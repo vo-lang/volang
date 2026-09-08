@@ -10,6 +10,7 @@ use vo_common_core::instruction::Opcode;
 use vo_common_core::SlotType;
 use vo_syntax::ast::{Expr, ExprKind};
 
+use crate::assign::AssignSource;
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
 use crate::func::{ElemLayoutSpec, ExprSource, FuncBuilder, StorageKind};
@@ -30,48 +31,16 @@ pub(crate) fn snapshot_closure_value(src: u16, func: &mut FuncBuilder) -> u16 {
     snapshot
 }
 
-/// Compute slot types for the arg region of a call buffer, matching `calc_method_arg_slots`.
-/// For variadic (non-spread) calls the packed slice contributes one exact object base.
-pub(crate) fn calc_arg_slot_types(
-    call: &vo_syntax::ast::CallExpr,
+/// The callee's parameter types determine the complete argument ABI, including
+/// the final slice of a variadic function. Source spelling cannot change it.
+pub(crate) fn call_arg_slot_types(
     param_types: &[TypeKey],
-    is_variadic: bool,
     info: &TypeInfoWrapper,
 ) -> Vec<SlotType> {
-    calc_arg_slot_types_for_args(&call.args, call.spread, param_types, is_variadic, info)
-}
-
-/// Compute slot types for the arg region of a call buffer, matching `calc_method_arg_slots`.
-/// For variadic (non-spread) calls the packed slice contributes one exact object base.
-pub(crate) fn calc_arg_slot_types_for_args(
-    args: &[Expr],
-    spread: bool,
-    param_types: &[TypeKey],
-    is_variadic: bool,
-    info: &TypeInfoWrapper,
-) -> Vec<SlotType> {
-    let arg_info = info.get_call_arg_info(args, param_types);
-    if arg_info.tuple_expand.is_some() {
-        return param_types
-            .iter()
-            .flat_map(|&t| info.type_slot_types(t))
-            .collect();
-    }
-    if is_variadic && !spread {
-        let n_fixed = num_fixed_params(param_types, is_variadic);
-        let mut types: Vec<SlotType> = param_types
-            .iter()
-            .take(n_fixed)
-            .flat_map(|&t| info.type_slot_types(t))
-            .collect();
-        types.push(SlotType::GcBase);
-        types
-    } else {
-        param_types
-            .iter()
-            .flat_map(|&t| info.type_slot_types(t))
-            .collect()
-    }
+    param_types
+        .iter()
+        .flat_map(|&ty| info.type_slot_types(ty))
+        .collect()
 }
 
 fn slot_types_for_type_keys(type_keys: &[TypeKey], info: &TypeInfoWrapper) -> Vec<SlotType> {
@@ -208,29 +177,6 @@ pub(crate) fn strip_paren_expr(mut expr: &Expr) -> &Expr {
     expr
 }
 
-fn is_type_name_expr(expr: &Expr, info: &TypeInfoWrapper) -> bool {
-    match &strip_paren_expr(expr).kind {
-        ExprKind::Ident(ident) => {
-            let obj_key = info.get_use(ident);
-            info.project.tc_objs.lobjs[obj_key]
-                .entity_type()
-                .is_type_name()
-        }
-        ExprKind::Selector(sel) => {
-            if let ExprKind::Ident(pkg_ident) = &strip_paren_expr(&sel.expr).kind {
-                if info.package_path(pkg_ident).is_some() {
-                    let obj_key = info.get_use(&sel.sel);
-                    return info.project.tc_objs.lobjs[obj_key]
-                        .entity_type()
-                        .is_type_name();
-                }
-            }
-            false
-        }
-        _ => false,
-    }
-}
-
 fn explicit_interface_conversion_source<'a>(
     expr: &'a Expr,
     info: &TypeInfoWrapper,
@@ -242,7 +188,10 @@ fn explicit_interface_conversion_source<'a>(
 
     let source = match &expr.kind {
         ExprKind::Call(call)
-            if !call.spread && call.args.len() == 1 && is_type_name_expr(&call.func, info) =>
+            if matches!(
+                info.call_info(expr).map(|info| info.kind),
+                Some(vo_analysis::check::type_info::CallKind::Conversion { .. })
+            ) =>
         {
             &call.args[0]
         }
@@ -369,9 +318,9 @@ fn emit_direct_func_call_with_type(
     let ret_slots = ctx.slot_count_u16_or_record(ret_slot_types.len());
     let param_types = info.func_param_types(func_type);
     let is_variadic = info.is_variadic(func_type);
-    let total_arg_slots_usize = calc_method_arg_slots(call, &param_types, is_variadic, info);
+    let total_arg_slots_usize = call_arg_slots(&param_types, info);
     let total_arg_slots = ctx.slot_count_u16_or_record(total_arg_slots_usize);
-    let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
+    let arg_slot_types = call_arg_slot_types(&param_types, info);
     let args_start = func.alloc_call_buffer(&arg_slot_types, &ret_slot_types);
 
     compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
@@ -512,6 +461,16 @@ fn compile_call_inner_unscoped(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
+    // Semantic analysis owns conversion classification, including parenthesized
+    // and qualified pointer types that have no identifier-shaped callee.
+    if matches!(
+        info.call_info(expr).map(|call| call.kind),
+        Some(vo_analysis::check::type_info::CallKind::Conversion { .. })
+    ) {
+        let dst = result.materialized_slot(expr, ctx, func, info)?;
+        super::conversion::compile_type_conversion(&call.args[0], dst, expr, ctx, func, info)?;
+        return Ok(dst);
+    }
     let callee_expr = strip_paren_expr(&call.func);
 
     // Check if method call (selector expression)
@@ -526,41 +485,12 @@ fn compile_call_inner_unscoped(
         return compile_method_call(expr, call, callee_expr, sel, result, ctx, func, info);
     }
 
-    // Check if builtin or type conversion
-    if let ExprKind::Ident(ident) = &callee_expr.kind {
-        // Use analysis phase info for builtin detection - correctly handles variable shadowing
-        if let Some(builtin_id) = info.expr_builtin(callee_expr.id) {
-            let dst = result.materialized_slot(expr, ctx, func, info)?;
-            super::builtin::compile_builtin_call_by_id(
-                expr, builtin_id, call, dst, ctx, func, info,
-            )?;
-            return Ok(dst);
-        }
-
-        // Check if this is a type conversion (ident refers to a type, not a function)
-        // Type conversions look like function calls: T(x)
-        {
-            let obj_key = info.get_use(ident);
-            let obj = &info.project.tc_objs.lobjs[obj_key];
-            if obj.entity_type().is_type_name() {
-                // This is a type conversion
-                if call.args.len() == 1 {
-                    let dst = result.materialized_slot(expr, ctx, func, info)?;
-                    super::conversion::compile_type_conversion(
-                        &call.args[0],
-                        dst,
-                        expr,
-                        ctx,
-                        func,
-                        info,
-                    )?;
-                    return Ok(dst);
-                } else if call.args.is_empty() {
-                    // Zero value - already handled by default initialization
-                    return result.materialized_slot(expr, ctx, func, info);
-                }
-            }
-        }
+    if let Some(vo_analysis::check::type_info::CallKind::Builtin(builtin_id)) =
+        info.call_info(expr).map(|call| call.kind)
+    {
+        let dst = result.materialized_slot(expr, ctx, func, info)?;
+        super::builtin::compile_builtin_call_by_id(expr, builtin_id, call, dst, ctx, func, info)?;
+        return Ok(dst);
     }
 
     if let ExprKind::FuncLit(func_lit) = &callee_expr.kind {
@@ -588,8 +518,8 @@ fn compile_call_inner_unscoped(
         let obj_key = info.get_use(ident);
 
         // Check if it's a closure (local, capture, or global variable)
-        let is_closure = func.lookup_local(ident.symbol).is_some()
-            || func.lookup_capture(ident.symbol).is_some()
+        let is_closure = func.lookup_local_object(info.get_use(ident)).is_some()
+            || func.lookup_capture(info.get_use(ident)).is_some()
             || ctx.get_global_index(obj_key).is_some();
 
         if is_closure {
@@ -720,6 +650,22 @@ fn compile_method_expr_call(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
+    if info
+        .call_expr_info(call)
+        .is_some_and(|checked| checked.expands_tuple())
+    {
+        // A tuple can contain both receiver and ordinary arguments. The method
+        // expression's existing function wrapper exposes that complete ABI.
+        return compile_closure_call(
+            expr,
+            call,
+            strip_paren_expr(&call.func),
+            result,
+            ctx,
+            func,
+            info,
+        );
+    }
     let recv_type = selection.recv().ok_or_else(|| {
         CodegenError::Internal("method expression has no receiver type".to_string())
     })?;
@@ -812,7 +758,7 @@ fn compile_closure_call(
     let is_variadic = info.is_variadic(func_type);
 
     // Calculate arg slots with variadic packing
-    let total_arg_slots_usize = calc_method_arg_slots(call, &param_types, is_variadic, info);
+    let total_arg_slots_usize = call_arg_slots(&param_types, info);
     let total_arg_slots = ctx.slot_count_u16_or_record(total_arg_slots_usize);
 
     let direct_closure = if arguments_preserve_preexisting_storage(&call.args) {
@@ -829,7 +775,7 @@ fn compile_closure_call(
     } else {
         SlotType::GcBase
     };
-    let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
+    let arg_slot_types = call_arg_slot_types(&param_types, info);
     let args_start =
         func.alloc_dynamic_call_buffer(&[hidden_slot_type], &arg_slot_types, &ret_slot_types);
     let closure_reg = if let Some(slot) = direct_closure {
@@ -949,31 +895,12 @@ fn compile_method_call(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    // 1. Check for package function call or type conversion (e.g., bytes.Contains, json.Number)
+    // Resolve a package function or function-valued package variable.
     if let ExprKind::Ident(pkg_ident) = &sel.expr.kind {
         // Check if it's a package reference
         if let Some(package_path) = info.package_path(pkg_ident) {
-            // Check if sel.sel refers to a type (type conversion: pkg.Type(x))
             let obj_key = info.get_use(&sel.sel);
             let obj = &info.project.tc_objs.lobjs[obj_key];
-            if obj.entity_type().is_type_name() {
-                // This is a type conversion: pkg.Type(x)
-                if call.args.len() == 1 {
-                    let dst = result.materialized_slot(expr, ctx, func, info)?;
-                    super::conversion::compile_type_conversion(
-                        &call.args[0],
-                        dst,
-                        expr,
-                        ctx,
-                        func,
-                        info,
-                    )?;
-                    return Ok(dst);
-                } else if call.args.is_empty() {
-                    // Zero value - already handled by default initialization
-                    return result.materialized_slot(expr, ctx, func, info);
-                }
-            }
 
             // A package variable whose value has function type is a dynamic
             // callee. Evaluate and snapshot its closure value before arguments,
@@ -1145,8 +1072,7 @@ fn emit_static_method_call(
         usize::from(info.type_slot_count(actual_recv_type))
     };
     let recv_slots = ctx.slot_count_u16_or_record(recv_slots_usize);
-    let arg_slots_usize =
-        calc_method_arg_slots_for_args(args, spread, &param_types, is_variadic, info);
+    let arg_slots_usize = call_arg_slots(&param_types, info);
     let total_slots_usize = recv_slots_usize + arg_slots_usize;
     let total_slots = ctx.slot_count_u16_or_record(total_slots_usize);
     let ret_slot_types = func_result_slot_types(method_type, info);
@@ -1156,14 +1082,13 @@ fn emit_static_method_call(
     } else {
         info.type_slot_types(actual_recv_type)
     };
-    let arg_slot_types_only =
-        calc_arg_slot_types_for_args(args, spread, &param_types, is_variadic, info);
+    let arg_slot_types_only = call_arg_slot_types(&param_types, info);
     let mut all_arg_slot_types = recv_slot_types;
     all_arg_slot_types.extend(arg_slot_types_only);
     let args_start = func.alloc_call_buffer(&all_arg_slot_types, &ret_slot_types);
 
     let recv_storage = if let ExprKind::Ident(ident) = &recv_expr.kind {
-        func.lookup_local(ident.symbol).map(|local| local.storage)
+        func.lookup_local_object(info.get_use(ident))
     } else {
         None
     };
@@ -1209,16 +1134,14 @@ fn emit_interface_call_with_args(
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
     let (param_types, is_variadic) = info.get_interface_method_signature(iface_type, method_name);
-    let arg_slots_usize =
-        calc_method_arg_slots_for_args(args, spread, &param_types, is_variadic, info);
+    let arg_slots_usize = call_arg_slots(&param_types, info);
     let arg_slots = ctx.slot_count_u16_or_record(arg_slots_usize);
     let ret_slot_types = slot_types_for_type_keys(
         &info.get_interface_method_result_types(iface_type, method_name),
         info,
     );
     let ret_slots = ctx.slot_count_u16_or_record(ret_slot_types.len());
-    let arg_slot_types =
-        calc_arg_slot_types_for_args(args, spread, &param_types, is_variadic, info);
+    let arg_slot_types = call_arg_slot_types(&param_types, info);
     let args_start =
         func.alloc_dynamic_call_buffer(&[SlotType::Value], &arg_slot_types, &ret_slot_types);
 
@@ -1372,9 +1295,9 @@ pub fn compile_extern_call(
     let func_type = info.expr_type(call.func.id);
     let is_variadic = info.is_variadic(func_type);
     let param_types = info.func_param_types(func_type);
-    let total_slots_usize = calc_method_arg_slots(call, &param_types, is_variadic, info);
+    let total_slots_usize = call_arg_slots(&param_types, info);
     let _total_slots = ctx.slot_count_u16_or_record(total_slots_usize);
-    let mut arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
+    let mut arg_slot_types = call_arg_slot_types(&param_types, info);
     let param_kinds = crate::context::ext_slot_kinds_for_slot_types(&arg_slot_types);
 
     // Get return slot count from the function's result type
@@ -1407,66 +1330,112 @@ pub fn compile_extern_call(
 // Argument Compilation Helpers
 // =============================================================================
 
-/// Compile arguments with parameter types for automatic interface conversion.
-/// Used by method calls and defer with known param types.
-/// Handles multi-value function calls: f(g()) where g() returns multiple values.
-pub fn compile_args_with_types(
-    args: &[Expr],
+/// Materialize a tuple producer once and map checked logical arguments back to
+/// their source values. Ordinary arguments remain lazy until their turn.
+pub(super) fn checked_argument_sources<'a>(
+    call: &'a vo_syntax::ast::CallExpr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<Vec<(AssignSource<'a>, TypeKey)>, CodegenError> {
+    let checked = info.call_expr_info(call).ok_or_else(|| {
+        CodegenError::Internal("call is missing checked argument bindings".into())
+    })?;
+    let mut sources = Vec::with_capacity(checked.arguments.len());
+    let mut tuple = None;
+    for argument in &checked.arguments {
+        let expression = call.args.get(argument.source_index).ok_or_else(|| {
+            CodegenError::Internal(format!(
+                "checked call argument {} has no source expression",
+                argument.source_index
+            ))
+        })?;
+        let source = if let Some(index) = argument.tuple_index {
+            if tuple.is_none() {
+                let compiled = super::CompiledTuple::compile(expression, ctx, func, info)?;
+                let mut elements = Vec::new();
+                compiled.for_each_element_result(info, |slot, type_key| {
+                    elements.push((slot, type_key));
+                    Ok::<_, CodegenError>(())
+                })?;
+                tuple = Some(elements);
+            }
+            let &(slot, type_key) = tuple.as_ref().unwrap().get(index).ok_or_else(|| {
+                CodegenError::Internal(format!(
+                    "checked call tuple argument {index} has no result component"
+                ))
+            })?;
+            AssignSource::Slot { slot, type_key }
+        } else {
+            AssignSource::Expr(expression)
+        };
+        sources.push((source, argument.parameter_type));
+    }
+    Ok(sources)
+}
+
+/// Synthetic receiver adapters pass a subrange of already checked arguments.
+/// Expansion depends on the checked result type, never on formal arity.
+fn argument_sources<'a>(
+    args: &'a [Expr],
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<Vec<AssignSource<'a>>, CodegenError> {
+    if args.len() == 1 && info.is_tuple(info.expr_type(args[0].id)) {
+        let tuple = super::CompiledTuple::compile(&args[0], ctx, func, info)?;
+        let mut sources = Vec::new();
+        tuple.for_each_element_result(info, |slot, type_key| {
+            sources.push(AssignSource::Slot { slot, type_key });
+            Ok::<_, CodegenError>(())
+        })?;
+        Ok(sources)
+    } else {
+        Ok(args.iter().map(AssignSource::Expr).collect())
+    }
+}
+
+fn compile_argument_sources(
+    sources: Vec<AssignSource<'_>>,
+    spread: bool,
     param_types: &[TypeKey],
+    is_variadic: bool,
     args_start: u16,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    let arg_info = info.get_call_arg_info(args, param_types);
-
-    if arg_info.tuple_expand.is_some() {
-        // Multi-value expansion: compile tuple once, then convert each element
-        let tuple = super::CompiledTuple::compile(&args[0], ctx, func, info)?;
-
-        let mut offset = 0u16;
-        let mut elem_idx = 0usize;
-        tuple.for_each_element_result(info, |elem_slot, elem_type| {
-            let pt = param_types[elem_idx];
-            let pt_slots = info.type_slot_count(pt);
-            crate::assign::emit_assign(
-                args_start + offset,
-                crate::assign::AssignSource::Slot {
-                    slot: elem_slot,
-                    type_key: elem_type,
-                },
-                pt,
-                ctx,
-                func,
-                info,
-            )?;
-            offset += pt_slots;
-            elem_idx += 1;
-            Ok::<(), CodegenError>(())
-        })?;
-        Ok(offset)
+    let pack = is_variadic && !spread;
+    let fixed = if pack {
+        num_fixed_params(param_types, true)
     } else {
-        // Normal case: one arg per param
-        let mut offset = 0u16;
-        for (i, arg) in args.iter().enumerate() {
-            if let Some(&pt) = param_types.get(i) {
-                crate::assign::emit_assign(
-                    args_start + offset,
-                    crate::assign::AssignSource::Expr(arg),
-                    pt,
-                    ctx,
-                    func,
-                    info,
-                )?;
-                offset += info.type_slot_count(pt);
-            } else {
-                let slots = info.expr_slots(arg.id);
-                compile_expr_to(arg, args_start + offset, ctx, func, info)?;
-                offset += slots;
-            }
-        }
-        Ok(offset)
+        param_types.len()
+    };
+    if sources.len() < fixed || (!pack && sources.len() != fixed) {
+        return Err(CodegenError::Internal(
+            "checked argument count disagrees with callee ABI".into(),
+        ));
     }
+    let mut sources = sources.into_iter();
+    let mut offset = 0;
+    for &ty in &param_types[..fixed] {
+        crate::assign::emit_assign(
+            args_start + offset,
+            sources.next().unwrap(),
+            ty,
+            ctx,
+            func,
+            info,
+        )?;
+        offset += info.type_slot_count(ty);
+    }
+    if pack {
+        let elem = info.slice_elem_type(*param_types.last().unwrap());
+        let slice = pack_variadic_args(sources.collect(), elem, ctx, func, info)?;
+        func.emit_copy(args_start + offset, slice, 1);
+        offset += 1;
+    }
+    Ok(offset)
 }
 
 /// Get the canonical extern name for a package function call.
@@ -1510,8 +1479,12 @@ pub fn compile_method_args(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    compile_method_args_for_args(
-        &call.args,
+    let sources = checked_argument_sources(call, ctx, func, info)?
+        .into_iter()
+        .map(|(source, _)| source)
+        .collect();
+    compile_argument_sources(
+        sources,
         call.spread,
         param_types,
         is_variadic,
@@ -1533,77 +1506,24 @@ pub(crate) fn compile_method_args_for_args(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    // Tuple expansion for non-variadic calls: f(g()) where g() returns multiple values
-    let arg_info = info.get_call_arg_info(args, param_types);
-    if arg_info.tuple_expand.is_some() {
-        return compile_args_with_types(args, param_types, args_start, ctx, func, info);
-    }
-
-    if is_variadic && !spread {
-        let n_fixed = num_fixed_params(param_types, is_variadic);
-
-        // Emit fixed arguments
-        let fixed_args: Vec<_> = args.iter().take(n_fixed).cloned().collect();
-        let mut offset = compile_args_with_types(
-            &fixed_args,
-            &param_types[..n_fixed],
-            args_start,
-            ctx,
-            func,
-            info,
-        )?;
-
-        // Pack variadic arguments into slice (handles tuple expansion internally)
-        let variadic_args: Vec<_> = args.iter().skip(n_fixed).collect();
-        let elem_type = info.slice_elem_type(param_types.last().copied().unwrap());
-        let slice_reg = pack_variadic_args(&variadic_args, elem_type, ctx, func, info)?;
-        func.emit_copy(args_start + offset, slice_reg, 1);
-        offset += 1;
-        Ok(offset)
-    } else {
-        compile_args_with_types(args, param_types, args_start, ctx, func, info)
-    }
+    let sources = argument_sources(args, ctx, func, info)?;
+    compile_argument_sources(
+        sources,
+        spread,
+        param_types,
+        is_variadic,
+        args_start,
+        ctx,
+        func,
+        info,
+    )
 }
 
-/// Calculate arg slots for method call.
-pub fn calc_method_arg_slots(
-    call: &vo_syntax::ast::CallExpr,
-    param_types: &[TypeKey],
-    is_variadic: bool,
-    info: &TypeInfoWrapper,
-) -> usize {
-    calc_method_arg_slots_for_args(&call.args, call.spread, param_types, is_variadic, info)
-}
-
-pub(crate) fn calc_method_arg_slots_for_args(
-    args: &[Expr],
-    spread: bool,
-    param_types: &[TypeKey],
-    is_variadic: bool,
-    info: &TypeInfoWrapper,
-) -> usize {
-    let arg_info = info.get_call_arg_info(args, param_types);
-    if arg_info.tuple_expand.is_some() {
-        return param_types
-            .iter()
-            .map(|&t| usize::from(info.type_slot_count(t)))
-            .sum();
-    }
-
-    if is_variadic && !spread {
-        let n_fixed = num_fixed_params(param_types, is_variadic);
-        let fixed_slots: usize = param_types
-            .iter()
-            .take(n_fixed)
-            .map(|&t| usize::from(info.type_slot_count(t)))
-            .sum();
-        fixed_slots + 1
-    } else {
-        param_types
-            .iter()
-            .map(|&t| usize::from(info.type_slot_count(t)))
-            .sum()
-    }
+fn call_arg_slots(param_types: &[TypeKey], info: &TypeInfoWrapper) -> usize {
+    param_types
+        .iter()
+        .map(|&ty| usize::from(info.type_slot_count(ty)))
+        .sum()
 }
 
 /// Pack variadic arguments into a slice.
@@ -1613,28 +1533,17 @@ pub(crate) fn calc_method_arg_slots_for_args(
 /// `elem_type` is the element type of the variadic slice.
 /// Returns the register containing the slice (1 slot).
 fn pack_variadic_args(
-    variadic_args: &[&vo_syntax::ast::Expr],
+    variadic_args: Vec<AssignSource<'_>>,
     elem_type: vo_analysis::objects::TypeKey,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    let elem_bytes = vo_analysis::check::type_info::elem_bytes_for_heap(elem_type, info.tc_objs());
+    let elem_bytes = vo_analysis::layout::elem_bytes_for_heap(elem_type, info.tc_objs());
     let elem_slot_types = info.type_slot_types(elem_type);
     let elem_vk = info.type_value_kind(elem_type);
 
-    // Calculate total element count (expanding tuples)
-    let total_elems = variadic_args.iter().try_fold(0usize, |total, arg| {
-        let arg_type = info.expr_type(arg.id);
-        let expanded = if info.is_tuple(arg_type) {
-            info.tuple_len(arg_type)
-        } else {
-            1
-        };
-        total.checked_add(expanded).ok_or_else(|| {
-            CodegenError::Internal("variadic argument element count overflow".to_string())
-        })
-    })?;
+    let total_elems = variadic_args.len();
     let total_elems_i64 = i64::try_from(total_elems).map_err(|_| {
         CodegenError::Internal(format!(
             "variadic argument element count exceeds i64::MAX: {total_elems}"
@@ -1685,41 +1594,10 @@ fn pack_variadic_args(
         Ok(())
     };
 
-    // Set each element (expanding tuples as needed)
-    for elem in variadic_args.iter() {
-        let arg_type = info.expr_type(elem.id);
-
-        if info.is_tuple(arg_type) {
-            // Tuple expansion: compile once, set each element
-            let tuple = super::CompiledTuple::compile(elem, ctx, func, info)?;
-            tuple.for_each_element_result(info, |src_slot, src_type| {
-                let val_reg = func.alloc_slots(&elem_slot_types);
-                crate::assign::emit_assign(
-                    val_reg,
-                    crate::assign::AssignSource::Slot {
-                        slot: src_slot,
-                        type_key: src_type,
-                    },
-                    elem_type,
-                    ctx,
-                    func,
-                    info,
-                )?;
-                set_elem(val_reg, func, ctx)?;
-                Ok::<(), CodegenError>(())
-            })?;
-        } else {
-            let val_reg = func.alloc_slots(&elem_slot_types);
-            crate::assign::emit_assign(
-                val_reg,
-                crate::assign::AssignSource::Expr(elem),
-                elem_type,
-                ctx,
-                func,
-                info,
-            )?;
-            set_elem(val_reg, func, ctx)?;
-        }
+    for source in variadic_args {
+        let value = func.alloc_slots(&elem_slot_types);
+        crate::assign::emit_assign(value, source, elem_type, ctx, func, info)?;
+        set_elem(value, func, ctx)?;
     }
 
     Ok(dst)

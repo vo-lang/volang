@@ -457,14 +457,6 @@ fn analyze_with_package_resolver<R: vo_analysis::vfs::Resolver>(
     })?;
     let imported_packages = project
         .imported_packages_in_order()
-        .map_err(|error| {
-            WebCompileError::new(
-                WebCompileStage::Analysis,
-                WebCompileErrorKind::Analysis,
-                error,
-            )
-        })?
-        .into_iter()
         .map(|(path, _, _, _)| path)
         .collect::<Vec<_>>();
     for ready in ready_modules {

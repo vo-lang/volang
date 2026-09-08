@@ -75,19 +75,18 @@ fn invoke_jit_and_handle(
     // Most functions return 0-4 slots; 16 covers all practical cases.
     const RET_STACK_MAX: usize = 16;
     let mut ret_stack_buf = [0u64; RET_STACK_MAX];
-    let mut ret_heap_buf = core::mem::take(&mut fiber.jit_return_scratch);
+    let empty = fiber.jit_return_scratch.empty_like();
+    let mut ret_heap_buf = core::mem::replace(&mut fiber.jit_return_scratch, empty);
     let ret: &mut [u64] = if ret_slots <= RET_STACK_MAX {
         &mut ret_stack_buf[..ret_slots.max(1)]
     } else {
-        if ret_slots > ret_heap_buf.len()
-            && ret_heap_buf
-                .try_reserve_exact(ret_slots - ret_heap_buf.len())
-                .is_err()
+        if let Err(error) =
+            ret_heap_buf.try_reserve_exact(ret_slots.saturating_sub(ret_heap_buf.len()))
         {
             fiber.jit_return_scratch = ret_heap_buf;
-            return ExecResult::JitError("JIT return scratch allocation failed".into());
+            return ExecResult::ResourceError(error);
         }
-        ret_heap_buf.resize(ret_slots, 0);
+        ret_heap_buf.resize_reserved(ret_slots, 0);
         ret_heap_buf[..ret_slots].fill(0);
         &mut ret_heap_buf[..ret_slots]
     };
@@ -316,9 +315,7 @@ mod tests {
             func_id: 1,
             closure: core::ptr::null_mut(),
             args: core::ptr::null_mut(),
-            arg_layout: crate::fiber::DeferArgLayout {
-                slot_types: Vec::new(),
-            },
+            arg_layout: crate::fiber::DeferArgLayout::Test(Vec::new()),
             is_closure: false,
             is_errdefer: true,
             registered_at_generation: 0,

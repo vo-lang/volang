@@ -1,0 +1,28 @@
+package main
+
+import (
+	"time"
+)
+
+var stop bool
+
+func busy(ready port<- int) {
+	ready <- 1
+	for !stop {}
+}
+
+func finish(done port<- int) {
+	stop = true
+	done <- 7
+}
+
+func main() {
+	child := make(island)
+	ready := make(port int, 1)
+	done := make(port int, 1)
+	go @(child) busy(ready)
+	assert(<-ready == 1)
+	time.Sleep(time.Millisecond)
+	go @(child) finish(done)
+	assert(<-done == 7)
+}

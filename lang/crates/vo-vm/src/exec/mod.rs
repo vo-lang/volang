@@ -11,6 +11,7 @@ use vo_runtime::gc::MemoryError;
 pub enum InstructionError {
     Malformed(String),
     Memory(MemoryError),
+    Capacity(crate::fiber::FiberCapacityError),
 }
 
 impl core::fmt::Display for InstructionError {
@@ -18,6 +19,7 @@ impl core::fmt::Display for InstructionError {
         match self {
             Self::Malformed(message) => f.write_str(message),
             Self::Memory(error) => error.fmt(f),
+            Self::Capacity(error) => f.write_str(&error.message()),
         }
     }
 }
@@ -31,6 +33,12 @@ impl From<String> for InstructionError {
 impl From<MemoryError> for InstructionError {
     fn from(error: MemoryError) -> Self {
         Self::Memory(error)
+    }
+}
+
+impl From<crate::fiber::FiberCapacityError> for InstructionError {
+    fn from(error: crate::fiber::FiberCapacityError) -> Self {
+        Self::Capacity(error)
     }
 }
 

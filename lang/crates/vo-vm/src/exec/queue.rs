@@ -29,6 +29,7 @@ use vo_runtime::objects::queue_state::{
 use vo_runtime::slot::Slot;
 use vo_runtime::{SlotType, ValueKind, ValueMeta, ValueRttid};
 
+extern crate alloc;
 use crate::fiber::SelectWokenResult;
 use crate::instruction::Instruction;
 use crate::runtime_boundary::IslandCommandEffect;
@@ -336,8 +337,8 @@ pub fn select_woken_recv_payload_with_slot_types(
 ) -> Result<SelectWokenResult, String> {
     validate_select_woken_recv_payload_width(payload.len(), slot_types.len())?;
     Ok(SelectWokenResult::Recv {
-        data: payload.into_vec(),
-        slot_types,
+        data: alloc::sync::Arc::new(payload.into_vec()),
+        slot_types: alloc::sync::Arc::new(slot_types),
         closed: false,
     })
 }

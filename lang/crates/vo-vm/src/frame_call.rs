@@ -511,6 +511,9 @@ impl<'a> FrameCallBuilder<'a> {
             ));
         }
 
+        if let Err(error) = self.fiber.closure_replay.reserve_boundary() {
+            return ExecResult::ResourceError(error);
+        }
         let new_bp = self.fiber.sp;
         let reservation = match self.fiber.try_reserve_call_window(new_bp, local_slots) {
             Ok(reservation) => reservation,
@@ -559,7 +562,7 @@ impl<'a> FrameCallBuilder<'a> {
         self.fiber.frames[parent_index].pc = suspended_pc;
         self.fiber
             .closure_replay
-            .push_boundary(self.fiber.frames.len(), replay_pc);
+            .commit_boundary(self.fiber.frames.len(), replay_pc);
         ExecResult::FrameChanged
     }
 

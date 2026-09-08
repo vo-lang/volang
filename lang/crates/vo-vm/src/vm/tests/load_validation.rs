@@ -62,7 +62,8 @@ fn verified_load_reuses_exact_module_image_and_runtime_facts() {
         .expect("common-verified module must load");
 
     assert_loaded_image_reused(&vm, &expected);
-    assert_eq!(expected.runtime_type_facts().len(), 1);
+    assert_eq!(expected.runtime_type_facts().len(), 2);
+    assert_eq!(expected.basic_type_rttid(ValueKind::String), Some(1));
 }
 
 #[cfg(feature = "std")]

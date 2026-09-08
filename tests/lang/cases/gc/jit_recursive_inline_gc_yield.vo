@@ -13,14 +13,14 @@ func main() {
 	for i := 0; i < 256; i++ {
 		// Leave a collection request pending before entering the scalar recursive
 		// function. Once fibonacci reaches the optimizing tier, a cooperative
-		// yield may interrupt its bounded inline expansion and must replay the
-		// original source Call without exposing partial native state.
+		// yield may interrupt a native call and must preserve every suspended
+		// activation without exposing partial native state.
 		garbage := make([]int, 256)
 		garbage[0] = i
 		checksum += garbage[0]
 		total += fibonacci(10)
 	}
-	assert(total == 14080, "recursive inline result survived GC yield")
+	assert(total == 14080, "recursive result survived GC yield")
 	assert(checksum == 32640, "allocation checksum survived GC yield")
 	println("jit_recursive_inline_gc_yield: ok")
 }

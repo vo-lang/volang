@@ -5,7 +5,28 @@ pub(super) fn interface_array_assertion_layout(
     module: &VoModule,
     target_rttid: u32,
     result_slots: u16,
-) -> Result<Option<InterfaceArrayAssertionLayout>, WasmAotError> {
+) -> Result<Option<InterfaceArrayLayout>, WasmAotError> {
+    let layout = interface_array_layout(module, target_rttid)?;
+    if layout.is_some() {
+        let value = module.value_rttid_for_rttid(target_rttid).ok_or_else(|| {
+            WasmAotError::InvalidModule("interface array target type is missing".into())
+        })?;
+        let expected_slots = runtime_value_slot_count(module, value)?;
+        if expected_slots != u32::from(result_slots) {
+            return Err(WasmAotError::InvalidModule(format!(
+                "interface array assertion target runtime type {target_rttid} has {expected_slots} logical slots, metadata declares {result_slots}"
+            )));
+        }
+    }
+    Ok(layout)
+}
+
+/// Layout of the canonical array object used by interface comparison/hash.
+/// Only assertion materialization is constrained by a frame result width.
+pub(super) fn interface_array_layout(
+    module: &VoModule,
+    target_rttid: u32,
+) -> Result<Option<InterfaceArrayLayout>, WasmAotError> {
     let value_rttid = module.value_rttid_for_rttid(target_rttid).ok_or_else(|| {
         WasmAotError::InvalidModule(format!(
             "interface assertion target runtime type {target_rttid} cannot be resolved"
@@ -27,32 +48,20 @@ pub(super) fn interface_array_assertion_layout(
             "interface assertion target runtime type {target_rttid} has array value kind without array metadata"
         )));
     };
-    let elem_layout = module.slot_layout_for_value_rttid(*elem).ok_or_else(|| {
-        WasmAotError::InvalidModule(format!(
-            "interface array assertion target runtime type {target_rttid} has no element layout"
-        ))
-    })?;
-    let expected_slots = usize::try_from(*len)
-        .ok()
-        .and_then(|len| len.checked_mul(elem_layout.len()))
-        .ok_or_else(|| {
-            WasmAotError::InvalidModule(format!(
-                "interface array assertion target runtime type {target_rttid} exceeds the slot domain"
-            ))
-        })?;
-    if expected_slots != usize::from(result_slots) {
-        return Err(WasmAotError::InvalidModule(format!(
-            "interface array assertion target runtime type {target_rttid} has {expected_slots} logical slots, metadata declares {result_slots}"
-        )));
-    }
+    let expected_slots = runtime_value_slot_count(module, value_rttid)?;
     if expected_slots == 0 {
-        return Ok(Some(InterfaceArrayAssertionLayout {
+        return Ok(Some(InterfaceArrayLayout {
             len: 0,
             elem_bytes: 0,
             needs_sign_extend: false,
         }));
     }
-    let len = u16::try_from(*len).map_err(|_| {
+    let elem_layout = module.slot_layout_for_value_rttid(*elem).ok_or_else(|| {
+        WasmAotError::InvalidModule(format!(
+            "interface array runtime type {target_rttid} has no element layout"
+        ))
+    })?;
+    let len = u32::try_from(*len).map_err(|_| {
         WasmAotError::InvalidModule(format!(
             "interface array assertion target runtime type {target_rttid} exceeds the slot domain"
         ))
@@ -83,7 +92,7 @@ pub(super) fn interface_array_assertion_layout(
             "interface array assertion target runtime type {target_rttid} has an invalid packed element layout"
         )));
     }
-    Ok(Some(InterfaceArrayAssertionLayout {
+    Ok(Some(InterfaceArrayLayout {
         len,
         elem_bytes,
         needs_sign_extend,
@@ -220,13 +229,30 @@ pub(super) fn build_allocation_descriptors(
         let Some(value_rttid) = module.value_rttid_for_rttid(rttid) else {
             continue;
         };
-        let value_layout = module
-            .slot_layout_for_value_rttid(value_rttid)
-            .ok_or_else(|| {
-                WasmAotError::InvalidModule(format!(
+        let value_layout = match module.slot_layout_for_value_rttid(value_rttid) {
+            Some(layout) => layout,
+            None if value_rttid.value_kind() == ValueKind::Array => {
+                let slots = runtime_value_slot_count(module, value_rttid)?;
+                if slots > u32::from(u16::MAX) {
+                    // Canonical arrays allocate through their instruction's
+                    // element descriptor. They need no flattened frame or
+                    // sequence-element descriptor for the entire array.
+                    continue;
+                }
+                if slots == 0 {
+                    Vec::new()
+                } else {
+                    return Err(WasmAotError::InvalidModule(format!(
+                        "array runtime type {rttid} has no physical slot layout"
+                    )));
+                }
+            }
+            None => {
+                return Err(WasmAotError::InvalidModule(format!(
                     "runtime value type {rttid} has no physical slot layout"
-                ))
-            })?;
+                )));
+            }
+        };
         let fixed_descriptor = AllocationDescriptor::Fixed {
             slot_types: encoded_slot_types(&value_layout),
         };
@@ -264,17 +290,10 @@ pub(super) fn build_allocation_descriptors(
         if value_rttid.value_kind() != ValueKind::Array {
             continue;
         }
-        let layout = module
-            .slot_layout_for_value_rttid(value_rttid)
-            .ok_or_else(|| {
-                WasmAotError::InvalidModule(format!(
-                    "array runtime type {rttid} has no physical slot layout"
-                ))
-            })?;
         let value_meta = ValueMeta::try_new(rttid, ValueKind::Array).ok_or_else(|| {
             WasmAotError::InvalidModule("array runtime type exceeds the packed type domain".into())
         })?;
-        let descriptor = sequence_descriptor(&layout, (layout.len() as u32) * 8, false);
+        let descriptor = sequence_descriptor(&value_layout, (value_layout.len() as u32) * 8, false);
         unique.insert(descriptor.clone());
         requested_sequence_by_meta.insert(value_meta.to_raw(), descriptor);
     }
@@ -593,6 +612,7 @@ pub(super) fn build_static_data(module: &VoModule) -> Result<StaticData, WasmAot
     }
     let nil_reference_panic_ref =
         push_string(&mut bytes, "runtime error: nil pointer dereference")?;
+    let nil_function_panic_ref = push_string(&mut bytes, "runtime error: call of nil function")?;
     let nil_map_write_panic_ref =
         push_string(&mut bytes, "runtime error: assignment to entry in nil map")?;
     let makeslice_negative_len_panic_ref =
@@ -784,6 +804,7 @@ pub(super) fn build_static_data(module: &VoModule) -> Result<StaticData, WasmAot
         dynamic_string_refs,
         runtime_panic_refs,
         nil_reference_panic_ref,
+        nil_function_panic_ref,
         nil_map_write_panic_ref,
         makeslice_negative_len_panic_ref,
         makeslice_cap_panic_ref,
@@ -872,6 +893,49 @@ pub(super) fn encode_extern_manifest(
     Ok(bytes)
 }
 
+/// Runtime array metadata describes logical storage independently of the
+/// bytecode frame's u16 slot domain. Count nested arrays without flattening
+/// them; actual materialization remains subject to its instruction ABI.
+pub(super) fn runtime_value_slot_count(
+    module: &VoModule,
+    value: ValueRttid,
+) -> Result<u32, WasmAotError> {
+    let resolver = module.runtime_type_resolver();
+    let invalid = || {
+        WasmAotError::InvalidModule(format!(
+            "runtime type {} has no finite slot layout",
+            value.rttid()
+        ))
+    };
+    let mut current = value;
+    let mut lengths = Vec::new();
+    for _ in 0..=module.runtime_types.len() {
+        let (_, runtime_type) = resolver.resolve_value_rttid(current).ok_or_else(invalid)?;
+        if let RuntimeType::Array { len, elem } = runtime_type {
+            lengths.push(*len);
+            current = *elem;
+            continue;
+        }
+        let element_slots = resolver
+            .slot_count_for_value_rttid(current)
+            .ok_or_else(invalid)?;
+        if element_slots == 0 || lengths.contains(&0) {
+            return Ok(0);
+        }
+        let slots = lengths
+            .into_iter()
+            .try_fold(element_slots as u64, |slots, len| {
+                slots.checked_mul(len).ok_or_else(|| {
+                    WasmAotError::InvalidModule("runtime slot count overflows".into())
+                })
+            })?;
+        return slots
+            .try_into()
+            .map_err(|_| WasmAotError::InvalidModule("runtime slot count exceeds wasm32".into()));
+    }
+    Err(invalid())
+}
+
 pub(super) fn runtime_storage_bytes(
     module: &VoModule,
     value: ValueRttid,
@@ -882,15 +946,7 @@ pub(super) fn runtime_storage_bytes(
         ValueKind::Int16 | ValueKind::Uint16 => 2,
         ValueKind::Int32 | ValueKind::Uint32 | ValueKind::Float32 => 4,
         ValueKind::Interface => 16,
-        ValueKind::Struct | ValueKind::Array => module
-            .slot_layout_for_value_rttid(value)
-            .ok_or_else(|| {
-                WasmAotError::InvalidModule(format!(
-                    "runtime type {} has no physical layout",
-                    value.rttid()
-                ))
-            })?
-            .len()
+        ValueKind::Struct | ValueKind::Array => (runtime_value_slot_count(module, value)? as usize)
             .checked_mul(8)
             .ok_or_else(|| WasmAotError::InvalidModule("runtime layout overflows".into()))?,
         _ => 8,
@@ -994,16 +1050,7 @@ pub(super) fn encode_runtime_metadata(
                 )));
             }
         };
-        let slot_count: u32 = resolver
-            .slot_count_for_value_rttid(value)
-            .ok_or_else(|| {
-                WasmAotError::InvalidModule(format!(
-                    "runtime type {} has no finite slot layout",
-                    value.rttid()
-                ))
-            })?
-            .try_into()
-            .map_err(|_| WasmAotError::InvalidModule("runtime slot count exceeds u32".into()))?;
+        let slot_count = runtime_value_slot_count(module, value)?;
         let canonical_meta = module
             .canonical_value_meta_for_value_rttid(value)
             .ok_or_else(|| {

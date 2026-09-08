@@ -218,9 +218,13 @@ pub struct JitProfileCounters {
     pub deopts: u64,
     /// 0=eligible baseline, 1=requested, 2=optimizing, 3=rejected/disabled.
     pub tier_up_state: u64,
+    /// Sticky proof that this function entered optimizing machine code.
+    pub optimizing_entered: u64,
 }
 
 impl JitProfileCounters {
+    pub const OFFSET_OPTIMIZING_ENTERED: i32 =
+        core::mem::offset_of!(Self, optimizing_entered) as i32;
     pub const OFFSET_ENTRIES: i32 = core::mem::offset_of!(Self, entries) as i32;
     pub const OFFSET_COMPLETED: i32 = core::mem::offset_of!(Self, completed) as i32;
     pub const OFFSET_BUDGET_CONSUMED: i32 = core::mem::offset_of!(Self, budget_consumed) as i32;
@@ -228,7 +232,7 @@ impl JitProfileCounters {
     pub const SIZE: usize = core::mem::size_of::<Self>();
 }
 
-const _: () = assert!(JitProfileCounters::SIZE == 40);
+const _: () = assert!(JitProfileCounters::SIZE == 48);
 
 /// Result of preparing a closure or interface call.
 /// Note: SIZE must match core::mem::size_of::<PreparedCall>() (checked below).
@@ -617,13 +621,14 @@ pub struct JitContext {
     /// Call request: resume PC for VM to continue execution
     pub call_resume_pc: u32,
 
+    /// Prepared call: stable callee frame base, independent of caller resume PC.
+    pub call_callee_bp: u32,
+
     /// Call request: number of return slots caller expects
     pub call_ret_slots: u16,
 
     /// Call request: ret_reg offset in caller's frame where return values should go.
     /// For REGULAR calls, this may differ from call_arg_start (inst.a vs inst.c).
-    /// For PREPARED calls, `call_arg_start` carries the caller resume pc and
-    /// `call_resume_pc` carries the callee frame base.
     pub call_ret_reg: u16,
 
     /// Call request: call kind (0=regular, 253=yield, 254=block)
@@ -648,14 +653,18 @@ pub struct JitContext {
     /// length clamped to `stack_limit`.
     pub stack_cap: u32,
 
-    /// Maximum stack slots allowed for direct JIT native-stack call chains.
+    /// VM resource limit for stack slots; native shadow capacity is separate.
     pub stack_limit: u32,
 
     /// Current direct JIT call depth.
     pub call_depth: u32,
 
-    /// Maximum direct JIT call depth before reporting stack overflow.
+    /// Maximum direct JIT call depth before continuing through the VM trampoline.
     pub call_depth_limit: u32,
+
+    /// Lowest SP at which another native call may start. The outer native
+    /// activation initializes this bound with room for a maximum-size callee.
+    pub native_stack_floor: u64,
 
     /// Current JIT frame base pointer (index into fiber.stack).
     /// Updated by push_frame_fn / pop_frame_fn callbacks.
@@ -711,7 +720,7 @@ pub struct JitContext {
     pub link_function_fn: Option<JitLinkFunctionFn>,
 
     // =========================================================================
-    // Monomorphic Inline Cache for dynamic calls
+    // Bounded polymorphic inline caches for dynamic calls
     // =========================================================================
     /// Pointer to the verified module's dense DynCallIC table.
     pub ic_table: *mut DynCallIC,
@@ -794,16 +803,16 @@ impl JitContext {
     }
 
     // JitResult constants for Call infrastructure
-    pub const JIT_RESULT_OK: u32 = 0;
-    pub const JIT_RESULT_PANIC: u32 = 1;
-    pub const JIT_RESULT_CALL: u32 = 2;
-    pub const JIT_RESULT_WAIT_IO: u32 = 3;
-    pub const JIT_RESULT_WAIT_QUEUE: u32 = 4;
-    pub const JIT_RESULT_REPLAY: u32 = 5;
-    pub const JIT_RESULT_JIT_ERROR: u32 = 6;
-    pub const JIT_RESULT_EXTERN_SUSPEND: u32 = 7;
-    pub const JIT_RESULT_RUNTIME_TRANSITION: u32 = 8;
-    pub const JIT_RESULT_DEOPT: u32 = 9;
+    pub const JIT_RESULT_OK: u32 = JitResult::Ok as u32;
+    pub const JIT_RESULT_PANIC: u32 = JitResult::Panic as u32;
+    pub const JIT_RESULT_CALL: u32 = JitResult::Call as u32;
+    pub const JIT_RESULT_WAIT_IO: u32 = JitResult::WaitIo as u32;
+    pub const JIT_RESULT_WAIT_QUEUE: u32 = JitResult::WaitQueue as u32;
+    pub const JIT_RESULT_REPLAY: u32 = JitResult::Replay as u32;
+    pub const JIT_RESULT_JIT_ERROR: u32 = JitResult::JitError as u32;
+    pub const JIT_RESULT_EXTERN_SUSPEND: u32 = JitResult::ExternSuspend as u32;
+    pub const JIT_RESULT_RUNTIME_TRANSITION: u32 = JitResult::RuntimeTransition as u32;
+    pub const JIT_RESULT_DEOPT: u32 = JitResult::Deopt as u32;
 
     // call_kind constants
     pub const CALL_KIND_REGULAR: u8 = 0;
@@ -872,6 +881,7 @@ jit_context_raw_fields!(
     (JitProfileTable, jit_profile_table),
     (OptimizingThreshold, optimizing_threshold),
     (CallResumePc, call_resume_pc),
+    (CallCalleeBp, call_callee_bp),
     (CallKind, call_kind),
     (LoopExitPc, loop_exit_pc),
     (StackPtr, stack_ptr),
@@ -879,6 +889,7 @@ jit_context_raw_fields!(
     (StackLimit, stack_limit),
     (CallDepth, call_depth),
     (CallDepthLimit, call_depth_limit),
+    (NativeStackFloor, native_stack_floor),
     (JitBp, jit_bp),
     (FiberSp, fiber_sp),
     (PushFrameFn, push_frame_fn),
@@ -1143,6 +1154,7 @@ impl JitRuntimeHelperAbi {
             self.name,
             "vo_jit_gc_alloc_value_slots"
                 | "vo_str_new"
+                | "vo_str_new_const"
                 | "vo_str_concat"
                 | "vo_str_slice"
                 | "vo_closure_new"
@@ -1791,7 +1803,6 @@ pub extern "C" fn vo_gc_typed_write_barrier_by_meta(
     }
 }
 
-/// Legacy safepoint compatibility symbol.
 /// Set Call request state in JitContext.
 /// Called by JIT when it needs to hand off to VM for a non-jittable callee.
 ///
@@ -1818,7 +1829,7 @@ pub extern "C" fn vo_set_call_request(
         );
         return;
     };
-    if call_kind != JitContext::CALL_KIND_PREPARED && u16::try_from(arg_start).is_err() {
+    if u16::try_from(arg_start).is_err() {
         let _ = set_jit_infra_error(
             ctx,
             JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -1842,9 +1853,54 @@ pub extern "C" fn vo_set_call_request(
         (*ctx).call_func_id = func_id;
         (*ctx).call_arg_start = arg_start;
         (*ctx).call_resume_pc = resume_pc;
+        (*ctx).call_callee_bp = 0;
         (*ctx).call_ret_slots = ret_slots;
         (*ctx).call_ret_reg = ret_reg;
         (*ctx).call_kind = call_kind;
+    }
+}
+
+/// Publish an already prepared callee using distinct frame and continuation
+/// identities. Validate payload widths before publication; the VM admits the
+/// callee identity and frame when consuming the request.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
+pub extern "C" fn vo_set_prepared_call_request(
+    ctx: *mut JitContext,
+    func_id: u32,
+    callee_bp: u32,
+    resume_pc: u32,
+    ret_slots: u32,
+    ret_reg: u32,
+) {
+    if ctx.is_null() {
+        return;
+    }
+    let invalid = if u16::try_from(ret_slots).is_err() {
+        Some(ret_slots)
+    } else if u16::try_from(ret_reg).is_err() {
+        Some(ret_reg)
+    } else {
+        None
+    };
+    if let Some(value) = invalid {
+        let _ = set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            u64::from(value),
+        );
+        return;
+    }
+    vo_set_call_request(
+        ctx,
+        func_id,
+        0,
+        resume_pc,
+        ret_slots,
+        ret_reg,
+        u32::from(JitContext::CALL_KIND_PREPARED),
+    );
+    unsafe {
+        (*ctx).call_callee_bp = callee_bp;
     }
 }
 
@@ -2606,6 +2662,26 @@ pub extern "C" fn vo_map_get_scalar(m: u64, key: u64) -> u64 {
     }
 }
 
+/// Verified one-slot lookup. The runtime owns shape dispatch and its generic
+/// fallback, keeping each generated lookup and its recovery CFG compact.
+/// `value_out` is one writable native scratch word; no GC or callback occurs.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
+pub unsafe extern "C" fn vo_map_get_one(
+    ctx: *mut JitContext,
+    m: u64,
+    key: u64,
+    value_out: *mut u64,
+) -> u64 {
+    let cell = vo_map_get_scalar(m, key);
+    if cell == JIT_HELPER_MAP_SCALAR_FALLBACK {
+        return vo_map_get(ctx, m, &key, 1, value_out, 1);
+    }
+    unsafe {
+        *value_out = if cell == 0 { 0 } else { *(cell as *const u64) };
+    }
+    u64::from(cell != 0)
+}
+
 /// Set value in map.
 /// Returns: 0 = success, 1 = panic (interface key with uncomparable type),
 /// 2 = retry after the caller executes its precise allocation safepoint.
@@ -3115,11 +3191,30 @@ pub extern "C" fn vo_str_new(gc: *mut Gc, data: *const u8, len: u64) -> u64 {
     }
 }
 
+/// Copy a literal from the immutable loaded module. The module owns its bytes
+/// throughout JIT and Native AOT execution; generated code needs no temporary
+/// native buffer or embedded process address.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
+pub extern "C" fn vo_str_new_const(ctx: *mut JitContext, index: u32) -> u64 {
+    let Some(ctx) = (unsafe { ctx.as_ref() }) else {
+        return 0;
+    };
+    let Some(module) = (unsafe { ctx.module_ref() }) else {
+        return 0;
+    };
+    let Some(crate::bytecode::Constant::String(value)) = module.constants.get(index as usize)
+    else {
+        return 0;
+    };
+    vo_str_new(ctx.gc, value.as_ptr(), value.len() as u64)
+}
+
 // =============================================================================
 // Interface Helpers
 // =============================================================================
 
 fn jit_interface_array_payload_matches(
+    gc: &Gc,
     module: &Module,
     value_rttid: ValueRttid,
     object: GcRef,
@@ -3127,10 +3222,12 @@ fn jit_interface_array_payload_matches(
 ) -> bool {
     use crate::objects::array;
 
-    let Some(expected_layout) = module.slot_layout_for_value_rttid(value_rttid) else {
-        return false;
-    };
     if header.kind() == ValueKind::Struct {
+        // Only a flattened value-slot box is constrained by the frame layout.
+        // Canonical arrays below are validated by their element representation.
+        let Some(expected_layout) = module.slot_layout_for_value_rttid(value_rttid) else {
+            return false;
+        };
         return module
             .struct_metas
             .get(header.meta_id() as usize)
@@ -3139,7 +3236,14 @@ fn jit_interface_array_payload_matches(
                     && usize::from(header.slots) == expected_layout.len()
             });
     }
-    if header.kind() != ValueKind::Array || usize::from(header.slots) < array::HEADER_SLOTS {
+    // Large canonical arrays use slots == 0 in the compact GC header. The
+    // collector's allocation extent still includes their complete ArrayHeader.
+    if header.kind() != ValueKind::Array
+        || header.is_value_slots_object()
+        || !gc
+            .allocated_data_size_bytes(object)
+            .is_some_and(|bytes| bytes >= array::HEADER_SLOTS * crate::slot::SLOT_BYTES)
+    {
         return false;
     }
     let Some((_, RuntimeType::Array { len, elem })) = module
@@ -3212,7 +3316,7 @@ fn jit_interface_payload_matches(
                     .is_some_and(|meta| usize::from(header.slots) == meta.slot_types.len())
         }
         ValueKind::Array => {
-            jit_interface_array_payload_matches(module, value_rttid, object, header)
+            jit_interface_array_payload_matches(gc, module, value_rttid, object, header)
         }
         ValueKind::String | ValueKind::Slice => {
             header.kind() == value_kind
@@ -4240,6 +4344,7 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_runtime_trap", vo_runtime_trap as *const u8),
         ("vo_call_extern", vo_call_extern as *const u8),
         ("vo_str_new", vo_str_new as *const u8),
+        ("vo_str_new_const", vo_str_new_const as *const u8),
         ("vo_str_len", vo_str_len as *const u8),
         ("vo_str_index", vo_str_index as *const u8),
         ("vo_str_concat", vo_str_concat as *const u8),
@@ -4277,6 +4382,10 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_iface_to_iface", vo_iface_to_iface as *const u8),
         ("vo_iface_eq", vo_iface_eq as *const u8),
         ("vo_iface_assert", vo_iface_assert as *const u8),
+        (
+            "vo_set_prepared_call_request",
+            vo_set_prepared_call_request as *const u8,
+        ),
         ("vo_set_call_request", vo_set_call_request as *const u8),
         (
             "vo_jit_copy_frame_slots",
@@ -4286,6 +4395,7 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_map_new", vo_map_new as *const u8),
         ("vo_map_len", vo_map_len as *const u8),
         ("vo_map_get", vo_map_get as *const u8),
+        ("vo_map_get_one", vo_map_get_one as *const u8),
         ("vo_map_get_scalar", vo_map_get_scalar as *const u8),
         ("vo_map_set", vo_map_set as *const u8),
         ("vo_map_set_scalar", vo_map_set_scalar as *const u8),
@@ -4321,6 +4431,7 @@ pub fn runtime_symbol_names() -> &'static [&'static str] {
         "vo_runtime_trap",
         "vo_call_extern",
         "vo_str_new",
+        "vo_str_new_const",
         "vo_str_len",
         "vo_str_index",
         "vo_str_concat",
@@ -4349,12 +4460,14 @@ pub fn runtime_symbol_names() -> &'static [&'static str] {
         "vo_iface_to_iface",
         "vo_iface_eq",
         "vo_iface_assert",
+        "vo_set_prepared_call_request",
         "vo_set_call_request",
         "vo_jit_copy_frame_slots",
         "vo_ptr_clone",
         "vo_map_new",
         "vo_map_len",
         "vo_map_get",
+        "vo_map_get_one",
         "vo_map_get_scalar",
         "vo_map_set",
         "vo_map_set_scalar",
@@ -4486,6 +4599,16 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
         JitRuntimeHelperAbi {
             name: "vo_str_new",
             params: &[T::Ptr, T::Ptr, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_str_new_const",
+            params: &[T::Ptr, T::U32],
             ret: T::U64,
             return_policy: Ret::RawU64,
             panic_policy: Panic::MustNotPanicAcrossAbi,
@@ -4795,6 +4918,16 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             observes_frame: false,
         },
         JitRuntimeHelperAbi {
+            name: "vo_set_prepared_call_request",
+            params: &[T::Ptr, T::U32, T::U32, T::U32, T::U32, T::U32],
+            ret: T::Void,
+            return_policy: Ret::Void,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
             name: "vo_set_call_request",
             params: &[T::Ptr, T::U32, T::U32, T::U32, T::U32, T::U32, T::U32],
             ret: T::Void,
@@ -4847,6 +4980,16 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
         JitRuntimeHelperAbi {
             name: "vo_map_get",
             params: &[T::Ptr, T::U64, T::Ptr, T::U32, T::Ptr, T::U32],
+            ret: T::U64,
+            return_policy: Ret::U64ErrorSentinel,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_map_get_one",
+            params: &[T::Ptr, T::U64, T::U64, T::Ptr],
             ret: T::U64,
             return_policy: Ret::U64ErrorSentinel,
             panic_policy: Panic::ReturnsStatusOrSentinel,

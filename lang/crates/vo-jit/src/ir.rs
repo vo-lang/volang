@@ -209,6 +209,7 @@ impl EffectSet {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TypedInstruction {
     source: Instruction,
+    pc: u32,
     block: BlockId,
     values: Span,
     input_count: u16,
@@ -218,6 +219,10 @@ pub(crate) struct TypedInstruction {
 }
 
 impl TypedInstruction {
+    pub(crate) fn pc(self) -> usize {
+        self.pc as usize
+    }
+
     #[inline]
     pub(crate) fn source(self) -> Instruction {
         self.source
@@ -264,14 +269,6 @@ pub(crate) struct FrameState {
     values: Span,
     direct_roots: Span,
     conditional_roots: Span,
-    /// Inlined frame states form a parent chain through this field.
-    parent: u32,
-}
-
-impl FrameState {
-    pub(crate) fn parent(self) -> Option<FrameStateId> {
-        (self.parent != NONE_ID).then_some(FrameStateId(self.parent))
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -381,6 +378,7 @@ impl FunctionIr {
         Self::build_with_limit(func, module, crate::MAX_JIT_ANALYSIS_BYTES)
     }
 
+    #[cfg(test)]
     pub(crate) fn build_with_limit(
         func: &FunctionDef,
         module: &Module,
@@ -402,7 +400,7 @@ impl FunctionIr {
         let mut raw = Vec::with_capacity(func.code.len());
         for (pc, source) in func.code.iter().copied().enumerate() {
             let facts = EffectFacts::from_instruction(func.instruction_metadata.get(pc));
-            let instruction_effects = effects::try_instruction_effects_with_module_context(
+            let mut instruction_effects = effects::try_instruction_effects_with_module_context(
                 &source,
                 facts,
                 &module.externs,
@@ -414,6 +412,7 @@ impl FunctionIr {
                     func.name
                 ))
             })?;
+            instruction_effects.reads.extend(func.unwind_root_slots());
             validate_slots(func, pc, &instruction_effects.reads, "read")?;
             validate_slots(func, pc, &instruction_effects.writes, "write")?;
             raw.push(RawInstruction {
@@ -535,7 +534,6 @@ impl FunctionIr {
                         values,
                         direct_roots: liveness.direct_roots,
                         conditional_roots: liveness.conditional_roots,
-                        parent: NONE_ID,
                     });
                     id
                 } else {
@@ -575,6 +573,7 @@ impl FunctionIr {
                 };
                 typed.push(TypedInstruction {
                     source: instruction.source,
+                    pc: pc as u32,
                     block: block_id,
                     values: instruction_value_span,
                     input_count,
@@ -871,7 +870,9 @@ impl FunctionIr {
 
     pub(crate) fn frame_state(&self, pc: usize) -> Option<&FrameState> {
         let id = self.instruction(pc)?.frame_state_id()?;
-        self.frame_states.get(id.index())
+        let state = self.frame_states.get(id.index())?;
+        debug_assert_eq!(state.resume_pc as usize, pc);
+        Some(state)
     }
 
     pub(crate) fn frame_values(&self, state: FrameState) -> &[FrameValue] {
@@ -884,67 +885,6 @@ impl FunctionIr {
 
     pub(crate) fn conditional_roots(&self, state: FrameState) -> &[u16] {
         state.conditional_roots.slice(&self.root_slots)
-    }
-
-    pub(crate) fn deopt_metadata(
-        &self,
-        pc_range: std::ops::Range<usize>,
-    ) -> Vec<crate::native_stack_map::DeoptFrameState> {
-        self.frame_states
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(_, state)| pc_range.contains(&(state.resume_pc as usize)))
-            .map(
-                |(state_id, state)| crate::native_stack_map::DeoptFrameState {
-                    state_id: state_id as u32,
-                    resume_pc: state.resume_pc,
-                    parent_state_id: state
-                        .parent()
-                        .map_or(crate::native_stack_map::DeoptFrameState::NO_PARENT, |id| {
-                            id.0
-                        }),
-                    values: self
-                        .frame_values(state)
-                        .iter()
-                        .map(|value| {
-                            let ssa = self.value(value.value);
-                            crate::native_stack_map::DeoptValue {
-                                slot: value.slot,
-                                kind: match ssa.ty {
-                                    ValueType::Word => {
-                                        crate::native_stack_map::DeoptValueKind::Word
-                                    }
-                                    ValueType::Float64 => {
-                                        crate::native_stack_map::DeoptValueKind::Float64
-                                    }
-                                    ValueType::GcRef(_) => {
-                                        crate::native_stack_map::DeoptValueKind::GcRef
-                                    }
-                                    ValueType::InterfaceHeader => {
-                                        crate::native_stack_map::DeoptValueKind::InterfaceHeader
-                                    }
-                                    ValueType::InterfaceData => {
-                                        crate::native_stack_map::DeoptValueKind::InterfaceData
-                                    }
-                                },
-                                location: self.constant(value.value).map_or(
-                                    crate::native_stack_map::DeoptValueLocation::FiberSlot(
-                                        value.slot,
-                                    ),
-                                    |constant| {
-                                        crate::native_stack_map::DeoptValueLocation::Constant(
-                                            constant as u64,
-                                        )
-                                    },
-                                ),
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                },
-            )
-            .collect()
     }
 
     #[inline]
@@ -2001,6 +1941,22 @@ mod tests {
         let state = *ir.frame_state(1).expect("allocating string slice state");
         assert_eq!(ir.direct_roots(state), &[0]);
         assert!(ir.instruction(1).unwrap().effects().requires_frame_state());
+    }
+
+    #[test]
+    fn named_return_cells_remain_roots_at_native_safepoints() {
+        let mut module = module_with(
+            vec![Instruction::new(Opcode::Panic, 0, 0, 0)],
+            vec![SlotType::Interface0, SlotType::Interface1, SlotType::GcBase],
+        );
+        module.functions[0].has_defer = true;
+        module.functions[0].heap_ret_gcref_start = 2;
+        module.functions[0].heap_ret_gcref_count = 1;
+        module.functions[0].heap_ret_slots = vec![1];
+        let ir = FunctionIr::build(&module.functions[0], &module).unwrap();
+        let state = *ir.frame_state(0).expect("panic unwind state");
+        assert_eq!(ir.direct_roots(state), &[2]);
+        assert_eq!(ir.conditional_roots(state), &[0]);
     }
 
     #[test]

@@ -33,12 +33,12 @@ fn compute_iface_assert_params(
 /// Returns the concrete type only for a clause containing exactly one,
 /// non-nil type. Mixed clauses keep the switched expression's interface type.
 fn get_single_concrete_type(
-    types: &[Option<vo_syntax::ast::TypeExpr>],
+    types: &[vo_syntax::ast::TypeCase],
 ) -> Option<&vo_syntax::ast::TypeExpr> {
     if types.len() != 1 {
         return None;
     }
-    types[0].as_ref()
+    types[0].type_expr()
 }
 
 /// Emit the nil-interface predicate used by every `nil` entry in a type case.
@@ -160,7 +160,7 @@ pub(crate) fn compile_type_switch(
             // Preserve source order within a type list. `nil` is a regular
             // entry and may be mixed with concrete or interface types.
             for case_type in &case.types {
-                match case_type {
+                match case_type.type_expr() {
                     None => {
                         let ok_slot = emit_nil_interface_test(iface_slot, func);
                         case_jumps.push((func.emit_jump(Opcode::JumpIf, ok_slot), case_idx));

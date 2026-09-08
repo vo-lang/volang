@@ -29,29 +29,18 @@ impl Visitor for PackageExpressionIndexer<'_> {
     }
 }
 
-fn index_project_expressions(
-    project: &AnalysisProject,
-) -> Result<HashMap<(PackageKey, ExprId), Expr>, String> {
+fn index_project_expressions(project: &AnalysisProject) -> HashMap<(PackageKey, ExprId), Expr> {
     let mut expressions = HashMap::new();
-    {
+    for package in project.packages() {
         let mut indexer = PackageExpressionIndexer {
-            package: project.main_package,
+            package: package.key,
             expressions: &mut expressions,
         };
-        for file in &project.files {
+        for file in &package.files {
             indexer.visit_file(file);
         }
     }
-    for (_, package, _, files) in project.imported_packages_in_order()? {
-        let mut indexer = PackageExpressionIndexer {
-            package,
-            expressions: &mut expressions,
-        };
-        for file in files {
-            indexer.visit_file(file);
-        }
-    }
-    Ok(expressions)
+    expressions
 }
 
 pub fn compile_project(project: &AnalysisProject) -> Result<vo_common_core::Module, String> {
@@ -159,7 +148,7 @@ pub fn compile_project(project: &AnalysisProject) -> Result<vo_common_core::Modu
         })
         .unwrap_or_default();
     let scoped_calls = if let Some(discovery) = &ui_runtime_discovery {
-        let expressions = index_project_expressions(project).map_err(|error| error.to_string())?;
+        let expressions = index_project_expressions(project);
         discovery
             .component_scopes
             .iter()

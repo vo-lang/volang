@@ -1,0 +1,20 @@
+package main
+
+import (
+	"time"
+)
+
+var stop bool
+
+func waitForTimer() {
+	for !stop {}
+}
+
+func main() {
+	go func() {
+		time.Sleep(time.Millisecond)
+		stop = true
+	}()
+	waitForTimer()
+	assert(stop)
+}

@@ -17,7 +17,8 @@ pub(super) fn direct_stack_capacity(fiber: &Fiber) -> u32 {
     fiber
         .stack
         .len()
-        .min(crate::fiber::MAX_JIT_DIRECT_STACK_SLOTS) as u32
+        .min(crate::fiber::MAX_JIT_DIRECT_STACK_SLOTS)
+        .min(fiber.stack_slot_limit()) as u32
 }
 
 static JIT_CONTEXT_CALLBACKS: JitContextCallbacks = JitContextCallbacks {
@@ -143,6 +144,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber) -> Result<JitContextWra
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -151,9 +153,10 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber) -> Result<JitContextWra
         // Fiber stack access fields - will be updated before JIT call
         stack_ptr: fiber.stack_ptr(),
         stack_cap: direct_stack_capacity(fiber),
-        stack_limit: crate::fiber::MAX_JIT_DIRECT_STACK_SLOTS as u32,
+        stack_limit: fiber.stack_slot_limit() as u32,
         call_depth: 0,
         call_depth_limit: crate::fiber::MAX_JIT_CALL_DEPTH as u32,
+        native_stack_floor: 0,
         jit_bp: 0, // Set when the active VM frame enters native code.
         fiber_sp: fiber.sp as u32,
         push_frame_fn: Some(jit_push_frame),

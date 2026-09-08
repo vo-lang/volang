@@ -1,6 +1,5 @@
 mod branches;
 mod driver;
-mod facts;
 mod poll;
 mod slots;
 mod state;
@@ -10,7 +9,6 @@ use cranelift_frontend::FunctionBuilder;
 
 pub(crate) use branches::*;
 pub(crate) use driver::*;
-pub(crate) use facts::*;
 pub(crate) use poll::*;
 pub(crate) use slots::*;
 pub(crate) use state::*;

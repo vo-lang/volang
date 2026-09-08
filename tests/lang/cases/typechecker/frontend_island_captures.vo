@@ -1,0 +1,35 @@
+package main
+
+func exerciseIsland() {
+    x := 17
+    Number := 19
+    {
+        const x = 3
+        type Number int
+        type C chan int
+        type F func()
+        type A interface{}
+        type S struct { ch chan int }
+        i := make(island)
+        p := make(port int, 1)
+        go @(i) func(out port<- int) {
+            _ = C(nil)
+            _ = F(nil)
+            _ = A(nil)
+            _ = new(S)
+            out <- x + int(Number(2))
+        }(p)
+        assert(<-p == 5)
+        value := 9
+        go @(i) func(out port<- int) {
+            nested := func() int { return value + x }
+            out <- nested()
+        }(p)
+        assert(<-p == 12)
+    }
+    assert(x == 17 && Number == 19)
+}
+
+func main() {
+    for n := 0; n < 4; n++ { exerciseIsland() }
+}

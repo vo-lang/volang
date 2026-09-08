@@ -374,6 +374,7 @@ pub(super) fn compile_run_defer(
     _module: &VoModule,
     _dispatch_index: u32,
     globals: RuntimeGlobals,
+    nil_function_panic_ref: u32,
 ) -> Function {
     const RAW: u32 = 1;
     const ENTRY: u32 = 2;
@@ -473,6 +474,55 @@ pub(super) fn compile_run_defer(
         }))
         .instruction(&W::Br(1))
         .instruction(&W::End)
+        .instruction(&W::End);
+    // The entry is already detached from the pending list. Publish its trap
+    // without inventing a child frame or changing the caller's defer depth.
+    body.instruction(&W::LocalGet(FLAGS))
+        .instruction(&W::I32Const(2))
+        .instruction(&W::I32And)
+        .instruction(&W::I32Eqz)
+        .instruction(&W::I32Eqz)
+        .instruction(&W::LocalGet(ENTRY))
+        .instruction(&W::I64Load(MemArg {
+            offset: 16,
+            align: 3,
+            memory_index: 0,
+        }))
+        .instruction(&W::I64Eqz)
+        .instruction(&W::I32And)
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::LocalGet(RAW))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::I32Store(MemArg {
+            offset: FRAME_ACTIVE_DEFER_OFFSET,
+            align: 2,
+            memory_index: 0,
+        }))
+        .instruction(&W::GlobalGet(globals.current_fiber))
+        .instruction(&W::I64Load(MemArg {
+            offset: FIBER_PREVIOUS_PANIC_OFFSET,
+            align: 3,
+            memory_index: 0,
+        }))
+        .instruction(&W::I32WrapI64)
+        .instruction(&W::LocalSet(CHILD_RAW))
+        .instruction(&W::I64Const((17u64 << 8 | 17) as i64))
+        .instruction(&W::I64Const(i64::from(nil_function_panic_ref)))
+        .instruction(&W::LocalGet(0))
+        .instruction(&W::Call(RAISE_PANIC_FUNCTION_INDEX))
+        .instruction(&W::LocalSet(STATUS))
+        // The new panic has already escaped this saved call. Discard the
+        // displaced panic context exactly as for a completed panicking defer.
+        .instruction(&W::GlobalGet(globals.current_fiber))
+        .instruction(&W::LocalGet(CHILD_RAW))
+        .instruction(&W::I64ExtendI32U)
+        .instruction(&W::I64Store(MemArg {
+            offset: FIBER_PREVIOUS_PANIC_OFFSET,
+            align: 3,
+            memory_index: 0,
+        }))
+        .instruction(&W::LocalGet(STATUS))
+        .instruction(&W::Return)
         .instruction(&W::End)
         .instruction(&W::LocalGet(FLAGS))
         .instruction(&W::I32Const(2))
@@ -1155,6 +1205,14 @@ pub(super) fn compile_scheduler_start(
             memory_index: 0,
         }))
         .instruction(&W::LocalTee(FRAME))
+        // Only pending entry traps have no guest frame. current_fiber already
+        // owns their panic value, so report it without entering caller unwind.
+        .instruction(&W::I32Eqz)
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::I32Const(STATUS_PANIC))
+        .instruction(&W::Return)
+        .instruction(&W::End)
+        .instruction(&W::LocalGet(FRAME))
         .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
         .instruction(&W::I32Sub)
         .instruction(&W::I32Load(MemArg {

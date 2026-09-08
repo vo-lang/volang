@@ -259,7 +259,10 @@ async fn run_vm_async_owned(
     let mut timers = FuturesUnordered::<TimerFuture>::new();
     let mut timer_aborts = HashMap::<vo_vm::scheduler::HostWaitKey, AbortHandle>::new();
 
-    let mut outcome = match vo_web_runtime_wasm::net_http::with_http_owner(owner, || vm.run()) {
+    const VM_QUANTA_PER_HOST_TURN: usize = 8;
+    let mut outcome = match vo_web_runtime_wasm::net_http::with_http_owner(owner, || {
+        vm.run_with_budget(VM_QUANTA_PER_HOST_TURN)
+    }) {
         Ok(o) => o,
         Err(e) => {
             return (
@@ -271,7 +274,10 @@ async fn run_vm_async_owned(
         }
     };
 
-    while outcome == SchedulingOutcome::SuspendedForHostEvents {
+    while matches!(
+        outcome,
+        SchedulingOutcome::Suspended | SchedulingOutcome::SuspendedForHostEvents
+    ) {
         for pending in vo_web_runtime_wasm::net_http::take_pending_fetch_promises() {
             if fetch_tokens.insert(pending.token) {
                 fetches.push(await_fetch(pending).boxed_local());
@@ -321,32 +327,45 @@ async fn run_vm_async_owned(
             );
         }
 
-        if fetches.is_empty() && timers.is_empty() {
+        let runnable = vm.has_runnable_fibers();
+        if !runnable && fetches.is_empty() && timers.is_empty() {
             break;
         }
 
-        let event = match (fetches.is_empty(), timers.is_empty()) {
-            (false, false) => {
-                let next_fetch = fetches.next();
-                let next_timer = timers.next();
-                futures_util::pin_mut!(next_fetch, next_timer);
-                match select(next_fetch, next_timer).await {
-                    Either::Left((Some(fetch), _)) => DrivenHostEvent::Fetch(fetch),
-                    Either::Right((Some(timer), _)) => DrivenHostEvent::Timer(timer),
-                    _ => DrivenHostEvent::Idle,
+        let next_event = async {
+            match (fetches.is_empty(), timers.is_empty()) {
+                (false, false) => {
+                    let next_fetch = fetches.next();
+                    let next_timer = timers.next();
+                    futures_util::pin_mut!(next_fetch, next_timer);
+                    match select(next_fetch, next_timer).await {
+                        Either::Left((Some(fetch), _)) => DrivenHostEvent::Fetch(fetch),
+                        Either::Right((Some(timer), _)) => DrivenHostEvent::Timer(timer),
+                        _ => DrivenHostEvent::Idle,
+                    }
                 }
+                (false, true) => fetches
+                    .next()
+                    .await
+                    .map(DrivenHostEvent::Fetch)
+                    .unwrap_or(DrivenHostEvent::Idle),
+                (true, false) => timers
+                    .next()
+                    .await
+                    .map(DrivenHostEvent::Timer)
+                    .unwrap_or(DrivenHostEvent::Idle),
+                (true, true) => DrivenHostEvent::Idle,
             }
-            (false, true) => fetches
-                .next()
-                .await
-                .map(DrivenHostEvent::Fetch)
-                .unwrap_or(DrivenHostEvent::Idle),
-            (true, false) => timers
-                .next()
-                .await
-                .map(DrivenHostEvent::Timer)
-                .unwrap_or(DrivenHostEvent::Idle),
-            (true, true) => DrivenHostEvent::Idle,
+        };
+        let event = if runnable {
+            // Give JS timers and Fetch a macrotask turn even if guest work is
+            // continuously ready. Start/poll pending futures before yielding;
+            // their state remains owned by the streams across the guest turn.
+            let ready_event = next_event.now_or_never();
+            wasm_sleep_once_ms(0).await;
+            ready_event.unwrap_or(DrivenHostEvent::Idle)
+        } else {
+            next_event.await
         };
 
         let should_run = match event {
@@ -382,9 +401,9 @@ async fn run_vm_async_owned(
             DrivenHostEvent::Timer(None) | DrivenHostEvent::Idle => false,
         };
 
-        if should_run {
+        if should_run || runnable {
             outcome = match vo_web_runtime_wasm::net_http::with_http_owner(owner, || {
-                vm.run_scheduled()
+                vm.run_scheduled_with_budget(VM_QUANTA_PER_HOST_TURN)
             }) {
                 Ok(o) => o,
                 Err(e) => {
@@ -596,10 +615,18 @@ export function voAsyncRunnerFetchAborted() {
         let mut foreign_run = Box::pin(run_vm_async_owned(&mut foreign_vm, foreign_owner));
         let mut context = Context::from_waker(noop_waker_ref());
 
-        assert!(matches!(
-            foreign_run.as_mut().poll(&mut context),
-            Poll::Pending
-        ));
+        // Bounded execution can yield during initialization before reaching
+        // the fetch. Drive host turns until the request has actually started.
+        for _ in 0..128 {
+            assert!(matches!(
+                foreign_run.as_mut().poll(&mut context),
+                Poll::Pending
+            ));
+            if fetch_started() > 0 {
+                break;
+            }
+            super::wasm_sleep_once_ms(0).await;
+        }
         assert_eq!(fetch_started(), 1);
         assert_eq!(fetch_aborted(), 0);
 

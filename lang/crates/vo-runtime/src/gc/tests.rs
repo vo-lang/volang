@@ -445,6 +445,37 @@ fn incremental_step_returns_with_a_sub_slot_phase_budget_remainder() {
 }
 
 #[test]
+fn incremental_sweep_returns_with_a_sub_slot_frozen_budget_remainder() {
+    for root_state in [
+        GcRootState::MayHaveChanged,
+        GcRootState::StableSinceLastScan,
+    ] {
+        let mut gc = Gc::new();
+        for _ in 0..16 {
+            gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
+        }
+        gc.state = GcState::Sweep;
+        gc.sweep_cursor = gc.heap.object_cursor();
+        gc.sweep_complete = false;
+        gc.sweep_budget = SLOT_BYTES + 1;
+
+        let work = unsafe {
+            gc.step_with_scanners_budget(
+                root_state,
+                usize::MAX / SLOT_BYTES,
+                |_, _, _| GcRootScanChunk::complete(0),
+                |_, _, _, _| GcObjectScanChunk::complete(SLOT_BYTES),
+                |_| {},
+            )
+        };
+
+        assert_eq!(work, SLOT_BYTES);
+        assert_eq!(gc.state(), GcState::Sweep);
+        assert!(!gc.sweep_complete);
+    }
+}
+
+#[test]
 fn gc_lease_keeps_object_alive_and_rejects_stale_generation() {
     fn run_major(gc: &mut Gc) {
         let completed = gc.memory_stats().major_cycles;

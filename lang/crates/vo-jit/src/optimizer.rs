@@ -16,6 +16,7 @@ use crate::JitError;
 /// from reconstructing an optimizer pipeline out of unrelated side tables.
 pub(crate) struct OptimizedFunction {
     instructions: Box<[OptimizedInstruction]>,
+    scalar_live_ranges: Box<[Box<[std::ops::Range<u32>]>]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -502,6 +503,7 @@ impl OptimizedFunction {
         }
         Self {
             instructions: instructions.into_boxed_slice(),
+            scalar_live_ranges: Box::default(),
         }
     }
 
@@ -513,7 +515,7 @@ impl OptimizedFunction {
         let pc_range = 0..ir.instruction_count();
         let dynamic_targets = vec![NO_DYNAMIC_TARGET; ir.instruction_count()];
         let (inline_targets, inline_costs) =
-            plan_inlines(ir, &pc_range, module, caller_id, &dynamic_targets, false);
+            plan_inlines(ir, &pc_range, module, caller_id, &dynamic_targets);
         let instructions = (0..ir.instruction_count())
             .map(|pc| {
                 let typed = *ir
@@ -530,7 +532,10 @@ impl OptimizedFunction {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Self { instructions }
+        Self {
+            instructions,
+            scalar_live_ranges: Box::default(),
+        }
     }
     #[cfg(test)]
     pub(crate) fn analyze(ir: &crate::ir::FunctionIr) -> Self {
@@ -580,7 +585,6 @@ impl OptimizedFunction {
                 &module.inline_plan,
                 caller_id,
                 &dynamic_call_targets,
-                true,
             ),
             _ => (
                 vec![NO_DYNAMIC_TARGET; ir.instruction_count()],
@@ -612,7 +616,12 @@ impl OptimizedFunction {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Self { instructions }
+        Self {
+            instructions,
+            scalar_live_ranges: escape
+                .map(crate::escape::EscapePlan::into_live_ranges)
+                .unwrap_or_default(),
+        }
     }
 
     /// Derive an OSR entry view from the canonical optimized graph. GVN and
@@ -645,15 +654,37 @@ impl OptimizedFunction {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Self { instructions }
+        Self {
+            instructions,
+            scalar_live_ranges: Box::default(),
+        }
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
-        core::mem::size_of::<Self>().saturating_add(
-            self.instructions
-                .len()
-                .saturating_mul(core::mem::size_of::<OptimizedInstruction>()),
-        )
+        core::mem::size_of::<Self>()
+            .saturating_add(
+                self.instructions
+                    .len()
+                    .saturating_mul(core::mem::size_of::<OptimizedInstruction>()),
+            )
+            .saturating_add(
+                self.scalar_live_ranges
+                    .iter()
+                    .map(|ranges| {
+                        core::mem::size_of_val(ranges) + core::mem::size_of_val(&**ranges)
+                    })
+                    .sum::<usize>(),
+            )
+    }
+
+    pub(crate) fn scalar_object_is_live(&self, object: usize, pc: usize) -> bool {
+        let Some(ranges) = self.scalar_live_ranges.get(object) else {
+            return false;
+        };
+        let pc = pc as u32;
+        ranges
+            .get(ranges.partition_point(|range| range.end <= pc))
+            .is_some_and(|range| range.contains(&pc))
     }
 
     #[inline]
@@ -1920,27 +1951,7 @@ fn clear_field_values(
 }
 
 fn invalidates_field_values(opcode: Opcode) -> bool {
-    matches!(
-        opcode,
-        Opcode::PtrSetN
-            | Opcode::ArraySet
-            | Opcode::SliceSet
-            | Opcode::MapSet
-            | Opcode::MapDelete
-            | Opcode::QueueSend
-            | Opcode::QueueRecv
-            | Opcode::QueueClose
-            | Opcode::SelectExec
-            | Opcode::Call
-            | Opcode::CallExtern
-            | Opcode::CallClosure
-            | Opcode::CallIface
-            | Opcode::GoStart
-            | Opcode::GoIsland
-            | Opcode::DeferPush
-            | Opcode::ErrDeferPush
-            | Opcode::Recover
-    )
+    vo_common_core::execution_effects::opcode_effect_contract(opcode).may_write_heap
 }
 
 fn set_bit(words: &mut [u64], index: usize) {
@@ -1968,7 +1979,6 @@ fn plan_inlines(
     module: &ModuleInlinePlan,
     caller_id: u32,
     dynamic_targets: &[u32],
-    allow_self_recursion: bool,
 ) -> (Vec<u32>, Vec<u32>) {
     let mut targets = vec![NO_DYNAMIC_TARGET; ir.instruction_count()];
     let mut costs = vec![0_u32; ir.instruction_count()];
@@ -1992,11 +2002,7 @@ fn plan_inlines(
             }
             _ => continue,
         };
-        let recipe = if source.opcode() == Opcode::Call && allow_self_recursion {
-            module.static_inline(caller_id, target)
-        } else {
-            module.pure_leaf_inline(caller_id, target)
-        };
+        let recipe = module.pure_leaf_inline(caller_id, target);
         let Some(recipe) = recipe else {
             continue;
         };
@@ -2361,16 +2367,8 @@ impl ModuleInlinePlan {
                 limit_bytes,
                 requested_bytes: fixed_bytes,
             })?;
-        for (func_id, function) in module.functions.iter().enumerate() {
-            let inline = SmallFunctionInline::analyze_leaf(function, module)
-                .or_else(|| {
-                    SmallFunctionInline::analyze_self_recursive(
-                        u32::try_from(func_id).ok()?,
-                        function,
-                        module,
-                    )
-                })
-                .map(Arc::new);
+        for function in &module.functions {
+            let inline = SmallFunctionInline::analyze_leaf(function, module).map(Arc::new);
             retained_bytes = retained_bytes.saturating_add(
                 inline
                     .as_deref()
@@ -2416,31 +2414,7 @@ impl ModuleInlinePlan {
         if self.graph.is_recursive_edge(caller, callee) {
             return None;
         }
-        let inline = self.small_inlines.get(callee)?.as_deref()?;
-        (!inline.is_self_recursive(callee_id)).then_some(inline)
-    }
-
-    pub(crate) fn static_inline(
-        &self,
-        caller_id: u32,
-        callee_id: u32,
-    ) -> Option<&SmallFunctionInline> {
-        if self
-            .graph
-            .is_recursive_edge(caller_id as usize, callee_id as usize)
-        {
-            if caller_id != callee_id {
-                return None;
-            }
-            let inline = self.small_inlines.get(callee_id as usize)?.as_deref()?;
-            return inline.is_self_recursive(callee_id).then_some(inline);
-        }
-        self.pure_leaf_inline(caller_id, callee_id)
-    }
-
-    pub(crate) fn is_recursive_edge(&self, caller_id: u32, callee_id: u32) -> bool {
-        self.graph
-            .is_recursive_edge(caller_id as usize, callee_id as usize)
+        self.small_inlines.get(callee)?.as_deref()
     }
 
     fn direct_self_call(&self, caller_id: u32, callee_id: u32) -> bool {
@@ -2550,10 +2524,6 @@ impl ModuleOptimizationPlan {
         })
     }
 
-    pub(crate) fn is_recursive_edge(&self, caller_id: u32, callee_id: u32) -> bool {
-        self.inline_plan.is_recursive_edge(caller_id, callee_id)
-    }
-
     pub(crate) fn retained_bytes(&self) -> usize {
         core::mem::size_of::<Self>()
             .saturating_add(self.function_param_slots.len() * core::mem::size_of::<u16>())
@@ -2577,16 +2547,12 @@ impl ModuleOptimizationPlan {
         self.inline_plan.pure_leaf_inline(caller_id, callee_id)
     }
 
-    pub(crate) fn static_inline(
-        &self,
-        caller_id: u32,
-        callee_id: u32,
-    ) -> Option<&SmallFunctionInline> {
-        self.inline_plan.static_inline(caller_id, callee_id)
-    }
-
     pub(crate) fn direct_self_call(&self, caller_id: u32, callee_id: u32) -> bool {
         self.inline_plan.direct_self_call(caller_id, callee_id)
+    }
+
+    pub(crate) fn inline_plan(&self) -> &ModuleInlinePlan {
+        &self.inline_plan
     }
 
     fn function(&self, func_id: u32) -> Option<FunctionPlanShape> {
@@ -2644,7 +2610,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_selects_bounded_self_recursion_separately_from_leaf_inlining() {
+    fn recursive_calls_retain_complete_native_activations() {
         let mut module = Module::new("optimizer-plan".into());
         module.functions = vec![
             function_with_sig(
@@ -2663,14 +2629,13 @@ mod tests {
         let plan = ModuleOptimizationPlan::build(&module);
         assert!(plan.direct_self_call(0, 0));
         assert!(plan.pure_leaf_inline(0, 0).is_none());
-        assert!(plan.static_inline(0, 0).is_some());
         assert!(plan.pure_leaf_inline(0, 1).is_some());
 
         let ir = crate::ir::FunctionIr::build(&module.functions[0], &module).unwrap();
         let baseline = OptimizedFunction::baseline_with_module(&ir, &plan.inline_plan, 0);
         let optimized = OptimizedFunction::analyze_with_module(&ir, &module.functions[0], &plan, 0);
         assert_eq!(baseline.inline_target(0), None);
-        assert_eq!(optimized.inline_target(0), Some(0));
+        assert_eq!(optimized.inline_target(0), None);
     }
 
     #[test]

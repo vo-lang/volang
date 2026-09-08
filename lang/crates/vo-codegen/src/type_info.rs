@@ -1,10 +1,10 @@
 //! Type info wrapper - provides slot layout calculation and type queries.
 //!
 //! This module provides a convenient wrapper around Project for codegen queries.
-//! Core type layout functions are in vo_analysis::check::type_info.
+//! Core type layout functions are in vo_analysis::layout.
 
 use std::rc::Rc;
-use vo_analysis::check::type_info as type_layout;
+use vo_analysis::layout as type_layout;
 use vo_analysis::objects::PackageKey;
 use vo_analysis::objects::{ObjKey, TCObjects, TypeKey};
 use vo_analysis::typ::{self, Type};
@@ -12,16 +12,6 @@ use vo_analysis::Project;
 use vo_common_core::SlotType;
 use vo_syntax::ast::ExprId;
 use vo_syntax::ast::Ident;
-
-/// Describes how call arguments should be compiled.
-/// If `tuple_expand` is Some, the single argument is a tuple that needs expansion.
-pub struct CallArgInfo {
-    /// Expanded argument types (after tuple expansion if applicable)
-    pub arg_types: Vec<TypeKey>,
-    /// If Some, the single AST argument is a tuple and should be expanded.
-    /// The value is the tuple type to expand.
-    pub tuple_expand: Option<TypeKey>,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum QueueFlavor {
@@ -49,8 +39,8 @@ impl<'a> TypeInfoWrapper<'a> {
     ) -> Self {
         Self {
             project,
-            pkg: project.main_package,
-            type_info: &project.type_info,
+            pkg: project.main().key,
+            type_info: &project.main().type_info,
             layout_facts: Rc::new(layout_facts),
         }
     }
@@ -84,6 +74,13 @@ impl<'a> TypeInfoWrapper<'a> {
 
     fn type_info(&self) -> &vo_analysis::check::TypeInfo {
         self.type_info
+    }
+
+    pub fn call_info(
+        &self,
+        expr: &vo_syntax::ast::Expr,
+    ) -> Option<&vo_analysis::check::type_info::CallInfo> {
+        self.type_info.call(expr)
     }
 
     // === Expression type queries ===
@@ -1048,7 +1045,7 @@ impl<'a> TypeInfoWrapper<'a> {
 
     pub fn try_array_elem_bytes(&self, type_key: TypeKey) -> Result<usize, String> {
         let elem_type = self.array_elem_type(type_key);
-        vo_analysis::check::type_info::try_elem_bytes_for_heap_with_facts(
+        vo_analysis::layout::try_elem_bytes_for_heap_with_facts(
             elem_type,
             self.tc_objs(),
             &self.layout_facts,
@@ -1059,7 +1056,7 @@ impl<'a> TypeInfoWrapper<'a> {
     /// Get slice element heap bytes (for packed array storage)
     pub fn slice_elem_bytes(&self, type_key: TypeKey) -> usize {
         let elem_type = self.slice_elem_type(type_key);
-        vo_analysis::check::type_info::try_elem_bytes_for_heap_with_facts(
+        vo_analysis::layout::try_elem_bytes_for_heap_with_facts(
             elem_type,
             self.tc_objs(),
             &self.layout_facts,
@@ -1378,29 +1375,11 @@ impl<'a> TypeInfoWrapper<'a> {
     }
 
     /// Get call argument info for a function call.
-    /// Handles the `f(g())` pattern where g() returns multiple values.
-    pub fn get_call_arg_info(
+    pub fn call_expr_info(
         &self,
-        args: &[vo_syntax::ast::Expr],
-        param_types: &[TypeKey],
-    ) -> CallArgInfo {
-        // Check for multi-value expansion: single arg that is a tuple matching multiple params
-        if args.len() == 1 && param_types.len() > 1 {
-            let arg_type = self.expr_type(args[0].id);
-            if self.is_tuple(arg_type) && self.tuple_len(arg_type) == param_types.len() {
-                return CallArgInfo {
-                    arg_types: (0..param_types.len())
-                        .map(|i| self.tuple_elem_type(arg_type, i))
-                        .collect(),
-                    tuple_expand: Some(arg_type),
-                };
-            }
-        }
-        // Normal case: arg types from expressions
-        CallArgInfo {
-            arg_types: args.iter().map(|a| self.expr_type(a.id)).collect(),
-            tuple_expand: None,
-        }
+        call: &vo_syntax::ast::CallExpr,
+    ) -> Option<&vo_analysis::check::type_info::CallInfo> {
+        self.type_info.call_expr(call)
     }
 
     /// Get parameter types for a function signature

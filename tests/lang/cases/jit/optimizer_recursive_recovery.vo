@@ -1,0 +1,25 @@
+package main
+
+func recursiveSum(n int) int {
+	if n == 0 {
+		return 0
+	}
+	return n + recursiveSum(n - 1)
+}
+
+func recursiveArraySum(n int, values [64]int) int {
+	if n == 0 {
+		return values[0]
+	}
+	return n + values[0] + recursiveArraySum(n - 1, values)
+}
+
+func main() {
+	var values [64]int
+	values[0] = 3
+	for i := 0; i < 5; i++ {
+		assert(recursiveSum(100) == 5050, "cold and warm native calls must preserve every activation")
+		assert(recursiveSum(2000) == 2001000, "native depth exhaustion must continue through VM frames")
+		assert(recursiveArraySum(1000, values) == 503503, "native stack and shadow limits must preserve VM recursion semantics")
+	}
+}

@@ -45,6 +45,7 @@ fn spawn_call_without_module_returns_error_instead_of_expect_panic() {
 #[test]
 fn configured_fiber_limit_is_a_typed_vm_resource_error() {
     let limits = VmResourceLimits {
+        max_total_fiber_auxiliary_bytes: 1024 * 1024,
         max_fibers: 0,
         ..VmResourceLimits::default()
     };
@@ -98,6 +99,7 @@ fn aggregate_fiber_storage_limit_rolls_back_rejected_spawn() {
 #[test]
 fn guest_termination_preserves_vm_resource_policy() {
     let limits = VmResourceLimits {
+        max_total_fiber_auxiliary_bytes: 1024 * 1024,
         max_fibers: 7,
         max_total_fiber_storage_bytes: 4096,
         max_stack_slots_per_fiber: 128,
@@ -1068,4 +1070,99 @@ fn gc_env_verify_flag_enables_precise_step_verification() {
 
     assert!(!vm.gc_stress_every_step());
     assert!(vm.gc_verify_after_step());
+}
+
+#[test]
+fn bounded_scheduler_zero_budget_does_not_run_and_reports_final_completion() {
+    let mut vm = Vm::new();
+    vm.load(malformed_single_instruction_module(
+        "bounded-host",
+        Vec::new(),
+        Vec::new(),
+    ))
+    .unwrap();
+    vm.spawn_call(0, &[]).unwrap();
+    assert!(matches!(
+        vm.run_scheduled_with_budget(0).unwrap(),
+        SchedulingOutcome::Suspended
+    ));
+    assert!(!vm.scheduler.ready_queue.is_empty());
+    assert!(matches!(
+        vm.run_scheduled_with_budget(1).unwrap(),
+        SchedulingOutcome::Completed
+    ));
+    assert!(!vm.has_runnable_fibers());
+}
+
+#[test]
+fn bounded_entry_starts_once_and_resumes_without_spawning_another_fiber() {
+    let mut vm = Vm::new();
+    vm.load(malformed_single_instruction_module(
+        "bounded-entry",
+        Vec::new(),
+        Vec::new(),
+    ))
+    .unwrap();
+    assert_eq!(vm.run_with_budget(0).unwrap(), SchedulingOutcome::Suspended);
+    assert!(vm.has_runnable_fibers());
+    assert_eq!(vm.scheduler.fibers.len(), 1);
+    assert_eq!(
+        vm.run_scheduled_with_budget(1).unwrap(),
+        SchedulingOutcome::Completed
+    );
+    assert!(!vm.has_runnable_fibers());
+    assert_eq!(vm.scheduler.fibers.len(), 1);
+}
+
+#[test]
+fn auxiliary_limit_rejects_select_before_publishing_state() {
+    let limits = VmResourceLimits {
+        max_total_fiber_auxiliary_bytes: 1,
+        ..VmResourceLimits::default()
+    };
+    let mut vm = Vm::try_with_resource_limits(limits).unwrap();
+    vm.load(malformed_single_instruction_module(
+        "select-admission",
+        Vec::new(),
+        Vec::new(),
+    ))
+    .unwrap();
+    vm.spawn_call(0, &[]).unwrap();
+    let id = vm.scheduler.ready_queue[0];
+    let fiber = vm.scheduler.get_fiber_mut(id);
+    assert!(crate::exec::exec_select_begin(fiber, 1, false).is_err());
+    assert!(fiber.select_state.is_none());
+    assert!(matches!(
+        fiber.pending_resource_error,
+        Some(crate::fiber::FiberCapacityError::HostStorage {
+            resource: "fiber auxiliary storage",
+            ..
+        })
+    ));
+    assert_eq!(vm.fiber_auxiliary_storage_bytes(), 0);
+}
+
+#[test]
+fn bounded_completion_releases_large_auxiliary_caches_and_replay_payloads() {
+    let mut vm = Vm::new();
+    vm.load(malformed_single_instruction_module(
+        "retire-auxiliary",
+        Vec::new(),
+        Vec::new(),
+    ))
+    .unwrap();
+    vm.spawn_call(0, &[]).unwrap();
+    let id = vm.scheduler.ready_queue[0];
+    let fiber = vm.scheduler.get_fiber_mut(id);
+    fiber.defer_stack.try_reserve_exact(4000).unwrap();
+    fiber
+        .closure_replay
+        .try_push_result(vec![0; 20_000], vec![SlotType::Value; 20_000])
+        .unwrap();
+    assert!(vm.fiber_auxiliary_storage_bytes() > 64 * 1024);
+    assert!(matches!(
+        vm.run_scheduled_with_budget(1).unwrap(),
+        SchedulingOutcome::Completed
+    ));
+    assert_eq!(vm.fiber_auxiliary_storage_bytes(), 0);
 }

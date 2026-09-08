@@ -8,11 +8,11 @@ use vo_common::symbol::{Symbol, SymbolInterner};
 
 use crate::ast::{
     AssignOp, BinaryExpr, BinaryOp, Block, CaseClause, ChanDir, CommClause, CompositeLit,
-    CompositeLitElem, CompositeLitKey, ConstDecl, ConstSpec, Decl, DynAccessOp, Expr, ExprKind,
-    File, ForClause, FuncDecl, FuncSig, FuncType, Ident, IfStmt, ImportDecl, InlineModMetadata,
-    InterfaceElem, InterfaceType, Param, PortType, Receiver, ResultParam, SelectCase, SelectStmt,
-    Stmt, StmtKind, StructType, SwitchStmt, TypeCaseClause, TypeDecl, TypeExpr, TypeExprKind,
-    TypeSwitchStmt, UnaryOp, VarDecl, VarSpec,
+    CompositeLitElem, ConstDecl, ConstSpec, Decl, DynAccessOp, Expr, ExprKind, File, ForClause,
+    FuncDecl, FuncSig, FuncType, Ident, IfStmt, ImportDecl, InlineModMetadata, InterfaceElem,
+    InterfaceType, Param, PortType, Receiver, ResultParam, SelectCase, SelectStmt, Stmt, StmtKind,
+    StructType, SwitchStmt, TypeCaseClause, TypeDecl, TypeExpr, TypeExprKind, TypeSwitchStmt,
+    UnaryOp, VarDecl, VarSpec,
 };
 use crate::inline_mod::{INLINE_MOD_CLOSE, INLINE_MOD_OPEN};
 
@@ -534,7 +534,7 @@ impl<'a> SourcePrinter<'a> {
                 if i > 0 {
                     self.write_str(", ");
                 }
-                if let Some(ty) = ty {
+                if let Some(ty) = ty.type_expr() {
                     self.write_type_expr(ty);
                 } else {
                     self.write_str("nil");
@@ -1045,10 +1045,7 @@ impl<'a> SourcePrinter<'a> {
 
     fn write_composite_elem(&mut self, elem: &CompositeLitElem) {
         if let Some(key) = &elem.key {
-            match key {
-                CompositeLitKey::Ident(ident) => self.write_ident(ident),
-                CompositeLitKey::Expr(expr) => self.write_expr(expr),
-            }
+            self.write_expr(key);
             self.write_str(": ");
         }
         self.write_expr(&elem.value);

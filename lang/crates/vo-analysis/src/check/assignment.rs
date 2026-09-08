@@ -125,19 +125,13 @@ impl Checker {
     /// Use t == None to indicate assignment to an untyped blank identifier.
     /// x.mode is set to invalid if the assignment failed.
     pub(crate) fn assignment(&mut self, x: &mut Operand, t: Option<TypeKey>, note: &str) {
+        self.expr_value_err(x);
         self.single_value(x);
         if x.invalid() {
             return;
         }
 
-        match x.mode {
-            OperandMode::Constant(_)
-            | OperandMode::Variable
-            | OperandMode::MapIndex
-            | OperandMode::Value
-            | OperandMode::CommaOk => {}
-            _ => return,
-        }
+        debug_assert!(x.mode.is_value());
 
         let xt = match x.typ {
             Some(t) => t,
@@ -279,6 +273,43 @@ impl Checker {
         }
     }
 
+    /// Shared identifier assignment for ordinary assignments and select receives.
+    /// A write records the binding without marking the variable as read.
+    pub(crate) fn assign_ident(&mut self, ident: &Ident, x: &mut Operand) -> Option<TypeKey> {
+        if x.invalid() {
+            return None;
+        }
+        let name = self.resolve_ident(ident);
+        if name == "_" {
+            self.result.record_def(*ident, None);
+            self.assignment(x, None, "assignment to _ identifier");
+            return (!x.invalid()).then_some(x.typ).flatten();
+        }
+        let previous_use =
+            self.lookup(name)
+                .and_then(|object| match self.lobj(object).entity_type() {
+                    crate::obj::EntityType::Var(prop) => Some((object, prop.used)),
+                    _ => None,
+                });
+        let mut target = Operand::new();
+        self.ident(&mut target, ident, None, false);
+        if let Some((object, used)) = previous_use {
+            self.lobj_mut(object)
+                .entity_type_mut()
+                .var_property_mut()
+                .used = used;
+        }
+        if target.invalid() {
+            return None;
+        }
+        if target.mode != OperandMode::Variable {
+            self.error_code(TypeError::CannotAssign, ident.span);
+            return None;
+        }
+        self.assignment(x, target.typ, "assignment");
+        (!x.invalid()).then_some(x.typ).flatten()
+    }
+
     /// Assigns x to the variable denoted by lhs expression.
     pub(crate) fn assign_var(&mut self, lhs: &Expr, x: &mut Operand) -> Option<TypeKey> {
         let invalid_type = self.invalid_type();
@@ -286,48 +317,27 @@ impl Checker {
             return None;
         }
 
-        let mut v: Option<ObjKey> = None;
-        let mut v_used = false;
-
-        // determine if the lhs is a (possibly parenthesized) identifier.
         if let Some(ident) = self.expr_as_ident(lhs) {
-            let name = self.resolve_ident(&ident);
-            if name == "_" {
-                self.result.record_def(ident, None);
-                self.assignment(x, None, "assignment to _ identifier");
-                return if x.mode != OperandMode::Invalid {
-                    x.typ
-                } else {
-                    None
-                };
-            } else {
-                // If the lhs is an identifier denoting a variable v, this assignment
-                // is not a 'use' of v. Remember current value of v.used and restore
-                // after evaluating the lhs via check.expr.
-                if let Some(okey) = self.lookup(name) {
-                    // It's ok to mark non-local variables, but ignore variables
-                    // from other packages to avoid potential race conditions with
-                    // dot-imported variables.
-                    if self.lobj(okey).entity_type().is_var() {
-                        v = Some(okey);
-                        if let crate::obj::EntityType::Var(prop) = self.lobj(okey).entity_type() {
-                            v_used = prop.used;
-                        }
+            let result = self.assign_ident(&ident, x);
+            if let Some(typ) = self
+                .result
+                .get_use(&ident)
+                .and_then(|object| self.lobj(object).typ())
+            {
+                let mut expression = lhs;
+                loop {
+                    self.result
+                        .record_type(expression.id, OperandMode::Variable, typ);
+                    match &expression.kind {
+                        vo_syntax::ast::ExprKind::Paren(inner) => expression = inner,
+                        _ => break,
                     }
                 }
             }
+            return result;
         }
-
-        // Evaluate lhs
         let mut z = Operand::new();
         self.expr(&mut z, lhs);
-
-        // restore v.used
-        if let Some(okey) = v {
-            if let crate::obj::EntityType::Var(prop) = self.lobj_mut(okey).entity_type_mut() {
-                prop.used = v_used;
-            }
-        }
 
         if z.mode == OperandMode::Invalid || z.typ == Some(invalid_type) {
             return None;

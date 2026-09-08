@@ -282,6 +282,39 @@ fn validate_jit_iface_callsite(
 /// Prepare a closure call for JIT dispatch.
 ///
 /// Always does push_frame + arg layout so callee_args_ptr is valid for both paths.
+/// Publish only through the VM-owned cache. Generated code consumes the same
+/// bounded cache as interpreter dispatch and never duplicates publication rules.
+fn publish_prepared_ic(
+    ctx: &JitContext,
+    callsite_pc: u32,
+    key: u64,
+    prepared: &PreparedCall,
+) -> bool {
+    let Some(loaded) = (unsafe { ctx.loaded_module.as_ref() }) else {
+        return false;
+    };
+    let Some(fiber) = (unsafe { (ctx.fiber as *const Fiber).as_ref() }) else {
+        return false;
+    };
+    let Some(frame) = fiber.current_frame() else {
+        return false;
+    };
+    let Some(instruction) = loaded
+        .module()
+        .functions
+        .get(frame.func_id as usize)
+        .and_then(|function| function.code.get(callsite_pc as usize))
+    else {
+        return false;
+    };
+    let index = instruction.dynamic_callsite_index() as usize;
+    if ctx.ic_table.is_null() || index >= loaded.dynamic_callsite_count() {
+        return false;
+    }
+    // The context owns one dense cache per verified module callsite.
+    unsafe { &mut *ctx.ic_table.add(index) }.publish_native_target(key, prepared)
+}
+
 /// The prepared shadow window allows compiled callees that do not need to
 /// observe or own a materialized `Fiber::CallFrame`.
 pub extern "C" fn jit_prepare_closure_call(
@@ -337,6 +370,7 @@ pub extern "C" fn jit_prepare_closure_call(
             return set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, closure_ref);
         }
     };
+    let dispatch_key = ((target.capture_count() as u64) << 32) | u64::from(target.func_id);
     let closure_gcref = target.closure_gcref;
     let func_id = target.func_id;
     let func_def = target.func;
@@ -448,12 +482,13 @@ pub extern "C" fn jit_prepare_closure_call(
             dispatch_generation,
         };
     }
+    let published = publish_prepared_ic(ctx, callsite_pc, dispatch_key, unsafe { &*out });
     record_prepared_dynamic_call_if_available(
         ctx_ptr,
         true,
         local_slots,
         !jit_func_ptr.is_null(),
-        !ic_jit_func_ptr.is_null(),
+        published,
     );
     JitResult::Ok
 }
@@ -683,12 +718,13 @@ pub extern "C" fn jit_prepare_iface_call(
             dispatch_generation,
         };
     }
+    let published = publish_prepared_ic(ctx_ref, callsite_pc, iface_slot0, unsafe { &*out });
     record_prepared_dynamic_call_if_available(
         ctx,
         false,
         local_slots,
         !jit_func_ptr.is_null(),
-        !ic_jit_func_ptr.is_null(),
+        published,
     );
     JitResult::Ok
 }

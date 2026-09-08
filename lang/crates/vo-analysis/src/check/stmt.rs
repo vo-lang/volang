@@ -133,7 +133,6 @@ impl Checker {
     pub(crate) fn func_body(
         &mut self,
         di: Option<crate::objects::DeclInfoKey>,
-        _name: &str,
         sig: TypeKey,
         body: &Block,
         iota: Option<Value>,
@@ -154,35 +153,32 @@ impl Checker {
         octx.scope = Some(scope_key);
         octx.iota = iota;
         octx.sig = Some(sig);
-        std::mem::swap(&mut self.octx, &mut octx);
+        self.with_context(octx, |checker| {
+            // Check the function body
+            let sctx = StmtContext::new();
+            checker.stmt_list(&body.stmts, &sctx);
 
-        // Check the function body
-        let sctx = StmtContext::new();
-        self.stmt_list(&body.stmts, &sctx);
+            // Check labels if any
+            if checker.octx.has_label {
+                checker.labels(body);
+            }
 
-        // Check labels if any
-        if self.octx.has_label {
-            self.labels(body);
-        }
+            // Check for missing return
+            let sig_val = checker.otype(sig).try_as_signature().unwrap();
+            if sig_val.results_count(checker.objs()) > 0 && !checker.is_terminating_block(body) {
+                checker.error_code_msg(
+                    TypeError::MissingReturn,
+                    Span::new(
+                        vo_common::BytePos(end as u32),
+                        vo_common::BytePos(end as u32),
+                    ),
+                    "missing return",
+                );
+            }
 
-        // Check for missing return
-        let sig_val = self.otype(sig).try_as_signature().unwrap();
-        if sig_val.results_count(self.objs()) > 0 && !self.is_terminating_block(body) {
-            self.error_code_msg(
-                TypeError::MissingReturn,
-                Span::new(
-                    vo_common::BytePos(end as u32),
-                    vo_common::BytePos(end as u32),
-                ),
-                "missing return",
-            );
-        }
-
-        // Check for unused variables
-        self.usage(scope_key);
-
-        // Restore object context
-        std::mem::swap(&mut self.octx, &mut octx);
+            // Check for unused variables
+            checker.usage(scope_key);
+        });
     }
 
     /// Checks for unused variables in the given scope and its children.
@@ -426,12 +422,12 @@ impl Checker {
         &mut self,
         x: &mut Operand,
         xtype: TypeKey,
-        types: &[Option<vo_syntax::ast::TypeExpr>],
+        types: &[vo_syntax::ast::TypeCase],
         seen: &mut HashMap<Option<TypeKey>, Span>,
     ) -> Option<TypeKey> {
         let mut last_type: Option<TypeKey> = None;
         for ty_opt in types {
-            let t = match ty_opt {
+            let t = match ty_opt.type_expr() {
                 Some(ty) => {
                     let t = self.type_expr(ty);
                     if t == self.invalid_type() {
@@ -447,8 +443,8 @@ impl Checker {
                 .iter()
                 .find(|(&t2, _)| typ::identical_o(t, t2, self.objs()))
             {
-                let ts = t.map_or("nil".to_owned(), |tk| format!("{:?}", tk));
-                let span = ty_opt.as_ref().map_or(Span::default(), |ty| ty.span);
+                let ts = t.map_or_else(|| "nil".to_owned(), |tk| self.type_str(tk));
+                let span = ty_opt.span();
                 self.emit(
                     TypeError::DuplicateCase
                         .at_with_message(span, format!("duplicate case {} in type switch", ts))
@@ -457,7 +453,7 @@ impl Checker {
                 continue;
             }
 
-            let span = ty_opt.as_ref().map_or(Span::default(), |ty| ty.span);
+            let span = ty_opt.span();
             seen.insert(t, span);
 
             if let Some(t) = t {
@@ -544,6 +540,14 @@ impl Checker {
                 // propagated and non-error results can be deliberately
                 // discarded.
                 let expr = Self::unparen(e);
+                let resolved_call = self.result.call(expr);
+                if matches!(
+                    resolved_call.map(|call| call.kind),
+                    Some(super::type_info::CallKind::Conversion { .. })
+                ) {
+                    self.error_code(TypeError::InvalidExprStatement, e.span);
+                    return;
+                }
                 match &x.mode {
                     OperandMode::Builtin(_) => {
                         self.error_code(TypeError::BuiltinMustBeCalled, e.span);
@@ -923,7 +927,7 @@ impl Checker {
                         let scope_pos = clause
                             .types
                             .last()
-                            .and_then(|te| te.as_ref())
+                            .and_then(|te| te.type_expr())
                             .map(|te| te.span.end.to_usize())
                             .unwrap_or(clause.span.start.to_usize());
                         self.declare(self.octx.scope.unwrap(), okey, scope_pos);
@@ -1035,37 +1039,13 @@ impl Checker {
                                             self.declare(scope_key, okey, scope_pos);
                                         }
                                     } else {
-                                        // Assignment: v = <-ch or v, ok = <-ch
-                                        for (i, ident) in recv.lhs.iter().enumerate() {
-                                            let name =
-                                                self.resolve_symbol(ident.symbol).to_string();
-                                            if name == "_" {
-                                                continue;
-                                            }
-                                            if let Some(var_type) =
-                                                rhs_types.get(i).copied().flatten()
-                                            {
-                                                // Look up existing variable and check assignment
-                                                if let Some(okey) = self.lookup(&name) {
-                                                    self.result.record_use(*ident, okey);
-                                                    let lhs_type = self.lobj(okey).typ();
-                                                    if let Some(t) = lhs_type {
-                                                        let mut val = Operand::new();
-                                                        val.mode = OperandMode::Value;
-                                                        val.typ = Some(var_type);
-                                                        self.assignment(
-                                                            &mut val,
-                                                            Some(t),
-                                                            "assignment",
-                                                        );
-                                                    }
-                                                } else {
-                                                    self.error_code_msg(
-                                                        TypeError::Undeclared,
-                                                        ident.span,
-                                                        format!("undeclared name: {}", name),
-                                                    );
-                                                }
+                                        for (ident, rhs_type) in recv.lhs.iter().zip(&rhs_types) {
+                                            if let Some(typ) = rhs_type {
+                                                let mut value = Operand::with_mode(
+                                                    OperandMode::Value,
+                                                    Some(*typ),
+                                                );
+                                                self.assign_ident(ident, &mut value);
                                             }
                                         }
                                     }
@@ -1309,44 +1289,23 @@ impl Checker {
         let x = &mut Operand::new();
         self.raw_expr(x, call, None);
 
-        // Check that it's actually a function call
-        match &call.kind {
-            vo_syntax::ast::ExprKind::Call(call_expr) => {
-                // Builtins are compiler operations rather than first-class
-                // function values. Scheduled/deferred calls currently lower a
-                // callee to a function id or closure, so accepting a builtin
-                // here would let codegen reinterpret its identifier as a
-                // closure value.
-                let callee = Self::unparen(&call_expr.func);
-                let builtin = self
-                    .result
-                    .types
-                    .get(&callee.id)
-                    .and_then(|tv| tv.mode.builtin_id());
-                if let Some(id) = builtin {
-                    self.error_code_msg(
-                        TypeError::SuspendedBuiltinCall,
-                        callee.span,
-                        format!("{kw} cannot invoke compiler builtin {}", id.name()),
-                    );
-                }
-            }
-            vo_syntax::ast::ExprKind::Conversion(_) => {
+        if x.invalid() {
+            return;
+        }
+        match self.result.call(call).map(|call| call.kind) {
+            Some(super::type_info::CallKind::Function { .. }) => {}
+            Some(super::type_info::CallKind::Builtin(id)) => {
                 self.error_code_msg(
-                    TypeError::CannotCall,
+                    TypeError::SuspendedBuiltinCall,
                     call.span,
-                    format!("{} requires function call, not conversion", kw),
+                    format!("{kw} cannot invoke compiler builtin {}", id.name()),
                 );
             }
-            _ => {
-                if !x.invalid() {
-                    self.error_code_msg(
-                        TypeError::CannotCall,
-                        call.span,
-                        format!("expression in {} must be function call", kw),
-                    );
-                }
-            }
+            _ => self.error_code_msg(
+                TypeError::CannotCall,
+                call.span,
+                format!("expression in {kw} must be function call"),
+            ),
         }
     }
 

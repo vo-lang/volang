@@ -23,6 +23,20 @@ struct VirtualObject {
     fields: Vec<Variable>,
 }
 
+/// A tier carries its complete lowering decisions. Callers cannot combine a
+/// baseline tier with optimizing-only plans or omit an optimizing self entry.
+pub(crate) enum FunctionCompilePlan<'a> {
+    Baseline {
+        inlines: &'a crate::optimizer::ModuleInlinePlan,
+        instructions: &'a crate::optimizer::OptimizedFunction,
+    },
+    Optimizing {
+        module: &'a crate::optimizer::ModuleOptimizationPlan,
+        instructions: &'a crate::optimizer::OptimizedFunction,
+        self_entry: FuncRef,
+    },
+}
+
 pub struct FunctionCompiler<'a> {
     builder: FunctionBuilder<'a>,
     core: crate::compile_common::CompilerCore<'a>,
@@ -52,12 +66,32 @@ impl<'a> FunctionCompiler<'a> {
         entry_eligibility: &'a [crate::JitFrameEntryEligibility],
         helpers: HelperRefs<'a>,
         analysis: &'a FunctionAnalysis,
-        tier: vo_runtime::jit_api::JitTier,
-        inline_plan: &'a crate::optimizer::ModuleInlinePlan,
-        optimization_plan: Option<&'a crate::optimizer::ModuleOptimizationPlan>,
-        instruction_optimization: Option<&'a crate::optimizer::OptimizedFunction>,
-        self_native_ref: Option<FuncRef>,
+        plan: FunctionCompilePlan<'a>,
     ) -> Self {
+        let (tier, inline_plan, optimization_plan, instructions, self_native_ref) = match plan {
+            FunctionCompilePlan::Baseline {
+                inlines,
+                instructions,
+            } => (
+                vo_runtime::jit_api::JitTier::Baseline,
+                inlines,
+                None,
+                instructions,
+                None,
+            ),
+            FunctionCompilePlan::Optimizing {
+                module,
+                instructions,
+                self_entry,
+            } => (
+                vo_runtime::jit_api::JitTier::Optimizing,
+                module.inline_plan(),
+                Some(module),
+                instructions,
+                Some(self_entry),
+            ),
+        };
+        let instruction_optimization = Some(instructions);
         let mut builder = FunctionBuilder::new(func, func_ctx);
         let entry_block = builder.create_block();
         builder.append_block_params_for_function_params(entry_block);
@@ -173,7 +207,7 @@ impl<'a> FunctionCompiler<'a> {
     /// The canonical entry pointer identifies this frame's BP, so a current
     /// destination can always be rebuilt after fiber.stack reallocation.
     fn publish_recovery_state(&mut self, resume_pc: usize) {
-        self.materialize_virtual_objects();
+        self.materialize_virtual_objects(resume_pc);
         self.publish_execution_context();
         let dst_ptr = self.fiber_stack_args_ptr();
         let recovery_values = self
@@ -222,8 +256,14 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
 
-    fn materialize_virtual_objects(&mut self) {
+    fn materialize_virtual_objects(&mut self, resume_pc: usize) {
         for object_id in 0..self.virtual_objects.len() {
+            if !self
+                .instruction_optimization
+                .is_some_and(|plan| plan.scalar_object_is_live(object_id, resume_pc))
+            {
+                continue;
+            }
             let active = self.builder.use_var(self.virtual_objects[object_id].active);
             let materialize = crate::compile_common::cold_block(&mut self.builder);
             let done = self.builder.create_block();
@@ -429,6 +469,22 @@ impl<'a> FunctionCompiler<'a> {
         let params = self.builder.block_params(self.core.entry_block).to_vec();
         let frame_bp = params[1];
         let _ret = params[2];
+        crate::call_helpers::initialize_native_stack_budget(self);
+        if self.tier == vo_runtime::jit_api::JitTier::Optimizing {
+            let profiles = self.builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                params[0],
+                JitContextField::JitProfileTable.offset(),
+            );
+            let entered = self.builder.ins().iconst(types::I64, 1);
+            let offset = self.core.func_id as i32
+                * vo_runtime::jit_api::JitProfileCounters::SIZE as i32
+                + vo_runtime::jit_api::JitProfileCounters::OFFSET_OPTIMIZING_ENTERED;
+            self.builder
+                .ins()
+                .store(MemFlags::trusted(), entered, profiles, offset);
+        }
         if self.tier == vo_runtime::jit_api::JitTier::Baseline {
             let profile_table = self.builder.ins().load(
                 types::I64,
@@ -1099,7 +1155,7 @@ impl<'a> FunctionCompiler<'a> {
             .filter(|target| *target == target_func_id)
             .and_then(|_| {
                 self.inline_plan
-                    .static_inline(self.core.func_id, target_func_id)
+                    .pure_leaf_inline(self.core.func_id, target_func_id)
             });
         if let Some(inline) = selected_inline {
             inline.emit(self, call_plan.arg_start)?;
@@ -1110,25 +1166,14 @@ impl<'a> FunctionCompiler<'a> {
             .optimization_plan
             .is_some_and(|plan| plan.direct_self_call(self.core.func_id, target_func_id));
         let direct_native = direct_self.then_some(self.self_native_ref).flatten();
-        let recursive_edge = self
-            .inline_plan
-            .is_recursive_edge(self.core.func_id, target_func_id);
-        match call_plan.route_for_full_function(self.core.func_id) {
-            crate::call_helpers::CallRoute::DynamicJitTable => {
+
+        match call_plan.route() {
+            crate::call_helpers::CallRoute::DynamicJitTable
+            | crate::call_helpers::CallRoute::PreparedJitTable => {
                 crate::call_helpers::emit_jit_call_with_vm_materialization(
                     self,
                     call_plan,
                     direct_native,
-                    recursive_edge,
-                )?;
-                Ok(false)
-            }
-            crate::call_helpers::CallRoute::PreparedJitTable => {
-                crate::call_helpers::emit_jit_call_with_vm_materialization(
-                    self,
-                    call_plan,
-                    direct_native,
-                    recursive_edge,
                 )?;
                 Ok(false)
             }
@@ -1188,10 +1233,6 @@ impl<'a> crate::compile_common::CompileDriver for FunctionCompiler<'a> {
             }
         }
         Ok(())
-    }
-
-    fn apply_pc_facts(&mut self, pc: usize) -> Result<(), JitError> {
-        self.core.apply_ir_facts(pc)
     }
 
     fn should_skip_instruction(&self, inst: crate::compile_common::LoweringInstruction) -> bool {
@@ -1316,6 +1357,28 @@ impl<'a> crate::translator::RuntimeContext<'a> for FunctionCompiler<'a> {
 crate::translator::impl_shared_compiler_traits!(FunctionCompiler<'_>);
 
 impl crate::translator::FrameBoundary for FunctionCompiler<'_> {
+    fn cold_recovery_values(&mut self) -> Vec<(Variable, Value)> {
+        let mut values = self.core.cold_recovery_values(&mut self.builder);
+        for (id, object) in self.virtual_objects.iter().enumerate() {
+            if self
+                .instruction_optimization
+                .is_some_and(|plan| plan.scalar_object_is_live(id, self.core.current_pc))
+            {
+                for variable in [object.active, object.pointer]
+                    .into_iter()
+                    .chain(object.fields.iter().copied())
+                {
+                    values.push((variable, self.builder.use_var(variable)));
+                }
+            }
+        }
+        values
+    }
+
+    fn native_trap_blocks(&mut self) -> &mut crate::translator::NativeTrapBlocks {
+        &mut self.core.native_trap_blocks
+    }
+
     fn publish_current_frame_state(&mut self) {
         self.emit_variable_spill();
     }
@@ -1359,68 +1422,6 @@ impl<'a> crate::translator::CallBoundary<'a> for FunctionCompiler<'a> {
         self.builder
             .ins()
             .iconst(types::I32, i64::from(self.core.func_id))
-    }
-    fn emit_residual_inline_call(
-        &mut self,
-        inst: &Instruction,
-        arguments: &[(Value, bool)],
-    ) -> Result<(), JitError> {
-        let target_func_id = inst.static_call_func_id();
-        let target_func = self
-            .core
-            .vo_module
-            .functions
-            .get(target_func_id as usize)
-            .ok_or(JitError::FunctionNotFound(target_func_id))?;
-        let eligibility = self
-            .core
-            .entry_eligibility
-            .get(target_func_id as usize)
-            .copied()
-            .ok_or(JitError::FunctionNotFound(target_func_id))?;
-        let call_plan = crate::call_helpers::CallPlan::with_eligibility(
-            target_func_id,
-            usize::from(inst.b),
-            target_func,
-            eligibility,
-        );
-        let direct_self = self
-            .optimization_plan
-            .is_some_and(|plan| plan.direct_self_call(self.core.func_id, target_func_id));
-        let direct_native = direct_self.then_some(self.self_native_ref).flatten();
-        let recursive_edge = self
-            .inline_plan
-            .is_recursive_edge(self.core.func_id, target_func_id);
-        if direct_native.is_none()
-            || !matches!(
-                call_plan.route_for_full_function(self.core.func_id),
-                crate::call_helpers::CallRoute::DynamicJitTable
-                    | crate::call_helpers::CallRoute::PreparedJitTable
-            )
-        {
-            return Err(JitError::Internal(
-                "bounded recursive inline requires a stable native self entry".into(),
-            ));
-        }
-        let abi_arguments = arguments
-            .iter()
-            .map(|&(value, is_float)| {
-                if is_float {
-                    self.builder
-                        .ins()
-                        .bitcast(types::I64, MemFlags::new(), value)
-                } else {
-                    value
-                }
-            })
-            .collect::<Vec<_>>();
-        crate::call_helpers::emit_jit_call_with_explicit_arguments(
-            self,
-            call_plan,
-            direct_native,
-            recursive_edge,
-            &abi_arguments,
-        )
     }
 }
 

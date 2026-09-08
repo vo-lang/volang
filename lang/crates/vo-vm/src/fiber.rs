@@ -118,9 +118,17 @@ pub(crate) enum CompletedStackReturn {
     Resume,
 }
 
+/// A range in immutable, admitted caller metadata. Repeated defer registration
+/// allocates no per-entry layout and cannot drift from the executing module.
 #[derive(Debug, Clone)]
-pub struct DeferArgLayout {
-    pub slot_types: Vec<vo_runtime::SlotType>,
+pub enum DeferArgLayout {
+    Caller {
+        func_id: u32,
+        start: u16,
+        slots: u16,
+    },
+    #[cfg(test)]
+    Test(Vec<vo_runtime::SlotType>),
 }
 
 impl DeferArgLayout {
@@ -131,28 +139,42 @@ impl DeferArgLayout {
         arg_start: u16,
         arg_slots: u16,
     ) -> Result<Self, String> {
-        let start = arg_start as usize;
-        let count = arg_slots as usize;
-        let end = start.saturating_add(count);
+        let end = usize::from(arg_start) + usize::from(arg_slots);
         if end > caller_slot_types.len() {
-            return Err(format!(
-                "DeferArgLayout metadata missing: func_id={} pc={} slot range {}..{} expected {} slots actual slot_types={}",
-                caller_func_id,
-                caller_pc,
-                start,
-                end,
-                count,
-                caller_slot_types.len()
-            ));
+            return Err(format!("DeferArgLayout metadata missing: func_id={caller_func_id} pc={caller_pc} slot range {arg_start}..{end} expected {arg_slots} slots actual slot_types={}", caller_slot_types.len()));
         }
-        Ok(Self {
-            slot_types: caller_slot_types[start..end].to_vec(),
+        Ok(Self::Caller {
+            func_id: caller_func_id,
+            start: arg_start,
+            slots: arg_slots,
         })
+    }
+
+    pub fn slot_types<'a>(
+        &'a self,
+        module: &'a vo_runtime::bytecode::Module,
+    ) -> &'a [vo_runtime::SlotType] {
+        match self {
+            Self::Caller {
+                func_id,
+                start,
+                slots,
+            } => {
+                &module.functions[*func_id as usize].slot_types
+                    [usize::from(*start)..usize::from(*start) + usize::from(*slots)]
+            }
+            #[cfg(test)]
+            Self::Test(slots) => slots,
+        }
     }
 
     #[inline]
     pub fn arg_slots(&self) -> u16 {
-        self.slot_types.len() as u16
+        match self {
+            Self::Caller { slots, .. } => *slots,
+            #[cfg(test)]
+            Self::Test(slots) => slots.len() as u16,
+        }
     }
 }
 
@@ -206,14 +228,15 @@ pub enum UnwindingMode {
 /// 4. For Panic: if recover() called → switch to Return mode, resume normal
 /// 5. For Panic: no recover, no more defers → unwind to parent frame
 /// 6. For Panic: no more frames → return ExecResult::Panic
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+#[cfg_attr(test, derive(Clone))]
 pub struct UnwindingState {
     /// Defers remaining to execute in registration order (`last()` runs next).
     ///
     /// Keeping the next defer at the tail makes each unwind step an O(1) pop and
     /// lets defers registered by a running defer append without moving the older
     /// pending tail.
-    pub pending: Vec<DeferEntry>,
+    pub pending: crate::fiber_storage::AuxiliaryVec<DeferEntry>,
     /// Frame depth after the unwinding function was popped.
     /// Defer functions run at depth = target_depth + 1.
     pub target_depth: usize,
@@ -228,6 +251,7 @@ pub struct UnwindingState {
     /// Return values to write after all defers complete.
     /// None for void functions. For panic, may contain heap return values for recover().
     pub return_values: Option<ReturnValues>,
+    pub(crate) return_storage: Option<crate::fiber_storage::AuxiliaryCharge>,
     /// Function whose return metadata applies to `return_values`.
     pub return_func_id: u32,
     /// PC in the returning function when return/unwind started.
@@ -268,9 +292,10 @@ impl UnwindingState {
 /// A defer may call an ordinary function which starts its own deferred return.
 /// Keeping every operation here prevents the nested return from overwriting the
 /// suspended caller's pending defers and return values.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
+#[cfg_attr(test, derive(Clone))]
 pub struct UnwindingStack {
-    states: Vec<UnwindingState>,
+    states: crate::fiber_storage::AuxiliaryVec<UnwindingState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,6 +322,25 @@ impl core::fmt::Display for UnwindingStackOrderError {
 #[cfg(feature = "std")]
 impl std::error::Error for UnwindingStackOrderError {}
 
+#[derive(Debug)]
+pub enum UnwindingStackError {
+    Order(UnwindingStackOrderError),
+    Capacity(FiberCapacityError),
+}
+impl From<UnwindingStackOrderError> for UnwindingStackError {
+    fn from(error: UnwindingStackOrderError) -> Self {
+        Self::Order(error)
+    }
+}
+impl core::fmt::Display for UnwindingStackError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Order(error) => error.fmt(f),
+            Self::Capacity(error) => f.write_str(&error.message()),
+        }
+    }
+}
+
 impl UnwindingStack {
     #[inline]
     pub fn as_ref(&self) -> Option<&UnwindingState> {
@@ -319,7 +363,7 @@ impl UnwindingStack {
     }
 
     #[inline]
-    pub fn try_push(&mut self, state: UnwindingState) -> Result<(), UnwindingStackOrderError> {
+    pub fn try_push(&mut self, mut state: UnwindingState) -> Result<(), UnwindingStackError> {
         let valid = match self.states.last() {
             None => !state.resume_parent_after_recovery,
             Some(parent) if state.resume_parent_after_recovery => {
@@ -333,9 +377,31 @@ impl UnwindingStack {
                 child_target_depth: state.target_depth,
                 child_mode: state.mode,
                 resume_parent_after_recovery: state.resume_parent_after_recovery,
-            });
+            }
+            .into());
         }
-        self.states.push(state);
+        self.states
+            .try_reserve(1)
+            .map_err(UnwindingStackError::Capacity)?;
+        let payload_bytes = match state.return_values.as_ref() {
+            Some(ReturnValues::Stack { vals, slot_types }) => {
+                vals.capacity() * 8
+                    + slot_types.capacity() * core::mem::size_of::<vo_runtime::SlotType>()
+            }
+            Some(ReturnValues::Heap {
+                gcrefs,
+                slots_per_ref,
+            }) => gcrefs.capacity() * 8 + slots_per_ref.capacity() * core::mem::size_of::<usize>(),
+            None => 0,
+        };
+        if state.return_storage.is_none() {
+            state.return_storage = Some(
+                self.states
+                    .charge_payload(payload_bytes)
+                    .map_err(UnwindingStackError::Capacity)?,
+            );
+        }
+        self.states.push_reserved(state);
         Ok(())
     }
 
@@ -400,7 +466,8 @@ pub struct SelectCase {
     pub queue_reg: u16,
     pub val_reg: u16,
     pub elem_slots: u16,
-    pub elem_layout: Option<Vec<vo_runtime::SlotType>>,
+    pub elem_layout: Option<Arc<Vec<vo_runtime::SlotType>>>,
+    pub(crate) _storage: Option<Arc<crate::fiber_storage::AuxiliaryCharge>>,
     pub has_ok: bool,
 }
 
@@ -415,15 +482,15 @@ pub struct SelectRegisteredQueue {
 pub enum SelectWokenResult {
     SendAccepted,
     Recv {
-        data: Vec<u64>,
-        slot_types: Vec<vo_runtime::SlotType>,
+        data: Arc<Vec<u64>>,
+        slot_types: Arc<Vec<vo_runtime::SlotType>>,
         closed: bool,
     },
 }
 
 #[derive(Debug, Clone)]
 pub struct SelectState {
-    pub cases: Vec<SelectCase>,
+    pub cases: crate::fiber_storage::SharedAuxiliaryVec<SelectCase>,
     pub expected_cases: u16,
     pub has_default: bool,
     pub woken_index: Option<usize>,
@@ -432,7 +499,7 @@ pub struct SelectState {
     /// When one case becomes ready, we cancel waiters on other channels using this ID.
     pub select_id: u64,
     /// Channels we've registered waiters on (for cancellation when woken).
-    pub registered_queues: Vec<SelectRegisteredQueue>,
+    pub registered_queues: crate::fiber_storage::SharedAuxiliaryVec<SelectRegisteredQueue>,
 }
 
 /// Fiber lifecycle state - single source of truth.
@@ -568,7 +635,8 @@ impl PanicState {
 /// When an extern function requests a closure call (ExternResult::CallClosure),
 /// the VM pushes the closure frame, executes it, caches the return values here,
 /// then replays the extern with cached results.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+#[cfg_attr(test, derive(Clone))]
 pub struct ClosureReplayState {
     /// Accumulated closure call results for extern replay.
     /// Each entry is (return_values, slot_types) from one closure call.
@@ -577,24 +645,28 @@ pub struct ClosureReplayState {
     /// On extern replay, results are consumed in order within the active
     /// extern scope. The scope is cleared when that extern finally returns a
     /// terminal result, but parent scopes survive nested extern calls.
-    pub results: Vec<(Vec<u64>, Vec<vo_runtime::SlotType>)>,
+    pub results: crate::fiber_storage::AuxiliaryVec<(Vec<u64>, Vec<vo_runtime::SlotType>)>,
+    result_storage: crate::fiber_storage::AuxiliaryVec<crate::fiber_storage::AuxiliaryCharge>,
     /// Consumption index during extern replay.
     /// Tracks how many cached results have been consumed in the current replay.
     /// Reset to 0 at the start of each CallExtern execution.
     pub index: usize,
     /// Nested closure-replay boundaries, ordered outermost to innermost.
     /// Depth and replay PC form one transition record so they cannot drift.
-    boundaries: Vec<ClosureReplayBoundary>,
+    boundaries: crate::fiber_storage::AuxiliaryVec<ClosureReplayBoundary>,
     /// Original panic message captured when the replayed closure unwound.
     /// Preserved so the replayed extern can report the true root cause.
     /// `is_some()` also serves as the "panicked" flag.
     pub panic_message: Option<String>,
+    panic_message_storage: Option<crate::fiber_storage::AuxiliaryCharge>,
     /// Active extern replay scope.
     pub extern_scope: Option<ClosureReplayExternScope>,
     /// Saved parent extern scopes for nested extern calls.
-    pub extern_scope_stack: Vec<ClosureReplayExternScope>,
+    pub extern_scope_stack: crate::fiber_storage::AuxiliaryVec<ClosureReplayExternScope>,
     /// Saved parent panic messages for nested extern calls.
-    pub panic_message_stack: Vec<Option<String>>,
+    pub panic_message_stack: crate::fiber_storage::AuxiliaryVec<Option<String>>,
+    panic_message_storage_stack:
+        crate::fiber_storage::AuxiliaryVec<Option<crate::fiber_storage::AuxiliaryCharge>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -617,25 +689,37 @@ impl Default for ClosureReplayState {
 
 impl ClosureReplayState {
     pub fn new() -> Self {
+        Self::with_budget(Arc::new(FiberStorageBudget::new(0)))
+    }
+
+    fn with_budget(budget: Arc<FiberStorageBudget>) -> Self {
         Self {
-            results: Vec::new(),
+            results: crate::fiber_storage::AuxiliaryVec::new(Arc::clone(&budget)),
+            result_storage: crate::fiber_storage::AuxiliaryVec::new(Arc::clone(&budget)),
             index: 0,
-            boundaries: Vec::new(),
+            boundaries: crate::fiber_storage::AuxiliaryVec::new(Arc::clone(&budget)),
             panic_message: None,
+            panic_message_storage: None,
             extern_scope: None,
-            extern_scope_stack: Vec::new(),
-            panic_message_stack: Vec::new(),
+            extern_scope_stack: crate::fiber_storage::AuxiliaryVec::new(Arc::clone(&budget)),
+            panic_message_stack: crate::fiber_storage::AuxiliaryVec::new(Arc::clone(&budget)),
+            panic_message_storage_stack: crate::fiber_storage::AuxiliaryVec::new(Arc::clone(
+                &budget,
+            )),
         }
     }
 
     pub fn reset(&mut self) {
         self.results.clear();
+        self.result_storage.clear();
         self.index = 0;
         self.boundaries.clear();
         self.panic_message = None;
+        self.panic_message_storage = None;
         self.extern_scope = None;
         self.extern_scope_stack.clear();
         self.panic_message_stack.clear();
+        self.panic_message_storage_stack.clear();
     }
 
     /// Prepare a replay snapshot for a new CallExtern execution.
@@ -646,31 +730,78 @@ impl ClosureReplayState {
     pub fn snapshot_for_extern(
         &mut self,
         frame_depth: usize,
-    ) -> (Vec<vo_runtime::ffi::ExternReplayResult>, Option<String>) {
-        self.begin_extern_scope(frame_depth);
+    ) -> Result<
+        (
+            Vec<vo_runtime::ffi::ExternReplayResult>,
+            Option<String>,
+            crate::fiber_storage::AuxiliaryCharge,
+        ),
+        FiberCapacityError,
+    > {
+        self.begin_extern_scope(frame_depth)?;
         let result_start = self
             .extern_scope
             .map(|scope| scope.result_start.min(self.results.len()))
             .unwrap_or(0);
-        let results = self
-            .results
+        let count = self.results.len() - result_start;
+        let bytes = self.results[result_start..]
             .iter()
-            .skip(result_start)
-            .map(|(vals, slot_types)| {
-                vo_runtime::ffi::ExternReplayResult::new(vals.clone(), slot_types.clone())
-            })
-            .collect();
-        let panic_message = self.panic_message.clone();
+            .fold(
+                count.saturating_mul(core::mem::size_of::<vo_runtime::ffi::ExternReplayResult>()),
+                |sum, (values, types)| {
+                    sum.saturating_add(values.len() * 8)
+                        .saturating_add(types.len() * core::mem::size_of::<vo_runtime::SlotType>())
+                },
+            )
+            .saturating_add(self.panic_message.as_ref().map_or(0, String::len));
+        let charge = self.results.charge_payload(bytes)?;
+        let allocation_error = || FiberCapacityError::HostAllocation {
+            resource: "extern replay snapshot",
+        };
+        let mut results = Vec::new();
+        results
+            .try_reserve_exact(count)
+            .map_err(|_| allocation_error())?;
+        for (values, types) in &self.results[result_start..] {
+            let mut value_copy = Vec::new();
+            value_copy
+                .try_reserve_exact(values.len())
+                .map_err(|_| allocation_error())?;
+            value_copy.extend_from_slice(values);
+            let mut type_copy = Vec::new();
+            type_copy
+                .try_reserve_exact(types.len())
+                .map_err(|_| allocation_error())?;
+            type_copy.extend_from_slice(types);
+            results.push(vo_runtime::ffi::ExternReplayResult::new(
+                value_copy, type_copy,
+            ));
+        }
+        let panic_message = if let Some(message) = &self.panic_message {
+            let mut copy = String::new();
+            copy.try_reserve_exact(message.len())
+                .map_err(|_| allocation_error())?;
+            copy.push_str(message);
+            Some(copy)
+        } else {
+            None
+        };
         self.index = result_start;
-        (results, panic_message)
+        Ok((results, panic_message, charge))
     }
 
-    fn begin_extern_scope(&mut self, frame_depth: usize) {
+    fn begin_extern_scope(&mut self, frame_depth: usize) -> Result<(), FiberCapacityError> {
         match self.extern_scope {
             Some(scope) if scope.frame_depth == frame_depth => {}
             Some(scope) => {
-                self.extern_scope_stack.push(scope);
-                self.panic_message_stack.push(self.panic_message.take());
+                self.extern_scope_stack.try_reserve(1)?;
+                self.panic_message_stack.try_reserve(1)?;
+                self.panic_message_storage_stack.try_reserve(1)?;
+                self.extern_scope_stack.push_reserved(scope);
+                self.panic_message_stack
+                    .push_reserved(self.panic_message.take());
+                self.panic_message_storage_stack
+                    .push_reserved(self.panic_message_storage.take());
                 self.extern_scope = Some(ClosureReplayExternScope {
                     result_start: self.results.len(),
                     frame_depth,
@@ -683,6 +814,7 @@ impl ClosureReplayState {
                 });
             }
         }
+        Ok(())
     }
 
     /// Finish a terminal extern replay result.
@@ -697,8 +829,10 @@ impl ClosureReplayState {
         };
         self.results
             .truncate(scope.result_start.min(self.results.len()));
+        self.result_storage.truncate(self.results.len());
         self.index = scope.result_start.min(self.results.len());
         self.panic_message = self.panic_message_stack.pop().flatten();
+        self.panic_message_storage = self.panic_message_storage_stack.pop().flatten();
         self.extern_scope = self.extern_scope_stack.pop();
         if self.extern_scope.is_none() {
             self.index = 0;
@@ -723,11 +857,60 @@ impl ClosureReplayState {
     }
 
     /// Publish the boundary owned by a newly pushed replay closure frame.
-    pub fn push_boundary(&mut self, frame_depth: usize, replay_pc: usize) {
-        self.boundaries.push(ClosureReplayBoundary {
+    pub(crate) fn reserve_boundary(&mut self) -> Result<(), FiberCapacityError> {
+        self.boundaries.try_reserve(1)
+    }
+
+    pub(crate) fn commit_boundary(&mut self, frame_depth: usize, replay_pc: usize) {
+        self.boundaries.push_reserved(ClosureReplayBoundary {
             frame_depth,
             replay_pc,
         });
+    }
+
+    #[cfg(test)]
+    pub fn push_boundary(&mut self, frame_depth: usize, replay_pc: usize) {
+        self.reserve_boundary().unwrap();
+        self.commit_boundary(frame_depth, replay_pc);
+    }
+
+    pub(crate) fn try_set_panic_message(
+        &mut self,
+        message: Option<String>,
+    ) -> Result<(), FiberCapacityError> {
+        let storage = message
+            .as_ref()
+            .map(|message| self.results.charge_payload(message.capacity()))
+            .transpose()?;
+        self.panic_message = message;
+        self.panic_message_storage = storage;
+        Ok(())
+    }
+
+    pub(crate) fn try_push_result(
+        &mut self,
+        values: Vec<u64>,
+        types: Vec<vo_runtime::SlotType>,
+    ) -> Result<(), FiberCapacityError> {
+        self.results.try_reserve(1)?;
+        self.result_storage.try_reserve(1)?;
+        let charge = self.results.charge_payload(
+            values.capacity() * 8 + types.capacity() * core::mem::size_of::<vo_runtime::SlotType>(),
+        )?;
+        self.results.push_reserved((values, types));
+        self.result_storage.push_reserved(charge);
+        Ok(())
+    }
+
+    fn cache_bytes(&self) -> usize {
+        self.results.capacity() * core::mem::size_of::<(Vec<u64>, Vec<vo_runtime::SlotType>)>()
+            + self.result_storage.capacity()
+                * core::mem::size_of::<crate::fiber_storage::AuxiliaryCharge>()
+            + self.boundaries.capacity() * core::mem::size_of::<ClosureReplayBoundary>()
+            + self.extern_scope_stack.capacity() * core::mem::size_of::<ClosureReplayExternScope>()
+            + self.panic_message_stack.capacity() * core::mem::size_of::<Option<String>>()
+            + self.panic_message_storage_stack.capacity()
+                * core::mem::size_of::<Option<crate::fiber_storage::AuxiliaryCharge>>()
     }
 
     /// Retire the innermost replay boundary after return or intercepted panic.
@@ -781,10 +964,9 @@ pub const MAX_STACK_CAPACITY: usize = 1 << 20;
 ///
 /// JIT-to-JIT direct calls reserve unmaterialized windows in `fiber.stack` and
 /// materialize real frames only on side exits. Keep a separate bound so deep
-/// native call chains fail at the language stack boundary.
+/// native call chains continue through VM frame materialization.
 pub const MAX_JIT_DIRECT_STACK_SLOTS: usize = 1 << 15;
-/// Maximum nested direct JIT call depth before converting recursion into a
-/// recoverable Vo stack overflow.
+/// Maximum nested direct JIT call depth before continuing in the VM trampoline.
 pub const MAX_JIT_CALL_DEPTH: usize = 512;
 /// Maximum call frames per fiber.
 ///
@@ -802,6 +984,7 @@ pub(crate) const MAX_RETAINED_CALL_FRAMES: usize = MAX_JIT_CALL_DEPTH;
 pub struct VmResourceLimits {
     pub max_fibers: usize,
     pub max_total_fiber_storage_bytes: usize,
+    pub max_total_fiber_auxiliary_bytes: usize,
     pub max_stack_slots_per_fiber: usize,
     pub max_call_frames_per_fiber: usize,
 }
@@ -811,6 +994,7 @@ impl Default for VmResourceLimits {
         Self {
             max_fibers: 16 * 1024,
             max_total_fiber_storage_bytes: 512 * 1024 * 1024,
+            max_total_fiber_auxiliary_bytes: 256 * 1024 * 1024,
             max_stack_slots_per_fiber: MAX_STACK_CAPACITY,
             max_call_frames_per_fiber: MAX_CALL_FRAMES,
         }
@@ -821,14 +1005,48 @@ impl Default for VmResourceLimits {
 pub(crate) struct FiberStorageBudget {
     limit_bytes: usize,
     used_bytes: AtomicUsize,
+    auxiliary_limit_bytes: usize,
+    auxiliary_used_bytes: AtomicUsize,
 }
 
 impl FiberStorageBudget {
     pub(crate) fn new(limit_bytes: usize) -> Self {
+        Self::with_limits(
+            limit_bytes,
+            VmResourceLimits::default().max_total_fiber_auxiliary_bytes,
+        )
+    }
+
+    pub(crate) fn with_limits(limit_bytes: usize, auxiliary_limit_bytes: usize) -> Self {
         Self {
             limit_bytes,
             used_bytes: AtomicUsize::new(0),
+            auxiliary_limit_bytes,
+            auxiliary_used_bytes: AtomicUsize::new(0),
         }
+    }
+
+    pub(crate) fn try_charge_auxiliary(&self, bytes: usize) -> bool {
+        self.auxiliary_used_bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(bytes)
+                    .filter(|&next| next <= self.auxiliary_limit_bytes)
+            })
+            .is_ok()
+    }
+
+    pub(crate) fn release_auxiliary(&self, bytes: usize) {
+        let previous = self
+            .auxiliary_used_bytes
+            .fetch_sub(bytes, Ordering::Relaxed);
+        debug_assert!(previous >= bytes);
+    }
+
+    pub(crate) fn auxiliary_used_bytes(&self) -> usize {
+        self.auxiliary_used_bytes.load(Ordering::Relaxed)
+    }
+    pub(crate) fn auxiliary_limit_bytes(&self) -> usize {
+        self.auxiliary_limit_bytes
     }
 
     fn try_charge(&self, bytes: usize) -> bool {
@@ -971,7 +1189,7 @@ pub struct Fiber {
     resource_limits: VmResourceLimits,
     storage_budget: Arc<FiberStorageBudget>,
     accounted_storage_bytes: usize,
-    pub defer_stack: Vec<DeferEntry>,
+    pub defer_stack: crate::fiber_storage::AuxiliaryVec<DeferEntry>,
     pub unwinding: UnwindingStack,
     pub queue_wait_state: Option<QueueWaitState>,
     pub select_state: Option<SelectState>,
@@ -989,6 +1207,10 @@ pub struct Fiber {
     /// Source location (func_id, pc) captured at panic initiation, before frames are unwound.
     /// Used by kill_current() to report accurate error locations.
     pub panic_source_loc: Option<(u32, u32)>,
+    /// Saved invocation failure, raised only when this fiber next executes.
+    pub(crate) entry_trap: Option<crate::vm::RuntimeTrapKind>,
+    pub(crate) pending_resource_error: Option<FiberCapacityError>,
+    pub(crate) gc_allocation_permit: Option<(u32, usize)>,
     #[cfg(feature = "std")]
     pub resume_io_token: Option<IoToken>,
     /// Host event token set when fiber wakes via `HostEventWaitAndReplay`.
@@ -1001,7 +1223,7 @@ pub struct Fiber {
     /// When JIT returns Call/WaitIo, resume points are pushed here.
     /// On resume, they are popped and converted to VM frames.
     #[cfg(feature = "jit")]
-    pub resume_stack: Vec<ResumePoint>,
+    pub resume_stack: crate::fiber_storage::AuxiliaryVec<ResumePoint>,
     #[cfg(feature = "jit")]
     pub jit_extern_suspend: Option<JitExternSuspend>,
     /// Closure callback suspend/replay state for extern functions.
@@ -1026,10 +1248,10 @@ pub struct Fiber {
     pub jit_infra_error_message: String,
     /// Reused wide-result storage for VM-to-JIT calls.
     #[cfg(feature = "jit")]
-    pub(crate) jit_return_scratch: Vec<u64>,
+    pub(crate) jit_return_scratch: crate::fiber_storage::AuxiliaryVec<u64>,
     /// Reused wide argument/result frame for JIT-to-extern callbacks.
     #[cfg(feature = "jit")]
-    pub(crate) jit_extern_scratch: Vec<u64>,
+    pub(crate) jit_extern_scratch: crate::fiber_storage::AuxiliaryVec<u64>,
     /// Pending remote recv response data from home island.
     /// Set by handle_chan_response_command before waking fiber.
     /// Consumed by ChanRecv handler on retry.
@@ -1053,6 +1275,7 @@ pub(crate) struct PendingSpawn {
     local_slots: u16,
     ret_slots: u16,
     entry_slots: Vec<u64>,
+    entry_trap: Option<crate::vm::RuntimeTrapKind>,
 }
 
 impl PendingSpawn {
@@ -1074,12 +1297,27 @@ impl PendingSpawn {
             local_slots,
             ret_slots,
             entry_slots,
+            entry_trap: None,
         })
+    }
+
+    pub(crate) fn trapped(kind: crate::vm::RuntimeTrapKind) -> Self {
+        Self {
+            func_id: 0,
+            local_slots: 0,
+            ret_slots: 0,
+            entry_slots: Vec::new(),
+            entry_trap: Some(kind),
+        }
     }
 
     pub(crate) fn initialize(self, fiber: &mut Fiber) -> Result<(), FiberCapacityError> {
         debug_assert_eq!(fiber.sp, 0);
         debug_assert!(fiber.frames.is_empty());
+        if let Some(kind) = self.entry_trap {
+            fiber.entry_trap = Some(kind);
+            return Ok(());
+        }
         let bp = fiber.try_push_frame(self.func_id, self.local_slots, 0, self.ret_slots)?;
         fiber.zero_slots_at(bp, usize::from(self.local_slots));
         fiber.copy_slots_from_slice(bp, &self.entry_slots);
@@ -1089,6 +1327,9 @@ impl PendingSpawn {
     /// Reserve every fallible Fiber allocation used by `initialize` without
     /// publishing the spawn or changing its execution state.
     pub(crate) fn preflight(&self, fiber: &mut Fiber) -> Result<(), FiberCapacityError> {
+        if self.entry_trap.is_some() {
+            return Ok(());
+        }
         fiber.try_ensure_capacity(self.local_slots as usize)?;
         fiber.try_reserve_call_frames(1)
     }
@@ -1105,8 +1346,9 @@ impl Fiber {
         Self::new_with_resources(
             id,
             limits,
-            Arc::new(FiberStorageBudget::new(
+            Arc::new(FiberStorageBudget::with_limits(
                 limits.max_total_fiber_storage_bytes,
+                limits.max_total_fiber_auxiliary_bytes,
             )),
         )
     }
@@ -1124,10 +1366,24 @@ impl Fiber {
             sp: 0,
             frames: Vec::new(),
             resource_limits,
+            defer_stack: crate::fiber_storage::AuxiliaryVec::new(Arc::clone(&storage_budget)),
+            unwinding: UnwindingStack {
+                states: crate::fiber_storage::AuxiliaryVec::new(Arc::clone(&storage_budget)),
+            },
+            #[cfg(feature = "jit")]
+            resume_stack: crate::fiber_storage::AuxiliaryVec::new(Arc::clone(&storage_budget)),
+            #[cfg(feature = "jit")]
+            jit_return_scratch: crate::fiber_storage::AuxiliaryVec::new(Arc::clone(
+                &storage_budget,
+            )),
+            #[cfg(feature = "jit")]
+            jit_extern_scratch: crate::fiber_storage::AuxiliaryVec::new(Arc::clone(
+                &storage_budget,
+            )),
+            map_scratch: crate::exec::MapScratch::new(Arc::clone(&storage_budget)),
+            closure_replay: ClosureReplayState::with_budget(Arc::clone(&storage_budget)),
             storage_budget,
             accounted_storage_bytes: 0,
-            defer_stack: Vec::new(),
-            unwinding: UnwindingStack::default(),
             queue_wait_state: None,
             select_state: None,
             next_select_id: Some(0),
@@ -1136,17 +1392,16 @@ impl Fiber {
             panic_generation: 0,
             active_panic_generation: None,
             panic_source_loc: None,
+            entry_trap: None,
+            gc_allocation_permit: None,
+            pending_resource_error: None,
             #[cfg(feature = "std")]
             resume_io_token: None,
             resume_host_event_token: None,
             resume_host_event_data: None,
             #[cfg(feature = "jit")]
-            resume_stack: Vec::new(), // Lazy: only allocates on first push (Call/WaitIo)
-            #[cfg(feature = "jit")]
             jit_extern_suspend: None,
-            closure_replay: ClosureReplayState::new(),
             execution_budget: 0,
-            map_scratch: crate::exec::MapScratch::default(),
             #[cfg(feature = "jit")]
             jit_panic_flag: false,
             #[cfg(feature = "jit")]
@@ -1155,15 +1410,15 @@ impl Fiber {
             jit_panic_msg: InterfaceSlot::default(),
             #[cfg(feature = "jit")]
             jit_infra_error_message: String::new(),
-            #[cfg(feature = "jit")]
-            jit_return_scratch: Vec::new(),
-            #[cfg(feature = "jit")]
-            jit_extern_scratch: Vec::new(),
             remote_recv_response: None,
             remote_send_closed: false,
             remote_endpoint_wait: None,
             next_remote_endpoint_wait_id: Some(1),
         }
+    }
+
+    pub(crate) fn auxiliary_vec<T>(&self) -> crate::fiber_storage::AuxiliaryVec<T> {
+        crate::fiber_storage::AuxiliaryVec::new(Arc::clone(&self.storage_budget))
     }
 
     pub fn consume_remote_send_closed(&mut self) -> bool {
@@ -1345,6 +1600,20 @@ impl Fiber {
         }
     }
 
+    /// Retire owned execution payloads promptly while retaining small buffers
+    /// for reuse. Dead fibers are no longer part of the collector root set.
+    pub(crate) fn retire_auxiliary_state(&mut self) {
+        self.defer_stack.clear();
+        self.unwinding.clear();
+        self.closure_replay.reset();
+        self.select_state = None;
+        #[cfg(feature = "jit")]
+        {
+            self.resume_stack.clear();
+            self.jit_extern_suspend = None;
+        }
+    }
+
     /// Reset fiber for reuse.
     pub fn reset(&mut self) {
         self.state = FiberState::Runnable;
@@ -1360,6 +1629,9 @@ impl Fiber {
         self.panic_generation = 0;
         self.active_panic_generation = None;
         self.panic_source_loc = None;
+        self.entry_trap = None;
+        self.gc_allocation_permit = None;
+        self.pending_resource_error = None;
         #[cfg(feature = "std")]
         {
             self.resume_io_token = None;
@@ -1391,6 +1663,32 @@ impl Fiber {
     pub(crate) fn has_oversized_storage(&self) -> bool {
         self.stack.capacity() > MAX_RETAINED_STACK_SLOTS
             || self.frames.capacity() > MAX_RETAINED_CALL_FRAMES
+            || self
+                .unwinding
+                .states
+                .capacity()
+                .saturating_mul(core::mem::size_of::<UnwindingState>())
+                > 64 * 1024
+            || self.map_scratch.capacity_bytes() > 64 * 1024
+            || self.closure_replay.cache_bytes() > 64 * 1024
+            || self.jit_auxiliary_cache_bytes() > 64 * 1024
+            || self
+                .defer_stack
+                .capacity()
+                .saturating_mul(core::mem::size_of::<DeferEntry>())
+                > 64 * 1024
+    }
+
+    fn jit_auxiliary_cache_bytes(&self) -> usize {
+        #[cfg(feature = "jit")]
+        {
+            self.resume_stack.capacity() * core::mem::size_of::<ResumePoint>()
+                + (self.jit_return_scratch.capacity() + self.jit_extern_scratch.capacity()) * 8
+        }
+        #[cfg(not(feature = "jit"))]
+        {
+            0
+        }
     }
 
     /// Shed exceptional high-water storage while preserving scheduler identity.
@@ -1552,14 +1850,17 @@ impl Fiber {
         self.stack.as_mut_ptr()
     }
 
+    pub(crate) fn stack_slot_limit(&self) -> usize {
+        self.resource_limits
+            .max_stack_slots_per_fiber
+            .min(MAX_STACK_CAPACITY)
+    }
+
     /// Ensure stack has capacity for at least `required` slots.
     /// Grows by doubling if needed. Only call when sp might exceed capacity.
     #[inline]
     pub fn try_ensure_capacity(&mut self, required: usize) -> Result<(), FiberCapacityError> {
-        let stack_limit = self
-            .resource_limits
-            .max_stack_slots_per_fiber
-            .min(MAX_STACK_CAPACITY);
+        let stack_limit = self.stack_slot_limit();
         if required > stack_limit {
             return Err(FiberCapacityError::StackSlots {
                 required,
@@ -1705,7 +2006,13 @@ impl Fiber {
                     limit_bytes: self.storage_budget.limit_bytes(),
                 });
             }
-            if self.frames.try_reserve_exact(additional_frames).is_err() {
+            // Vec reservations are relative to length, not current capacity.
+            // Materialization relies on this preflight making commit allocation-free.
+            if self
+                .frames
+                .try_reserve_exact(new_cap - self.frames.len())
+                .is_err()
+            {
                 self.storage_budget.release(additional_bytes);
                 return Err(FiberCapacityError::HostAllocation {
                     resource: "fiber call frames",
@@ -2103,7 +2410,8 @@ mod tests {
         resume_parent_after_recovery: bool,
     ) -> UnwindingState {
         UnwindingState {
-            pending: Vec::new(),
+            return_storage: None,
+            pending: Default::default(),
             target_depth,
             mode,
             current_defer_generation: 0,
@@ -2153,6 +2461,22 @@ mod tests {
             .try_push(unwind_state(3, UnwindingMode::Panic, true))
             .is_err());
         assert!(stack.is_none());
+    }
+
+    #[test]
+    fn bulk_frame_reservation_covers_required_length_and_charges_once() {
+        let mut fiber = Fiber::new(0);
+        fiber.try_reserve_call_frames(1).unwrap();
+        assert_eq!(fiber.frames.len(), 0);
+        fiber.try_reserve_call_frames(5).unwrap();
+        assert!(fiber.frames.capacity() >= 5);
+        let accounted = fiber.storage_budget.used_bytes();
+        assert_eq!(
+            accounted,
+            fiber.frames.capacity() * core::mem::size_of::<super::CallFrame>()
+        );
+        fiber.try_reserve_call_frames(5).unwrap();
+        assert_eq!(fiber.storage_budget.used_bytes(), accounted);
     }
 
     #[test]
@@ -2465,12 +2789,12 @@ mod tests {
     #[test]
     fn closure_replay_snapshot_keeps_fiber_owned_typed_log() {
         let mut replay = super::ClosureReplayState::new();
-        let (empty, _) = replay.snapshot_for_extern(1);
+        let (empty, _, _storage) = replay.snapshot_for_extern(1).unwrap();
         assert!(empty.is_empty());
 
         replay.results.push((vec![11], vec![SlotType::GcRef]));
 
-        let (first, panic) = replay.snapshot_for_extern(1);
+        let (first, panic, _storage) = replay.snapshot_for_extern(1).unwrap();
         assert!(panic.is_none());
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].values, vec![11]);
@@ -2478,7 +2802,7 @@ mod tests {
         assert_eq!(replay.results.len(), 1);
 
         replay.results.push((vec![22], vec![SlotType::Value]));
-        let (second, _) = replay.snapshot_for_extern(1);
+        let (second, _, _storage) = replay.snapshot_for_extern(1).unwrap();
         assert_eq!(second.len(), 2);
         assert_eq!(second[0].values, vec![11]);
         assert_eq!(second[1].values, vec![22]);
@@ -2489,19 +2813,19 @@ mod tests {
     fn nested_extern_replay_scope_discards_inner_results_only() {
         let mut replay = super::ClosureReplayState::new();
 
-        let (outer_empty, _) = replay.snapshot_for_extern(1);
+        let (outer_empty, _, _storage) = replay.snapshot_for_extern(1).unwrap();
         assert!(outer_empty.is_empty());
 
         replay.results.push((vec![11], vec![SlotType::Value]));
-        let (outer_first, _) = replay.snapshot_for_extern(1);
+        let (outer_first, _, _storage) = replay.snapshot_for_extern(1).unwrap();
         assert_eq!(outer_first.len(), 1);
         assert_eq!(outer_first[0].values, vec![11]);
 
-        let (inner_empty, _) = replay.snapshot_for_extern(2);
+        let (inner_empty, _, _storage) = replay.snapshot_for_extern(2).unwrap();
         assert!(inner_empty.is_empty());
 
         replay.results.push((vec![99], vec![SlotType::Value]));
-        let (inner_replay, _) = replay.snapshot_for_extern(2);
+        let (inner_replay, _, _storage) = replay.snapshot_for_extern(2).unwrap();
         assert_eq!(inner_replay.len(), 1);
         assert_eq!(inner_replay[0].values, vec![99]);
 
@@ -2510,7 +2834,7 @@ mod tests {
         assert_eq!(replay.results[0].0, vec![11]);
 
         replay.results.push((vec![22], vec![SlotType::GcRef]));
-        let (outer_second, _) = replay.snapshot_for_extern(1);
+        let (outer_second, _, _storage) = replay.snapshot_for_extern(1).unwrap();
         assert_eq!(outer_second.len(), 2);
         assert_eq!(outer_second[0].values, vec![11]);
         assert_eq!(outer_second[1].values, vec![22]);

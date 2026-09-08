@@ -32,6 +32,7 @@ extern crate alloc;
 
 pub(crate) mod exec;
 pub mod fiber;
+pub mod fiber_storage;
 mod frame_call;
 mod gc_roots;
 pub mod runtime_boundary;

@@ -133,7 +133,10 @@ impl WindowsDriver {
 
     pub fn poll(&mut self) -> Vec<Completion> {
         let mut completions = Vec::new();
-        while let Ok(completion) = self.completion_rx.try_recv() {
+        for _ in 0..64 {
+            let Ok(completion) = self.completion_rx.try_recv() else {
+                break;
+            };
             if self.pending_timers.remove(&completion.token) {
                 completions.push(completion);
             }

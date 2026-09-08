@@ -1,7 +1,6 @@
+use crate::translator::NativeScratchKind;
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{
-    types, InstBuilder, MemFlagsData as MemFlags, StackSlotData, StackSlotKind, Value,
-};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData as MemFlags, Value};
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitRuntimeTrapKind;
 
@@ -49,9 +48,7 @@ pub(in crate::translate) fn array_new<'a>(
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
     let elem_bytes_i32 = emit_elem_bytes_i32(e, inst.opcode())?;
     let len = e.read_var(inst.c);
-    let out_slot =
-        e.builder()
-            .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
+    let out_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, (8) as usize);
     let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
     let call = emit_runtime_helper_call(
         e,
@@ -192,9 +189,7 @@ pub(in crate::translate) fn emit_typed_write_barrier_single_by_meta<'a>(
     e.builder().switch_to_block(barrier_block);
     e.builder().seal_block(barrier_block);
     let typed_barrier = e.helper(HelperKind::typed_write_barrier_by_meta);
-    let vals_slot =
-        e.builder()
-            .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
+    let vals_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, (8) as usize);
     e.builder().ins().stack_store(types::I64, val, vals_slot, 0);
     let vals_ptr = e.builder().ins().stack_addr(types::I64, vals_slot, 0);
     let ctx = e.ctx_param();
@@ -232,11 +227,10 @@ pub(in crate::translate) fn emit_write_barrier_multi_by_meta<'a>(
     elem_slots: usize,
 ) {
     let typed_barrier = e.helper(HelperKind::typed_write_barrier_by_meta);
-    let vals_slot = e.builder().create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        (elem_slots * 8) as u32,
-        8,
-    ));
+    let vals_slot = e.native_scratch_slot(
+        NativeScratchKind::CollectionValue,
+        ((elem_slots * 8) as u32) as usize,
+    );
     let vals_ptr = e.builder().ins().stack_addr(types::I64, vals_slot, 0);
     for i in 0..elem_slots {
         let v = e.read_var(src_start + i as u16);

@@ -855,6 +855,16 @@ fn verify_module_invariants(module: &Module) -> Result<RuntimeTypeFacts, ModuleV
         module.runtime_types.len(),
     )?;
 
+    // LoadedModule admits the intrinsic diagnostic string descriptor without
+    // renumbering existing identities. Keep its ID inside the packed domain.
+    if module.runtime_types.len() == crate::types::INVALID_META_ID as usize
+        && module.basic_type_rttid(ValueKind::String).is_none()
+    {
+        return Err(invariant(
+            "runtime type table has no room for the intrinsic diagnostic string".to_string(),
+        ));
+    }
+
     let mut expected_dynamic_callsite_index = 0usize;
     for (func_id, function) in module.functions.iter().enumerate() {
         for (pc, instruction) in function.code.iter().enumerate() {

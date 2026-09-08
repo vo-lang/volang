@@ -310,7 +310,7 @@ pub(super) fn compile(
             reject_nil_reference(
                 body,
                 instruction.a,
-                static_data.nil_reference_panic_ref,
+                static_data.nil_function_panic_ref,
                 current_block,
             );
             let candidates = closure_callsite_candidates(
@@ -511,8 +511,6 @@ pub(super) fn compile(
                 materialized,
                 runtime_globals,
                 allocation_descriptors,
-                static_data.nil_reference_panic_ref,
-                current_block,
             )?;
         }
         Opcode::Panic => {

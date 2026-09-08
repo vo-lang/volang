@@ -1,0 +1,93 @@
+package main
+
+type Cell struct { value int }
+func f() {}
+var recovered int
+var steps int
+var largeMessage [65536]int
+
+func checkFunctionKey(parenthesized bool) {
+    defer func() { assert(recover() != nil); recovered++ }()
+    if parenthesized { _ = map[any]int{(f): 1} } else { _ = map[any]int{f: 1} }
+}
+
+func mark(value int) int { steps = steps * 10 + value; return value }
+func assertionArgs() (bool, int8, string) { steps++; return true, 7, "message" }
+
+func capturedParameter(x int) func() int {
+    return func() int { x++; return x }
+}
+func capturedReturn() (x int) {
+    defer func() { x++ }()
+    x = 6
+    return
+}
+func (c Cell) captureReceiver() func() int { return func() int { return c.value } }
+
+func exerciseBindings() {
+    x := 17
+    {
+        const x = 3
+        type Number int
+        value := 9
+        nested := func() func() int {
+            return func() int { value++; return x + int(Number(2)) + value }
+        }
+        assert(nested()() == 15)
+        assert(value == 10)
+    }
+    assert(x == 17)
+    a := capturedParameter(4)
+    assert(a() == 5 && a() == 6 && capturedReturn() == 7)
+    receiver := Cell{8}.captureReceiver()
+    assert(receiver() == 8)
+    callbacks := []func() int{}
+    for i := 0; i < 4; i++ { callbacks = append(callbacks, func() int { return i }) }
+    for i, callback := range callbacks { assert(callback() == i) }
+    callbacks = []func() int{}
+    for _, value := range []int{3, 4, 5} {
+        callbacks = append(callbacks, func() int { return value })
+    }
+    for i, callback := range callbacks { assert(callback() == i + 3) }
+
+    const key = 2
+    values := map[int]int{key: 7, 3: 8}
+    assert(values[(key)] == 7)
+    array := [4]int{key: 9}
+    assert(array[2] == 9)
+    func() {
+        local := 1
+        m := map[int]int{local: 11}
+        assert(m[1] == 11)
+    }()
+    checkFunctionKey(false)
+    checkFunctionKey(true)
+
+    steps = 0
+    assert(true, int8(1), "message", mark(1), mark(2))
+    assert(steps == 12)
+    assert(assertionArgs())
+    assert(steps == 13)
+    b := true
+    assert(b, [2]int{1, 2}, "array message")
+    var v any
+    switch v.(type) { case nil: default: panic("nil case") }
+    assert(0123.0 == 123.0 && 0123e2 == 12300.0 && 08.0 == 8.0)
+    assert(0_8.5 == 8.5 && 00_9E+2 == 900.0 && 0644 == 420)
+}
+
+func main() {
+    // Interface parameters preserve canonical arrays beyond the flat-slot limit.
+    assert(true, largeMessage)
+    var left any = largeMessage
+    var right any = largeMessage
+    assert(left == right)
+    keyed := map[any]int{left: 7}
+    assert(keyed[right] == 7)
+    largeMessage[65535] = 1
+    var different any = largeMessage
+    assert(left != different && keyed[different] == 0)
+    largeMessage[65535] = 0
+    for i := 0; i < 40; i++ { exerciseBindings() }
+    assert(recovered == 80)
+}

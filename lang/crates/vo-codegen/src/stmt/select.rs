@@ -269,13 +269,13 @@ fn store_recv_ident(
         CodegenError::Internal(format!("recv lhs has no type: {:?}", ident.symbol))
     })?;
 
-    let lv = if let Some(local) = func.lookup_local(ident.symbol) {
-        crate::lvalue::LValue::Variable(local.storage)
+    let lv = if let Some(storage) = func.lookup_local_object(info.get_use(ident)) {
+        crate::lvalue::LValue::Variable(storage)
     } else {
         let obj_key = info.get_use(ident);
         if let Some(global_idx) = ctx.get_global_index(obj_key) {
             crate::lvalue::LValue::Variable(StorageKind::package_global(global_idx, lhs_type, info))
-        } else if let Some(capture) = func.lookup_capture(ident.symbol) {
+        } else if let Some(capture) = func.lookup_capture(info.get_use(ident)) {
             crate::lvalue::LValue::Capture {
                 capture_index: capture.index,
                 value_slots: info.type_slot_count(lhs_type),

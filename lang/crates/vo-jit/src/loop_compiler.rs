@@ -121,6 +121,7 @@ impl<'a> LoopCompiler<'a> {
         let params = self.builder.block_params(self.core.entry_block);
         self.ctx_ptr = params[0];
         let locals_ptr_init = params[1];
+        crate::call_helpers::initialize_native_stack_budget(self);
         let current_func_id = self
             .builder
             .ins()
@@ -525,34 +526,17 @@ impl<'a> LoopCompiler<'a> {
             .filter(|target| *target == func_id)
             .and_then(|_| {
                 self.optimization_plan
-                    .static_inline(self.core.func_id, func_id)
+                    .pure_leaf_inline(self.core.func_id, func_id)
             });
         if let Some(inline) = planned_inline {
             inline.emit(self, call_plan.arg_start)?;
             return Ok(false);
         }
 
-        let recursive_edge = self
-            .optimization_plan
-            .is_recursive_edge(self.core.func_id, func_id);
-
-        match call_plan.route_for_loop() {
-            crate::call_helpers::CallRoute::DynamicJitTable => {
-                crate::call_helpers::emit_jit_call_with_vm_materialization(
-                    self,
-                    call_plan,
-                    None,
-                    recursive_edge,
-                )?;
-                Ok(false)
-            }
-            crate::call_helpers::CallRoute::PreparedJitTable => {
-                crate::call_helpers::emit_jit_call_with_vm_materialization(
-                    self,
-                    call_plan,
-                    None,
-                    recursive_edge,
-                )?;
+        match call_plan.route() {
+            crate::call_helpers::CallRoute::DynamicJitTable
+            | crate::call_helpers::CallRoute::PreparedJitTable => {
+                crate::call_helpers::emit_jit_call_with_vm_materialization(self, call_plan, None)?;
                 Ok(false)
             }
             crate::call_helpers::CallRoute::VmCallMaterialization => {
@@ -623,10 +607,6 @@ impl<'a> crate::compile_common::CompileDriver for LoopCompiler<'a> {
             }
         }
         Ok(())
-    }
-
-    fn apply_pc_facts(&mut self, pc: usize) -> Result<(), JitError> {
-        self.core.apply_ir_facts(pc)
     }
 
     fn instruction_for_pc(
@@ -800,6 +780,14 @@ impl<'a> crate::translator::RuntimeContext<'a> for LoopCompiler<'a> {
 crate::translator::impl_shared_compiler_traits!(LoopCompiler<'_>);
 
 impl crate::translator::FrameBoundary for LoopCompiler<'_> {
+    fn cold_recovery_values(&mut self) -> Vec<(cranelift_frontend::Variable, Value)> {
+        self.core.cold_recovery_values(&mut self.builder)
+    }
+
+    fn native_trap_blocks(&mut self) -> &mut crate::translator::NativeTrapBlocks {
+        &mut self.core.native_trap_blocks
+    }
+
     fn publish_current_frame_state(&mut self) {
         self.emit_variable_spill();
     }
@@ -818,15 +806,6 @@ impl<'a> crate::translator::CallBoundary<'a> for LoopCompiler<'a> {
         self.builder
             .ins()
             .iconst(types::I32, i64::from(self.core.func_id))
-    }
-    fn emit_residual_inline_call(
-        &mut self,
-        _inst: &Instruction,
-        _arguments: &[(Value, bool)],
-    ) -> Result<(), JitError> {
-        Err(JitError::Internal(
-            "acyclic recursive inline recipe reached OSR lowering".into(),
-        ))
     }
 }
 

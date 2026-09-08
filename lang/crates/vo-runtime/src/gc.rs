@@ -2553,10 +2553,16 @@ impl Gc {
         // ordinary presentation allocations to outrun the collector indefinitely.
         const TARGET_PHASE_FRAMES: usize = 128;
         loop {
-            let phase_limit = (self.total_bytes / TARGET_PHASE_FRAMES)
+            let mut phase_limit = (self.total_bytes / TARGET_PHASE_FRAMES)
                 .max(base)
                 .min(MAX_INCREMENTAL_SLICE_BYTES)
                 .min(requested_limit);
+            if self.state == GcState::Sweep {
+                // Allocation can grow the heap after sweep starts. Apply its
+                // frozen ceiling to the entire slice, including roots and the
+                // progress check below, so a sub-slot remainder cannot spin.
+                phase_limit = phase_limit.min(self.sweep_budget);
+            }
             // Scanner work is accounted in whole slots. A heap-derived phase
             // budget can have a 1..SLOT_BYTES-1 remainder; returning that
             // remainder to the next scheduler boundary prevents a zero-work
@@ -2723,7 +2729,7 @@ impl Gc {
                 }
 
                 GcState::Sweep => {
-                    let sweep_limit = self.sweep_budget.min(phase_limit);
+                    let sweep_limit = phase_limit;
                     // Mutator roots can change while sweep is incremental. Rescue
                     // any newly reachable old-white graph before sweeping the next
                     // chunk; mark_gray() is sweep-aware and ignores current-white

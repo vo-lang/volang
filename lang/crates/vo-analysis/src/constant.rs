@@ -113,6 +113,30 @@ pub enum Value {
     Float(f64),
 }
 
+/// Exact, hashable equality key for a valid constant. Numeric representations
+/// normalize to the same rational value; signed floating zero normalizes too.
+/// Type identity (when needed, e.g. interface map keys) belongs to the caller.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ConstantKey {
+    Bool(bool),
+    String(String),
+    Number(BigRational),
+}
+
+impl Value {
+    pub(crate) fn equality_key(&self) -> Option<ConstantKey> {
+        Some(match self {
+            Self::Unknown => return None,
+            Self::Bool(value) => ConstantKey::Bool(*value),
+            Self::Str(value) => ConstantKey::String(value.clone()),
+            Self::Int64(value) => ConstantKey::Number(BigRational::from_integer((*value).into())),
+            Self::IntBig(value) => ConstantKey::Number(BigRational::from_integer(value.clone())),
+            Self::Rat(value) => ConstantKey::Number(value.clone()),
+            Self::Float(value) => ConstantKey::Number(BigRational::from_float(*value)?),
+        })
+    }
+}
+
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         compare(self, BinaryOp::Eq, other)

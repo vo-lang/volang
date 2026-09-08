@@ -5,7 +5,7 @@
 //! these helpers instead of returning a bare `JitResult::Panic`.
 
 use cranelift_codegen::ir::{types, InstBuilder, Value};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use vo_runtime::bytecode::{ExternJitRoute, FunctionDef, Module};
 use vo_runtime::instruction::Opcode;
 use vo_runtime::jit_api::{JitContextField, JitResult, JitRuntimeTrapKind};
@@ -62,7 +62,7 @@ pub(crate) fn function_contract_in_env(
     module: &Module,
     env: JitCompileEnv<'_>,
 ) -> EffectContract {
-    let refined_ir = contract_refinement_ir(func, module);
+    let nonzero_divisors = known_nonzero_divisors(func, module);
 
     let mut contract = EffectContract::PURE;
     if func.has_defer {
@@ -106,16 +106,7 @@ pub(crate) fn function_contract_in_env(
             continue;
         }
 
-        let divisor_is_known_nonzero = matches!(
-            inst.opcode(),
-            Opcode::DivI | Opcode::DivU | Opcode::ModI | Opcode::ModU
-        ) && refined_ir
-            .as_ref()
-            .and_then(|ir| {
-                ir.input_constants(pc)
-                    .find_map(|(slot, value)| (slot == inst.c).then_some(value))
-            })
-            .is_some_and(|value| value != 0);
+        let divisor_is_known_nonzero = nonzero_divisors.contains(&pc);
         if divisor_is_known_nonzero {
             continue;
         }
@@ -235,7 +226,7 @@ fn local_function_contract_in_env(
     module: &Module,
     env: JitCompileEnv<'_>,
 ) -> EffectContract {
-    let refined_ir = contract_refinement_ir(func, module);
+    let nonzero_divisors = known_nonzero_divisors(func, module);
 
     let mut contract = EffectContract::PURE;
     if func.has_defer {
@@ -260,16 +251,7 @@ fn local_function_contract_in_env(
             continue;
         }
 
-        let divisor_is_known_nonzero = matches!(
-            inst.opcode(),
-            Opcode::DivI | Opcode::DivU | Opcode::ModI | Opcode::ModU
-        ) && refined_ir
-            .as_ref()
-            .and_then(|ir| {
-                ir.input_constants(pc)
-                    .find_map(|(slot, value)| (slot == inst.c).then_some(value))
-            })
-            .is_some_and(|value| value != 0);
+        let divisor_is_known_nonzero = nonzero_divisors.contains(&pc);
         if divisor_is_known_nonzero {
             continue;
         }
@@ -279,20 +261,104 @@ fn local_function_contract_in_env(
     contract
 }
 
-fn contract_refinement_ir(func: &FunctionDef, module: &Module) -> Option<crate::ir::FunctionIr> {
-    func.code
-        .iter()
-        .any(|instruction| {
-            matches!(
-                instruction.opcode(),
-                Opcode::DivI | Opcode::DivU | Opcode::ModI | Opcode::ModU
-            )
-        })
-        .then(|| {
-            crate::ir::FunctionIr::build_with_limit(func, module, crate::MAX_JIT_ANALYSIS_BYTES)
+/// Module summaries need only a conservative nonzero proof. Track literal
+/// definitions within basic blocks without constructing cold-function SSA or
+/// recovery states; the hot artifact retains the full analysis independently.
+fn known_nonzero_divisors(func: &FunctionDef, module: &Module) -> BTreeSet<usize> {
+    use vo_common_core::instruction_effects::{
+        instruction_frame_memory_effect, visit_instruction_register_writes, FrameMemoryEffect,
+    };
+    use vo_runtime::bytecode::Constant;
+    let mut proven = BTreeSet::new();
+    if !func.code.iter().any(|inst| {
+        matches!(
+            inst.opcode(),
+            Opcode::DivI | Opcode::DivU | Opcode::ModI | Opcode::ModU
+        )
+    }) {
+        return proven;
+    }
+    let mut boundaries = BTreeSet::new();
+    for (pc, inst) in func.code.iter().enumerate() {
+        let target = match inst.opcode() {
+            Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot => {
+                boundaries.insert(pc + 1);
+                crate::compile_common::checked_branch_target(
+                    func.code.len(),
+                    pc,
+                    inst.imm32(),
+                    inst.opcode(),
+                )
                 .ok()
-        })
-        .flatten()
+            }
+            Opcode::ForLoop => {
+                boundaries.insert(pc + 1);
+                Some(inst.forloop_target(pc))
+            }
+            _ => None,
+        };
+        if let Some(target) = target {
+            boundaries.insert(target);
+        }
+    }
+    let mut constants = vec![None; usize::from(func.local_slots)];
+    for (pc, inst) in func.code.iter().enumerate() {
+        if boundaries.contains(&pc) {
+            constants.fill(None);
+        }
+        if matches!(
+            inst.opcode(),
+            Opcode::DivI | Opcode::DivU | Opcode::ModI | Opcode::ModU
+        ) && constants
+            .get(usize::from(inst.c))
+            .copied()
+            .flatten()
+            .is_some_and(|value| value != 0)
+        {
+            proven.insert(pc);
+        }
+        let output = match inst.opcode() {
+            Opcode::LoadInt => Some(i64::from(inst.imm32())),
+            Opcode::LoadConst => match module.constants.get(usize::from(inst.b)) {
+                Some(Constant::Int(value)) => Some(*value),
+                Some(Constant::Bool(value)) => Some(i64::from(*value)),
+                Some(Constant::Nil) => Some(0),
+                _ => None,
+            },
+            Opcode::Copy => constants.get(usize::from(inst.b)).copied().flatten(),
+            _ => None,
+        };
+        let metadata = func.instruction_metadata.get(pc);
+        if visit_instruction_register_writes(
+            inst,
+            metadata,
+            &module.externs,
+            &module.functions,
+            |start, count| {
+                if let Some(written) =
+                    constants.get_mut(usize::from(start)..usize::from(start) + usize::from(count))
+                {
+                    written.fill(None);
+                }
+            },
+        )
+        .is_err()
+        {
+            constants.fill(None);
+        }
+        if matches!(
+            instruction_frame_memory_effect(inst, metadata),
+            Ok(FrameMemoryEffect::AliasedRange { .. }) | Err(_)
+        ) {
+            constants.fill(None);
+        }
+        if let Some(value) = output {
+            if let Some(slot) = constants.get_mut(usize::from(inst.a)) {
+                *slot = Some(value);
+            }
+        }
+    }
+    proven
 }
 
 pub fn emit_runtime_trap_return<'a>(
@@ -341,16 +407,61 @@ pub fn emit_runtime_trap_if<'a>(
     arg0: Option<Value>,
     arg1: Option<Value>,
 ) {
-    let panic_block = crate::compile_common::cold_block(e.builder());
+    let recovery = e.cold_recovery_values();
+    let variables: Vec<_> = recovery
+        .iter()
+        .map(|(variable, _)| variable.as_u32())
+        .collect();
+    let existing = e.native_trap_blocks().by_variables.get(&variables).copied();
+    let panic_block = existing.unwrap_or_else(|| crate::compile_common::cold_block(e.builder()));
+    if existing.is_none() {
+        for ty in [types::I32, types::I64, types::I64, types::I32] {
+            e.builder().append_block_param(panic_block, ty);
+        }
+        for (_, value) in &recovery {
+            let ty = e.builder().func.dfg.value_type(*value);
+            e.builder().append_block_param(panic_block, ty);
+        }
+        e.native_trap_blocks()
+            .by_variables
+            .insert(variables, panic_block);
+    }
+    let zero = e.builder().ins().iconst(types::I64, 0);
+    let kind = e.builder().ins().iconst(types::I32, kind as i64);
+    let pc = e.current_pc();
+    let pc = e.builder().ins().iconst(types::I32, pc as i64);
+    let mut arguments: Vec<cranelift_codegen::ir::BlockArg> = vec![
+        kind.into(),
+        arg0.unwrap_or(zero).into(),
+        arg1.unwrap_or(zero).into(),
+        pc.into(),
+    ];
+    arguments.extend(
+        recovery
+            .iter()
+            .map(|(_, value)| cranelift_codegen::ir::BlockArg::Value(*value)),
+    );
     let ok_block = e.builder().create_block();
     e.builder()
         .ins()
-        .brif(condition, panic_block, &[], ok_block, &[]);
+        .brif(condition, panic_block, &arguments, ok_block, &[]);
 
-    e.builder().switch_to_block(panic_block);
-    e.builder().seal_block(panic_block);
-    emit_runtime_trap_return(e, kind, arg0, arg1);
-
+    if existing.is_none() {
+        e.builder().switch_to_block(panic_block);
+        // Later bytecodes may add predecessors with the same recovery layout.
+        // The compiler seals all shared blocks after lowering the whole body.
+        for (index, (variable, _)) in recovery.iter().enumerate() {
+            let value = e.builder().block_params(panic_block)[index + 4];
+            e.builder().def_var(*variable, value);
+        }
+        let ctx = e.ctx_param();
+        let params = e.builder().block_params(panic_block)[..4].to_vec();
+        let trap = e.helper(HelperKind::runtime_trap);
+        let call =
+            emit_runtime_helper_call(e, trap, &[ctx, params[0], params[1], params[2], params[3]]);
+        let result = e.builder().inst_results(call)[0];
+        e.builder().ins().return_(&[result]);
+    }
     e.builder().switch_to_block(ok_block);
     e.builder().seal_block(ok_block);
 }
@@ -383,6 +494,44 @@ mod tests {
             externs,
             backend_caps: Default::default(),
         }
+    }
+
+    #[test]
+    fn nonzero_summary_drops_constants_at_control_flow_joins_and_alias_writes() {
+        let mut module = Module::new("nonzero-summary".into());
+        let mut func = function_with_sig(
+            vec![
+                Instruction::new(Opcode::LoadInt, 1, 7, 0),
+                Instruction::new(Opcode::Copy, 2, 1, 0),
+                Instruction::new(Opcode::DivI, 3, 0, 2),
+                Instruction::new(Opcode::JumpIf, 0, 2, 0),
+                Instruction::new(Opcode::LoadInt, 2, 0, 0),
+                Instruction::new(Opcode::DivI, 3, 0, 2),
+                Instruction::new(Opcode::Return, 1, 3, 0),
+            ],
+            1,
+            1,
+            4,
+            1,
+        );
+        assert_eq!(known_nonzero_divisors(&func, &module), BTreeSet::from([2]));
+
+        func.code = vec![
+            Instruction::new(Opcode::LoadInt, 1, 7, 0),
+            Instruction::new(Opcode::SlotSet, 1, 0, 2),
+            Instruction::new(Opcode::DivI, 3, 0, 1),
+        ];
+        // Missing alias metadata must conservatively clear the proof too.
+        func.instruction_metadata.clear();
+        assert!(known_nonzero_divisors(&func, &module).is_empty());
+        module
+            .constants
+            .push(vo_runtime::bytecode::Constant::Int(-3));
+        func.code = vec![
+            Instruction::new(Opcode::LoadConst, 1, 0, 0),
+            Instruction::new(Opcode::ModI, 3, 0, 1),
+        ];
+        assert_eq!(known_nonzero_divisors(&func, &module), BTreeSet::from([1]));
     }
 
     #[test]

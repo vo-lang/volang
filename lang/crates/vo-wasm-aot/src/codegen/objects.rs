@@ -183,16 +183,13 @@ pub(super) fn compile_deep_equal(
                         "runtime array type {rttid} exceeds the wasm32 element domain"
                     ))
                 })?;
-                let elem_slots = resolver.slot_count_for_value_rttid(*elem).ok_or_else(|| {
-                    WasmAotError::InvalidModule(format!(
-                        "runtime array type {rttid} has no finite element layout"
-                    ))
-                })?;
-                let elem_slots: u32 = elem_slots.try_into().map_err(|_| {
-                    WasmAotError::InvalidModule(format!(
-                        "runtime array type {rttid} element layout exceeds wasm32"
-                    ))
-                })?;
+                let elem_bytes = runtime_value_slot_count(module, *elem)?
+                    .checked_mul(8)
+                    .ok_or_else(|| {
+                        WasmAotError::InvalidModule(format!(
+                            "runtime array type {rttid} element layout exceeds wasm32"
+                        ))
+                    })?;
                 body.instruction(&W::I32Const(0))
                     .instruction(&W::LocalSet(INDEX))
                     .instruction(&W::Block(BlockType::Empty))
@@ -203,12 +200,12 @@ pub(super) fn compile_deep_equal(
                     .instruction(&W::BrIf(1))
                     .instruction(&W::LocalGet(0))
                     .instruction(&W::LocalGet(INDEX))
-                    .instruction(&W::I32Const((elem_slots * 8) as i32))
+                    .instruction(&W::I32Const(elem_bytes as i32))
                     .instruction(&W::I32Mul)
                     .instruction(&W::I32Add)
                     .instruction(&W::LocalGet(1))
                     .instruction(&W::LocalGet(INDEX))
-                    .instruction(&W::I32Const((elem_slots * 8) as i32))
+                    .instruction(&W::I32Const(elem_bytes as i32))
                     .instruction(&W::I32Mul)
                     .instruction(&W::I32Add)
                     .instruction(&W::I32Const(elem.to_raw() as i32))
@@ -474,16 +471,13 @@ pub(super) fn compile_deep_hash(
                         "runtime array type {rttid} exceeds the wasm32 element domain"
                     ))
                 })?;
-                let elem_slots = resolver.slot_count_for_value_rttid(*elem).ok_or_else(|| {
-                    WasmAotError::InvalidModule(format!(
-                        "runtime array type {rttid} has no finite element layout"
-                    ))
-                })?;
-                let elem_slots: u32 = elem_slots.try_into().map_err(|_| {
-                    WasmAotError::InvalidModule(format!(
-                        "runtime array type {rttid} element layout exceeds wasm32"
-                    ))
-                })?;
+                let elem_bytes = runtime_value_slot_count(module, *elem)?
+                    .checked_mul(8)
+                    .ok_or_else(|| {
+                        WasmAotError::InvalidModule(format!(
+                            "runtime array type {rttid} element layout exceeds wasm32"
+                        ))
+                    })?;
                 body.instruction(&W::I32Const(0))
                     .instruction(&W::LocalSet(INDEX))
                     .instruction(&W::Block(BlockType::Empty))
@@ -494,7 +488,7 @@ pub(super) fn compile_deep_hash(
                     .instruction(&W::BrIf(1))
                     .instruction(&W::LocalGet(0))
                     .instruction(&W::LocalGet(INDEX))
-                    .instruction(&W::I32Const((elem_slots * 8) as i32))
+                    .instruction(&W::I32Const(elem_bytes as i32))
                     .instruction(&W::I32Mul)
                     .instruction(&W::I32Add)
                     .instruction(&W::I32Const(elem.to_raw() as i32))
@@ -621,20 +615,11 @@ pub(super) fn compile_sequence_deep_equal(module: &VoModule) -> Result<Function,
         let Some((_, RuntimeType::Array { elem, .. })) = resolver.resolve_value_rttid(value) else {
             continue;
         };
-        let result_slots = resolver
-            .slot_count_for_value_rttid(value)
-            .and_then(|slots| u16::try_from(slots).ok())
-            .ok_or_else(|| {
-                WasmAotError::InvalidModule(format!(
-                    "runtime array type {rttid} exceeds the interface slot domain"
-                ))
-            })?;
-        let layout =
-            interface_array_assertion_layout(module, rttid, result_slots)?.ok_or_else(|| {
-                WasmAotError::InvalidModule(format!(
-                    "runtime array type {rttid} has no interface sequence layout"
-                ))
-            })?;
+        let layout = interface_array_layout(module, rttid)?.ok_or_else(|| {
+            WasmAotError::InvalidModule(format!(
+                "runtime array type {rttid} has no interface sequence layout"
+            ))
+        })?;
 
         body.instruction(&W::LocalGet(2))
             .instruction(&W::I32Const(value.to_raw() as i32))
@@ -672,7 +657,7 @@ pub(super) fn compile_sequence_deep_equal(module: &VoModule) -> Result<Function,
                 .instruction(&W::Block(BlockType::Empty))
                 .instruction(&W::Loop(BlockType::Empty))
                 .instruction(&W::LocalGet(INDEX))
-                .instruction(&W::I32Const(i32::from(layout.len)))
+                .instruction(&W::I32Const(layout.len as i32))
                 .instruction(&W::I32GeU)
                 .instruction(&W::BrIf(1));
             emit_sequence_element_address(&mut body, LEFT_DATA, INDEX, LEFT_STRIDE);
@@ -760,20 +745,11 @@ pub(super) fn compile_sequence_deep_hash(module: &VoModule) -> Result<Function, 
         let Some((_, RuntimeType::Array { elem, .. })) = resolver.resolve_value_rttid(value) else {
             continue;
         };
-        let result_slots = resolver
-            .slot_count_for_value_rttid(value)
-            .and_then(|slots| u16::try_from(slots).ok())
-            .ok_or_else(|| {
-                WasmAotError::InvalidModule(format!(
-                    "runtime array type {rttid} exceeds the interface slot domain"
-                ))
-            })?;
-        let layout =
-            interface_array_assertion_layout(module, rttid, result_slots)?.ok_or_else(|| {
-                WasmAotError::InvalidModule(format!(
-                    "runtime array type {rttid} has no interface sequence layout"
-                ))
-            })?;
+        let layout = interface_array_layout(module, rttid)?.ok_or_else(|| {
+            WasmAotError::InvalidModule(format!(
+                "runtime array type {rttid} has no interface sequence layout"
+            ))
+        })?;
 
         body.instruction(&W::LocalGet(1))
             .instruction(&W::I32Const(value.to_raw() as i32))
@@ -799,7 +775,7 @@ pub(super) fn compile_sequence_deep_hash(module: &VoModule) -> Result<Function, 
                 .instruction(&W::Block(BlockType::Empty))
                 .instruction(&W::Loop(BlockType::Empty))
                 .instruction(&W::LocalGet(INDEX))
-                .instruction(&W::I32Const(i32::from(layout.len)))
+                .instruction(&W::I32Const(layout.len as i32))
                 .instruction(&W::I32GeU)
                 .instruction(&W::BrIf(1));
             if layout.elem_bytes < 8 {

@@ -10,153 +10,6 @@ use crate::error::CodegenError;
 use crate::func::{ElemLayoutSpec, FuncBuilder};
 use crate::type_info::{encode_i32, TypeInfoWrapper};
 
-/// Compile a map literal key, handling interface key boxing.
-fn compile_map_lit_key(
-    key: &vo_syntax::ast::CompositeLitKey,
-    key_type: vo_analysis::objects::TypeKey,
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
-) -> Result<u16, CodegenError> {
-    match key {
-        vo_syntax::ast::CompositeLitKey::Expr(key_expr) => {
-            super::compile_map_key_expr(key_expr, key_type, ctx, func, info)
-        }
-        vo_syntax::ast::CompositeLitKey::Ident(ident) => {
-            compile_ident_as_map_key(ident, key_type, ctx, func, info)
-        }
-    }
-}
-
-/// Compile an identifier used as a map literal key.
-///
-/// The parser preserves bare map keys as `CompositeLitKey::Ident`, so this path
-/// must support the same constant/local/global/capture sources as an ordinary
-/// identifier expression.
-fn compile_ident_as_map_key(
-    ident: &vo_syntax::ast::Ident,
-    key_type: vo_analysis::objects::TypeKey,
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
-) -> Result<u16, CodegenError> {
-    if info.project.interner.resolve(ident.symbol) == Some("nil") {
-        let key_slot_types = info.type_slot_types(key_type);
-        let key_reg = func.alloc_slots(&key_slot_types);
-        func.emit_zero_slots(key_reg, info.type_slot_count(key_type));
-        return Ok(key_reg);
-    }
-
-    let obj_key = info.get_use(ident);
-    let obj = &info.project.tc_objs.lobjs[obj_key];
-    let src_type = info.ident_type(ident).ok_or_else(|| {
-        CodegenError::Internal(format!(
-            "cannot get type for map key identifier {:?}",
-            ident.symbol
-        ))
-    })?;
-
-    if obj.entity_type().is_const() {
-        if info.is_interface(key_type) {
-            let concrete_type = if vo_analysis::typ::is_untyped(src_type, info.tc_objs()) {
-                vo_analysis::typ::untyped_default_type(src_type, info.tc_objs())
-            } else {
-                src_type
-            };
-            let concrete_layout = info.type_slot_types(concrete_type);
-            let concrete = func.alloc_slots(&concrete_layout);
-            compile_const_value(obj.const_val(), concrete, concrete_type, ctx, func, info)?;
-            let key_layout = info.type_slot_types(key_type);
-            let key_reg = func.alloc_slots(&key_layout);
-            crate::assign::emit_assign(
-                key_reg,
-                crate::assign::AssignSource::Slot {
-                    slot: concrete,
-                    type_key: concrete_type,
-                },
-                key_type,
-                ctx,
-                func,
-                info,
-            )?;
-            return Ok(key_reg);
-        }
-
-        let key_layout = info.type_slot_types(key_type);
-        let key_reg = func.alloc_slots(&key_layout);
-        compile_const_value(obj.const_val(), key_reg, key_type, ctx, func, info)?;
-        crate::expr::emit_int_trunc(key_reg, key_type, func, info);
-        return Ok(key_reg);
-    }
-
-    let source = if let Some(local) = func.lookup_local(ident.symbol) {
-        match local.storage {
-            crate::func::StorageKind::HeapArray { gcref_slot, .. } if info.is_array(src_type) => {
-                crate::assign::AssignSource::ArrayRef {
-                    slot: gcref_slot,
-                    type_key: src_type,
-                }
-            }
-            storage => {
-                let src_slot_types = info.type_slot_types(src_type);
-                let src_reg = func.alloc_slots(&src_slot_types);
-                func.emit_storage_load(storage, src_reg);
-                crate::assign::AssignSource::Slot {
-                    slot: src_reg,
-                    type_key: src_type,
-                }
-            }
-        }
-    } else if let Some(global_idx) = ctx.get_global_index(obj_key) {
-        if info.is_array(src_type) {
-            let array_ref = func.alloc_slots(&[SlotType::GcBase]);
-            func.emit_global_get(array_ref, global_idx, 1);
-            crate::assign::AssignSource::ArrayRef {
-                slot: array_ref,
-                type_key: src_type,
-            }
-        } else {
-            let src_slot_types = info.type_slot_types(src_type);
-            let src_reg = func.alloc_slots(&src_slot_types);
-            func.emit_storage_load(
-                crate::func::StorageKind::package_global(global_idx, src_type, info),
-                src_reg,
-            );
-            crate::assign::AssignSource::Slot {
-                slot: src_reg,
-                type_key: src_type,
-            }
-        }
-    } else if let Some(capture_index) = func.lookup_capture(ident.symbol).map(|c| c.index) {
-        let capture_ref = func.alloc_slots(&[SlotType::GcBase]);
-        func.emit_op(Opcode::ClosureGet, capture_ref, capture_index, 0);
-        if info.is_array(src_type) {
-            crate::assign::AssignSource::ArrayRef {
-                slot: capture_ref,
-                type_key: src_type,
-            }
-        } else {
-            let src_slot_types = info.type_slot_types(src_type);
-            let src_reg = func.alloc_slots(&src_slot_types);
-            func.emit_ptr_get(src_reg, capture_ref, 0, info.type_slot_count(src_type));
-            crate::assign::AssignSource::Slot {
-                slot: src_reg,
-                type_key: src_type,
-            }
-        }
-    } else {
-        return Err(CodegenError::VariableNotFound(format!(
-            "map key identifier {:?} has no value storage",
-            ident.symbol
-        )));
-    };
-
-    let key_slot_types = info.type_slot_types(key_type);
-    let key_reg = func.alloc_slots(&key_slot_types);
-    crate::assign::emit_assign(key_reg, source, key_type, ctx, func, info)?;
-    Ok(key_reg)
-}
-
 // =============================================================================
 // Constant Values
 // =============================================================================
@@ -303,7 +156,7 @@ fn compile_struct_lit(
     for (i, elem) in lit.elems.iter().enumerate() {
         if let Some(key) = &elem.key {
             // Named field: key is field name
-            if let vo_syntax::ast::CompositeLitKey::Ident(field_ident) = key {
+            if let vo_syntax::ast::ExprKind::Ident(field_ident) = &key.kind {
                 let field_name = info
                     .project
                     .interner
@@ -351,33 +204,14 @@ pub(crate) fn resolve_elem_index(
     info: &TypeInfoWrapper,
 ) -> Result<u64, CodegenError> {
     let index = if let Some(ref key) = elem.key {
-        match key {
-            vo_syntax::ast::CompositeLitKey::Expr(key_expr) => {
-                let index = info.try_const_int(key_expr).ok_or_else(|| {
-                    CodegenError::Internal("array/slice literal index is not constant".to_string())
-                })?;
-                u64::try_from(index).map_err(|_| {
-                    CodegenError::Internal(format!(
-                        "array/slice literal index {index} must be non-negative"
-                    ))
-                })?
-            }
-            vo_syntax::ast::CompositeLitKey::Ident(ident) => {
-                let obj = &info.project.tc_objs.lobjs[info.get_use(ident)];
-                let (index, exact) = obj.const_val().int_as_i64();
-                if !exact {
-                    return Err(CodegenError::Internal(
-                        "array/slice literal identifier index is not an integer constant"
-                            .to_string(),
-                    ));
-                }
-                u64::try_from(index).map_err(|_| {
-                    CodegenError::Internal(format!(
-                        "array/slice literal index {index} must be non-negative"
-                    ))
-                })?
-            }
-        }
+        let index = info.try_const_int(key).ok_or_else(|| {
+            CodegenError::Internal("array/slice literal index is not constant".to_string())
+        })?;
+        u64::try_from(index).map_err(|_| {
+            CodegenError::Internal(format!(
+                "array/slice literal index {index} must be non-negative"
+            ))
+        })?
     } else {
         *current_index
     };
@@ -543,7 +377,7 @@ fn compile_map_lit(
     for elem in &lit.elems {
         if let Some(key) = &elem.key {
             // Compile key - use compile_map_lit_key for unified interface key boxing
-            let key_reg = compile_map_lit_key(key, key_type, ctx, func, info)?;
+            let key_reg = super::compile_map_key_expr(key, key_type, ctx, func, info)?;
             let key_start = func.alloc_slots(&key_slot_types);
             func.emit_copy(key_start, key_reg, key_slots);
 
@@ -584,27 +418,33 @@ pub fn compile_func_lit(
     let capture_count = checked_closure_capture_count(captures.len())?;
     parent_func.emit_closure_new(dst, func_id, capture_count);
 
-    for (i, obj_key) in captures.iter().enumerate() {
-        let var_name = info.obj_name(*obj_key);
-        if let Some(sym) = info.project.interner.get(var_name) {
-            let capture_index = u16::try_from(i).map_err(|_| {
-                CodegenError::Internal(format!("closure capture index exceeds u16::MAX: {i}"))
-            })?;
-            let offset = capture_index.checked_add(1).ok_or_else(|| {
-                CodegenError::Internal(format!(
-                    "closure capture storage offset exceeds u16::MAX: {capture_index}"
-                ))
-            })?;
-
-            if let Some(local) = parent_func.lookup_local(sym) {
-                parent_func.emit_ptr_set(dst, offset, local.storage.slot(), 1);
-            } else if let Some(capture) = parent_func.lookup_capture(sym) {
-                let capture_index = capture.index;
-                let temp = parent_func.alloc_slots(&[SlotType::GcBase]);
-                parent_func.emit_op(Opcode::ClosureGet, temp, capture_index, 0);
-                parent_func.emit_ptr_set(dst, offset, temp, 1);
+    for (i, &object) in captures.iter().enumerate() {
+        let capture_index = u16::try_from(i).map_err(|_| {
+            CodegenError::Internal(format!("closure capture index exceeds u16::MAX: {i}"))
+        })?;
+        let offset = capture_index.checked_add(1).ok_or_else(|| {
+            CodegenError::Internal(format!(
+                "closure capture storage offset exceeds u16::MAX: {i}"
+            ))
+        })?;
+        let reference = if let Some(storage) = parent_func.lookup_local_object(object) {
+            if !storage.is_heap() {
+                return Err(CodegenError::Internal(format!(
+                    "captured declaration {object:?} has unboxed storage: {storage:?}"
+                )));
             }
-        }
+            storage.slot()
+        } else if let Some(capture) = parent_func.lookup_capture(object) {
+            let index = capture.index;
+            let temp = parent_func.alloc_slots(&[SlotType::GcBase]);
+            parent_func.emit_op(Opcode::ClosureGet, temp, index, 0);
+            temp
+        } else {
+            return Err(CodegenError::Internal(format!(
+                "captured declaration {object:?} has no enclosing storage"
+            )));
+        };
+        parent_func.emit_ptr_set(dst, offset, reference, 1);
     }
 
     Ok(())
@@ -638,13 +478,15 @@ pub(crate) fn lower_func_lit(
     // Register captures in closure builder so it can access them via ClosureGet
     // Also collect capture types for cross-island serialization
     for (i, obj_key) in captures.iter().enumerate() {
-        let var_name = info.obj_name(*obj_key);
-        if let Some(sym) = info.project.interner.get(var_name) {
-            let capture_index = u16::try_from(i).map_err(|_| {
-                CodegenError::Internal(format!("closure capture index exceeds u16::MAX: {i}"))
-            })?;
-            closure_builder.define_capture(sym, capture_index);
+        if !info.project.tc_objs.lobjs[*obj_key].entity_type().is_var() {
+            return Err(CodegenError::Internal(format!(
+                "closure capture {obj_key:?} is not a variable"
+            )));
         }
+        let capture_index = u16::try_from(i).map_err(|_| {
+            CodegenError::Internal(format!("closure capture index exceeds u16::MAX: {i}"))
+        })?;
+        closure_builder.define_capture(*obj_key, capture_index);
         // Get the captured variable's physical transfer type. Adapter-owned
         // locals capture one opaque handle even when their source type is a
         // managed reference such as string.
@@ -708,6 +550,7 @@ pub(crate) fn lower_func_lit(
             closure_builder
                 .try_define_param(Some(name.symbol), slots, &slot_types)
                 .map_err(CodegenError::Internal)?;
+            closure_builder.bind_local_object(name.symbol, Some(obj_key))?;
             closure_builder.add_param_type_key(param_type_key, ctx, info);
             if info.needs_boxing(obj_key, param_type_key) {
                 escaped_params.push((name.symbol, param_type_key, slots, slot_types.clone()));
@@ -849,6 +692,7 @@ pub(crate) fn lower_func_lit(
                 }
                 slot
             };
+            closure_builder.bind_local_object(name.symbol, Some(obj_key))?;
             closure_builder.register_named_return(slot, slots, escapes);
         }
     }

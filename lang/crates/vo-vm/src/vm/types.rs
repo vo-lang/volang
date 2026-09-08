@@ -368,6 +368,7 @@ pub enum ExecResult {
     Panic,
     /// Managed-memory admission or allocation failed.
     MemoryError(MemoryError),
+    ResourceError(crate::fiber::FiberCapacityError),
     /// Fatal JIT infrastructure error. This is not recoverable by user code.
     JitError(String),
     /// Entire VM process requested immediate termination through `os.Exit`.
@@ -766,8 +767,7 @@ pub struct VmRootScanSnapshot {
     pub mode: VmRootScanMode,
     pub dirty_epoch: u64,
     pub stage: VmRootScanStage,
-    pub global_def_cursor: usize,
-    pub global_base_cursor: usize,
+
     pub global_slot_cursor: usize,
     pub fiber_source_cursor: usize,
     pub fiber_frame_cursor: usize,

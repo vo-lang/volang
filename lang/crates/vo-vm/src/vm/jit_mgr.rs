@@ -530,7 +530,13 @@ impl JitManager {
 
     #[inline]
     pub fn execution_stats(&self) -> JitExecutionStats {
-        self.execution_stats
+        let mut stats = self.execution_stats;
+        stats.optimizing_functions_executed = self
+            .profiles
+            .iter()
+            .filter(|profile| profile.optimizing_entered != 0)
+            .count() as u64;
+        stats
     }
 
     #[inline]
@@ -1995,6 +2001,153 @@ mod tests {
         assert!(
             !vm.state.gc.should_step(),
             "one exact native-root lease should finish this sub-limit cycle"
+        );
+    }
+
+    #[test]
+    fn native_gc_side_exit_bounds_large_vm_root_pass_and_preserves_frames() {
+        let caller = string_slice_func(
+            "caller",
+            vec![
+                Instruction::new(Opcode::Call, 1, 0, 0),
+                Instruction::new(Opcode::Return, 0, 1, 0),
+            ],
+        );
+        let callee = string_slice_func(
+            "callee",
+            vec![
+                Instruction::new(Opcode::StrSlice, 3, 0, 1),
+                Instruction::new(Opcode::Return, 0, 1, 0),
+            ],
+        );
+        let mut module = VoModule::new("native-gc-total-budget".into());
+        module.functions = vec![caller, callee];
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).unwrap();
+        vm.load(module).unwrap();
+        let loaded = vm.module.as_ref().unwrap().clone();
+        let externs = vo_runtime::bytecode::ResolvedExternTable::empty();
+        let entry = {
+            let manager = vm.jit.manager_mut().unwrap();
+            let env = JitCompileEnv {
+                externs: &externs,
+                backend_caps: Default::default(),
+            };
+            manager
+                .compile_full(1, loaded.verified_module(), env)
+                .unwrap();
+            manager
+                .compile_full(0, loaded.verified_module(), env)
+                .unwrap();
+            manager.get_entry(0).unwrap()
+        };
+        // Suspended extern replay results are a root domain independent of the
+        // current native chain and can exceed the callback's total work budget.
+        for _ in 0..4 {
+            let mut suspended = Fiber::new(0);
+            suspended
+                .closure_replay
+                .try_push_result(vec![0; 40_000], vec![vo_runtime::SlotType::GcBase; 40_000])
+                .unwrap();
+            vm.scheduler.spawn(suspended);
+        }
+        let source = vo_runtime::objects::string::create(&mut vm.state.gc, b"bounded");
+        vm.state.gc.gc_request_cycle();
+        let mut fiber = Fiber::new(1);
+        fiber.execution_budget = vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS;
+        let bp = fiber.push_frame(0, 4, 0, 1);
+        fiber.stack[bp] = source as u64;
+        fiber.stack[bp + 1] = 0;
+        fiber.stack[bp + 2] = 7;
+        let before = vm.memory_stats().work_units_total;
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).unwrap();
+        let args = unsafe { fiber.stack.as_mut_ptr().add(bp) };
+        let mut ret = [0_u64; 1];
+        let result = unsafe {
+            vo_jit::invoke_native_from_frame(entry, ctx.as_ptr(), args, ret.as_mut_ptr(), 3)
+        };
+        assert_eq!(result, JitResult::RuntimeTransition);
+        assert!(
+            ctx.ctx.native_frame.is_null(),
+            "machine frame addresses must not escape"
+        );
+        assert!(
+            vm.memory_stats().work_units_total - before
+                <= (vo_runtime::gc::MAX_INCREMENTAL_SLICE_BYTES / 8) as u64
+        );
+        assert_eq!(
+            vm.jit
+                .manager()
+                .unwrap()
+                .execution_stats()
+                .native_root_scan_budget_exhaustions,
+            1
+        );
+        assert!(fiber.gc_allocation_permit.is_some());
+        assert!(vm.state.gc.root_scan_pending());
+        assert!(
+            vm.state.gc_root_scan.is_none(),
+            "the next pass must scan materialized frames"
+        );
+        assert!(
+            !fiber.resume_stack.is_empty(),
+            "native ancestors must be published on side exit"
+        );
+    }
+
+    #[test]
+    fn large_native_root_side_exit_resumes_guest_under_gc_stress() {
+        let mut module = VoModule::new("native-gc-side-exit-resume".into());
+        module.functions = vec![string_slice_func(
+            "entry",
+            vec![
+                Instruction::new(Opcode::StrSlice, 3, 0, 1),
+                Instruction::new(Opcode::GlobalSet, 0, 3, 0),
+                Instruction::new(Opcode::Return, 3, 1, 0),
+            ],
+        )];
+        module.globals.push(vo_runtime::bytecode::GlobalDef {
+            name: "result".into(),
+            slots: 1,
+            value_kind: vo_runtime::ValueKind::String as u8,
+            meta_id: 0,
+            slot_types: vec![vo_runtime::SlotType::GcBase],
+        });
+        let mut vm = Vm::try_with_jit_config(JitConfig {
+            call_threshold: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        vm.load(module).unwrap();
+        for _ in 0..4 {
+            let mut suspended = Fiber::new(0);
+            suspended
+                .closure_replay
+                .try_push_result(vec![0; 40_000], vec![vo_runtime::SlotType::GcBase; 40_000])
+                .unwrap();
+            vm.scheduler.spawn(suspended);
+        }
+        // Keep synthetic host-owned replay roots published without executing
+        // their fibers; only the entry under test belongs to the ready queue.
+        vm.scheduler.ready_queue.clear();
+        let source = vo_runtime::objects::string::create(&mut vm.state.gc, b"resume");
+        vm.set_gc_stress_every_step(true);
+        vm.set_gc_verify_after_step(true);
+        let mut entry = Fiber::new(0);
+        let bp = entry.push_frame(0, 4, 0, 1);
+        entry.stack[bp..bp + 3].copy_from_slice(&[source as u64, 0, 6]);
+        vm.scheduler.spawn(entry);
+        assert!(matches!(
+            vm.run_scheduled_with_budget(20_000).unwrap(),
+            crate::vm::SchedulingOutcome::Completed
+        ));
+        let stats = vm.jit.manager().unwrap().execution_stats();
+        assert!(stats.function_entries > 0);
+        assert!(stats.native_root_scan_budget_exhaustions > 0);
+        let result = vm.state.globals[0] as vo_runtime::gc::GcRef;
+        assert_eq!(vm.state.gc.canonicalize_ref(result), Some(result));
+        assert_eq!(
+            unsafe { vo_runtime::objects::string::to_bytes(result) },
+            b"resume"
         );
     }
 

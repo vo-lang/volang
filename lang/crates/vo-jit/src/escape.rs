@@ -19,6 +19,7 @@ pub(crate) struct ScalarReplacement {
 pub(crate) struct EscapePlan {
     replacements: Box<[ScalarReplacement]>,
     accesses: Box<[(u32, u32)]>,
+    live_ranges: Box<[Box<[std::ops::Range<u32>]>]>,
 }
 
 impl EscapePlan {
@@ -74,11 +75,32 @@ impl EscapePlan {
         };
         let mut invalid = vec![false; candidates.len()];
         let mut accesses = Vec::new();
+        let mut live_ranges = vec![Vec::<std::ops::Range<u32>>::new(); candidates.len()];
         for block in ir.blocks().iter().filter(|block| block.reachable) {
             let Some(mut state) = block_states[block.id.index()].clone() else {
                 continue;
             };
             for pc in block.start_pc as usize..block.end_pc as usize {
+                // Recovery and GC use the same bytecode liveness. An object's
+                // private native pointer must never outlive its rooted aliases.
+                let mut live_objects = BTreeSet::new();
+                for value in ir.resume_values(pc).unwrap_or_default() {
+                    live_objects.extend(state.possible[usize::from(value.slot)].iter().copied());
+                }
+                for object in live_objects {
+                    let ranges = &mut live_ranges[object as usize];
+                    if let Some(last) = ranges.last_mut().filter(|last| last.end == pc as u32) {
+                        last.end += 1;
+                    } else {
+                        ranges.push(pc as u32..pc as u32 + 1);
+                    }
+                    // One scalar record represents one dynamic allocation. A
+                    // loop may revisit this site while an earlier instance is
+                    // still live; such overlapping instances cannot share it.
+                    if allocation_ids[pc] == Some(object) {
+                        invalid[object as usize] = true;
+                    }
+                }
                 validate_alias_uses(ir, pc, &state, &mut invalid, &mut accesses);
                 transfer_alias_state(ir, pc, &allocation_ids, &mut state);
             }
@@ -106,7 +128,17 @@ impl EscapePlan {
         Self {
             replacements: replacements.into_boxed_slice(),
             accesses: accesses.into_boxed_slice(),
+            live_ranges: live_ranges
+                .into_iter()
+                .enumerate()
+                .filter(|(object, _)| old_to_new[*object].is_some())
+                .map(|(_, ranges)| ranges.into_boxed_slice())
+                .collect(),
         }
+    }
+
+    pub(crate) fn into_live_ranges(self) -> Box<[Box<[std::ops::Range<u32>]>]> {
+        self.live_ranges
     }
 
     #[inline]

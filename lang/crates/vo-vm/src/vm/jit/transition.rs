@@ -304,7 +304,10 @@ mod tests {
     fn vm_jit_runtime_panic_061_keeps_user_arg_equal_to_infra_sentinel() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut fiber = Fiber::new(11);
-        let module = Module::new("jit-runtime-panic-sentinel-arg".to_string());
+        let mut module = Module::new("jit-runtime-panic-sentinel-arg".to_string());
+        module.runtime_types.push(vo_runtime::RuntimeType::Basic(
+            vo_runtime::ValueKind::String,
+        ));
         vm.finish_load(module.clone());
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.runtime_trap_kind = vo_runtime::jit_api::JitRuntimeTrapKind::IndexOutOfBounds as u8;
@@ -337,21 +340,21 @@ mod tests {
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         let high_resume_pc = u32::from(u16::MAX) + 1;
 
-        vo_runtime::jit_api::vo_set_call_request(
+        vo_runtime::jit_api::vo_set_prepared_call_request(
             ctx.as_ptr(),
             0,
-            high_resume_pc,
             42,
+            high_resume_pc,
             0,
             0,
-            vo_runtime::jit_api::JitContext::CALL_KIND_PREPARED as u32,
         );
 
         assert_ne!(
             ctx.ctx.runtime_trap_arg0,
             vo_runtime::jit_api::JIT_INFRA_ERROR_SENTINEL
         );
-        assert_eq!(ctx.call_arg_start(), high_resume_pc);
-        assert_eq!(ctx.call_resume_pc(), 42);
+        assert_eq!(ctx.call_arg_start(), 0);
+        assert_eq!(ctx.call_resume_pc(), high_resume_pc);
+        assert_eq!(ctx.ctx.call_callee_bp, 42);
     }
 }

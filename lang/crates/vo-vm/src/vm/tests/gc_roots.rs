@@ -128,9 +128,7 @@ fn gc_root_matrix_scans_every_nested_unwind_state_until_that_state_finishes() {
         func_id: 0,
         closure: core::ptr::null_mut(),
         args,
-        arg_layout: DeferArgLayout {
-            slot_types: vec![SlotType::GcRef],
-        },
+        arg_layout: DeferArgLayout::Test(vec![SlotType::GcRef]),
         is_closure: false,
         is_errdefer: false,
         registered_at_generation: 0,
@@ -148,7 +146,8 @@ fn gc_root_matrix_scans_every_nested_unwind_state_until_that_state_finishes() {
     let parent_panic = panic_context(parent_panic_root, 1);
     let child_panic = panic_context(child_panic_root, 2);
     let unwind = |target_depth, args, return_root, context| UnwindingState {
-        pending: vec![pending(args)],
+        return_storage: None,
+        pending: vec![pending(args)].into(),
         target_depth,
         mode: UnwindingMode::Panic,
         current_defer_generation: 0,
@@ -257,26 +256,24 @@ fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
             func_id: 0,
             closure: core::ptr::null_mut(),
             args: direct_args,
-            arg_layout: DeferArgLayout {
-                slot_types: vec![SlotType::GcRef],
-            },
+            arg_layout: DeferArgLayout::Test(vec![SlotType::GcRef]),
             is_closure: false,
             is_errdefer: false,
             registered_at_generation: 0,
         });
         fiber.unwinding.push(UnwindingState {
+            return_storage: None,
             pending: vec![DeferEntry {
                 frame_depth: 1,
                 func_id: 0,
                 closure: core::ptr::null_mut(),
                 args: pending_args,
-                arg_layout: DeferArgLayout {
-                    slot_types: vec![SlotType::GcRef],
-                },
+                arg_layout: DeferArgLayout::Test(vec![SlotType::GcRef]),
                 is_closure: false,
                 is_errdefer: false,
                 registered_at_generation: 0,
-            }],
+            }]
+            .into(),
             target_depth: 0,
             mode: UnwindingMode::Return,
             current_defer_generation: 0,
@@ -300,7 +297,7 @@ fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
             .results
             .push((vec![replay_root as u64], vec![SlotType::GcRef]));
         fiber.select_state = Some(SelectState {
-            cases: Vec::new(),
+            cases: Default::default(),
             expected_cases: 0,
             has_default: false,
             woken_index: None,
@@ -310,7 +307,8 @@ fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
                 case_index: 0,
                 queue: select_root,
                 kind: crate::fiber::SelectCaseKind::Recv,
-            }],
+            }]
+            .into(),
         });
         fiber.queue_wait_state = Some(QueueWaitState {
             queue_ref: queue_wait_root,
@@ -323,7 +321,8 @@ fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
         let fiber = vm.scheduler.get_fiber_mut(heap_return_fid);
         fiber.push_frame(0, 1, 0, 0);
         fiber.unwinding.push(UnwindingState {
-            pending: Vec::new(),
+            return_storage: None,
+            pending: Default::default(),
             target_depth: 0,
             mode: UnwindingMode::Return,
             current_defer_generation: 0,
@@ -594,9 +593,7 @@ fn gc_root_defer_payload_scan_is_budgeted() {
             func_id: 0,
             closure: core::ptr::null_mut(),
             args,
-            arg_layout: DeferArgLayout {
-                slot_types: vec![SlotType::GcRef; ROOTS as usize],
-            },
+            arg_layout: DeferArgLayout::Test(vec![SlotType::GcRef; ROOTS as usize]),
             is_closure: false,
             is_errdefer: false,
             registered_at_generation: 0,
@@ -772,8 +769,7 @@ fn gc_root_duplicate_dirty_fiber_mark_invalidates_each_active_scan_once() {
         mode: VmRootScanMode::DirtyFibers,
         dirty_epoch: vm.state.gc_dirty_epoch,
         stage: VmRootScanStage::Fibers,
-        global_def_cursor: 0,
-        global_base_cursor: 0,
+
         global_slot_cursor: 0,
         fiber_source_cursor: 0,
         fiber_frame_cursor: 0,
@@ -823,4 +819,43 @@ fn gc_root_effect_applier_preserves_existing_dirty_epoch_protocol() {
     assert_eq!(vm.state.gc_dirty_epoch, 13);
     assert!(vm.state.gc_roots_dirty_all);
     assert!(vm.state.gc_dirty_fibers.is_empty());
+}
+
+#[test]
+fn small_explicit_gc_steps_progress_between_callbacks_with_many_scalar_globals() {
+    let mut module =
+        malformed_single_instruction_module("scalar-global-gc-progress", Vec::new(), Vec::new());
+    for index in 0..2048 {
+        module.globals.push(GlobalDef {
+            name: format!("scalar{index}"),
+            slots: 1,
+            value_kind: ValueKind::Int64 as u8,
+            meta_id: 0,
+            slot_types: vec![SlotType::Value],
+        });
+    }
+    module.globals.push(GlobalDef {
+        name: "last".into(),
+        slots: 1,
+        value_kind: ValueKind::String as u8,
+        meta_id: 0,
+        slot_types: vec![SlotType::GcBase],
+    });
+    let mut vm = Vm::new();
+    vm.load(module).unwrap();
+    assert_eq!(vm.module.as_ref().unwrap().global_root_slots().len(), 1);
+    vm.gc_stop();
+    let mut last = core::ptr::null_mut();
+    for _ in 0..200 {
+        vm.spawn_call(0, &[]).unwrap();
+        vm.run_scheduled().unwrap();
+        last = vo_runtime::objects::string::create(&mut vm.state.gc, b"root");
+        vm.state.globals[2048] = last as u64;
+        vm.mark_gc_all_roots_dirty();
+        vm.gc_step_units(32);
+        assert!(vm.memory_stats().last_step_work_units <= 32);
+    }
+    assert!(vm.memory_stats().minor_cycles + vm.memory_stats().major_cycles > 0);
+    assert_eq!(vm.state.gc.canonicalize_ref(last), Some(last));
+    assert!(vm.memory_stats().object_count < 100);
 }

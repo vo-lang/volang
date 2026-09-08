@@ -702,6 +702,7 @@ pub struct Vm {
     /// Remains true after the first fiber begins execution, including after
     /// every scheduler slot has reached a terminal state.
     execution_started: bool,
+    bounded_scheduling: bool,
     #[cfg(feature = "jit")]
     pub(crate) pending_runtime_transitions: Vec<RuntimeTransition>,
     /// Declared last so executable memory outlives scheduler and VM state.
@@ -755,7 +756,11 @@ impl<'vm> DetachedFiberExecution<'vm> {
                 "detached fiber execution attempted after ownership was restored".to_string(),
             );
         };
-        self.vm.run_detached_fiber(self.fiber_id, fiber, module)
+        let result = self.vm.run_detached_fiber(self.fiber_id, fiber, module);
+        match fiber.pending_resource_error.take() {
+            Some(error) => ExecResult::ResourceError(error),
+            None => result,
+        }
     }
 
     fn restore(&mut self) {
@@ -1003,8 +1008,13 @@ fn invoke_verified_extern(
     .with_host_services_v2(vm.state.host_services_v2.as_ref());
     #[cfg(feature = "std")]
     let world = world.with_io(&mut vm.state.io);
-    let (replay_results, replay_panic_message) =
-        fiber.closure_replay.snapshot_for_extern(fiber.frames.len());
+    let (replay_results, replay_panic_message, _replay_storage) = fiber
+        .closure_replay
+        .snapshot_for_extern(fiber.frames.len())
+        .map_err(|error| {
+            fiber.pending_resource_error = Some(error);
+            error.message()
+        })?;
     let resume_io_token = {
         #[cfg(feature = "std")]
         {
@@ -1271,6 +1281,7 @@ impl Vm {
             pending_exit_code: None,
             terminal_memory_error: None,
             execution_started: false,
+            bounded_scheduling: false,
             #[cfg(feature = "jit")]
             pending_runtime_transitions: Vec::new(),
         };
@@ -1308,6 +1319,10 @@ impl Vm {
 
     pub fn fiber_storage_bytes(&self) -> usize {
         self.scheduler.fiber_storage_bytes()
+    }
+
+    pub fn fiber_auxiliary_storage_bytes(&self) -> usize {
+        self.scheduler.fiber_auxiliary_storage_bytes()
     }
 
     /// Returns a point-in-time, mutation-free view of live Volang goroutines
@@ -2510,11 +2525,22 @@ impl Vm {
     ///
     /// Callers decide whether `Blocked` is a deadlock error or expected behaviour (e.g. GUI host VM).
     pub fn run(&mut self) -> Result<SchedulingOutcome, VmError> {
+        self.run_entry(None)
+    }
+
+    /// Spawn the entry function and execute at most `quanta` scheduling turns.
+    /// Continue a suspended invocation with `run_scheduled_with_budget` so the
+    /// entry function is spawned exactly once.
+    pub fn run_with_budget(&mut self, quanta: usize) -> Result<SchedulingOutcome, VmError> {
+        self.run_entry(Some(quanta))
+    }
+
+    fn run_entry(&mut self, quanta: Option<usize>) -> Result<SchedulingOutcome, VmError> {
         if let Some(outcome) = self.terminal_outcome() {
             return Ok(outcome);
         }
         self.spawn_entry()?;
-        self.run_scheduling_loop(None)
+        self.run_scheduling_loop(quanta)
     }
 
     /// Run island initialization only (global vars + user init functions, no main).
@@ -2607,6 +2633,21 @@ impl Vm {
             return Ok(outcome);
         }
         self.run_scheduling_loop(None)
+    }
+
+    /// Run at most `quanta` scheduling turns, yielding ownership to the host
+    /// with `Suspended` when runnable work remains. Zero never executes guest code.
+    pub fn run_scheduled_with_budget(
+        &mut self,
+        quanta: usize,
+    ) -> Result<SchedulingOutcome, VmError> {
+        self.run_scheduling_loop(Some(quanta))
+    }
+
+    /// Whether another scheduling turn can execute a runnable Fiber. Async
+    /// hosts must keep driving these turns while also polling their own events.
+    pub fn has_runnable_fibers(&self) -> bool {
+        self.scheduler.has_work()
     }
 
     /// Queues a command accepted by the owning trusted island transport.
@@ -2750,22 +2791,23 @@ impl Vm {
             if self.interrupt_requested() {
                 return Err(VmError::Interrupted);
             }
-            if let Some(max) = max_iterations {
-                iterations += 1;
-                if iterations > max {
-                    self.apply_runtime_transition(
-                        self.scheduler.current,
-                        RuntimeTransition::new(
-                            RuntimeBoundary::Yield,
-                            ResumePolicy::PreserveFramePc,
-                            GcRootEffect::None,
-                        ),
-                    )?;
-                    break;
-                }
+            if max_iterations.is_some_and(|max| iterations >= max) {
+                return Ok(self.nonblocking_scheduling_outcome());
             }
+            iterations += 1;
 
+            // A root cursor borrows the published VM state. Finish it across
+            // bounded turns before admitting another root mutation; each turn
+            // still checks cancellation and returns at the host's quantum limit.
+            if self.state.gc.should_step() && self.state.gc.root_scan_pending() {
+                self.gc_step_after_fiber(None);
+                continue;
+            }
             self.process_island_commands()?;
+            #[cfg(feature = "std")]
+            if self.scheduler.has_io_waiters() {
+                self.poll_io_ready_commands();
+            }
             if let Some(error) = self.state.gc.take_last_memory_error() {
                 return Err(self.terminate_island_for_memory_error(error));
             }
@@ -2774,6 +2816,9 @@ impl Vm {
             }
 
             if !self.scheduler.has_work() {
+                if max_iterations.is_some() {
+                    return Ok(self.nonblocking_scheduling_outcome());
+                }
                 match self.wait_for_work()? {
                     WaitResult::Retry => continue,
                     WaitResult::Done => return Ok(SchedulingOutcome::Completed),
@@ -2794,7 +2839,9 @@ impl Vm {
                 None => break,
             };
 
+            self.bounded_scheduling = max_iterations.is_some();
             let result = self.run_fiber(fiber_id);
+            self.bounded_scheduling = false;
             let _runtime_boundary = Self::runtime_boundary_for_exec_result(&result);
             let gc_after_boundary = exec_result_allows_gc_step(&result);
             let gc_root_effect = if exec_result_marks_gc_fiber_roots_dirty(&result) {
@@ -2803,7 +2850,7 @@ impl Vm {
                 GcRootEffect::None
             };
 
-            let handled = self.handle_exec_result(result, max_iterations.is_some());
+            let handled = self.handle_exec_result(result, false);
             // GC step at the scheduling boundary after the current fiber has
             // yielded/blocked/done. Stacks are stable here, and a newly-woken
             // fiber can handle latency-sensitive work (for example a render
@@ -2840,6 +2887,31 @@ impl Vm {
         Ok(SchedulingOutcome::Completed)
     }
 
+    fn nonblocking_scheduling_outcome(&mut self) -> SchedulingOutcome {
+        if !self.scheduler.has_work() {
+            self.scheduler.release_oversized_dead_fiber_storage();
+        }
+        if self.scheduler.has_work()
+            || !self.state.command_queue.is_empty()
+            || !self.state.outbound_commands.is_empty()
+            || self.state.pending_island_responses > 0
+        {
+            return SchedulingOutcome::Suspended;
+        }
+        if self.scheduler.has_host_event_waiters() {
+            return SchedulingOutcome::SuspendedForHostEvents;
+        }
+        #[cfg(feature = "std")]
+        if self.scheduler.has_io_waiters() {
+            return SchedulingOutcome::Suspended;
+        }
+        if self.scheduler.has_blocked() {
+            SchedulingOutcome::Blocked
+        } else {
+            SchedulingOutcome::Completed
+        }
+    }
+
     fn next_fiber_for_turn(&mut self) -> Option<crate::scheduler::FiberId> {
         if let Some(id) = self.scheduler.current {
             if self
@@ -2864,11 +2936,22 @@ impl Vm {
         let mut cmds = Vec::new();
         #[cfg(feature = "std")]
         if let Some(ref transport) = self.state.main_transport {
-            while let Ok(Some(envelope)) = transport.try_recv() {
-                cmds.push(envelope);
+            for _ in 0..32 {
+                match transport.try_recv() {
+                    Ok(Some(envelope)) => cmds.push(envelope),
+                    Ok(None) => break,
+                    Err(error) => {
+                        return Err(VmError::Jit(format!(
+                            "island transport receive failed: {error:?}"
+                        )))
+                    }
+                }
             }
         }
-        while let Some(envelope) = self.state.command_queue.pop_front() {
+        for _ in 0..32 {
+            let Some(envelope) = self.state.command_queue.pop_front() else {
+                break;
+            };
             cmds.push(envelope);
         }
         if !cmds.is_empty() {
@@ -3312,6 +3395,10 @@ impl Vm {
                     return Some(Ok(SchedulingOutcome::Panicked));
                 }
             }
+            ExecResult::ResourceError(error) => {
+                self.scheduler.kill_current();
+                return Some(Err(fiber_capacity_error_to_vm_error(error)));
+            }
             ExecResult::MemoryError(error) => {
                 return Some(Err(self.terminate_island_for_memory_error(error)));
             }
@@ -3641,6 +3728,16 @@ impl Vm {
     ) -> ExecResult {
         let module = loaded_module.module();
         let runtime_metadata = loaded_module.runtime_metadata();
+        if let Some(kind) = fiber.entry_trap.take() {
+            let stack = fiber.stack_ptr();
+            match runtime_trap(&mut self.state.gc, fiber, stack, module, kind) {
+                ExecResult::FrameChanged if fiber.entry_trap.is_some() => {
+                    return ExecResult::TimesliceExpired
+                }
+                ExecResult::FrameChanged => {}
+                result => return result,
+            }
+        }
         // The interpreter owns its remaining budget while it is running.  Keep
         // that state in a register and publish it only when native execution
         // needs to take over the same scheduling lease.
@@ -3691,6 +3788,9 @@ impl Vm {
         // Macro to refetch frame after Call/Return - only called when frame actually changes
         macro_rules! refetch {
             () => {{
+                if fiber.entry_trap.is_some() {
+                    return ExecResult::TimesliceExpired;
+                }
                 let frames = unsafe { &mut *frames_ptr };
                 frame_ptr = match frames.last_mut() {
                     Some(f) => f as *mut _,
@@ -3789,6 +3889,9 @@ impl Vm {
                     Ok(value) => value,
                     Err(exec::InstructionError::Malformed(message)) => {
                         return ExecResult::JitError(message);
+                    }
+                    Err(exec::InstructionError::Capacity(error)) => {
+                        return ExecResult::ResourceError(error)
                     }
                     Err(exec::InstructionError::Memory(error)) => {
                         return_memory_error!(error);
@@ -3935,6 +4038,7 @@ impl Vm {
                 // recover eligibility checks.
                 if JIT_ENABLED
                     && pc == 0
+                    && fiber.gc_allocation_permit != Some((func_id, pc))
                     && fiber.unwinding.is_none()
                     && can_enter_materialized_frame_at_pc(
                         func,
@@ -3993,6 +4097,26 @@ impl Vm {
             // frame/JIT refetch. The verifier proves every branch target and
             // reachable fallthrough inside that function's code range.
             let inst = unsafe { *code.get_unchecked(fetched_pc) };
+            // Poll before committing the instruction. A scheduler slice grants
+            // exactly one retry at this function/PC; failed allocations never
+            // reach this path and remain sticky IslandMemory failures.
+            let allocation_permitted =
+                fiber.gc_allocation_permit.take() == Some((func_id, fetched_pc));
+            if !allocation_permitted
+                && self.state.gc.should_step()
+                && vo_common_core::execution_effects::opcode_effect_contract(inst.opcode())
+                    .may_alloc
+            {
+                fiber.gc_allocation_permit = Some((func_id, fetched_pc));
+                unsafe {
+                    (*frame_ptr).pc = fetched_pc;
+                }
+                return ExecResult::Transition(RuntimeTransition::new(
+                    RuntimeBoundary::Yield,
+                    ResumePolicy::PreserveFramePc,
+                    GcRootEffect::CurrentFiberDirty,
+                ));
+            }
             pc = fetched_pc + 1;
 
             // Safety: LoadedModule verification rejects invalid opcode bytes
@@ -4867,6 +4991,9 @@ impl Vm {
                                 message
                             ));
                         }
+                        Err(exec::InstructionError::Capacity(error)) => {
+                            return ExecResult::ResourceError(error)
+                        }
                         Err(exec::InstructionError::Memory(error)) => {
                             return_memory_error!(error);
                         }
@@ -5067,6 +5194,9 @@ impl Vm {
                                 RuntimeTrapKind::MakeSlice,
                                 message
                             ));
+                        }
+                        Err(exec::InstructionError::Capacity(error)) => {
+                            return ExecResult::ResourceError(error)
                         }
                         Err(exec::InstructionError::Memory(error)) => {
                             return_memory_error!(error);
@@ -5482,6 +5612,9 @@ impl Vm {
                                 message
                             ));
                         }
+                        Err(exec::InstructionError::Capacity(error)) => {
+                            return ExecResult::ResourceError(error)
+                        }
                         Err(exec::InstructionError::Memory(error)) => {
                             return_memory_error!(error);
                         }
@@ -5643,10 +5776,15 @@ impl Vm {
                         inst.a,
                         inst.b,
                         elem_slots,
-                        Some(elem_layout.to_vec()),
+                        Some(elem_layout),
                         inst.c,
                     ) {
-                        return ExecResult::JitError(msg);
+                        return match msg {
+                            exec::InstructionError::Capacity(error) => {
+                                ExecResult::ResourceError(error)
+                            }
+                            other => ExecResult::JitError(other.to_string()),
+                        };
                     }
                 }
                 Opcode::SelectRecv => {
@@ -5668,11 +5806,16 @@ impl Vm {
                         inst.a,
                         inst.b,
                         elem_slots,
-                        Some(elem_layout.to_vec()),
+                        Some(elem_layout),
                         inst.recv_has_ok(),
                         inst.c,
                     ) {
-                        return ExecResult::JitError(msg);
+                        return match msg {
+                            exec::InstructionError::Capacity(error) => {
+                                ExecResult::ResourceError(error)
+                            }
+                            other => ExecResult::JitError(other.to_string()),
+                        };
                     }
                 }
                 Opcode::SelectExec => {
@@ -5692,6 +5835,9 @@ impl Vm {
                         &mut fiber.select_state,
                         inst.a,
                     ) {
+                        exec::SelectResult::Resource(error) => {
+                            return ExecResult::ResourceError(error)
+                        }
                         exec::SelectResult::Continue => {}
                         exec::SelectResult::Block => {
                             // Waiters have been registered on all channels by exec_select_exec.
@@ -5757,19 +5903,6 @@ impl Vm {
                 // Goroutine - spawn new fiber
                 Opcode::GoStart => {
                     sync_frame_pc!();
-                    if inst.call_shape_is_closure() {
-                        let closure_ref =
-                            stack_get(frame_base, inst.a as usize) as vo_runtime::gc::GcRef;
-                        if closure_ref.is_null() {
-                            handle_panic_result!(runtime_trap(
-                                &mut self.state.gc,
-                                fiber,
-                                stack,
-                                module,
-                                RuntimeTrapKind::NilFuncCall
-                            ));
-                        }
-                    }
                     let callsite_arg_layout =
                         match crate::frame_call::shared_call_arg_layout_for_callsite(
                             func, module, fetched_pc, &inst, "GoStart",

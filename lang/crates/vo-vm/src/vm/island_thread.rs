@@ -142,8 +142,9 @@ fn run_island_loop(
             return Ok(IslandThreadOutcome::Shutdown);
         }
 
-        // 1. Process all pending commands first
-        loop {
+        // Bound command delivery and guest execution independently so neither
+        // a busy producer nor a runnable fiber can starve the other lane.
+        for _ in 0..64 {
             match transport.try_recv() {
                 Ok(Some(envelope)) => {
                     if handle_command(
@@ -165,7 +166,7 @@ fn run_island_loop(
 
         // 2. Run scheduler if there's work
         if vm.scheduler.has_work() {
-            let outcome = match vm.run_scheduled() {
+            let outcome = match vm.run_scheduled_with_budget(1) {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     if let Some(launch_token) = pending_entry_launch.take() {

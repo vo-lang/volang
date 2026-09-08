@@ -118,6 +118,32 @@ fn jit_closure_new_fails_safely_when_header_slot_would_overflow() {
 }
 
 #[test]
+fn jit_interface_accepts_large_canonical_arrays_and_rejects_header_drift() {
+    use crate::objects::{array, interface};
+
+    let mut module = Module::new("large-array-interface".into());
+    module
+        .runtime_types
+        .push(RuntimeType::Basic(ValueKind::Int64));
+    module.runtime_types.push(RuntimeType::Array {
+        len: 65_536,
+        elem: ValueRttid::new(0, ValueKind::Int64),
+    });
+    let array_type = ValueRttid::new(1, ValueKind::Array);
+    assert!(module.slot_layout_for_value_rttid(array_type).is_none());
+    let slot0 = interface::pack_slot0(0, 1, ValueKind::Array);
+    let mut gc = Gc::new();
+    for (len, width, expected) in [(65_536, 8, true), (65_535, 8, false), (65_536, 4, false)] {
+        let array = array::create(&mut gc, ValueMeta::new(0, ValueKind::Int64), width, len);
+        assert_eq!(
+            validate_jit_interface_value(&gc, &module, slot0, array as u64),
+            expected.then_some(array_type),
+            "len={len}, width={width}",
+        );
+    }
+}
+
+#[test]
 fn jit_iface_assert_zero_sized_materialization_writes_no_value_slots() {
     for value_kind in [ValueKind::Array, ValueKind::Struct] {
         let slot0 = crate::objects::interface::pack_slot0(0, 0, value_kind);
@@ -288,6 +314,7 @@ fn vm_jit_iface_assert_layout_abi_061_rejects_width_drift_before_out_write() {
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -298,6 +325,7 @@ fn vm_jit_iface_assert_layout_abi_061_rejects_width_drift_before_out_write() {
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,
@@ -407,6 +435,7 @@ fn vm_jit_iface_assert_flags_width_abi_061_rejects_flags_drift_before_out_write(
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -417,6 +446,7 @@ fn vm_jit_iface_assert_flags_width_abi_061_rejects_flags_drift_before_out_write(
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,
@@ -537,6 +567,7 @@ fn vm_jit_iface_assert_has_ok_does_not_write_ok_before_success_materialization_0
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -547,6 +578,7 @@ fn vm_jit_iface_assert_has_ok_does_not_write_ok_before_success_materialization_0
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,
@@ -754,6 +786,7 @@ fn vm_jit_map_get_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -764,6 +797,7 @@ fn vm_jit_map_get_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,
@@ -869,6 +903,7 @@ fn vm_jit_map_iter_next_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -879,6 +914,7 @@ fn vm_jit_map_iter_next_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,
@@ -1069,6 +1105,7 @@ fn typed_write_barrier_helper_reports_invalid_struct_meta_as_jit_error() {
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -1079,6 +1116,7 @@ fn typed_write_barrier_helper_reports_invalid_struct_meta_as_jit_error() {
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,
@@ -1168,6 +1206,7 @@ fn slice_append_metadata_drift_returns_sentinel_instead_of_panicking() {
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -1178,6 +1217,7 @@ fn slice_append_metadata_drift_returns_sentinel_instead_of_panicking() {
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,
@@ -1349,6 +1389,7 @@ fn dyn_call_ic_061_allocates_exact_zeroed_dense_table() {
     assert_eq!(table.len(), 3);
     assert!(table
         .iter()
+        .flat_map(|cache| &cache.entries)
         .all(|entry| entry.valid == 0 && entry.jit_func_ptr == 0 && entry.dispatch_key == 0));
 }
 
@@ -1391,6 +1432,7 @@ fn jit_missing_callbacks_and_invalid_call_requests_fail_without_publishing() {
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -1401,6 +1443,7 @@ fn jit_missing_callbacks_and_invalid_call_requests_fail_without_publishing() {
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,

@@ -238,7 +238,14 @@ Native JIT 为每个 Island family 设置独立的可执行页上限，默认 64
 
 函数分析另有默认 64MiB retained budget，单个编译任务另有 256MiB work budget。full JIT 与全部 OSR loop 共用一份 `FunctionAnalysis`；VM manager 不保存第二份 loop catalogue，使闲置分析可以按最近访问顺序回收。loop 的 memory-only 下界通过一次嵌套区间扫描计算，不再为每个函数创建线段树。
 
-VM 原生 Fiber 存储由 `VmResourceLimits` 约束：调度 Fiber 数量、单 Fiber stack slots、单 Fiber call frames，以及 family 内 Fiber stack/frame 的聚合字节数都有明确上限。批量 runtime transition 会先预留全部 Fiber identity、栈和 frame 容量，再开始发布 wake、spawn 等可见效果；任一资源失败都会拒绝整批 transition。完成 Fiber 的异常高水位栈和 frame 缓存会在空闲边界释放。
+VM 原生 Fiber 存储由 `VmResourceLimits` 约束：调度 Fiber 数量、单 Fiber stack slots、单 Fiber call frames，以及单个 Island 内 Fiber stack/frame 的聚合字节数都有明确上限。子 Island 继承限制配置并独立记账。批量 runtime transition 会先预留全部 Fiber identity、栈和 frame 容量，再开始发布 wake、spawn 等可见效果；任一资源失败都会拒绝整批 transition。完成 Fiber 的异常高水位栈和 frame 缓存会在空闲边界释放。
+
+Fiber 的辅助存储另由 `max_total_fiber_auxiliary_bytes` 限制，默认 256MiB，通过 `fiber_auxiliary_storage_bytes()` 观察当前占用。defer、unwind、closure replay、select、map scratch 和原生调用恢复缓冲区共用容量记账；容量增长先检查预算和宿主分配结果，缓冲区移动保留原记账，释放容量时归还预算。defer 参数布局引用已加载模块的不可变元数据；select 描述、等待列表和接收快照共享所有权，避免事务回滚复制整个消息。单项辅助缓存超过 64KiB 时，在 Fiber 退役后释放。队列等待者、transport、provider 与 JIT 代码仍属于各自的资源域。
+
+调度器在每个执行量子投递有限批次的就绪 I/O 和 Island 命令。子 Island 通过 `run_scheduled_with_budget` 返回外层 transport 循环；预算为零不执行 guest，预算耗尽时根据真实就绪、阻塞和完成状态返回结果。Wasm 异步执行器通过 `run_with_budget` 启动、通过有预算恢复入口继续执行，并在可运行 Fiber 持续存在时让 JavaScript 事件循环处理 timer 和 Fetch。解释器在有分配效果的指令之前检查 GC 请求，使用精确的函数与 PC 记录一次恢复许可，避免重放已经提交的指令效果。
+
+全局根槽在模块加载时预计算，整数槽不占用根扫描预算。自动收集发现尚未完成的根遍历时，先用多个有界调度轮次完成该遍历，再继续改变根集合；每轮仍检查中断和宿主执行预算。原生 GC 回调同时限制 native 根验证与整个 VM/collector 的累计工作量。总预算耗尽时，生成代码发布可恢复的 VM 帧，结束机器栈游标的生命周期，随后由调度器继续收集。
+
 
 ## 宿主 API
 

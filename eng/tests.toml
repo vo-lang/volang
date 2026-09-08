@@ -12,6 +12,9 @@ targets = ["vm", "jit", "osr", "gc-vm", "gc-osr"]
 [matrices.native]
 targets = ["vm", "jit", "osr"]
 
+[matrices.jit-optimizer-contract]
+targets = ["vm", "jit", "osr", "nostd", "wasm", "jit-opt", "gc-jit-opt", "gc-osr"]
+
 [matrices.gc]
 targets = ["gc-vm", "gc-jit"]
 
@@ -80,6 +83,20 @@ kind = "native"
 backend = "jit"
 env = { VOWORK = "off", VO_JIT_CALL_THRESHOLD = "1" }
 default_timeout_sec = 60
+
+[[target]]
+name = "jit-opt"
+kind = "native"
+backend = "jit"
+env = { VOWORK = "off", VO_JIT_CALL_THRESHOLD = "1", VO_JIT_OPTIMIZING_THRESHOLD = "1", VO_JIT_LOOP_THRESHOLD = "1000000" }
+default_timeout_sec = 60
+
+[[target]]
+name = "gc-jit-opt"
+kind = "native"
+backend = "jit"
+env = { VOWORK = "off", VO_GC_STRESS = "1", VO_GC_VERIFY = "1", VO_JIT_CALL_THRESHOLD = "1", VO_JIT_OPTIMIZING_THRESHOLD = "1", VO_JIT_LOOP_THRESHOLD = "1000000" }
+default_timeout_sec = 90
 
 [[target]]
 name = "osr"

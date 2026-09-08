@@ -320,8 +320,9 @@ impl Scheduler {
     }
 
     pub(crate) fn with_resource_limits(resource_limits: VmResourceLimits) -> Self {
-        let fiber_storage_budget = Arc::new(FiberStorageBudget::new(
+        let fiber_storage_budget = Arc::new(FiberStorageBudget::with_limits(
             resource_limits.max_total_fiber_storage_bytes,
+            resource_limits.max_total_fiber_auxiliary_bytes,
         ));
         let mut execution_placeholder = Fiber::new_with_resources(
             DETACHED_FIBER_SENTINEL,
@@ -354,6 +355,10 @@ impl Scheduler {
 
     pub(crate) fn fiber_storage_bytes(&self) -> usize {
         self.fiber_storage_budget.used_bytes()
+    }
+
+    pub(crate) fn fiber_auxiliary_storage_bytes(&self) -> usize {
+        self.fiber_storage_budget.auxiliary_used_bytes()
     }
 
     pub(crate) fn goroutine_snapshot(&self) -> GoroutineSnapshot {
@@ -412,15 +417,9 @@ impl Scheduler {
         &mut self,
         additional: usize,
     ) -> Result<(), SchedulerIdentityExhausted> {
-        let reusable_slots = self
-            .free_slots
-            .iter()
-            .filter(|&&slot| {
-                self.fibers
-                    .get(slot as usize)
-                    .is_some_and(|fiber| fiber.generation < u32::MAX)
-            })
-            .count();
+        // Retired generations are excluded when a slot is released. Admission
+        // must stay O(1) even after a large historical concurrency peak.
+        let reusable_slots = self.free_slots.len();
         let needed_new = additional
             .saturating_sub(reusable_slots)
             .saturating_sub(self.reserved_fibers.len());
@@ -563,7 +562,9 @@ impl Scheduler {
         if let Err(error) = spawn.initialize(&mut self.fibers[id.0 as usize]) {
             let fiber = &mut self.fibers[id.0 as usize];
             fiber.state = FiberState::Dead;
-            self.free_slots.push(id.0);
+            if fiber.generation < u32::MAX {
+                self.free_slots.push(id.0);
+            }
             return Err(SchedulerIdentityExhausted::FiberCapacity(error));
         }
         self.ready_queue.push_back(id);
@@ -774,6 +775,7 @@ impl Scheduler {
                 .panic_source_loc
                 .take()
                 .or_else(|| fiber.current_frame().map(|f| (f.func_id, f.pc as u32)));
+            fiber.retire_auxiliary_state();
             let oversized = fiber.has_oversized_storage();
             fiber.state = FiberState::Dead;
             if fiber.generation != u32::MAX {
@@ -1108,7 +1110,7 @@ impl Scheduler {
     /// consuming registrations and waking fibers.
     #[cfg(feature = "std")]
     pub(crate) fn poll_io_ready_tokens(&mut self, io: &mut IoRuntime) -> Vec<IoToken> {
-        io.poll()
+        io.poll_bounded(64)
     }
 
     #[cfg(feature = "std")]

@@ -440,7 +440,8 @@ mod tests {
         ctx.ctx.jit_bp = caller_bp as u32;
         ctx.ctx.fiber_sp = before_sp as u32;
         ctx.ctx.call_func_id = 1;
-        ctx.ctx.call_arg_start = callee_bp;
+        ctx.ctx.call_arg_start = 0;
+        ctx.ctx.call_callee_bp = callee_bp;
         ctx.ctx.call_resume_pc = callee_bp;
         ctx.ctx.call_ret_reg = 0;
         ctx.ctx.call_kind = JitContext::CALL_KIND_PREPARED;
@@ -540,8 +541,8 @@ fn handle_prepared_call(
     target: CallTarget,
 ) -> JitBridgeTransition {
     let interpreter_reason = callee_interpreter_reason(vm, &target);
-    let callee_bp = ctx.call_resume_pc() as usize;
-    let caller_resume_pc = ctx.call_arg_start();
+    let callee_bp = ctx.ctx.call_callee_bp as usize;
+    let caller_resume_pc = ctx.call_resume_pc();
     match setup_prepared_call(
         fiber,
         module,

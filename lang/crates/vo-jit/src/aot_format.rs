@@ -17,7 +17,7 @@ const MAX_ROOTS_PER_STACK_MAP: usize = 1_000_000;
 const MAX_DEOPT_STATES_PER_FUNCTION: usize = 1_000_000;
 const MAX_DEOPT_VALUES_PER_STATE: usize = 1_000_000;
 
-pub const NATIVE_AOT_ABI_VERSION: u32 = 1;
+pub const NATIVE_AOT_ABI_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct NativeAotMetadata {

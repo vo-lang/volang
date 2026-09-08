@@ -226,6 +226,7 @@ pub(crate) fn range_var_info(
                     };
 
                     // For HeapBoxed with deferred alloc, we need a temp slot to receive the value
+                    sc.func.bind_local_object(ident.symbol, Some(obj_key))?;
                     let slot = if deferred_alloc.is_some() {
                         let slot_types = sc.info.type_slot_types(lhs_type);
                         sc.func.alloc_slots(&slot_types)

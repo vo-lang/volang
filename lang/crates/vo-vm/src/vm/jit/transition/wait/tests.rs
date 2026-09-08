@@ -113,7 +113,7 @@ fn vm_jit_waitqueue_materialize_006_cleans_select_waiters_on_failure() {
             .unwrap(),
     );
     fiber.select_state = Some(SelectState {
-        cases: Vec::new(),
+        cases: Default::default(),
         expected_cases: 0,
         has_default: false,
         woken_index: None,
@@ -123,7 +123,8 @@ fn vm_jit_waitqueue_materialize_006_cleans_select_waiters_on_failure() {
             case_index: 0,
             queue: ch,
             kind: SelectCaseKind::Recv,
-        }],
+        }]
+        .into(),
     });
     let before_wait_queue_side_exits = side_exit_count(&vm, JitSideExitReason::WaitQueue);
     let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit ctx");

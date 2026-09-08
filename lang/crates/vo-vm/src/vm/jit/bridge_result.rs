@@ -172,6 +172,7 @@ pub(super) fn set_stack_overflow_panic(vm: &mut Vm, fiber: &mut Fiber, err: Fibe
         &mut vm.state.gc,
         fiber,
         RuntimeTrapKind::StackOverflow,
+        vm.module.as_ref().expect("loaded JIT module").module(),
         &msg,
     );
 }

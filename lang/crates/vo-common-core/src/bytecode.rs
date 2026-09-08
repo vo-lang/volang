@@ -1408,6 +1408,17 @@ pub struct FunctionDef {
 }
 
 impl FunctionDef {
+    /// Heap cells backing named results remain observable by panic/recover
+    /// until this frame transfers its return state to the unwinder.
+    pub fn unwind_root_slots(&self) -> impl Iterator<Item = u16> + '_ {
+        let count = if self.has_defer {
+            self.heap_ret_gcref_count
+        } else {
+            0
+        };
+        (0..count).map(|offset| self.heap_ret_gcref_start + offset)
+    }
+
     /// Scan bytecode to compute (has_calls, has_call_extern).
     /// Used during construction and deserialization to avoid duplicating this logic.
     pub fn compute_call_flags(code: &[Instruction]) -> (bool, bool) {
@@ -2146,6 +2157,15 @@ impl RuntimeTypeFacts {
     }
 }
 
+/// A precise root slot in the immutable global storage layout.
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalRootSlot {
+    pub definition: usize,
+    pub slot: usize,
+    pub absolute_slot: usize,
+    pub slot_type: SlotType,
+}
+
 /// A verified immutable module image shared by one VM family.
 ///
 /// Derived runtime facts live here so they cannot outlive or drift from the
@@ -2158,21 +2178,53 @@ pub struct LoadedModule {
     element_layout_maps: crate::execution_layouts::ElementLayoutMaps,
     pointer_layout_maps: crate::execution_layouts::PointerLayoutMaps,
     frame_root_maps: crate::frame_roots::FrameRootMaps,
+    global_root_slots: Vec<GlobalRootSlot>,
     exact_base_maps: crate::exact_bases::ExactBaseMaps,
 }
 
 impl LoadedModule {
     pub(crate) fn new(
-        module: Module,
-        runtime_type_facts: RuntimeTypeFacts,
+        mut module: Module,
+        mut runtime_type_facts: RuntimeTypeFacts,
         frame_root_maps: crate::frame_roots::FrameRootMaps,
         exact_base_maps: crate::exact_bases::ExactBaseMaps,
     ) -> Self {
+        // Runtime diagnostics can produce a string even in a minimal image
+        // with no source-level string values. Append its intrinsic descriptor;
+        // every existing runtime type identity remains unchanged.
+        if module.basic_type_rttid(ValueKind::String).is_none() {
+            module
+                .runtime_types
+                .push(RuntimeType::Basic(ValueKind::String));
+            runtime_type_facts.entries.push(RuntimeTypeFact {
+                kind: ValueKind::String,
+                slot_count: 1,
+                scan: RuntimeTypeScan::GcBase,
+            });
+        }
         debug_assert_eq!(runtime_type_facts.len(), module.runtime_types.len());
         let dynamic_callsite_count = module.dynamic_callsite_count();
         let element_layout_maps = crate::execution_layouts::ElementLayoutMaps::build(&module);
         let pointer_layout_maps =
             crate::execution_layouts::PointerLayoutMaps::build(&module, &exact_base_maps);
+        let mut global_root_slots = Vec::new();
+        let mut base = 0;
+        for (definition, global) in module.globals.iter().enumerate() {
+            for (slot, &slot_type) in global.slot_types.iter().enumerate() {
+                if matches!(
+                    slot_type,
+                    SlotType::GcBase | SlotType::GcRef | SlotType::Interface1
+                ) {
+                    global_root_slots.push(GlobalRootSlot {
+                        definition,
+                        slot,
+                        absolute_slot: base + slot,
+                        slot_type,
+                    });
+                }
+            }
+            base += global.slots as usize;
+        }
         Self {
             module,
             runtime_type_facts,
@@ -2180,6 +2232,7 @@ impl LoadedModule {
             element_layout_maps,
             pointer_layout_maps,
             frame_root_maps,
+            global_root_slots,
             exact_base_maps,
         }
     }
@@ -2195,6 +2248,8 @@ impl LoadedModule {
     }
 
     #[inline]
+    /// Number of module-global inline-cache identities carried by dynamic
+    /// call instructions. Verified modules encode these identities densely.
     pub fn dynamic_callsite_count(&self) -> usize {
         self.dynamic_callsite_count
     }
@@ -2207,6 +2262,11 @@ impl LoadedModule {
     #[inline]
     pub fn pointer_layout_maps(&self) -> &crate::execution_layouts::PointerLayoutMaps {
         &self.pointer_layout_maps
+    }
+
+    #[inline]
+    pub fn global_root_slots(&self) -> &[GlobalRootSlot] {
+        &self.global_root_slots
     }
 
     #[inline]
@@ -2462,6 +2522,14 @@ impl Module {
                 None
             }
         }
+    }
+
+    /// Find the module-local identity of an intrinsic scalar type.
+    pub fn basic_type_rttid(&self, kind: ValueKind) -> Option<u32> {
+        self.runtime_types
+            .iter()
+            .position(|ty| matches!(ty, RuntimeType::Basic(k) if *k == kind))
+            .and_then(|index| u32::try_from(index).ok())
     }
 
     /// Number of module-global inline-cache identities carried by dynamic

@@ -158,24 +158,19 @@ pub extern "C" fn jit_call_extern(
     let ret_start = arg_slots;
     let frame_slots = arg_slots_usize + ret_slots_usize;
     let mut stack_buffer = [0_u64; EXTERN_STACK_SLOTS];
-    let mut heap_buffer = core::mem::take(&mut fiber.jit_extern_scratch);
+    let empty = fiber.jit_extern_scratch.empty_like();
+    let mut heap_buffer = core::mem::replace(&mut fiber.jit_extern_scratch, empty);
     let buffer: &mut [u64] = if frame_slots <= EXTERN_STACK_SLOTS {
         &mut stack_buffer[..frame_slots]
     } else {
-        if frame_slots > heap_buffer.len()
-            && heap_buffer
-                .try_reserve_exact(frame_slots - heap_buffer.len())
-                .is_err()
+        if let Err(error) =
+            heap_buffer.try_reserve_exact(frame_slots.saturating_sub(heap_buffer.len()))
         {
             fiber.jit_extern_scratch = heap_buffer;
-            return vo_runtime::jit_api::set_jit_infra_error_with_message(
-                ctx,
-                vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
-                extern_id as u64,
-                "JIT extern scratch allocation failed",
-            );
+            fiber.pending_resource_error = Some(error);
+            return JitResult::RuntimeTransition;
         }
-        heap_buffer.resize(frame_slots, 0);
+        heap_buffer.resize_reserved(frame_slots, 0);
         heap_buffer[..frame_slots].fill(0);
         &mut heap_buffer[..frame_slots]
     };
@@ -187,8 +182,15 @@ pub extern "C" fn jit_call_extern(
 
     // Take closure replay state from fiber (populated by VM suspend/replay on re-entry)
     let replay_frame_depth = jit_extern_replay_frame_depth(fiber, ctx_ref);
-    let (closure_replay_results, closure_replay_panic_message) =
-        fiber.closure_replay.snapshot_for_extern(replay_frame_depth);
+    let (closure_replay_results, closure_replay_panic_message, _replay_storage) =
+        match fiber.closure_replay.snapshot_for_extern(replay_frame_depth) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                fiber.pending_resource_error = Some(error);
+                fiber.jit_extern_scratch = heap_buffer;
+                return JitResult::JitError;
+            }
+        };
 
     let invoke = ExternInvoke {
         extern_id,
@@ -286,16 +288,14 @@ pub extern "C" fn jit_call_extern(
             JitResult::ExternSuspend
         }
         ExternBoundary::Panic(msg) => {
-            let msg_str = vo_runtime::objects::string::new_from_string(gc, msg);
-            let slot0 =
-                vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
+            let value = vo_runtime::objects::interface::diagnostic_string(gc, module, msg);
             unsafe {
                 *ctx_ref.panic_flag = true;
                 *ctx_ref.is_user_panic = true;
                 ctx_ref.runtime_trap_kind = JitRuntimeTrapKind::None as u8;
                 ctx_ref.runtime_trap_pc = u32::MAX;
-                (*ctx_ref.panic_msg).slot0 = slot0;
-                (*ctx_ref.panic_msg).slot1 = msg_str as u64;
+                (*ctx_ref.panic_msg).slot0 = value.slot0;
+                (*ctx_ref.panic_msg).slot1 = value.slot1;
             }
             JitResult::Panic
         }

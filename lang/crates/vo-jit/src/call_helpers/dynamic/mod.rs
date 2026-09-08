@@ -18,9 +18,9 @@ mod scratch;
 
 pub use closure::emit_call_closure;
 use ic::{
-    branch_on_dynamic_ic_hit, dynamic_ic_entry, emit_dynamic_miss_dispatch,
+    dynamic_ic_entry, dynamic_ic_generation_matches, emit_dynamic_miss_dispatch,
     emit_ic_hit_call_and_result, load_cached_dispatch_key, load_hit_fields, load_jit_ptr,
-    DynamicIcHitFields, DynamicMissParams, IcHitParams, IcUpdateParams,
+    DynamicIcHitFields, DynamicMissParams, IcHitParams,
 };
 pub use iface::emit_call_iface;
 use scratch::{
@@ -123,31 +123,61 @@ impl DynamicCallLowering {
             .expect("dynamic call lowering must initialize IC state")
     }
 
-    fn branch_on_ic_hit<'a, E: IrEmitter<'a>>(
-        &self,
-        emitter: &mut E,
-        key_match: Value,
-        zero: Value,
-    ) -> (Value, Block, Block, Block) {
-        let ic_jit_ptr = load_jit_ptr(emitter, self.ic().entry);
-        let (ic_hit_block, ic_miss_block, merge_block) =
-            branch_on_dynamic_ic_hit(emitter, key_match, ic_jit_ptr, self.ic().entry, zero);
-        (ic_jit_ptr, ic_hit_block, ic_miss_block, merge_block)
-    }
-
     fn branch_on_ic_key_hit<'a, E: IrEmitter<'a>>(
         &self,
         emitter: &mut E,
         dispatch_key: Value,
         zero: Value,
-    ) -> (Value, Block, Block, Block) {
-        let cached_dispatch_key = load_cached_dispatch_key(emitter, self.ic().entry);
-        let key_match = dynamic_ic_match(emitter.builder(), dispatch_key, cached_dispatch_key);
-        self.branch_on_ic_hit(emitter, key_match, zero)
+    ) -> (Value, Value, Block, Block, Block) {
+        use vo_runtime::{DynCallIC, DynCallICEntry};
+        let hit = emitter.builder().create_block();
+        emitter.builder().append_block_param(hit, types::I64);
+        emitter.builder().append_block_param(hit, types::I64);
+        let miss = crate::compile_common::cold_block(emitter.builder());
+        let merge = emitter.builder().create_block();
+        for way in 0..DynCallIC::WAYS {
+            let entry = emitter
+                .builder()
+                .ins()
+                .iadd_imm_u(self.ic().entry, (way * DynCallICEntry::SIZE) as i64);
+            let key = load_cached_dispatch_key(emitter, entry);
+            let matched = dynamic_ic_match(emitter.builder(), dispatch_key, key);
+            let ptr = load_jit_ptr(emitter, entry);
+            let available = emitter.builder().ins().icmp(IntCC::NotEqual, ptr, zero);
+            let matched = emitter.builder().ins().band(matched, available);
+            let check_generation = emitter.builder().create_block();
+            let next = if way + 1 == DynCallIC::WAYS {
+                miss
+            } else {
+                emitter.builder().create_block()
+            };
+            emitter
+                .builder()
+                .ins()
+                .brif(matched, check_generation, &[], next, &[]);
+            emitter.builder().switch_to_block(check_generation);
+            emitter.builder().seal_block(check_generation);
+            let current = dynamic_ic_generation_matches(emitter, entry);
+            emitter
+                .builder()
+                .ins()
+                .brif(current, hit, &[entry.into(), ptr.into()], miss, &[]);
+            if next != miss {
+                emitter.builder().switch_to_block(next);
+                emitter.builder().seal_block(next);
+            }
+        }
+        let entry = emitter.builder().block_params(hit)[0];
+        let ptr = emitter.builder().block_params(hit)[1];
+        (ptr, entry, hit, miss, merge)
     }
 
-    fn load_hit_fields<'a, E: IrEmitter<'a>>(&self, emitter: &mut E) -> DynamicIcHitFields {
-        load_hit_fields(emitter, self.ic().entry)
+    fn load_hit_fields<'a, E: IrEmitter<'a>>(
+        &self,
+        emitter: &mut E,
+        entry: Value,
+    ) -> DynamicIcHitFields {
+        load_hit_fields(emitter, entry)
     }
 
     fn emit_hit_call<'a, E: IrEmitter<'a>>(
@@ -238,15 +268,10 @@ impl DynamicCallLowering {
         emitter: &mut E,
         miss: DynamicCallMiss,
         merge_block: Block,
-        dispatch_key: Option<Value>,
     ) -> Result<(), crate::JitError> {
         emit_dynamic_miss_dispatch(
             emitter,
             DynamicMissParams {
-                ic_update: dispatch_key.map(|dispatch_key| IcUpdateParams {
-                    entry: self.ic().entry,
-                    dispatch_key,
-                }),
                 ret_ptr: self.ret_ptr,
                 out_slot: miss.out_slot,
                 ret_slot: self.ret_slot,

@@ -147,6 +147,14 @@ module. The artifact carries no serialized Volang bytecode and imports no VM
 dispatch loop. A future bytecode opcode without a sound lowering fails the AOT
 build with the function and bytecode PC.
 
+Runtime type metadata records an array's logical slot count independently of
+the bytecode frame's 16-bit slot limit. Arrays beyond that limit use canonical
+heap storage and allocation descriptors for their elements; their type records
+omit descriptors for flattening the whole array into a frame or sequence element.
+The host validates the logical count against the array length and element type.
+Ordinary value types still require complete flat allocation descriptors, and
+runtime storage widths remain bounded by wasm32.
+
 The backend computes a closed-world capability summary for every reachable
 function: suspension, allocation, unwind, host effects, managed roots, and
 direct-local support. The fixed-point result selects one of three calling
@@ -405,3 +413,10 @@ channel wake/replay, child-island initialization, island cloning/isolation,
 deep tracing, GC layout, formatting/scanning, VFS, Fetch networking, regexp,
 and binary trees, then executes the image through the maintained JavaScript
 host. The complete language job also runs the independent `wasm-aot` matrix.
+
+Native AOT ABI version 2 includes the four-entry dynamic-call cache, the
+optimizing-entry profile marker, the native stack-byte guard, and distinct
+prepared-call continuation/frame fields. Producers, runtime metadata decoding, and the
+native artifact cache key share `vo_jit::NATIVE_AOT_ABI_VERSION`; older native
+images must be rebuilt. Literal strings use the runtime-owned immutable module
+constant pool through `vo_str_new_const`.

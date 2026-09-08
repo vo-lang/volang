@@ -25,6 +25,19 @@ impl Checker {
     /// Returns true if the call is valid, with *x holding the result.
     /// x.expr_id is not set. If the call is invalid, returns false and *x is undefined.
     pub(crate) fn builtin(&mut self, x: &mut Operand, e: &Expr, id: Builtin) -> bool {
+        // Isolate argument effects for len/cap, restoring the enclosing context
+        // on every normal and diagnostic return path.
+        if matches!(id, Builtin::Len | Builtin::Cap) {
+            let previous = std::mem::replace(&mut self.octx.has_call_or_recv, false);
+            let result = self.builtin_impl(x, e, id);
+            self.octx.has_call_or_recv = previous;
+            result
+        } else {
+            self.builtin_impl(x, e, id)
+        }
+    }
+
+    fn builtin_impl(&mut self, x: &mut Operand, e: &Expr, id: Builtin) -> bool {
         let AstExprKind::Call(call) = &e.kind else {
             unreachable!()
         };
@@ -40,17 +53,6 @@ impl Checker {
             );
             self.use_exprs(&call.args);
             return false;
-        }
-
-        // For len(x) and cap(x) we need to know if x contains any function calls or
-        // receive operations.
-        let hcor_backup = if id == Builtin::Len || id == Builtin::Cap {
-            Some(self.octx.has_call_or_recv)
-        } else {
-            None
-        };
-        if hcor_backup.is_some() {
-            self.octx.has_call_or_recv = false;
         }
 
         let mut nargs = call.args.len();
@@ -75,18 +77,12 @@ impl Checker {
                 // Use unpack to handle multi-value returns (like goscript)
                 let result = self.unpack(&call.args, binfo.arg_count, false, binfo.variadic);
                 if matches!(result, UnpackResult::Error) {
-                    if let Some(previous) = hcor_backup {
-                        self.octx.has_call_or_recv = previous;
-                    }
                     return false;
                 }
                 let (count, ord) = result.rhs_count();
                 nargs = count;
                 if ord != Ordering::Equal {
                     self.report_arg_mismatch(call_span, binfo.name, binfo.arg_count, count);
-                    if let Some(previous) = hcor_backup {
-                        self.octx.has_call_or_recv = previous;
-                    }
                     return false;
                 }
                 // Evaluate first argument into x
@@ -96,9 +92,6 @@ impl Checker {
                     | UnpackResult::Single(_, _) => {
                         result.get(self, x, 0);
                         if x.invalid() {
-                            if let Some(previous) = hcor_backup {
-                                self.octx.has_call_or_recv = previous;
-                            }
                             return false;
                         }
                     }
@@ -120,7 +113,7 @@ impl Checker {
 
         let result = match id {
             Builtin::Append => {
-                let ok = self.builtin_append(x, call, call_span);
+                let ok = self.builtin_append(x, call, unpack_result.as_ref().unwrap(), call_span);
                 if ok {
                     // append(s S, x ...T) S
                     let slice = x.typ.unwrap();
@@ -138,13 +131,10 @@ impl Checker {
                 let arg_type = x.typ.unwrap_or(self.invalid_type());
                 let arg_has_call_or_recv = self.octx.has_call_or_recv;
                 let result = self.builtin_len_cap(x, id, arg_has_call_or_recv);
-                self.octx.has_call_or_recv = hcor_backup.unwrap();
                 if result {
-                    // len(x) int / cap(x) int - only record for non-constant results
-                    if !matches!(x.mode, OperandMode::Constant(_)) {
-                        let ty = typ::underlying_type(arg_type, self.objs());
-                        record_sig(self, x.typ, &[ty], false);
-                    }
+                    // Constant folding preserves the complete logical call signature.
+                    let ty = typ::underlying_type(arg_type, self.objs());
+                    record_sig(self, x.typ, &[ty], false);
                 }
                 result
             }
@@ -160,7 +150,8 @@ impl Checker {
             }
             Builtin::Copy => {
                 let dst_type = x.typ.unwrap_or(self.invalid_type());
-                let (ok, src_type) = self.builtin_copy(x, call, call_span);
+                let (ok, src_type) =
+                    self.builtin_copy(x, unpack_result.as_ref().unwrap(), call_span);
                 if ok {
                     // copy(dst, src []T) int
                     record_sig(
@@ -174,7 +165,7 @@ impl Checker {
             }
             Builtin::Delete => {
                 let map_type = x.typ.unwrap_or(self.invalid_type());
-                let ok = self.builtin_delete(x, call, call_span);
+                let ok = self.builtin_delete(x, unpack_result.as_ref().unwrap(), call_span);
                 if ok {
                     // delete(m, k)
                     if let Some(detail) = self
@@ -241,7 +232,7 @@ impl Checker {
                 // assert(pred, msg...) - Vo extension
                 let re = UnpackedResultLeftovers::new(unpack_result.as_ref().unwrap(), None);
                 let (ok, params) = self.builtin_assert(x, &re, nargs, call_span);
-                if ok && !params.is_empty() {
+                if ok {
                     record_sig(self, None, &params, false);
                 }
                 ok
@@ -251,7 +242,13 @@ impl Checker {
     }
 
     /// append(s S, x ...T) S
-    fn builtin_append(&mut self, x: &mut Operand, call: &CallExpr, call_span: Span) -> bool {
+    fn builtin_append(
+        &mut self,
+        x: &mut Operand,
+        call: &CallExpr,
+        args: &UnpackResult,
+        call_span: Span,
+    ) -> bool {
         let slice = match x.typ {
             Some(t) => t,
             None => return false,
@@ -266,57 +263,33 @@ impl Checker {
             }
         };
 
-        let nargs = call.args.len();
-        if call.spread && nargs < 2 {
+        let (nargs, _) = args.rhs_count();
+        if call.spread && (nargs != 2 || call.args.len() != 2) {
             self.error_code(TypeError::AppendInvalidArg, call_span);
             return false;
         }
-
-        // Special case: append([]byte, string...)
-        if nargs == 2 && call.spread {
-            let slice_of_bytes = self.universe().slice_of_bytes();
-            let mut reason = String::new();
-            if self.assignable_to(x, slice_of_bytes, &mut reason) {
-                let mut y = Operand::new();
-                self.multi_expr(&mut y, &call.args[1]);
-                if y.invalid() {
-                    return false;
-                }
-                if let Some(yt) = y.typ {
-                    if typ::is_string(yt, self.objs()) {
-                        x.mode = OperandMode::Value;
-                        x.typ = Some(slice);
-                        return true;
-                    }
-                }
-            }
-        }
-
-        // General case: check remaining arguments
         for i in 1..nargs {
             let mut arg = Operand::new();
-            self.multi_expr(&mut arg, &call.args[i]);
+            args.get(self, &mut arg, i);
             if arg.invalid() {
                 return false;
             }
-
-            // For variadic, each arg must be assignable to element type
-            // (or if spread, the arg must be a slice of element type)
-            if call.spread && i == nargs - 1 {
-                // Last arg with spread must be a slice
-                let _arg_type = arg.typ.unwrap_or(self.invalid_type());
-                let tslice = self.new_t_slice(telem);
-                let mut reason = String::new();
-                if !self.assignable_to(&arg, tslice, &mut reason) {
-                    self.error_code(TypeError::AppendInvalidArg, call.args[i].span);
-                    return false;
-                }
+            // append([]byte, string...) is the only non-slice spread.
+            if call.spread
+                && telem == self.universe().byte()
+                && arg.typ.is_some_and(|t| typ::is_string(t, self.objs()))
+            {
+                self.convert_untyped(&mut arg, self.basic_type(BasicType::Str));
             } else {
-                let mut reason = String::new();
-                if !self.assignable_to(&arg, telem, &mut reason) {
-                    self.error_code(TypeError::AppendInvalidArg, call.args[i].span);
-                    return false;
-                }
+                let target = if call.spread {
+                    self.new_t_slice(telem)
+                } else {
+                    telem
+                };
+                self.assignment(&mut arg, Some(target), "append argument");
+            }
+            if arg.invalid() {
+                return false;
             }
         }
 
@@ -331,7 +304,7 @@ impl Checker {
 
         let mode = match &self.otype(ty) {
             Type::Basic(detail) => {
-                if detail.info() == BasicInfo::IsString {
+                if id == Builtin::Len && detail.info() == BasicInfo::IsString {
                     if let OperandMode::Constant(v) = &x.mode {
                         OperandMode::Constant(crate::constant::make_uint64(
                             v.str_as_string().len() as u64
@@ -446,7 +419,7 @@ impl Checker {
     fn builtin_copy(
         &mut self,
         x: &mut Operand,
-        call: &CallExpr,
+        args: &UnpackResult,
         call_span: Span,
     ) -> (bool, TypeKey) {
         let invalid_type = self.invalid_type();
@@ -459,7 +432,7 @@ impl Checker {
 
         // Evaluate src
         let mut y = Operand::new();
-        self.multi_expr(&mut y, &call.args[1]);
+        args.get(self, &mut y, 1);
         if y.invalid() {
             return (false, invalid_type);
         }
@@ -490,7 +463,7 @@ impl Checker {
     }
 
     /// delete(m, k)
-    fn builtin_delete(&mut self, x: &mut Operand, call: &CallExpr, call_span: Span) -> bool {
+    fn builtin_delete(&mut self, x: &mut Operand, args: &UnpackResult, call_span: Span) -> bool {
         let mtype = x.typ.unwrap();
         match self.otype(mtype).underlying_val(self.objs()) {
             Type::Map(detail) => {
@@ -498,14 +471,13 @@ impl Checker {
 
                 // Evaluate key argument
                 let mut k = Operand::new();
-                self.multi_expr(&mut k, &call.args[1]);
+                args.get(self, &mut k, 1);
                 if k.invalid() {
                     return false;
                 }
 
-                let mut reason = String::new();
-                if !self.assignable_to(&k, key, &mut reason) {
-                    self.error_code(TypeError::DeleteKeyMismatch, call.args[1].span);
+                self.assignment(&mut k, Some(key), "delete key");
+                if k.invalid() {
                     return false;
                 }
 
@@ -551,47 +523,33 @@ impl Checker {
             return false;
         }
 
-        // Validate size arguments
-        for i in 1..nargs {
-            if self.index(&call.args[i], None).is_err() {
-                // Error already reported by index
+        // All constant dimensions must fit the language int. Keep their exact
+        // unsigned values for comparisons; a failed narrowing is an error.
+        let mut sizes = Vec::with_capacity(nargs - 1);
+        for arg in &call.args[1..] {
+            match self.slice_bound(arg, Some(super::MAX_LANGUAGE_LEN)) {
+                Ok(size) => sizes.push(size),
+                Err(()) => return false,
             }
         }
-
-        if matches!(self.otype(arg0t).underlying_val(self.objs()), Type::Port(_)) {
-            let mut cap_op = Operand::new();
-            self.expr(&mut cap_op, &call.args[1]);
-            if let OperandMode::Constant(cap_val) = &cap_op.mode {
-                let (cap, cap_exact) = cap_val.int_as_i64();
-                if cap_exact && cap <= 0 {
-                    self.error_code_msg(
-                        TypeError::InvalidOp,
-                        call.args[1].span,
-                        "port capacity must be positive",
-                    );
-                    return false;
-                }
-            }
+        if matches!(self.otype(arg0t).underlying_val(self.objs()), Type::Port(_))
+            && sizes[0] == Some(0)
+        {
+            self.error_code_msg(
+                TypeError::InvalidOp,
+                call.args[1].span,
+                "port capacity must be positive",
+            );
+            return false;
         }
-
-        // Check length <= capacity
-        if nargs == 3 {
-            let mut len_op = Operand::new();
-            let mut cap_op = Operand::new();
-            self.expr(&mut len_op, &call.args[1]);
-            self.expr(&mut cap_op, &call.args[2]);
-            if let (OperandMode::Constant(len_val), OperandMode::Constant(cap_val)) =
-                (&len_op.mode, &cap_op.mode)
-            {
-                let (len, len_exact) = len_val.int_as_i64();
-                let (cap, cap_exact) = cap_val.int_as_i64();
-                if len_exact && cap_exact && len > cap {
-                    self.error_code_msg(
-                        TypeError::MakeLenGtCap,
-                        call_span,
-                        format!("length ({}) larger than capacity ({})", len, cap),
-                    );
-                }
+        if let [Some(len), Some(cap)] = sizes.as_slice() {
+            if len > cap {
+                self.error_code_msg(
+                    TypeError::MakeLenGtCap,
+                    call_span,
+                    format!("length ({len}) larger than capacity ({cap})"),
+                );
+                return false;
             }
         }
 
@@ -644,7 +602,7 @@ impl Checker {
     }
 
     /// print(x...) / println(x...)
-    /// Returns (ok, arg_types) where arg_types are the converted argument types.
+    /// Returns (ok, parameter_types) for the complete logical argument list.
     /// Uses UnpackResult to handle multi-value function calls (consistent with goscript).
     fn builtin_print(
         &mut self,
@@ -670,10 +628,9 @@ impl Checker {
             if x.invalid() {
                 return (false, vec![]);
             }
-            // Collect the converted (typed) argument type
-            if let Some(t) = x.typ {
-                params.push(t);
-            }
+            // The checked source retains its concrete type; the logical
+            // parameter uses the runtime interface ABI, including arrays.
+            params.push(self.universe().any_type());
         }
 
         x.mode = OperandMode::NoValue;
@@ -688,7 +645,7 @@ impl Checker {
     }
 
     /// assert(pred bool, msg...) - Vo extension
-    /// Returns (ok, arg_types) where arg_types are the converted argument types.
+    /// Returns (ok, parameter_types) for the complete logical argument list.
     /// Uses UnpackResult to handle multi-value function calls (consistent with goscript).
     fn builtin_assert(
         &mut self,
@@ -710,13 +667,8 @@ impl Checker {
             return (false, vec![]);
         }
 
-        // Collect first arg type if not constant
-        let is_constant = matches!(x.mode, OperandMode::Constant(_));
-        if !is_constant {
-            if let Some(t) = x.typ {
-                params.push(t);
-            }
-        }
+        // Constants occupy the same logical parameter as runtime conditions.
+        params.push(x.typ.expect("checked assert condition has a type"));
 
         // If argument is a constant false, report error
         if let OperandMode::Constant(Value::Bool(false)) = &x.mode {
@@ -731,9 +683,7 @@ impl Checker {
             if x.invalid() {
                 return (false, vec![]);
             }
-            if let Some(t) = x.typ {
-                params.push(t);
-            }
+            params.push(self.universe().any_type());
         }
 
         x.mode = OperandMode::NoValue;

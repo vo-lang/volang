@@ -214,7 +214,9 @@ pub(super) fn compile(
                     .instruction(&W::LocalSet(ALLOC_LOCAL));
                 if array_layout.elem_bytes < 8 {
                     for index in 0..array_layout.len {
-                        store_prefix(body, instruction.a + index);
+                        // The assertion helper checked the complete result
+                        // width against the u16 frame ABI before this loop.
+                        store_prefix(body, instruction.a + index as u16);
                         body.instruction(&W::LocalGet(ALLOC_LOCAL));
                         let offset = u64::from(index) * u64::from(array_layout.elem_bytes);
                         match (array_layout.elem_bytes, array_layout.needs_sign_extend) {

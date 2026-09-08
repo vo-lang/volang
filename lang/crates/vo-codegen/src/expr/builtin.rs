@@ -10,7 +10,25 @@ use crate::func::{ElemLayoutSpec, FuncBuilder};
 use crate::type_info::{encode_i32, TypeInfoWrapper};
 
 use super::literal::{compile_const_value, get_const_value};
-use super::{compile_expr, compile_expr_to, compile_expr_to_type, compile_map_key_expr};
+use super::{compile_expr, compile_expr_to, compile_expr_to_type};
+
+/// Evaluate the checked logical arguments once, in source order, and apply
+/// their parameter conversions before a builtin can mutate any input storage.
+fn compile_checked_arguments(
+    call: &vo_syntax::ast::CallExpr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<Vec<(u16, vo_analysis::TypeKey)>, CodegenError> {
+    let sources = super::call::checked_argument_sources(call, ctx, func, info)?;
+    let mut values = Vec::with_capacity(sources.len());
+    for (source, parameter_type) in sources {
+        let dst = func.alloc_slots(&info.type_slot_types(parameter_type));
+        crate::assign::emit_assign(dst, source, parameter_type, ctx, func, info)?;
+        values.push((dst, parameter_type));
+    }
+    Ok(values)
+}
 
 /// Box a value as interface{} at the given slot.
 /// All values are uniformly represented as interface (2 slots).
@@ -37,64 +55,32 @@ fn emit_boxed_interface(
     Ok(())
 }
 
-/// Compile arguments as interface{} values for print/println/assert.
-/// Returns (args_start, actual_arg_count) - count may differ from args.len() due to tuple expansion.
+/// Lower the checked logical arguments, then box their converted values for
+/// the print/assert runtime ABI. Tuple expansion and conversions have one owner.
 fn compile_args_as_interfaces(
-    args: &[vo_syntax::ast::Expr],
+    call: &vo_syntax::ast::CallExpr,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(u16, usize), CodegenError> {
-    // Count actual args (expand tuples)
-    let total_args: usize = args
-        .iter()
-        .map(|arg| {
-            let t = info.expr_type(arg.id);
-            if info.is_tuple(t) {
-                info.tuple_len(t)
-            } else {
-                1
-            }
-        })
-        .sum();
-
-    // Each arg is an interface (2 slots)
+    let values = compile_checked_arguments(call, ctx, func, info)?;
+    let total_args = values.len();
+    let physical_slots = total_args
+        .checked_mul(2)
+        .ok_or_else(|| CodegenError::Internal("builtin argument slot count overflow".into()))?;
+    info.checked_slot_count(physical_slots)
+        .map_err(CodegenError::Internal)?;
     let args_start =
         func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1].repeat(total_args));
-    let mut slot_offset = 0u16;
-
-    for arg in args.iter() {
-        let arg_type = info.expr_type(arg.id);
-
-        if info.is_tuple(arg_type) {
-            let tuple = super::CompiledTuple::compile(arg, ctx, func, info)?;
-            tuple.for_each_element_result(info, |elem_slot, elem_type| {
-                emit_boxed_interface(
-                    args_start + slot_offset,
-                    elem_slot,
-                    elem_type,
-                    ctx,
-                    func,
-                    info,
-                )?;
-                slot_offset += 2;
-                Ok(())
-            })?;
-        } else {
-            // Preserve the expression's physical representation until the
-            // interface assignment boundary. Global, captured, and escaped
-            // arrays are canonical ArrayRefs; eagerly compiling them into a
-            // flattened temporary here used to copy only the reference bits.
-            crate::assign::emit_assign(
-                args_start + slot_offset,
-                crate::assign::AssignSource::Expr(arg),
-                info.any_type(),
-                ctx,
-                func,
-                info,
-            )?;
-            slot_offset += 2;
-        }
+    for (index, (slot, type_key)) in values.into_iter().enumerate() {
+        emit_boxed_interface(
+            args_start + (index * 2) as u16,
+            slot,
+            type_key,
+            ctx,
+            func,
+            info,
+        )?;
     }
     Ok((args_start, total_args))
 }
@@ -209,8 +195,7 @@ fn compile_builtin_call_impl(
                 "vo_print"
             };
             let extern_id = ctx.get_or_register_extern(extern_name);
-            let (args_start, actual_count) =
-                compile_args_as_interfaces(&call.args, ctx, func, info)?;
+            let (args_start, actual_count) = compile_args_as_interfaces(call, ctx, func, info)?;
             func.emit_call_extern(dst, extern_id, args_start, actual_count * 2, &[]);
         }
         "panic" => {
@@ -346,11 +331,8 @@ fn compile_builtin_call_impl(
                     "append requires a destination slice".to_string(),
                 ));
             }
-            let slice_value = compile_expr(&call.args[0], ctx, func, info)?;
-            let slice_reg = func.alloc_slots(&[SlotType::GcBase]);
-            func.emit_copy(slice_reg, slice_value, 1);
-
-            let slice_type = info.expr_type(call.args[0].id);
+            let arguments = compile_checked_arguments(call, ctx, func, info)?;
+            let (slice_reg, slice_type) = arguments[0];
             let elem_bytes = info.slice_elem_bytes(slice_type);
             let elem_type = info.slice_elem_type(slice_type);
             let elem_slot_types = info.type_slot_types(elem_type);
@@ -360,7 +342,7 @@ fn compile_builtin_call_impl(
             // Get elem_meta
             let elem_meta_idx = ctx.get_or_create_value_meta(elem_type, info);
 
-            if call.args.len() == 1 {
+            if arguments.len() == 1 {
                 func.emit_copy(dst, slice_reg, 1);
                 return Ok(());
             }
@@ -368,9 +350,8 @@ fn compile_builtin_call_impl(
             // Check for spread: append(a, b...)
             if call.spread && call.args.len() == 2 {
                 // Spread append: append all elements from second slice/string
-                let other_reg = compile_expr(&call.args[1], ctx, func, info)?;
+                let (other_reg, other_type) = arguments[1];
                 let ret_slot_types = vec![SlotType::GcBase];
-                let other_type = info.expr_type(call.args[1].id);
                 let extern_id = ctx.get_or_register_extern_with_return_layout(
                     if info.is_string(other_type) {
                         "vo_slice_append_string"
@@ -386,23 +367,7 @@ fn compile_builtin_call_impl(
                 func.emit_op(Opcode::LoadConst, args_reg + 2, elem_meta_idx, 0);
                 func.emit_call_extern(dst, extern_id, args_reg, 3, &ret_slot_types);
             } else {
-                // Builtin call operands are all evaluated before append mutates
-                // the backing array. Preserve each element in its typed layout;
-                // appending one element early could otherwise change what a
-                // later index expression observes.
-                let mut elements = Vec::with_capacity(call.args.len() - 1);
-                for arg in call.args.iter().skip(1) {
-                    let value = func.alloc_slots(&elem_slot_types);
-                    crate::assign::emit_assign(
-                        value,
-                        crate::assign::AssignSource::Expr(arg),
-                        elem_type,
-                        ctx,
-                        func,
-                        info,
-                    )?;
-                    elements.push(value);
-                }
+                let elements: Vec<_> = arguments.iter().skip(1).map(|(slot, _)| *slot).collect();
 
                 // SliceAppend: a=dst, b=slice, c=[elem_meta, elem...].
                 let mut meta_elem_slot_types = vec![SlotType::Value];
@@ -437,40 +402,21 @@ fn compile_builtin_call_impl(
             }
         }
         "copy" => {
-            let source_type = info.expr_type(call.args[1].id);
-            let extern_id = ctx.get_or_register_extern(if info.is_string(source_type) {
+            let arguments = compile_checked_arguments(call, ctx, func, info)?;
+            let extern_id = ctx.get_or_register_extern(if info.is_string(arguments[1].1) {
                 "vo_copy_string"
             } else {
                 "vo_copy"
             });
             let args_start = func.alloc_slots(&[SlotType::GcBase, SlotType::GcBase]);
-            compile_expr_to(&call.args[0], args_start, ctx, func, info)?;
-            compile_expr_to(&call.args[1], args_start + 1, ctx, func, info)?;
+            func.emit_copy(args_start, arguments[0].0, 1);
+            func.emit_copy(args_start + 1, arguments[1].0, 1);
             func.emit_call_extern(dst, extern_id, args_start, 2, &[SlotType::Value]);
         }
         "delete" => {
-            // delete(map, key)
-            if call.args.len() != 2 {
-                return Err(CodegenError::Internal("delete requires 2 args".to_string()));
-            }
-            let map_value = compile_expr(&call.args[0], ctx, func, info)?;
-            let map_reg = func.alloc_slots(&[SlotType::GcBase]);
-            func.emit_copy(map_reg, map_value, 1);
-
-            // MapDelete: a=map, b=key_start.
-            let map_type = info.expr_type(call.args[0].id);
-            let (key_type, _) = info.map_key_val_types(map_type);
-            let key_slot_types = info.type_slot_types(key_type);
-            let key_slots = info
-                .checked_slot_count(key_slot_types.len())
-                .map_err(CodegenError::Internal)?;
-
-            // Compile key - use compile_map_key_expr for unified interface key boxing
-            let key_reg = compile_map_key_expr(&call.args[1], key_type, ctx, func, info)?;
-            let key_start = func.alloc_slots(&key_slot_types);
-            func.emit_copy(key_start, key_reg, key_slots);
-
-            func.emit_map_delete(map_reg, key_start, &key_slot_types);
+            let arguments = compile_checked_arguments(call, ctx, func, info)?;
+            let key_slot_types = info.type_slot_types(arguments[1].1);
+            func.emit_map_delete(arguments[0].0, arguments[1].0, &key_slot_types);
         }
         "close" => {
             if call.args.len() != 1 {
@@ -493,8 +439,7 @@ fn compile_builtin_call_impl(
                 ));
             }
             let extern_id = ctx.get_or_register_extern("vo_assert");
-            let (args_start, actual_count) =
-                compile_args_as_interfaces(&call.args, ctx, func, info)?;
+            let (args_start, actual_count) = compile_args_as_interfaces(call, ctx, func, info)?;
 
             func.emit_call_extern(dst, extern_id, args_start, actual_count * 2, &[]);
         }

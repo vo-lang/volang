@@ -1,7 +1,6 @@
+use crate::translator::NativeScratchKind;
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{
-    types, InstBuilder, MemFlagsData as MemFlags, StackSlot, StackSlotData, StackSlotKind, Value,
-};
+use cranelift_codegen::ir::{types, InstBuilder, StackSlot, Value};
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::{
     JitRuntimeTrapKind, JIT_HELPER_MAP_SCALAR_FALLBACK, JIT_HELPER_MAP_SET_NEEDS_ALLOCATION,
@@ -26,7 +25,7 @@ pub(in crate::translate) fn map_new<'a>(
     let key_meta = e.builder().ins().ushr_imm_u(packed_meta, 32);
     let key_meta_i32 = e.builder().ins().ireduce(types::I32, key_meta);
     let val_meta_i32 = e.builder().ins().ireduce(types::I32, packed_meta);
-    let layout = e.map_new_layout(inst).ok_or(JitError::MissingJitLayout {
+    let layout = e.map_new_layout().ok_or(JitError::MissingJitLayout {
         pc: e.current_pc(),
         opcode: inst.opcode(),
         layout: "MapNew",
@@ -73,12 +72,9 @@ fn store_to_stack<'a>(
     e: &mut impl CollectionEmitter<'a>,
     start_reg: u16,
     slots: usize,
+    kind: NativeScratchKind,
 ) -> (StackSlot, Value, Value) {
-    let stack_slot = e.builder().create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        (slots.max(1) * 8) as u32,
-        8,
-    ));
+    let stack_slot = e.native_scratch_slot(kind, ((slots.max(1) * 8) as u32) as usize);
     for i in 0..slots {
         let val = e.read_var(start_reg + i as u16);
         e.builder()
@@ -94,7 +90,7 @@ pub(in crate::translate) fn map_get<'a>(
     e: &mut impl CollectionEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let layout = e.map_get_layout(inst).ok_or(JitError::MissingJitLayout {
+    let layout = e.map_get_layout().ok_or(JitError::MissingJitLayout {
         pc: e.current_pc(),
         opcode: inst.opcode(),
         layout: "MapGet",
@@ -109,7 +105,8 @@ pub(in crate::translate) fn map_get<'a>(
 
     let func = e.helper(HelperKind::map_get);
     let m = e.read_var(inst.b);
-    let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.c, key_slots);
+    let (_, key_ptr, key_slots_i32) =
+        store_to_stack(e, inst.c, key_slots, NativeScratchKind::MapKey);
 
     let val_ptr = e.var_addr(inst.a);
     let val_slots_i32 = e.builder().ins().iconst(types::I32, val_slots as i64);
@@ -142,62 +139,20 @@ fn map_get_scalar<'a>(
 ) -> Result<(), JitError> {
     let m = e.read_var(inst.b);
     let key = e.read_var(inst.c);
-    let scalar_func = e.helper(HelperKind::map_get_scalar);
-    let scalar_call = emit_runtime_helper_call(e, scalar_func, &[m, key]);
-    let value_ptr = e.builder().inst_results(scalar_call)[0];
-    let fallback = e.builder().ins().icmp_imm_u(
-        IntCC::Equal,
-        value_ptr,
-        JIT_HELPER_MAP_SCALAR_FALLBACK as i64,
-    );
-
-    let fallback_block = crate::compile_common::cold_block(e.builder());
-    let scalar_block = e.builder().create_block();
-    let merge_block = e.builder().create_block();
-    e.builder().append_block_param(merge_block, types::I64);
-    e.builder().append_block_param(merge_block, types::I64);
-    e.builder()
-        .ins()
-        .brif(fallback, fallback_block, &[], scalar_block, &[]);
-
-    e.builder().switch_to_block(fallback_block);
-    e.builder().seal_block(fallback_block);
-    let (fallback_value, fallback_found) = emit_map_get_generic_one(e, m, key)?;
-    e.builder()
-        .ins()
-        .jump(merge_block, &[fallback_value.into(), fallback_found.into()]);
-
-    e.builder().switch_to_block(scalar_block);
-    e.builder().seal_block(scalar_block);
-    let zero = e.builder().ins().iconst(types::I64, 0);
-    let found = e.builder().ins().icmp(IntCC::NotEqual, value_ptr, zero);
-    let found_block = e.builder().create_block();
-    let missing_block = e.builder().create_block();
-    e.builder()
-        .ins()
-        .brif(found, found_block, &[], missing_block, &[]);
-
-    e.builder().switch_to_block(found_block);
-    e.builder().seal_block(found_block);
+    let value_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, 8);
+    let value_ptr = e.builder().ins().stack_addr(types::I64, value_slot, 0);
+    let ctx = e.ctx_param();
+    mark_runtime_trap_pc(e);
+    let helper = e.helper(HelperKind::map_get_one);
+    let call = emit_runtime_helper_call(e, helper, &[ctx, m, key, value_ptr]);
+    let found = e.builder().inst_results(call)[0];
+    emit_return_if_u64_jit_error(e, found);
+    let is_panic = e.builder().ins().icmp_imm_u(IntCC::Equal, found, 2);
+    emit_runtime_trap_if(e, is_panic, JitRuntimeTrapKind::UnhashableType, None, None);
     let value = e
         .builder()
         .ins()
-        .load(types::I64, MemFlags::trusted(), value_ptr, 0);
-    let one = e.builder().ins().iconst(types::I64, 1);
-    e.builder()
-        .ins()
-        .jump(merge_block, &[value.into(), one.into()]);
-
-    e.builder().switch_to_block(missing_block);
-    e.builder().seal_block(missing_block);
-    e.builder()
-        .ins()
-        .jump(merge_block, &[zero.into(), zero.into()]);
-
-    e.builder().switch_to_block(merge_block);
-    e.builder().seal_block(merge_block);
-    let value = e.builder().block_params(merge_block)[0];
-    let found = e.builder().block_params(merge_block)[1];
+        .stack_load(types::I64, types::I64, value_slot, 0);
     e.write_var(inst.a, value);
     if has_ok {
         e.write_var(inst.a + 1, found);
@@ -205,42 +160,11 @@ fn map_get_scalar<'a>(
     Ok(())
 }
 
-fn emit_map_get_generic_one<'a>(
-    e: &mut impl CollectionEmitter<'a>,
-    m: Value,
-    key: Value,
-) -> Result<(Value, Value), JitError> {
-    let key_slot =
-        e.builder()
-            .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
-    let val_slot =
-        e.builder()
-            .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
-    e.builder().ins().stack_store(types::I64, key, key_slot, 0);
-    let key_ptr = e.builder().ins().stack_addr(types::I64, key_slot, 0);
-    let val_ptr = e.builder().ins().stack_addr(types::I64, val_slot, 0);
-    let one_i32 = e.builder().ins().iconst(types::I32, 1);
-    let ctx = e.ctx_param();
-    mark_runtime_trap_pc(e);
-    let func = e.helper(HelperKind::map_get);
-    let call = emit_runtime_helper_call(e, func, &[ctx, m, key_ptr, one_i32, val_ptr, one_i32]);
-    let found = e.builder().inst_results(call)[0];
-    emit_return_if_u64_jit_error(e, found);
-    let panic_code = e.builder().ins().iconst(types::I64, 2);
-    let is_panic = e.builder().ins().icmp(IntCC::Equal, found, panic_code);
-    emit_runtime_trap_if(e, is_panic, JitRuntimeTrapKind::UnhashableType, None, None);
-    let value = e
-        .builder()
-        .ins()
-        .stack_load(types::I64, types::I64, val_slot, 0);
-    Ok((value, found))
-}
-
 pub(in crate::translate) fn map_set<'a>(
     e: &mut impl CollectionEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let layout = e.map_set_layout(inst).ok_or(JitError::MissingJitLayout {
+    let layout = e.map_set_layout().ok_or(JitError::MissingJitLayout {
         pc: e.current_pc(),
         opcode: inst.opcode(),
         layout: "MapSet",
@@ -271,8 +195,10 @@ fn emit_map_set_generic<'a>(
 ) -> Result<(), JitError> {
     let func = e.helper(HelperKind::map_set);
 
-    let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.b, key_slots);
-    let (_, val_ptr, val_slots_i32) = store_to_stack(e, inst.c, val_slots);
+    let (_, key_ptr, key_slots_i32) =
+        store_to_stack(e, inst.b, key_slots, NativeScratchKind::MapKey);
+    let (_, val_ptr, val_slots_i32) =
+        store_to_stack(e, inst.c, val_slots, NativeScratchKind::CollectionValue);
 
     let ctx = e.ctx_param();
     let allocation_deferred = e.builder().ins().iconst(types::I32, 0);
@@ -418,13 +344,11 @@ pub(in crate::translate) fn map_delete<'a>(
     e: &mut impl CollectionEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let key_slots = e
-        .map_delete_key_slots(inst)
-        .ok_or(JitError::MissingJitLayout {
-            pc: e.current_pc(),
-            opcode: inst.opcode(),
-            layout: "MapDelete",
-        })? as usize;
+    let key_slots = e.map_delete_key_slots().ok_or(JitError::MissingJitLayout {
+        pc: e.current_pc(),
+        opcode: inst.opcode(),
+        layout: "MapDelete",
+    })? as usize;
 
     let m = e.read_var(inst.a);
     if key_slots == 1 {
@@ -472,7 +396,8 @@ fn emit_map_delete_generic<'a>(
     key_slots: usize,
 ) -> Result<(), JitError> {
     let func = e.helper(HelperKind::map_delete);
-    let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.b, key_slots);
+    let (_, key_ptr, key_slots_i32) =
+        store_to_stack(e, inst.b, key_slots, NativeScratchKind::MapKey);
 
     let ctx = e.ctx_param();
     mark_runtime_trap_pc(e);
@@ -494,11 +419,8 @@ pub(in crate::translate) fn map_iter_init<'a>(
 ) {
     let func = e.helper(HelperKind::map_iter_init);
     let m = e.read_var(inst.b);
-    let iter_slot = e.builder().create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        MAP_ITER_BYTES,
-        8,
-    ));
+    let iter_slot =
+        e.native_scratch_slot(NativeScratchKind::MapIterator, (MAP_ITER_BYTES) as usize);
     let iter_ptr = e.builder().ins().stack_addr(types::I64, iter_slot, 0);
     let ctx = e.ctx_param();
     mark_runtime_trap_pc(e);
@@ -519,31 +441,24 @@ pub(in crate::translate) fn map_iter_next<'a>(
     inst: &Instruction,
 ) -> Result<(), JitError> {
     let func = e.helper(HelperKind::map_iter_next);
-    let layout = e
-        .map_iter_next_layout(inst)
-        .ok_or(JitError::MissingJitLayout {
-            pc: e.current_pc(),
-            opcode: inst.opcode(),
-            layout: "MapIterNext",
-        })?;
+    let layout = e.map_iter_next_layout().ok_or(JitError::MissingJitLayout {
+        pc: e.current_pc(),
+        opcode: inst.opcode(),
+        layout: "MapIterNext",
+    })?;
     let key_slots = layout.key_slots as usize;
     let val_slots = layout.val_slots as usize;
 
-    let iter_slot = e.builder().create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        MAP_ITER_BYTES,
-        8,
-    ));
-    let key_slot = e.builder().create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        (key_slots.max(1) * 8) as u32,
-        8,
-    ));
-    let val_slot = e.builder().create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        (val_slots.max(1) * 8) as u32,
-        8,
-    ));
+    let iter_slot =
+        e.native_scratch_slot(NativeScratchKind::MapIterator, (MAP_ITER_BYTES) as usize);
+    let key_slot = e.native_scratch_slot(
+        NativeScratchKind::MapKey,
+        ((key_slots.max(1) * 8) as u32) as usize,
+    );
+    let val_slot = e.native_scratch_slot(
+        NativeScratchKind::CollectionValue,
+        ((val_slots.max(1) * 8) as u32) as usize,
+    );
 
     for i in 0..MAP_ITER_SLOTS {
         let val = e.read_var(inst.b + i as u16);

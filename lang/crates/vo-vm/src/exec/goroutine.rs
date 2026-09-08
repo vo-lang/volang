@@ -61,7 +61,7 @@ pub fn exec_go_start(
     let spawn = if is_closure_call {
         let raw_ref = stack_get(stack, bp + inst.a as usize) as GcRef;
         if raw_ref.is_null() {
-            return Err(GoStartError::Trap(RuntimeTrapKind::NilFuncCall));
+            return Ok(PendingSpawn::trapped(RuntimeTrapKind::NilFuncCall));
         }
         let target = validate_closure_target(gc, module, raw_ref as u64, "Go closure spawn")
             .map_err(GoStartError::Malformed)?;

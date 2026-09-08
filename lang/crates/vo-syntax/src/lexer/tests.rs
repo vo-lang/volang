@@ -678,3 +678,28 @@ fn test_errdefer_not_identifier_prefix() {
     // "errdeferred" should be an identifier
     assert_eq!(lex("errdeferred"), vec![TokenKind::Ident, TokenKind::Eof]);
 }
+
+#[test]
+fn leading_zero_floats_are_classified_before_legacy_octal_validation() {
+    for literal in [
+        "0123.0", "0123e2", "08.0", "00.5", "0_8.5", "00_9E+2", "00.", "09.e1",
+    ] {
+        let (tokens, diagnostics) = Lexer::new(literal, 100).collect_tokens();
+        assert!(!diagnostics.has_errors(), "{literal}: {diagnostics:?}");
+        assert_eq!(tokens[0].kind, TokenKind::FloatLit, "{literal}");
+        assert_eq!(
+            tokens[0].span,
+            Span::from_u32(100, 100 + literal.len() as u32)
+        );
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+    }
+    for literal in ["0644", "0_644", "00"] {
+        let (tokens, diagnostics) = lex_with_errors(literal);
+        assert!(!diagnostics.has_errors(), "{literal}");
+        assert_eq!(tokens[0], TokenKind::IntLit);
+    }
+    for literal in ["08", "019", "0_8", "00_.5", "00._5", "00e_2", "00e+"] {
+        let (_, diagnostics) = lex_with_errors(literal);
+        assert!(diagnostics.has_errors(), "{literal}");
+    }
+}

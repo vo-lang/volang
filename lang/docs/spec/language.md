@@ -1866,10 +1866,9 @@ invocation, not during registration. Ordinary `defer` and eligible `errdefer`
 calls share one reverse-registration-order sequence; see §1.3.3.
 
 ```vo
-func readFile(path string) {
-    f := open(path)
-    defer close(f)       // called when function returns
-    // ... use f ...
+func sendValue(ch chan<- int, value int) {
+    defer func() { close(ch) }() // close after the send completes
+    ch <- value
 }
 ```
 

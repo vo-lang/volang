@@ -17,11 +17,11 @@ use crate::call_graph::ModuleCallGraph;
 use crate::func_compiler::FunctionCompiler;
 use crate::helpers::{self, HelperRefs};
 use crate::native_stack_map::JitArtifactMetadata;
-use crate::optimizer::{ModuleInlinePlan, ModuleOptimizationPlan, OptimizedFunction};
+use crate::optimizer::{ModuleOptimizationPlan, OptimizedFunction};
 use crate::{
     abi, encode_native_aot_metadata, function_needs_native_root_frame, JitBackendCaps,
     JitCompileEnv, JitError, JitFrameEntryEligibility, MAX_JIT_ANALYSIS_BYTES,
-    MAX_JIT_COMPILE_WORK_BYTES, MAX_JIT_NATIVE_FRAME_BYTES,
+    MAX_JIT_COMPILE_WORK_BYTES,
 };
 
 pub const NATIVE_AOT_MODULE_BYTES_SYMBOL: &str = "vo_aot_module_bytes";
@@ -122,67 +122,6 @@ fn verify_compile_work_budget(module: &LoadedModule) -> Result<(), JitError> {
         });
     }
     Ok(())
-}
-
-fn verify_native_frame_budget(context: &cranelift_codegen::Context) -> Result<(), JitError> {
-    let requested_bytes = context
-        .func
-        .sized_stack_slots
-        .values()
-        .try_fold(0usize, |total, slot| total.checked_add(slot.size as usize))
-        .unwrap_or(usize::MAX);
-    if requested_bytes > MAX_JIT_NATIVE_FRAME_BYTES {
-        return Err(JitError::NativeFrameLimitExceeded {
-            limit_bytes: MAX_JIT_NATIVE_FRAME_BYTES,
-            requested_bytes,
-        });
-    }
-    Ok(())
-}
-
-fn compiled_metadata(
-    context: &cranelift_codegen::Context,
-    function_name: &str,
-    deopt_states: Vec<crate::DeoptFrameState>,
-) -> Result<JitArtifactMetadata, JitError> {
-    let compiled = context.compiled_code().ok_or_else(|| {
-        JitError::Internal(format!("missing compiled AOT code for {function_name}"))
-    })?;
-    let code_size = compiled.code_info().total_size as usize;
-    let stack_maps = compiled.buffer.user_stack_maps();
-    let source_locs = compiled.buffer.get_srclocs_sorted();
-    let mut source_index = 0usize;
-    let mut native_stack_maps = Vec::with_capacity(stack_maps.len());
-    for (return_address, frame_size, map) in stack_maps {
-        while source_locs
-            .get(source_index)
-            .is_some_and(|source| source.end < *return_address)
-        {
-            source_index += 1;
-        }
-        let source = source_locs
-            .get(source_index)
-            .filter(|source| source.start < *return_address && *return_address <= source.end)
-            .ok_or_else(|| {
-                JitError::Internal(format!(
-                    "native AOT stack map for {function_name} has no safepoint source location"
-                ))
-            })?;
-        let safepoint_id = source.loc.bits().checked_sub(1).ok_or_else(|| {
-            JitError::Internal(format!(
-                "native AOT stack map for {function_name} has an invalid source location"
-            ))
-        })?;
-        native_stack_maps.push((
-            safepoint_id,
-            *return_address,
-            *frame_size,
-            map.entries().collect::<Vec<_>>(),
-        ));
-    }
-
-    JitArtifactMetadata::from_entries(code_size, native_stack_maps, function_name)?
-        .with_deopt_states(deopt_states, function_name)
 }
 
 fn define_exported_bytes(
@@ -340,7 +279,6 @@ pub fn compile_native_object(
     )?);
     let module_analysis =
         super::ModuleJitAnalysis::build(loaded.module(), env, graph, MAX_JIT_ANALYSIS_BYTES)?;
-    let inline_plan: &ModuleInlinePlan = &module_analysis.inline_plan;
     let optimization_plan = ModuleOptimizationPlan::build_with_inline_plan(
         loaded.module(),
         Arc::clone(&module_analysis.inline_plan),
@@ -384,11 +322,11 @@ pub fn compile_native_object(
             &module_analysis.entry_eligibility,
             helpers,
             &analysis,
-            JitTier::Optimizing,
-            inline_plan,
-            Some(&optimization_plan),
-            Some(&optimization),
-            Some(self_native_ref),
+            crate::func_compiler::FunctionCompilePlan::Optimizing {
+                module: &optimization_plan,
+                instructions: &optimization,
+                self_entry: self_native_ref,
+            },
         )
         .compile(target_config)
         .map_err(|error| {
@@ -408,7 +346,7 @@ pub fn compile_native_object(
                 JitTier::Optimizing as u32,
             )?;
         }
-        verify_native_frame_budget(&context)?;
+        crate::artifact::verify_lowered_frame(&context)?;
         cranelift_codegen::verifier::verify_function(&context.func, object_module.isa().flags())
             .map_err(|errors| {
                 JitError::Internal(format!(
@@ -421,11 +359,7 @@ pub fn compile_native_object(
         }
 
         object_module.define_function(func_id, &mut context)?;
-        let metadata = Arc::new(compiled_metadata(
-            &context,
-            symbol,
-            analysis.ir().deopt_metadata(0..function.code.len()),
-        )?);
+        let metadata = Arc::new(crate::artifact::compiled_metadata(&context, symbol)?);
         functions.push(NativeAotFunction {
             func_id: func_id_u32,
             symbol: symbol.clone(),

@@ -119,6 +119,10 @@ pub extern "C" fn jit_defer_push(
         (func_id, core::ptr::null_mut())
     };
 
+    if let Err(error) = fiber.defer_stack.try_reserve(1) {
+        fiber.pending_resource_error = Some(error);
+        return JitResult::JitError;
+    }
     let args: GcRef = if arg_slots > 0 {
         let args_ref = gc.alloc(ValueMeta::new(0, ValueKind::Void), arg_slots);
         if args_ref.is_null() {
@@ -133,7 +137,7 @@ pub extern "C" fn jit_defer_push(
         core::ptr::null_mut()
     };
 
-    fiber.defer_stack.push(DeferEntry {
+    fiber.defer_stack.push_reserved(DeferEntry {
         frame_depth,
         func_id: fid,
         closure,

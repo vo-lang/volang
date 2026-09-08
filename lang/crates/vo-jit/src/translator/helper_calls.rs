@@ -56,11 +56,17 @@ pub(crate) fn emit_gc_safepoint_poll<'a>(emitter: &mut impl HelperCallEmitter<'a
     emitter.builder().seal_block(slow);
     let ctx = emitter.ctx_param();
     let safepoint = emitter.helper(HelperKind::gc_safepoint);
+    let pc = emitter.current_pc();
+    let resume_pc = emitter.builder().ins().iconst(types::I32, pc as i64);
+    emitter.store_context_field(
+        resume_pc,
+        vo_runtime::jit_api::JitContextField::CallResumePc,
+    );
     let native_roots = emitter.spill_native_roots();
     let poll = emit_funcref_call_raw(emitter, safepoint.func_ref(), &[ctx]);
     emitter.attach_native_roots(poll, native_roots);
     let result = emitter.builder().inst_results(poll)[0];
-    crate::call_helpers::check_call_result(emitter, result, false);
+    crate::call_helpers::check_call_result(emitter, result, true);
     emitter.clear_dead_native_roots();
     emitter.builder().ins().jump(continue_block, &[]);
 

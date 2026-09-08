@@ -288,6 +288,19 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
         init: Option<&vo_syntax::ast::Expr>,
         obj_key: Option<ObjKey>,
     ) -> Result<(StorageKind, Option<DeferredHeapAlloc>), CodegenError> {
+        let result = self.define_local_impl(sym, type_key, escapes, init, obj_key)?;
+        self.func.bind_local_object(sym, obj_key)?;
+        Ok(result)
+    }
+
+    fn define_local_impl(
+        &mut self,
+        sym: Symbol,
+        type_key: TypeKey,
+        escapes: bool,
+        init: Option<&vo_syntax::ast::Expr>,
+        obj_key: Option<ObjKey>,
+    ) -> Result<(StorageKind, Option<DeferredHeapAlloc>), CodegenError> {
         let is_loop_var = obj_key.is_some_and(|k| self.info.is_loop_var(k));
 
         if self.info.is_array(type_key) {
@@ -530,7 +543,9 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
         value: crate::array_value::ArrayValue,
         obj_key: Option<ObjKey>,
     ) -> Result<StorageKind, CodegenError> {
-        self.define_array_value(sym, type_key, escapes, Some(value), obj_key)
+        let result = self.define_array_value(sym, type_key, escapes, Some(value), obj_key)?;
+        self.func.bind_local_object(sym, obj_key)?;
+        Ok(result)
     }
 
     /// Allocate escaped boxed value with deferred PtrNew emission.
@@ -599,6 +614,19 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
     /// Define a local variable and initialize from an already-compiled slot.
     /// Used for comma-ok cases where the value is already in a temp slot.
     pub fn define_local_from_slot(
+        &mut self,
+        sym: Symbol,
+        type_key: TypeKey,
+        escapes: bool,
+        src_slot: u16,
+        obj_key: Option<ObjKey>,
+    ) -> Result<StorageKind, CodegenError> {
+        let result = self.define_local_from_slot_impl(sym, type_key, escapes, src_slot, obj_key)?;
+        self.func.bind_local_object(sym, obj_key)?;
+        Ok(result)
+    }
+
+    fn define_local_from_slot_impl(
         &mut self,
         sym: Symbol,
         type_key: TypeKey,

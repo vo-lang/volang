@@ -1,7 +1,5 @@
-use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData as MemFlags, Value};
 use vo_runtime::instruction::Opcode;
-use vo_runtime::jit_api::{JitResult, JIT_HELPER_U64_ERROR};
 
 use crate::translator::CollectionEmitter;
 use crate::JitError;
@@ -100,34 +98,4 @@ pub(in crate::translate) fn emit_elem_bytes_i32<'a>(
 ) -> Result<Value, JitError> {
     let (elem_bytes, _) = resolve_elem_bytes(e, opcode)?;
     Ok(e.builder().ins().iconst(types::I32, elem_bytes as i64))
-}
-
-pub(in crate::translate) fn emit_return_if_u64_jit_error<'a>(
-    e: &mut impl CollectionEmitter<'a>,
-    result: Value,
-) {
-    let sentinel = e
-        .builder()
-        .ins()
-        .iconst(types::I64, JIT_HELPER_U64_ERROR as i64);
-    let is_error = e.builder().ins().icmp(IntCC::Equal, result, sentinel);
-    let error_block = crate::compile_common::cold_block(e.builder());
-    let ok_block = e.builder().create_block();
-    e.builder()
-        .ins()
-        .brif(is_error, error_block, &[], ok_block, &[]);
-
-    e.builder().switch_to_block(error_block);
-    e.builder().seal_block(error_block);
-    // This is a terminal infrastructure failure. The VM reports the context
-    // error and never resumes this frame, so publishing local values adds no
-    // observable state and can dramatically widen otherwise pure helpers.
-    let jit_error = e
-        .builder()
-        .ins()
-        .iconst(types::I32, JitResult::JitError as i64);
-    e.builder().ins().return_(&[jit_error]);
-
-    e.builder().switch_to_block(ok_block);
-    e.builder().seal_block(ok_block);
 }

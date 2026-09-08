@@ -3,13 +3,11 @@
 //! This module provides the main entry point for analyzing a Vo project,
 //! handling package imports and producing type-checked results.
 
-use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 use crate::vfs::{find_module_metadata_abs, Resolver, VfsPackage};
-use vo_common::diagnostics::{DiagnosticEmitter, DiagnosticSink};
+use vo_common::diagnostics::DiagnosticSink;
 use vo_common::source::SourceMap;
 use vo_common::symbol::SymbolInterner;
 use vo_common::vfs::{
@@ -22,7 +20,6 @@ use vo_syntax::ast::File;
 use vo_syntax::parser;
 
 use crate::check::Checker;
-use crate::importer::{ImportKey, ImportResult, Importer};
 use crate::objects::{PackageKey, TCObjects, TypeKey};
 
 /// Borrowed metadata for one imported package in dependency order.
@@ -185,41 +182,106 @@ impl PackageIdentity {
     }
 }
 
-/// Result of project analysis.
-pub struct Project {
-    /// Shared type checking objects storage (arena).
-    pub tc_objs: TCObjects,
-    /// Symbol interner.
-    pub interner: SymbolInterner,
-    /// Checked packages in dependency order.
-    pub packages: Vec<PackageKey>,
-    /// Main package key.
-    pub main_package: PackageKey,
-    /// Type checking results for main package.
-    pub type_info: crate::check::TypeInfo,
-    /// Parsed files from the main package.
+/// One complete package, with source and semantic facts kept together.
+pub struct AnalyzedPackage {
+    pub key: PackageKey,
     pub files: Vec<File>,
-    /// Parsed files from all imported packages (package path -> files).
-    /// Uses BTreeMap to ensure deterministic iteration order for codegen.
-    pub imported_files: BTreeMap<String, Vec<File>>,
-    /// Type checking results for imported packages (package path -> type_info).
-    /// Uses BTreeMap to ensure deterministic iteration order for codegen.
-    pub imported_type_infos: BTreeMap<String, crate::check::TypeInfo>,
-    /// Source map for position lookup (used by codegen and runtime error reporting).
+    pub type_info: crate::check::TypeInfo,
+}
+
+/// Result of project analysis. Packages are frozen in dependency order and the
+/// final package is the root; files and semantic facts cannot become unpaired.
+pub struct Project {
+    pub tc_objs: TCObjects,
+    pub interner: SymbolInterner,
+    packages: Vec<AnalyzedPackage>,
+    package_indices: HashMap<PackageKey, usize>,
     pub source_map: SourceMap,
-    /// Native extension manifests discovered from imported packages.
+    pub diagnostics: DiagnosticSink,
     pub extensions: Vec<ExtensionManifest>,
 }
 
 impl Project {
+    /// Assemble complete checked packages, dependencies first and root last.
+    pub fn from_packages(
+        tc_objs: TCObjects,
+        interner: SymbolInterner,
+        packages: Vec<AnalyzedPackage>,
+        source_map: SourceMap,
+        diagnostics: DiagnosticSink,
+        extensions: Vec<ExtensionManifest>,
+    ) -> Result<Self, String> {
+        if packages.is_empty() {
+            return Err("analysis contains no root package".into());
+        }
+        let mut package_indices = HashMap::new();
+        let mut paths = HashSet::new();
+        for (index, package) in packages.iter().enumerate() {
+            let identity = tc_objs
+                .pkgs
+                .get(package.key)
+                .ok_or("invalid analyzed package key")?;
+            if package_indices.insert(package.key, index).is_some()
+                || !paths.insert(identity.path())
+            {
+                return Err(format!("duplicate analyzed package {}", identity.path()));
+            }
+        }
+        for (index, package) in packages.iter().enumerate() {
+            for dependency in tc_objs.pkgs[package.key].imports() {
+                if !package_indices
+                    .get(dependency)
+                    .is_some_and(|&position| position < index)
+                {
+                    return Err(format!(
+                        "missing or out-of-order dependency of {}",
+                        tc_objs.pkgs[package.key].path()
+                    ));
+                }
+            }
+        }
+        Ok(Self {
+            tc_objs,
+            interner,
+            packages,
+            package_indices,
+            source_map,
+            diagnostics,
+            extensions,
+        })
+    }
+
+    pub fn packages(&self) -> &[AnalyzedPackage] {
+        &self.packages
+    }
+
+    pub fn main(&self) -> &AnalyzedPackage {
+        self.packages
+            .last()
+            .expect("Project construction requires a root package")
+    }
+
+    pub fn package(&self, key: PackageKey) -> Option<&AnalyzedPackage> {
+        self.package_indices
+            .get(&key)
+            .map(|&index| &self.packages[index])
+    }
+
+    pub fn package_by_path(&self, path: &str) -> Option<&AnalyzedPackage> {
+        self.tc_objs
+            .find_package_by_path(path)
+            .and_then(|key| self.package(key))
+    }
+
     /// Get the main package.
     pub fn main_pkg(&self) -> &crate::package::Package {
-        &self.tc_objs.pkgs[self.main_package]
+        &self.tc_objs.pkgs[self.main().key]
     }
 
     /// Gets the type of an expression by ExprId.
     pub fn expr_type(&self, expr_id: vo_syntax::ast::ExprId) -> Option<&crate::typ::Type> {
-        self.type_info
+        self.main()
+            .type_info
             .types
             .get(&expr_id)
             .map(|tv| &self.tc_objs.types[tv.typ])
@@ -227,89 +289,83 @@ impl Project {
 
     /// Gets the expression types map.
     pub fn expr_types(&self) -> &HashMap<vo_syntax::ast::ExprId, crate::check::TypeAndValue> {
-        &self.type_info.types
+        &self.main().type_info.types
     }
 
     /// Gets the type expression types map.
     pub fn type_expr_types(&self) -> &HashMap<vo_syntax::ast::TypeExprId, TypeKey> {
-        &self.type_info.type_exprs
+        &self.main().type_info.type_exprs
     }
 
     /// Gets the selections map.
     pub fn selections(&self) -> &HashMap<vo_syntax::ast::ExprId, crate::selection::Selection> {
-        &self.type_info.selections
+        &self.main().type_info.selections
     }
 
     /// Gets the full type info.
     pub fn type_info(&self) -> &crate::check::TypeInfo {
-        &self.type_info
+        &self.main().type_info
     }
 
-    /// Returns imported packages in dependency order (dependencies first).
-    /// Each item contains the canonical path, package key, type information,
-    /// and parsed files. Inconsistent project metadata is reported explicitly
-    /// so downstream compilation cannot silently omit a package.
-    /// This order ensures that when initializing global variables,
-    /// dependencies are initialized before dependents.
-    pub fn imported_packages_in_order(&self) -> Result<Vec<ImportedPackageRef<'_>>, String> {
-        let mut packages = Vec::with_capacity(self.packages.len().saturating_sub(1));
-        let mut seen = HashSet::new();
-        for &package in &self.packages {
-            if package == self.main_package {
-                continue;
-            }
-            let path = self.tc_objs.pkgs[package].path();
-            if !seen.insert(path) {
-                return Err(format!(
-                    "duplicate imported package in dependency order: {path}"
-                ));
-            }
-            let type_info = self
-                .imported_type_infos
-                .get(path)
-                .ok_or_else(|| format!("missing type information for imported package {path}"))?;
-            let files = self
-                .imported_files
-                .get(path)
-                .ok_or_else(|| format!("missing parsed files for imported package {path}"))?;
-            packages.push((path, package, type_info, files.as_slice()));
-        }
-
-        if packages.len() != self.imported_type_infos.len()
-            || packages.len() != self.imported_files.len()
-        {
-            return Err(format!(
-                "imported package metadata cardinality mismatch: order={}, type_info={}, files={}",
-                packages.len(),
-                self.imported_type_infos.len(),
-                self.imported_files.len()
-            ));
-        }
-        Ok(packages)
+    /// Complete imported packages in their checked dependency order.
+    pub fn imported_packages_in_order(&self) -> impl Iterator<Item = ImportedPackageRef<'_>> {
+        self.packages[..self.packages.len() - 1]
+            .iter()
+            .map(|package| {
+                (
+                    self.tc_objs.pkgs[package.key].path(),
+                    package.key,
+                    &package.type_info,
+                    package.files.as_slice(),
+                )
+            })
     }
 }
 
 /// Shared state for project analysis.
 struct ProjectState {
-    tc_objs: TCObjects,
+    // Temporarily owned by Checker during a package check. Loading is complete
+    // before that phase, so no importer can observe the arena in transit.
+    tc_objs: Option<TCObjects>,
     interner: SymbolInterner,
-    /// Source map for all parsed files.
     source_map: SourceMap,
-    /// ID state for multi-file parsing.
+    diagnostics: DiagnosticSink,
     id_state: parser::IdState,
-    /// Package cache: import_path -> PackageKey.
     cache: HashMap<String, PackageKey>,
-    /// Packages currently being processed (for cycle detection).
     in_progress: HashSet<String>,
-    /// Checked packages in dependency order.
-    checked_packages: Vec<PackageKey>,
-    /// Type checking results from main package.
-    type_info: Option<crate::check::TypeInfo>,
-    /// Parsed files from imported packages (package path -> files).
-    imported_files: BTreeMap<String, Vec<File>>,
-    /// Type checking results from imported packages (package path -> type_info).
-    imported_type_infos: BTreeMap<String, crate::check::TypeInfo>,
+    checked_packages: Vec<AnalyzedPackage>,
     extensions: Vec<ExtensionManifest>,
+}
+
+impl ProjectState {
+    fn objects(&mut self) -> &mut TCObjects {
+        self.tc_objs.as_mut().unwrap()
+    }
+
+    fn check_package(
+        &mut self,
+        key: PackageKey,
+        files: &[File],
+        trace: bool,
+    ) -> Result<crate::check::TypeInfo, AnalysisError> {
+        let mut checker = Checker::with_objects(
+            key,
+            std::mem::take(&mut self.interner),
+            trace,
+            self.tc_objs.take().unwrap(),
+        );
+        let result = checker.check(files);
+        self.tc_objs = Some(checker.tc_objs);
+        self.interner = checker.interner;
+        self.diagnostics.extend(checker.diagnostics.into_inner());
+        if result.is_err() {
+            return Err(AnalysisError::Check(
+                std::mem::take(&mut self.diagnostics),
+                std::mem::take(&mut self.source_map),
+            ));
+        }
+        Ok(checker.result)
+    }
 }
 
 /// Analyze a project starting from the given source files.
@@ -380,109 +436,50 @@ fn analyze_project_with_identity_and_options<R: Resolver>(
         path: main_package_path,
         abi_path: main_package_abi_path,
     } = identity.unwrap_or_else(PackageIdentity::ad_hoc);
-    let state = Rc::new(RefCell::new(ProjectState {
-        tc_objs: TCObjects::new(),
+    let mut state = ProjectState {
+        tc_objs: Some(TCObjects::new()),
         interner: SymbolInterner::new(),
         source_map: SourceMap::new(),
+        diagnostics: DiagnosticSink::new(),
         id_state: parser::IdState::default(),
         cache: HashMap::new(),
         in_progress: HashSet::new(),
         checked_packages: Vec::new(),
-        type_info: None,
-        imported_files: BTreeMap::new(),
-        imported_type_infos: BTreeMap::new(),
         extensions: Vec::new(),
-    }));
-
-    // Create the main package
+    };
     let main_pkg_key = state
-        .borrow_mut()
-        .tc_objs
+        .objects()
         .new_package(main_package_path.clone(), main_package_abi_path);
-
-    // Parse the source files
-    let parsed_files = parse_files(&files, &state)?;
-
+    let parsed_files = parse_files(&files, &mut state)?;
     for extension in root_extensions {
-        record_extension(&state, extension).map_err(AnalysisError::Import)?;
+        record_extension(&mut state, extension).map_err(AnalysisError::Import)?;
     }
 
-    // Pre-load all imports BEFORE swap (importer needs state.tc_objs)
+    state.in_progress.insert(main_package_path.clone());
     {
-        // The root participates in cycle detection too. Without this marker a
-        // canonical self-import could create a second Package object and
-        // overwrite the root's path-cache entry.
-        state
-            .borrow_mut()
-            .in_progress
-            .insert(main_package_path.clone());
-        let mut importer = ProjectImporter::new(
+        let mut loader = PackageLoader {
             vfs,
-            &files.root,
-            Some(main_package_path.clone()),
-            Rc::clone(&state),
-        );
-        let preload_result = preload_imports(&parsed_files, &mut importer);
-        state.borrow_mut().in_progress.remove(&main_package_path);
-        if let Err(e) = preload_result {
-            return Err(AnalysisError::Import(e));
-        }
+            state: &mut state,
+        };
+        loader.load("errors", Some(&main_package_path), 1)?;
+        loader.load_imports(&parsed_files, &main_package_path, 1)?;
     }
-
-    // Type check the main package
-    {
-        let mut state_ref = state.borrow_mut();
-        let mut checker =
-            Checker::new_with_trace(main_pkg_key, state_ref.interner.clone(), options.trace);
-
-        // Swap tc_objs so checker uses our shared one (imports already loaded)
-        std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);
-        drop(state_ref); // Release borrow before calling check
-
-        // Use check() - imports preloaded, will be found via find_package_by_path
-        let result = checker.check(&parsed_files);
-
-        // Swap back and take type_info
-        let mut state_ref = state.borrow_mut();
-        std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);
-        state_ref.type_info = Some(checker.result);
-
-        match result {
-            Ok(_) => {}
-            Err(_) => {
-                let diags = checker.diagnostics.take();
-                let source_map = std::mem::take(&mut state_ref.source_map);
-                return Err(AnalysisError::Check(diags, source_map));
-            }
-        }
-    }
-
-    // Extract final state
-    let final_state = Rc::try_unwrap(state)
-        .map_err(|rc| {
-            let mut diags = DiagnosticSink::new();
-            diags.error("internal error: state still borrowed");
-            let source_map = std::mem::take(&mut rc.borrow_mut().source_map);
-            AnalysisError::Check(diags, source_map)
-        })?
-        .into_inner();
-
-    // Collect packages in dependency order
-    let mut packages = final_state.checked_packages;
-    packages.push(main_pkg_key);
-
-    Ok(Project {
-        tc_objs: final_state.tc_objs,
-        interner: final_state.interner,
-        packages,
-        main_package: main_pkg_key,
-        type_info: final_state.type_info.unwrap_or_default(),
+    state.in_progress.remove(&main_package_path);
+    let type_info = state.check_package(main_pkg_key, &parsed_files, options.trace)?;
+    state.checked_packages.push(AnalyzedPackage {
+        key: main_pkg_key,
         files: parsed_files,
-        imported_files: final_state.imported_files,
-        imported_type_infos: final_state.imported_type_infos,
-        source_map: final_state.source_map,
-        extensions: final_state.extensions,
-    })
+        type_info,
+    });
+    Project::from_packages(
+        state.tc_objs.unwrap(),
+        state.interner,
+        state.checked_packages,
+        state.source_map,
+        state.diagnostics,
+        state.extensions,
+    )
+    .map_err(AnalysisError::Import)
 }
 
 /// Seal the public `FileSet` boundary before syntax processing. Files loaded
@@ -550,7 +547,7 @@ fn validate_root_file_set(files: &FileSet) -> Result<(), String> {
 }
 
 fn record_extension(
-    state: &Rc<RefCell<ProjectState>>,
+    state: &mut ProjectState,
     mut extension: ExtensionManifest,
 ) -> Result<(), String> {
     extension
@@ -558,7 +555,6 @@ fn record_extension(
         .map_err(|error| format!("invalid extension metadata: {error}"))?;
     let manifest_path = normalize_fs_path(&extension.manifest_path);
     extension.manifest_path = manifest_path.clone();
-    let mut state = state.borrow_mut();
     if let Some(existing) = state
         .extensions
         .iter()
@@ -580,15 +576,14 @@ fn record_extension(
 fn parse_single_file(
     path: &std::path::Path,
     content: &str,
-    state: &Rc<RefCell<ProjectState>>,
+    state: &mut ProjectState,
     id_state: parser::IdState,
 ) -> Result<(File, parser::IdState), AnalysisError> {
-    let mut state_ref = state.borrow_mut();
     let file_name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string_lossy().into_owned());
-    let file_id = state_ref
+    let file_id = state
         .source_map
         .try_add_file_with_path(file_name, path.to_path_buf(), content)
         .map_err(|error| {
@@ -597,38 +592,36 @@ fn parse_single_file(
                 path.display()
             ))
         })?;
-    let base = state_ref.source_map.file_base(file_id).unwrap_or(0);
-    let interner = state_ref.interner.clone();
-    drop(state_ref);
+    let base = state.source_map.file_base(file_id).unwrap_or(0);
+    let interner = std::mem::take(&mut state.interner);
 
     let (file, diags, new_interner, new_id_state) =
         parser::parse_with_state(content, base, interner, id_state);
 
-    let mut state_ref = state.borrow_mut();
-    state_ref.interner = new_interner;
+    state.interner = new_interner;
 
-    if diags.has_errors() {
-        let source_map = std::mem::take(&mut state_ref.source_map);
-        return Err(AnalysisError::Parse(diags, source_map));
+    let failed = diags.has_errors();
+    state.diagnostics.extend(diags);
+    if failed {
+        return Err(AnalysisError::Parse(
+            std::mem::take(&mut state.diagnostics),
+            std::mem::take(&mut state.source_map),
+        ));
     }
-
     Ok((file, new_id_state))
 }
 
 /// Parse source files from a FileSet.
-fn parse_files(
-    files: &FileSet,
-    state: &Rc<RefCell<ProjectState>>,
-) -> Result<Vec<File>, AnalysisError> {
+fn parse_files(files: &FileSet, state: &mut ProjectState) -> Result<Vec<File>, AnalysisError> {
     let mut parsed_files = Vec::new();
 
     let mut paths: Vec<_> = files.files.keys().cloned().collect();
     sort_fs_paths(&mut paths);
     for path in paths {
         let content = &files.files[&path];
-        let id_state = state.borrow().id_state.clone();
+        let id_state = state.id_state.clone();
         let (file, new_id_state) = parse_single_file(&path, content, state, id_state)?;
-        state.borrow_mut().id_state = new_id_state;
+        state.id_state = new_id_state;
         parsed_files.push(file);
     }
 
@@ -638,7 +631,7 @@ fn parse_files(
 /// Parse package files from VFS.
 fn parse_vfs_package(
     vfs_pkg: &VfsPackage,
-    state: &Rc<RefCell<ProjectState>>,
+    state: &mut ProjectState,
 ) -> Result<Vec<File>, AnalysisError> {
     let mut parsed_files = Vec::new();
     let mut id_state = parser::IdState::default();
@@ -689,267 +682,97 @@ fn declared_package_name(files: &[File], interner: &SymbolInterner) -> Option<St
     None
 }
 
-/// Pre-load imports from files. Must be called BEFORE swapping tc_objs with checker.
-fn preload_file_imports<R: Resolver>(
-    files: &[File],
-    importer: &mut ProjectImporter<R>,
-) -> Result<(), String> {
-    for file in files {
-        for import in &file.imports {
-            let path = &import.path.value;
-            let key = ImportKey::new(path);
-            match importer.import(&key) {
-                ImportResult::Ok(_) => {}
-                ImportResult::Err(e) => return Err(e),
-                ImportResult::Cycle => return Err(format!("import cycle detected for '{}'", path)),
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Pre-load all imports including core packages. For main package entry point.
-fn preload_imports<R: Resolver>(
-    files: &[File],
-    importer: &mut ProjectImporter<R>,
-) -> Result<(), String> {
-    // Always-link core packages required by runtime.
-    let key = ImportKey::new("errors");
-    match importer.import(&key) {
-        ImportResult::Ok(_) => {}
-        ImportResult::Err(e) => return Err(e),
-        ImportResult::Cycle => return Err("import cycle detected for 'errors'".to_string()),
-    }
-    preload_file_imports(files, importer)
-}
-
-/// Maximum dependency edges followed recursively by the project importer.
+/// Maximum dependency edges followed from the root package.
 const MAX_IMPORT_DEPTH: usize = 128;
 
-/// Project-level importer that uses VFS to resolve packages.
-struct ProjectImporter<'a, R: Resolver> {
-    /// VFS for resolving import paths.
+/// Module loading owns dependency discovery; Checker only sees complete imports.
+/// Structured syntax/type errors cross this boundary without being formatted.
+struct PackageLoader<'a, R: Resolver> {
     vfs: &'a R,
-    /// Working directory (project root).
-    working_dir: PathBuf,
-    current_package_path: Option<String>,
-    /// Number of dependency edges from the root package currently being loaded.
-    depth: usize,
-    /// Shared project state.
-    state: Rc<RefCell<ProjectState>>,
+    state: &'a mut ProjectState,
 }
 
-impl<'a, R: Resolver> ProjectImporter<'a, R> {
-    fn new(
-        vfs: &'a R,
-        working_dir: &std::path::Path,
-        current_package_path: Option<String>,
-        state: Rc<RefCell<ProjectState>>,
-    ) -> Self {
-        Self {
-            vfs,
-            working_dir: working_dir.to_path_buf(),
-            current_package_path,
-            depth: 0,
-            state,
-        }
-    }
-}
-
-impl<R: Resolver> Importer for ProjectImporter<'_, R> {
-    fn import(&mut self, key: &ImportKey) -> ImportResult {
-        let import_path = &key.path;
-
-        if let Err(e) = identity::classify_import(import_path) {
-            return ImportResult::Err(format!("invalid import path \"{}\": {}", import_path, e));
-        }
-        if let Some(current_package_path) = self.current_package_path.as_deref() {
-            if !identity::check_internal_visibility(current_package_path, import_path) {
-                return ImportResult::Err(format!(
-                    "use of internal package not allowed: {} cannot import {}",
-                    current_package_path, import_path,
-                ));
+impl<R: Resolver> PackageLoader<'_, R> {
+    fn load_imports(
+        &mut self,
+        files: &[File],
+        parent: &str,
+        depth: usize,
+    ) -> Result<(), AnalysisError> {
+        for file in files {
+            for import in &file.imports {
+                self.load(&import.path.value, Some(parent), depth)?;
             }
         }
-
-        // Check cache first
-        {
-            let state = self.state.borrow();
-            if let Some(&pkg_key) = state.cache.get(import_path) {
-                return ImportResult::Ok(pkg_key);
-            }
-
-            // Check for import cycle
-            if state.in_progress.contains(import_path) {
-                return ImportResult::Cycle;
-            }
-        }
-
-        let vfs_pkg = match self.vfs.resolve(import_path) {
-            Ok(Some(pkg)) => pkg,
-            Ok(None) => return ImportResult::Err(format!("package not found: {}", import_path)),
-            Err(error) => {
-                return ImportResult::Err(format!(
-                    "failed to resolve package {}: {}",
-                    import_path, error,
-                ))
-            }
-        };
-
-        if vfs_pkg.path() != import_path.as_str() {
-            return ImportResult::Err(format!(
-                "import path '{}' resolved to package '{}'; imports must use the canonical package path",
-                import_path,
-                vfs_pkg.path()
-            ));
-        }
-        // Mark as in progress
-        self.state
-            .borrow_mut()
-            .in_progress
-            .insert(import_path.to_string());
-
-        // Parse the package files
-        let parsed_files = match parse_vfs_package(&vfs_pkg, &self.state) {
-            Ok(files) => files,
-            Err(e) => {
-                self.state.borrow_mut().in_progress.remove(import_path);
-                return ImportResult::Err(format!("failed to parse {}: {}", import_path, e));
-            }
-        };
-        let package_name = {
-            let state = self.state.borrow();
-            declared_package_name(&parsed_files, &state.interner)
-        };
-        if package_name.as_deref() == Some("main") {
-            self.state.borrow_mut().in_progress.remove(import_path);
-            return ImportResult::Err(format!(
-                "cannot import package {}: package clause is main",
-                import_path,
-            ));
-        }
-
-        if let Some(extension) = vfs_pkg.extension().cloned() {
-            if let Err(error) = record_extension(&self.state, extension) {
-                self.state.borrow_mut().in_progress.remove(import_path);
-                return ImportResult::Err(error);
-            }
-        }
-
-        // Pre-load imports BEFORE swap (importer needs state.tc_objs)
-        {
-            let Some(child_depth) = self.depth.checked_add(1) else {
-                self.state.borrow_mut().in_progress.remove(import_path);
-                return ImportResult::Err(format!(
-                    "import graph depth overflow while loading '{}'",
-                    import_path
-                ));
-            };
-            if child_depth > MAX_IMPORT_DEPTH {
-                self.state.borrow_mut().in_progress.remove(import_path);
-                return ImportResult::Err(format!(
-                    "import graph depth exceeds the supported limit of {MAX_IMPORT_DEPTH} while loading '{}'",
-                    import_path
-                ));
-            }
-            let mut sub_importer = ProjectImporter::new(
-                self.vfs,
-                &self.working_dir,
-                Some(vfs_pkg.path().to_string()),
-                Rc::clone(&self.state),
-            );
-            sub_importer.depth = child_depth;
-            if let Err(e) = preload_file_imports(&parsed_files, &mut sub_importer) {
-                self.state.borrow_mut().in_progress.remove(import_path);
-                return ImportResult::Err(e);
-            }
-        }
-
-        // Create package and type check.
-        // Use vfs_pkg.path (canonical module path, possibly from vo.mod) so that the
-        // typechecker Package.path() always holds the authoritative module path.
-        // This guarantees extern lookup names in bytecode match what the Rust macro
-        // registers, regardless of whether the import used a relative or full path.
-        let pkg_key = {
-            let mut state = self.state.borrow_mut();
-            let pkg = state
-                .tc_objs
-                .new_package(vfs_pkg.path().to_string(), vfs_pkg.abi_path().to_string());
-            // Set short name for package (used when referencing: hex.Encode)
-            let fallback_name = vfs_pkg
-                .path()
-                .rsplit('/')
-                .next()
-                .unwrap_or(vfs_pkg.path())
-                .to_string();
-            state.tc_objs.pkgs[pkg].set_name(package_name.unwrap_or(fallback_name));
-            pkg
-        };
-
-        // Type check the package (imports already preloaded, tc_objs can be swapped)
-        let (check_result, pkg_type_info, check_diagnostics) = {
-            let mut state_ref = self.state.borrow_mut();
-            let mut checker = Checker::new(pkg_key, state_ref.interner.clone());
-            std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);
-            drop(state_ref);
-
-            // Use check() instead of check_with_importer - imports already preloaded
-            let result = checker.check(&parsed_files);
-
-            let mut state_ref = self.state.borrow_mut();
-            let diagnostics = if result.is_err() && checker.diagnostics.borrow().has_errors() {
-                let emitter = DiagnosticEmitter::new(&state_ref.source_map);
-                Some(emitter.emit_all_to_string(&checker.diagnostics.borrow()))
-            } else {
-                None
-            };
-            std::mem::swap(&mut checker.tc_objs, &mut state_ref.tc_objs);
-            (result, checker.result, diagnostics)
-        };
-
-        // Remove from in progress
-        {
-            let mut state = self.state.borrow_mut();
-            state.in_progress.remove(import_path);
-
-            match check_result {
-                Ok(_) => {
-                    // Cache the result and record package
-                    state.cache.insert(import_path.to_string(), pkg_key);
-                    state.checked_packages.push(pkg_key);
-                    // Save parsed files for codegen
-                    state
-                        .imported_files
-                        .insert(import_path.to_string(), parsed_files);
-                    // Save type info for codegen
-                    state
-                        .imported_type_infos
-                        .insert(import_path.to_string(), pkg_type_info);
-                }
-                Err(_) => {
-                    if let Some(diag) = check_diagnostics {
-                        let diag = diag.trim();
-                        if !diag.is_empty() {
-                            return ImportResult::Err(format!(
-                                "type check failed for {}:\n{}",
-                                import_path, diag
-                            ));
-                        }
-                    }
-                    return ImportResult::Err(format!("type check failed for {}", import_path));
-                }
-            }
-        }
-
-        ImportResult::Ok(pkg_key)
+        Ok(())
     }
 
-    fn working_dir(&self) -> &std::path::Path {
-        &self.working_dir
+    fn load(
+        &mut self,
+        path: &str,
+        parent: Option<&str>,
+        depth: usize,
+    ) -> Result<PackageKey, AnalysisError> {
+        identity::classify_import(path)
+            .map_err(|e| AnalysisError::Import(format!("invalid import path \"{path}\": {e}")))?;
+        if let Some(parent) = parent {
+            if !identity::check_internal_visibility(parent, path) {
+                return Err(AnalysisError::Import(format!(
+                    "use of internal package not allowed: {parent} cannot import {path}"
+                )));
+            }
+        }
+        if let Some(&key) = self.state.cache.get(path) {
+            return Ok(key);
+        }
+        if self.state.in_progress.contains(path) {
+            return Err(AnalysisError::Import(format!(
+                "import cycle detected for '{path}'"
+            )));
+        }
+        if depth > MAX_IMPORT_DEPTH {
+            return Err(AnalysisError::Import(format!("import graph depth exceeds the supported limit of {MAX_IMPORT_DEPTH} while loading '{path}'")));
+        }
+        self.state.in_progress.insert(path.to_owned());
+        let result = self.load_package(path, depth);
+        self.state.in_progress.remove(path);
+        result
     }
 
-    fn base_dir(&self) -> Option<&std::path::Path> {
-        Some(&self.working_dir)
+    fn load_package(&mut self, path: &str, depth: usize) -> Result<PackageKey, AnalysisError> {
+        let package = self
+            .vfs
+            .resolve(path)
+            .map_err(|e| AnalysisError::Import(format!("failed to resolve package {path}: {e}")))?
+            .ok_or_else(|| AnalysisError::Import(format!("package not found: {path}")))?;
+        if package.path() != path {
+            return Err(AnalysisError::Import(format!("import path '{path}' resolved to package '{}'; imports must use the canonical package path", package.path())));
+        }
+        let files = parse_vfs_package(&package, self.state)?;
+        let name = declared_package_name(&files, &self.state.interner);
+        if name.as_deref() == Some("main") {
+            return Err(AnalysisError::Import(format!(
+                "cannot import package {path}: package clause is main"
+            )));
+        }
+        if let Some(extension) = package.extension().cloned() {
+            record_extension(self.state, extension).map_err(AnalysisError::Import)?;
+        }
+        self.load_imports(&files, path, depth + 1)?;
+        let key = self
+            .state
+            .objects()
+            .new_package(path.to_owned(), package.abi_path().to_owned());
+        self.state.objects().pkgs[key]
+            .set_name(name.unwrap_or_else(|| path.rsplit('/').next().unwrap_or(path).to_owned()));
+        let type_info = self.state.check_package(key, &files, false)?;
+        self.state.cache.insert(path.to_owned(), key);
+        self.state.checked_packages.push(AnalyzedPackage {
+            key,
+            files,
+            type_info,
+        });
+        Ok(key)
     }
 }
 
@@ -1373,16 +1196,16 @@ mod tests {
             r#mod: ModSource::with_fs(mod_fs),
         };
 
-        let mut project = analyze_project_with_identity(
+        let project = analyze_project_with_identity(
             files,
             &resolver,
             PackageIdentity::new("github.com/acme/graph").unwrap(),
         )
         .unwrap();
         let paths: Vec<_> = project
-            .packages
+            .packages()
             .iter()
-            .map(|&package| project.tc_objs.pkgs[package].path())
+            .map(|package| project.tc_objs.pkgs[package.key].path())
             .collect();
         assert_eq!(
             paths,
@@ -1395,12 +1218,8 @@ mod tests {
             ]
         );
 
-        project
-            .imported_type_infos
-            .remove("github.com/acme/graph/shared");
-        assert_eq!(
-            project.imported_packages_in_order().unwrap_err(),
-            "missing type information for imported package github.com/acme/graph/shared"
-        );
+        let imported: Vec<_> = project.imported_packages_in_order().collect();
+        assert_eq!(imported.len(), 4);
+        assert!(imported.iter().all(|(_, _, _, files)| !files.is_empty()));
     }
 }

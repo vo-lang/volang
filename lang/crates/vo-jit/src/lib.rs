@@ -5,6 +5,7 @@ mod abi;
 mod analysis;
 mod aot;
 mod aot_format;
+mod artifact;
 mod call_graph;
 mod call_helpers;
 #[cfg(test)]
@@ -397,18 +398,9 @@ impl ModuleJitAnalysis {
         graph: Arc<call_graph::ModuleCallGraph>,
         limit_bytes: usize,
     ) -> Result<Self, JitError> {
-        let requested_work_bytes = module.functions.iter().fold(0usize, |total, function| {
-            total
-                .saturating_add(function.code.len().saturating_mul(512))
-                .saturating_add(function.instruction_metadata.len().saturating_mul(32))
-                .saturating_add(usize::from(function.local_slots).saturating_mul(64))
-        });
-        if requested_work_bytes > MAX_JIT_COMPILE_WORK_BYTES {
-            return Err(JitError::CompileWorkLimitExceeded {
-                limit_bytes: MAX_JIT_COMPILE_WORK_BYTES,
-                requested_bytes: requested_work_bytes,
-            });
-        }
+        // Module summaries scan bytecode but retain only bounded graph and
+        // per-function facts. Compiler work is admitted independently for the
+        // requested artifact, so unrelated cold bodies cannot reject it.
         let minimum_bytes = core::mem::size_of::<Self>()
             .saturating_add(core::mem::size_of::<optimizer::ModuleInlinePlan>())
             .saturating_add(module.functions.len().saturating_mul(
@@ -1365,7 +1357,6 @@ impl JitCompiler {
         &mut self,
         func_id_cl: cranelift_module::FuncId,
         name: &str,
-        deopt_states: Vec<DeoptFrameState>,
     ) -> Result<StagedFunction, JitError> {
         let compile_result: Result<StagedFunction, JitError> = (|| {
             cranelift_codegen::verifier::verify_function(&self.ctx.func, self.module.isa().flags())
@@ -1378,6 +1369,7 @@ impl JitCompiler {
                 eprintln!("[JIT VERIFY OK] {}", name);
             }
 
+            self.ctx.set_disasm(self.debug_ir);
             self.ctx
                 .compile(self.module.isa(), &mut Default::default())
                 .map_err(cranelift_module::ModuleError::from)?;
@@ -1386,45 +1378,14 @@ impl JitCompiler {
                 .compiled_code()
                 .ok_or_else(|| JitError::Internal(format!("missing compiled code for {name}")))?;
             let code_size = compiled.code_info().total_size as usize;
+            if self.debug_ir {
+                if let Some(vcode) = &compiled.vcode {
+                    eprintln!("=== JIT machine code for {name} ===\n{vcode}");
+                }
+            }
             let committed_size = self.cache.committed_artifact_bytes(code_size);
             self.cache.ensure_code_capacity(committed_size)?;
-            let stack_maps = compiled.buffer.user_stack_maps();
-            let source_locs = compiled.buffer.get_srclocs_sorted();
-            let mut source_index = 0usize;
-            let mut native_stack_maps = Vec::with_capacity(stack_maps.len());
-            for (return_address, frame_size, map) in stack_maps {
-                while source_locs
-                    .get(source_index)
-                    .is_some_and(|source| source.end < *return_address)
-                {
-                    source_index += 1;
-                }
-                let source = source_locs
-                    .get(source_index)
-                    .filter(|source| {
-                        source.start < *return_address && *return_address <= source.end
-                    })
-                    .ok_or_else(|| {
-                        JitError::Internal(format!(
-                            "native stack map for {name} has no safepoint source location"
-                        ))
-                    })?;
-                let safepoint_id = source.loc.bits().checked_sub(1).ok_or_else(|| {
-                    JitError::Internal(format!(
-                        "native stack map for {name} has an invalid safepoint source location"
-                    ))
-                })?;
-                native_stack_maps.push((
-                    safepoint_id,
-                    *return_address,
-                    *frame_size,
-                    map.entries().collect::<Vec<_>>(),
-                ));
-            }
-            let metadata = Arc::new(
-                JitArtifactMetadata::from_entries(code_size, native_stack_maps, name)?
-                    .with_deopt_states(deopt_states, name)?,
-            );
+            let metadata = Arc::new(artifact::compiled_metadata(&self.ctx, name)?);
             let metadata_bytes = metadata.retained_bytes();
             self.cache.ensure_metadata_capacity(metadata_bytes)?;
             let relocs = compiled
@@ -1518,20 +1479,7 @@ impl JitCompiler {
     }
 
     fn verify_native_frame_budget(&self) -> Result<(), JitError> {
-        let requested_bytes = self
-            .ctx
-            .func
-            .sized_stack_slots
-            .values()
-            .try_fold(0usize, |total, slot| total.checked_add(slot.size as usize))
-            .unwrap_or(usize::MAX);
-        if requested_bytes > MAX_JIT_NATIVE_FRAME_BYTES {
-            return Err(JitError::NativeFrameLimitExceeded {
-                limit_bytes: MAX_JIT_NATIVE_FRAME_BYTES,
-                requested_bytes,
-            });
-        }
-        Ok(())
+        artifact::verify_lowered_frame(&self.ctx)
     }
 
     fn verify_compile_work_budget(func: &FunctionDef) -> Result<(), JitError> {
@@ -1660,11 +1608,21 @@ impl JitCompiler {
                 &entry_eligibility,
                 helpers,
                 &analysis,
-                tier,
-                &module_analysis.inline_plan,
-                optimization_plan.as_deref(),
-                instruction_optimization.as_deref(),
-                self_native_ref,
+                match optimization_plan.as_deref() {
+                    Some(module) => func_compiler::FunctionCompilePlan::Optimizing {
+                        module,
+                        instructions: instruction_optimization
+                            .as_deref()
+                            .expect("tier owns lowering plan"),
+                        self_entry: self_native_ref.expect("optimizing symbol declared above"),
+                    },
+                    None => func_compiler::FunctionCompilePlan::Baseline {
+                        inlines: &module_analysis.inline_plan,
+                        instructions: instruction_optimization
+                            .as_deref()
+                            .expect("tier owns lowering plan"),
+                    },
+                },
             );
             compiler.compile(target_config)
         };
@@ -1714,7 +1672,6 @@ impl JitCompiler {
         let staged_body = self.stage_function(
             func_id_cl,
             &format!("func_{}_tier{} {}", func_id, tier as u8, func.name),
-            analysis.ir().deopt_metadata(0..func.code.len()),
         );
         if let Err(error) = &staged_body {
             if let Some(rejection) = CodeMemoryRejection::from_error(error) {
@@ -1927,13 +1884,8 @@ impl JitCompiler {
             &self.ctx.func.signature,
         )?;
 
-        let staged_body = self.stage_function(
-            func_id_cl,
-            &format!("loop_{}_{}", func_id, begin_pc),
-            analysis
-                .ir()
-                .deopt_metadata(begin_pc..loop_info.end_pc.saturating_add(1)),
-        );
+        let staged_body =
+            self.stage_function(func_id_cl, &format!("loop_{}_{}", func_id, begin_pc));
         if let Err(error) = &staged_body {
             if let Some(rejection) = CodeMemoryRejection::from_error(error) {
                 self.cache.reject_loop(func_id, loop_info, rejection);

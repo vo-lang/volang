@@ -171,7 +171,7 @@ pub extern "C" fn jit_select_send(
     let module =
         unsafe { (*ctx).module_ref() }.expect("validated JIT callback context must carry a module");
     let elem_layout = match queue_layout_for_current_pc(unsafe { &*ctx }, module) {
-        Ok(layout) => layout.map(|layout| layout.to_vec()),
+        Ok(layout) => layout,
         Err(msg) => {
             return set_jit_infra_error_with_message(
                 ctx,
@@ -205,16 +205,18 @@ pub extern "C" fn jit_select_send(
             u64::from(queue_reg),
         );
     }
-    if exec::exec_select_send_with_layout(
+    if let Err(error) = exec::exec_select_send_with_layout(
         &mut fiber.select_state,
         queue_reg,
         val_reg,
         elem_slots,
         elem_layout,
         case_idx,
-    )
-    .is_err()
-    {
+    ) {
+        if let exec::InstructionError::Capacity(error) = error {
+            fiber.pending_resource_error = Some(error);
+            return JitResult::RuntimeTransition;
+        }
         return set_jit_infra_error(
             ctx,
             JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -279,7 +281,7 @@ pub extern "C" fn jit_select_recv(
     let module =
         unsafe { (*ctx).module_ref() }.expect("validated JIT callback context must carry a module");
     let elem_layout = match queue_layout_for_current_pc(unsafe { &*ctx }, module) {
-        Ok(layout) => layout.map(|layout| layout.to_vec()),
+        Ok(layout) => layout,
         Err(msg) => {
             return set_jit_infra_error_with_message(
                 ctx,
@@ -320,7 +322,7 @@ pub extern "C" fn jit_select_recv(
             u64::from(queue_reg),
         );
     }
-    if exec::exec_select_recv_with_layout(
+    if let Err(error) = exec::exec_select_recv_with_layout(
         &mut fiber.select_state,
         dst_reg,
         queue_reg,
@@ -328,9 +330,11 @@ pub extern "C" fn jit_select_recv(
         elem_layout,
         has_ok,
         case_idx,
-    )
-    .is_err()
-    {
+    ) {
+        if let exec::InstructionError::Capacity(error) = error {
+            fiber.pending_resource_error = Some(error);
+            return JitResult::RuntimeTransition;
+        }
         return set_jit_infra_error(
             ctx,
             JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -391,6 +395,10 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
         &mut fiber.select_state,
         result_reg,
     ) {
+        SelectResult::Resource(error) => {
+            fiber.pending_resource_error = Some(error);
+            JitResult::RuntimeTransition
+        }
         SelectResult::Continue => {
             vm.state_mut().mark_gc_fiber_roots_dirty(fiber.id);
             JitResult::Ok
@@ -400,6 +408,7 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
             &mut vm.state_mut().gc,
             fiber,
             RuntimeTrapKind::SendOnClosedChannel,
+            module,
             helpers::ERR_SEND_ON_CLOSED,
         ),
         SelectResult::UnsupportedRemotePort => {
@@ -409,6 +418,7 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
             set_jit_panic(
                 &mut vm.state_mut().gc,
                 fiber,
+                module,
                 helpers::ERR_SELECT_REMOTE_UNSUPPORTED,
             )
         }

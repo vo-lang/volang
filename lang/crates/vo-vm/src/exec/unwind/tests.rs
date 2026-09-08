@@ -245,9 +245,7 @@ fn vm_errdefer_heap_return_check_rejects_short_error_allocation_before_deref_059
         func_id: 0,
         closure: core::ptr::null_mut(),
         args: core::ptr::null_mut(),
-        arg_layout: crate::fiber::DeferArgLayout {
-            slot_types: Vec::new(),
-        },
+        arg_layout: crate::fiber::DeferArgLayout::Test(Vec::new()),
         is_closure: false,
         is_errdefer: true,
         registered_at_generation: 0,
@@ -344,9 +342,7 @@ fn jit_ok_return_missing_stack_metadata_is_jit_error_instead_of_panic() {
         func_id: 0,
         closure: core::ptr::null_mut(),
         args: core::ptr::null_mut(),
-        arg_layout: crate::fiber::DeferArgLayout {
-            slot_types: Vec::new(),
-        },
+        arg_layout: crate::fiber::DeferArgLayout::Test(Vec::new()),
         is_closure: false,
         is_errdefer: false,
         registered_at_generation: 0,
@@ -496,9 +492,7 @@ fn jit_closure_replay_return_skips_errdefer_without_panicking() {
         func_id: 0,
         closure: core::ptr::null_mut(),
         args: core::ptr::null_mut(),
-        arg_layout: crate::fiber::DeferArgLayout {
-            slot_types: Vec::new(),
-        },
+        arg_layout: crate::fiber::DeferArgLayout::Test(Vec::new()),
         is_closure: false,
         is_errdefer: true,
         registered_at_generation: 0,
@@ -542,9 +536,7 @@ fn interpreter_closure_replay_return_skips_errdefer_without_panicking() {
         func_id: 0,
         closure: core::ptr::null_mut(),
         args: core::ptr::null_mut(),
-        arg_layout: crate::fiber::DeferArgLayout {
-            slot_types: Vec::new(),
-        },
+        arg_layout: crate::fiber::DeferArgLayout::Test(Vec::new()),
         is_closure: false,
         is_errdefer: true,
         registered_at_generation: 0,
@@ -574,7 +566,8 @@ fn closure_replay_defer_completion_appends_final_return_values() {
     fiber.push_frame(0, 1, 0, 0);
     fiber.closure_replay.push_boundary(fiber.frames.len(), 0);
     fiber.unwinding.push(UnwindingState {
-        pending: Vec::new(),
+        return_storage: None,
+        pending: Default::default(),
         target_depth: 1,
         mode: UnwindingMode::Return,
         current_defer_generation: 0,
@@ -610,7 +603,8 @@ fn recovered_closure_replay_panic_finalizes_through_replay_return() {
     fiber.push_frame(0, 1, 0, 0);
     fiber.closure_replay.push_boundary(fiber.frames.len(), 0);
     fiber.unwinding.push(UnwindingState {
-        pending: Vec::new(),
+        return_storage: None,
+        pending: Default::default(),
         target_depth: 1,
         mode: UnwindingMode::Panic,
         current_defer_generation: 0,
@@ -648,7 +642,8 @@ fn unrecovered_closure_replay_panic_intercepts_after_defers_finish() {
     fiber.closure_replay.push_boundary(2, 0);
     fiber.push_frame(0, 1, 0, 0);
     fiber.unwinding.push(UnwindingState {
-        pending: Vec::new(),
+        return_storage: None,
+        pending: Default::default(),
         target_depth: 1,
         mode: UnwindingMode::Panic,
         current_defer_generation: 0,
@@ -683,9 +678,7 @@ fn defer_call_missing_function_is_jit_error_instead_of_index_panic() {
         func_id: 9,
         closure: core::ptr::null_mut(),
         args: core::ptr::null_mut(),
-        arg_layout: crate::fiber::DeferArgLayout {
-            slot_types: Vec::new(),
-        },
+        arg_layout: crate::fiber::DeferArgLayout::Test(Vec::new()),
         is_closure: false,
         is_errdefer: false,
         registered_at_generation: 0,
@@ -712,9 +705,7 @@ fn vm_defer_closure_kind_002_rejects_non_closure_gcref_before_header_read() {
         func_id: 0,
         closure: string_ref,
         args: core::ptr::null_mut(),
-        arg_layout: crate::fiber::DeferArgLayout {
-            slot_types: Vec::new(),
-        },
+        arg_layout: crate::fiber::DeferArgLayout::Test(Vec::new()),
         is_closure: true,
         is_errdefer: false,
         registered_at_generation: 0,
@@ -749,9 +740,7 @@ fn vm_defer_closure_shape_002_rejects_arg_slot_shape_drift_before_frame_push() {
         func_id: 0,
         closure: closure_ref,
         args: core::ptr::null_mut(),
-        arg_layout: crate::fiber::DeferArgLayout {
-            slot_types: Vec::new(),
-        },
+        arg_layout: crate::fiber::DeferArgLayout::Test(Vec::new()),
         is_closure: true,
         is_errdefer: false,
         registered_at_generation: 0,
@@ -786,9 +775,7 @@ fn vm_defer_static_shape_002_rejects_arg_slot_shape_drift_before_frame_push() {
         func_id: 0,
         closure: core::ptr::null_mut(),
         args: core::ptr::null_mut(),
-        arg_layout: crate::fiber::DeferArgLayout {
-            slot_types: Vec::new(),
-        },
+        arg_layout: crate::fiber::DeferArgLayout::Test(Vec::new()),
         is_closure: false,
         is_errdefer: false,
         registered_at_generation: 0,
@@ -814,7 +801,8 @@ fn execute_next_defer_empty_pending_is_jit_error_instead_of_remove_panic() {
     let mut fiber = Fiber::new(0);
     let module = Module::new("empty-pending-defer-test".to_string());
     fiber.unwinding.push(UnwindingState {
-        pending: Vec::new(),
+        return_storage: None,
+        pending: Default::default(),
         target_depth: 0,
         mode: UnwindingMode::Return,
         current_defer_generation: 0,
@@ -843,9 +831,7 @@ fn ordering_defer(frame_depth: usize, func_id: u32, is_errdefer: bool) -> DeferE
         func_id,
         closure: core::ptr::null_mut(),
         args: core::ptr::null_mut(),
-        arg_layout: crate::fiber::DeferArgLayout {
-            slot_types: Vec::new(),
-        },
+        arg_layout: crate::fiber::DeferArgLayout::Test(Vec::new()),
         is_closure: false,
         is_errdefer,
         registered_at_generation: func_id as u64,
@@ -857,10 +843,11 @@ fn large_defer_collection_keeps_next_entry_at_tail() {
     const DEFER_COUNT: u32 = 16_384;
     const FRAME_DEPTH: usize = 7;
 
-    let mut defer_stack = (0..DEFER_COUNT)
+    let mut defer_stack: crate::fiber_storage::AuxiliaryVec<DeferEntry> = (0..DEFER_COUNT)
         .map(|func_id| ordering_defer(FRAME_DEPTH, func_id, false))
-        .collect::<Vec<_>>();
-    let mut pending = collect_defers(&mut defer_stack, FRAME_DEPTH, true);
+        .collect::<Vec<_>>()
+        .into();
+    let mut pending = collect_defers(&mut defer_stack, FRAME_DEPTH, true).unwrap();
 
     assert!(defer_stack.is_empty());
     assert_eq!(pending.first().map(|entry| entry.func_id), Some(0));
@@ -880,17 +867,20 @@ fn nested_defers_stack_ahead_of_older_pending_without_reordering_recovery_filter
     const NESTED_BATCHES: u32 = 128;
     const NESTED_PER_BATCH: u32 = 16;
 
-    let mut outer_stack = (0..OUTER_COUNT)
+    let mut outer_stack: crate::fiber_storage::AuxiliaryVec<DeferEntry> = (0..OUTER_COUNT)
         .map(|func_id| ordering_defer(1, func_id, func_id % 11 == 0))
-        .collect::<Vec<_>>();
-    let mut pending = collect_defers(&mut outer_stack, 1, true);
+        .collect::<Vec<_>>()
+        .into();
+    let mut pending = collect_defers(&mut outer_stack, 1, true).unwrap();
 
     for batch in 0..NESTED_BATCHES {
         let base = OUTER_COUNT + batch * NESTED_PER_BATCH;
-        let mut nested_stack = (0..NESTED_PER_BATCH)
+        let mut nested_stack: crate::fiber_storage::AuxiliaryVec<DeferEntry> = (0
+            ..NESTED_PER_BATCH)
             .map(|offset| ordering_defer(2, base + offset, false))
-            .collect::<Vec<_>>();
-        collect_and_stack_nested_defers(&mut nested_stack, &mut pending, 2, true);
+            .collect::<Vec<_>>()
+            .into();
+        collect_and_stack_nested_defers(&mut nested_stack, &mut pending, 2, true).unwrap();
         assert!(nested_stack.is_empty());
         for expected in (base..base + NESTED_PER_BATCH).rev() {
             assert_eq!(pending.pop().map(|entry| entry.func_id), Some(expected));
@@ -898,6 +888,7 @@ fn nested_defers_stack_ahead_of_older_pending_without_reordering_recovery_filter
     }
 
     let mut state = UnwindingState {
+        return_storage: None,
         pending,
         target_depth: 0,
         mode: UnwindingMode::Panic,

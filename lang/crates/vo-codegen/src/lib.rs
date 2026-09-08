@@ -200,44 +200,19 @@ fn compile_expression_evaluators(
     for spec in specs {
         by_package.entry(spec.package).or_default().push(spec);
     }
-    for (package_index, package) in project.packages.iter().copied().enumerate() {
-        let Some(package_specs) = by_package.remove(&package) else {
+    for (package_index, package) in project.packages().iter().enumerate() {
+        let Some(package_specs) = by_package.remove(&package.key) else {
             continue;
         };
-        if package == project.main_package {
-            compile_package_expression_evaluators(
-                &package_specs,
-                project.files.as_slice(),
-                project,
-                ctx,
-                main_info,
-                package_index,
-            )?;
-            continue;
-        }
-        let package_path = project.tc_objs.pkgs[package].path();
-        let type_info = project
-            .imported_type_infos
-            .get(package_path)
-            .ok_or_else(|| {
-                CodegenError::Internal(format!(
-                    "expression evaluator package {package_path:?} has no type information"
-                ))
-            })?;
-        let files = project.imported_files.get(package_path).ok_or_else(|| {
-            CodegenError::Internal(format!(
-                "expression evaluator package {package_path:?} has no source files"
-            ))
-        })?;
         let info = TypeInfoWrapper::for_package(
             project,
-            package,
-            type_info,
+            package.key,
+            &package.type_info,
             main_info.shared_layout_facts(),
         );
         compile_package_expression_evaluators(
             &package_specs,
-            files,
+            &package.files,
             project,
             ctx,
             &info,
@@ -331,6 +306,7 @@ fn compile_package_expression_evaluators(
                 builder
                     .try_define_param(Some(symbol), 1, &[vo_common_core::SlotType::Value])
                     .map_err(CodegenError::Internal)?;
+                builder.bind_local_object(symbol, Some(*parameter))?;
                 if info.closure_captures(expression.id).contains(parameter) {
                     escaped_externalized_params.push(symbol);
                 }
@@ -345,6 +321,7 @@ fn compile_package_expression_evaluators(
             builder
                 .try_define_param(Some(symbol), slots, &slot_types)
                 .map_err(CodegenError::Internal)?;
+            builder.bind_local_object(symbol, Some(*parameter))?;
             builder.add_param_type_key(type_key, ctx, info);
             if info.closure_captures(expression.id).contains(parameter) {
                 escaped_source_params.push((symbol, type_key, slots, slot_types));
@@ -838,16 +815,13 @@ fn register_types(
 
     register_pkg_types(
         project.main_pkg().path(),
-        &project.files,
+        &project.main().files,
         project,
         ctx,
         info,
     )?;
 
-    for (pkg_path, pkg, pkg_type_info, files) in project
-        .imported_packages_in_order()
-        .map_err(CodegenError::Internal)?
-    {
+    for (pkg_path, pkg, pkg_type_info, files) in project.imported_packages_in_order() {
         let pkg_info =
             TypeInfoWrapper::for_package(project, pkg, pkg_type_info, info.shared_layout_facts());
         register_pkg_types(pkg_path, files, project, ctx, &pkg_info)?;
@@ -982,11 +956,9 @@ fn collect_type_decls(files: &[vo_syntax::ast::File]) -> Vec<vo_syntax::ast::Typ
     }
 
     impl Visitor for Collector {
-        fn visit_decl(&mut self, decl: &Decl) {
-            if let Decl::Type(type_decl) = decl {
-                self.declarations.push(type_decl.clone());
-            }
-            vo_syntax::ast::walk_decl(self, decl);
+        fn visit_type_decl(&mut self, decl: &vo_syntax::ast::TypeDecl) {
+            self.declarations.push(decl.clone());
+            vo_syntax::ast::walk_type_decl(self, decl);
         }
     }
 
@@ -1012,15 +984,12 @@ fn collect_declarations(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     // First collect main package declarations (using main type_info)
-    for file in &project.files {
+    for file in &project.main().files {
         collect_file_declarations(file, project, ctx, info, true)?;
     }
 
     // Then collect imported package declarations in dependency order.
-    for (_, pkg, pkg_type_info, files) in project
-        .imported_packages_in_order()
-        .map_err(CodegenError::Internal)?
-    {
+    for (_, pkg, pkg_type_info, files) in project.imported_packages_in_order() {
         let pkg_info =
             TypeInfoWrapper::for_package(project, pkg, pkg_type_info, info.shared_layout_facts());
         for file in files {
@@ -1141,14 +1110,11 @@ fn compile_functions(
     // This handles forward references (function A calls function B defined later).
 
     // Compile function bodies - main package files first
-    for file in &project.files {
+    for file in &project.main().files {
         compile_file_functions(file, project, ctx, info, &mut method_mappings)?;
     }
     // Then imported package files in dependency order.
-    for (_, pkg, pkg_type_info, files) in project
-        .imported_packages_in_order()
-        .map_err(CodegenError::Internal)?
-    {
+    for (_, pkg, pkg_type_info, files) in project.imported_packages_in_order() {
         let pkg_info =
             TypeInfoWrapper::for_package(project, pkg, pkg_type_info, info.shared_layout_facts());
         for file in files {
@@ -1645,6 +1611,7 @@ fn compile_func_body(
         // Check if receiver escapes (e.g., captured by closure)
         if let Some(name) = &recv.name {
             let obj_key = info.get_def(name);
+            builder.bind_local_object(name.symbol, Some(obj_key))?;
             let type_key = info.obj_type(obj_key, "receiver must have type");
             if info.needs_boxing(obj_key, type_key) {
                 escaped_params.push((name.symbol, type_key, slots, slot_types.clone()));
@@ -1682,6 +1649,7 @@ fn compile_func_body(
             builder
                 .try_define_param(Some(name.symbol), slots, &slot_types)
                 .map_err(CodegenError::Internal)?;
+            builder.bind_local_object(name.symbol, Some(obj_key))?;
             builder.add_param_type_key(param_type_key, ctx, info);
             if info.needs_boxing(obj_key, type_key) {
                 escaped_params.push((name.symbol, type_key, slots, slot_types.clone()));
@@ -1832,6 +1800,7 @@ fn compile_func_body(
                 }
                 slot
             };
+            builder.bind_local_object(name.symbol, Some(obj_key))?;
             builder.register_named_return(slot, slots, escapes);
         }
     }
@@ -2227,10 +2196,7 @@ fn compile_init_and_entry(
 
     // Initialize imported packages' global variables in dependency order
     // (dependencies are initialized before dependents)
-    for (_, pkg, pkg_type_info, files) in project
-        .imported_packages_in_order()
-        .map_err(CodegenError::Internal)?
-    {
+    for (_, pkg, pkg_type_info, files) in project.imported_packages_in_order() {
         let pkg_info =
             TypeInfoWrapper::for_package(project, pkg, pkg_type_info, info.shared_layout_facts());
         compile_package_globals(ctx, &mut init_builder, &pkg_info, files)?;
@@ -2240,8 +2206,8 @@ fn compile_init_and_entry(
     }
 
     // Then initialize the main package and run its init functions.
-    compile_package_globals(ctx, &mut init_builder, info, &project.files)?;
-    for user_init_id in ctx.init_functions_for_package(project.main_package) {
+    compile_package_globals(ctx, &mut init_builder, info, &project.main().files)?;
+    for user_init_id in ctx.init_functions_for_package(project.main().key) {
         emit_entry_static_call(&mut init_builder, ctx, user_init_id)?;
     }
 
@@ -2367,18 +2333,19 @@ mod tests {
             objects.new_t_map(first, int);
             objects.new_t_map(second, int);
             let main_package = objects.new_package("main".to_string(), "main".to_string());
-            let project = Project {
-                tc_objs: objects,
-                interner: vo_common::SymbolInterner::new(),
-                packages: vec![main_package],
-                main_package,
-                type_info: Default::default(),
-                files: Vec::new(),
-                imported_files: BTreeMap::new(),
-                imported_type_infos: BTreeMap::new(),
-                source_map: vo_common::SourceMap::new(),
-                extensions: Vec::new(),
-            };
+            let project = Project::from_packages(
+                objects,
+                vo_common::SymbolInterner::new(),
+                vec![vo_analysis::AnalyzedPackage {
+                    key: main_package,
+                    files: Vec::new(),
+                    type_info: Default::default(),
+                }],
+                vo_common::SourceMap::new(),
+                vo_common::diagnostics::DiagnosticSink::new(),
+                Vec::new(),
+            )
+            .unwrap();
 
             let error = validate_project_type_layouts(&project)
                 .expect_err("both map key layouts exceed the VM slot domain");

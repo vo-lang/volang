@@ -12,6 +12,7 @@ use crate::{JitCompileEnv, JitError, JitFrameEntryEligibility};
 
 /// State shared by full-function and loop-OSR compilation.
 pub(crate) struct CompilerCore<'a> {
+    pub(crate) native_trap_blocks: crate::translator::NativeTrapBlocks,
     pub(crate) func_id: u32,
     pub(crate) func_def: &'a FunctionDef,
     pub(crate) vo_module: &'a Module,
@@ -34,6 +35,20 @@ pub(crate) struct CompilerCore<'a> {
 }
 
 impl<'a> CompilerCore<'a> {
+    pub(crate) fn cold_recovery_values(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+    ) -> Vec<(cranelift_frontend::Variable, cranelift_codegen::ir::Value)> {
+        self.analysis
+            .ir()
+            .resume_values(self.current_pc)
+            .into_iter()
+            .flatten()
+            .filter_map(|value| self.vars.get(value.slot))
+            .map(|variable| (variable, builder.use_var(variable)))
+            .collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         func_id: u32,
@@ -48,6 +63,7 @@ impl<'a> CompilerCore<'a> {
         jit_memory_flags: JitMemoryFlags,
     ) -> Self {
         Self {
+            native_trap_blocks: Default::default(),
             func_id,
             func_def,
             vo_module,
@@ -115,16 +131,7 @@ impl<'a> CompilerCore<'a> {
     }
 
     pub(crate) fn clear_flow_facts(&mut self) {
-        super::clear_flow_facts(&mut self.checked_non_nil);
-    }
-
-    pub(crate) fn apply_ir_facts(&mut self, pc: usize) -> Result<(), JitError> {
-        if self.analysis.ir().instruction(pc).is_none() {
-            return Err(JitError::Internal(format!(
-                "missing SSA instruction facts at pc {pc}"
-            )));
-        }
-        Ok(())
+        self.checked_non_nil.clear();
     }
 
     pub(crate) fn lowered_value_for_slot(&self, slot: u16) -> Option<cranelift_codegen::ir::Value> {

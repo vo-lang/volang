@@ -355,9 +355,13 @@ function parseAotRuntimeMetadata(module: WebAssembly.Module): AotRuntimeMetadata
     const first = readU32(view, offset + 36);
     const second = readU32(view, offset + 40);
     const length = readU64(view, offset + 44);
-    if (slotCount > 0xffff || storageBytes > 0xffff_ffff
+    const canonicalArrayOnly = tag === 2 && kind === 14 && slotCount > 0xffff;
+    const validDescriptors = canonicalArrayOnly
+      ? fixedDescriptor === undefined && sequenceDescriptor === undefined
+      : fixedDescriptor !== undefined && sequenceDescriptor !== undefined;
+    if ((slotCount > 0xffff && !canonicalArrayOnly) || storageBytes > 0xffff_ffff
       || types.has(raw) || (canonicalMeta & 0xff) !== kind
-      || fixedDescriptor === undefined || sequenceDescriptor === undefined
+      || !validDescriptors
       || (tag === 2 && length > BigInt(Number.MAX_SAFE_INTEGER))) {
       throw new Error('invalid Volang runtime type layout');
     }
@@ -455,6 +459,10 @@ function parseAotRuntimeMetadata(module: WebAssembly.Module): AotRuntimeMetadata
       : (type.tag === 4 ? [type.first, type.second] : []);
     if (referenced.some((raw) => !types.has(raw))) {
       throw new Error('Volang runtime type references missing child metadata');
+    }
+    if (type.tag === 2 && (type.kind !== 14
+      || BigInt(type.slotCount) !== type.length * BigInt(types.get(type.first)!.slotCount))) {
+      throw new Error('Volang array runtime type has an inconsistent logical layout');
     }
     if (type.tag === 5 && (type.first >= structs.length
       || structs[type.first].slotCount !== type.slotCount)) {

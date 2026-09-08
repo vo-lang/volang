@@ -423,7 +423,7 @@ impl<'a> Parser<'a> {
                     .map(|typ| self.type_expr_binary_depth(typ))
                     .unwrap_or(0);
                 for elem in &literal.elems {
-                    if let Some(CompositeLitKey::Expr(key)) = &elem.key {
+                    if let Some(key) = &elem.key {
                         depth = depth.max(self.expr_binary_depth(key));
                     }
                     depth = depth.max(self.expr_binary_depth(&elem.value));
@@ -506,7 +506,7 @@ impl<'a> Parser<'a> {
                     .map(|typ| self.type_expr_depth(typ))
                     .unwrap_or(0);
                 for elem in &literal.elems {
-                    if let Some(CompositeLitKey::Expr(key)) = &elem.key {
+                    if let Some(key) = &elem.key {
                         depth = depth.max(self.expr_depth(key));
                     }
                     depth = depth.max(self.expr_depth(&elem.value));
@@ -747,7 +747,7 @@ impl<'a> Parser<'a> {
                             }
                             include_expr!(&stmt.expr);
                             for case in &stmt.cases {
-                                for typ in case.types.iter().flatten() {
+                                for typ in case.types.iter().filter_map(TypeCase::type_expr) {
                                     include_type!(typ);
                                 }
                                 tasks.extend(case.body.iter().map(Task::Stmt));
@@ -937,7 +937,7 @@ impl<'a> Parser<'a> {
                             }
                             include_expr!(&stmt.expr);
                             for case in &stmt.cases {
-                                for typ in case.types.iter().flatten() {
+                                for typ in case.types.iter().filter_map(TypeCase::type_expr) {
                                     include_type!(typ);
                                 }
                                 tasks.extend(

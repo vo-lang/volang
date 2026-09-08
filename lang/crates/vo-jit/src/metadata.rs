@@ -4,7 +4,6 @@
 //! only preserves the small effect/translator adapter used inside the JIT.
 
 use vo_runtime::bytecode::InstructionMetadata;
-use vo_runtime::instruction::Instruction;
 use vo_runtime::SlotType;
 
 pub use vo_runtime::bytecode::{
@@ -32,33 +31,8 @@ impl<'a> MetadataFacts<'a> {
 }
 
 #[inline]
-pub fn elem_layout_from_instruction(metadata: &InstructionMetadata) -> Option<ElemLayout> {
-    metadata.elem_layout()
-}
-
-#[inline]
 pub fn slot_layout_needs_write_barrier(layout: &[SlotType]) -> bool {
     layout.iter().any(|slot| slot.needs_write_barrier())
-}
-
-#[inline]
-pub fn map_get_layout_from_instruction(metadata: &InstructionMetadata) -> Option<MapGetLayout> {
-    metadata.map_get_layout()
-}
-
-#[inline]
-pub fn map_new_layout_from_instruction(metadata: &InstructionMetadata) -> Option<MapNewLayout> {
-    metadata.map_new_layout()
-}
-
-#[inline]
-pub fn map_set_layout_from_instruction(metadata: &InstructionMetadata) -> Option<MapSetLayout> {
-    metadata.map_set_layout()
-}
-
-#[inline]
-pub fn map_delete_key_slots_from_instruction(metadata: &InstructionMetadata) -> Option<u16> {
-    metadata.map_delete_key_slots()
 }
 
 #[inline]
@@ -66,29 +40,6 @@ pub(crate) fn call_iface_method_index_from_instruction(
     metadata: &InstructionMetadata,
 ) -> Option<u32> {
     metadata.call_iface_method_index()
-}
-
-#[inline]
-pub fn map_iter_next_layout(
-    _: &Instruction,
-    facts: MetadataFacts<'_>,
-) -> Option<MapIterNextLayout> {
-    facts.instruction?.map_iter_next_layout()
-}
-
-#[inline]
-pub fn iface_assert_layout(_: &Instruction, facts: MetadataFacts<'_>) -> Option<IfaceAssertLayout> {
-    facts.instruction?.iface_assert_layout()
-}
-
-#[inline]
-pub fn queue_elem_slots(_: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
-    facts.instruction?.queue_elem_slots()
-}
-
-#[inline]
-pub fn slot_elem_slots(_: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
-    facts.instruction?.slot_elem_slots()
 }
 
 #[cfg(test)]

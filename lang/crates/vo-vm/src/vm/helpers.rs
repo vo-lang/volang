@@ -5,7 +5,7 @@
 use alloc::{string::String, vec};
 
 use vo_runtime::gc::{Gc, GcRef};
-use vo_runtime::objects::{alloc_error, closure, slice, string};
+use vo_runtime::objects::{alloc_error, closure, slice};
 use vo_runtime::slot::{slot_to_ptr, slot_to_usize, Slot};
 use vo_runtime::InterfaceSlot;
 
@@ -149,9 +149,8 @@ pub fn runtime_panic(
     msg: String,
 ) -> ExecResult {
     fiber.capture_panic_source_loc();
-    let panic_str = string::new_from_string(gc, msg);
-    let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-    fiber.set_recoverable_trap(kind, InterfaceSlot::new(slot0, panic_str as u64));
+    let value = vo_runtime::objects::interface::diagnostic_string(gc, module, msg);
+    fiber.set_recoverable_trap(kind, value);
     panic_unwind(gc, fiber, stack, module)
 }
 
@@ -207,9 +206,8 @@ fn runtime_panic_msg_after_source_capture(
     module: &Module,
     msg: String,
 ) -> ExecResult {
-    let panic_str = string::new_from_string(gc, msg);
-    let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-    fiber.set_recoverable_panic(InterfaceSlot::new(slot0, panic_str as u64));
+    let value = vo_runtime::objects::interface::diagnostic_string(gc, module, msg);
+    fiber.set_recoverable_panic(value);
     panic_unwind(gc, fiber, stack, module)
 }
 

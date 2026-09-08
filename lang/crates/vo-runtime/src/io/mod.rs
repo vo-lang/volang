@@ -346,7 +346,7 @@ pub struct IoRuntime {
     completions: HashMap<IoToken, Completion>,
     /// Completions returned synchronously by submission and cancellation paths
     /// outside `driver.poll()` still need one scheduler notification.
-    pending_notifications: Vec<IoToken>,
+    pending_notifications: std::collections::VecDeque<IoToken>,
     slice_staging: HashMap<IoToken, StagedSliceIo>,
     /// Stable-index root slots used by the VM's bounded root scanner. Holes
     /// are reused, so storage is bounded by peak concurrent write-back reads.
@@ -395,7 +395,7 @@ impl IoRuntime {
             manual_clock: None,
             manual_timers: BTreeMap::new(),
             completions: HashMap::new(),
-            pending_notifications: Vec::new(),
+            pending_notifications: std::collections::VecDeque::new(),
             slice_staging: HashMap::new(),
             staged_gc_roots: Vec::new(),
             free_staged_gc_root_slots: Vec::new(),
@@ -946,13 +946,25 @@ impl IoRuntime {
     /// Poll for completed operations (non-blocking).
     /// Returns tokens of newly completed operations.
     pub fn poll(&mut self) -> Vec<IoToken> {
+        self.poll_bounded(usize::MAX)
+    }
+
+    /// Nonblocking delivery with a fixed upper bound on notifications.
+    /// Completed operations remain owned here until their notification is taken.
+    pub fn poll_bounded(&mut self, limit: usize) -> Vec<IoToken> {
+        if limit == 0 {
+            return Vec::new();
+        }
         if let Some(clock) = &self.manual_clock {
             let now = clock.elapsed_ns.load(Ordering::SeqCst);
-            while self
-                .manual_timers
-                .first_key_value()
-                .is_some_and(|((deadline, _), _)| *deadline <= now)
-            {
+            for _ in 0..limit {
+                if !self
+                    .manual_timers
+                    .first_key_value()
+                    .is_some_and(|((deadline, _), _)| *deadline <= now)
+                {
+                    break;
+                }
                 let ((_, token), ()) = self.manual_timers.pop_first().expect("due timer");
                 self.store_completion_for_poll(Completion {
                     token,
@@ -960,29 +972,24 @@ impl IoRuntime {
                 });
             }
         }
-        let mut completed_tokens = std::mem::take(&mut self.pending_notifications);
-        let Some(driver) = self.driver.as_mut() else {
-            return completed_tokens;
-        };
-        let driver_completions = driver.poll();
-        completed_tokens.reserve(driver_completions.len());
-
-        for completion in driver_completions {
-            let token = completion.token;
-            if let Entry::Vacant(entry) = self.completions.entry(token) {
-                entry.insert(completion);
-                completed_tokens.push(token);
+        // Drivers poll finite readiness batches. Drain already-staged results
+        // first so a completion flood cannot grow staging on every guest turn.
+        if self.pending_notifications.len() < limit {
+            if let Some(driver) = self.driver.as_mut() {
+                for completion in driver.poll() {
+                    self.store_completion_for_poll(completion);
+                }
             }
         }
-
-        completed_tokens
+        let count = self.pending_notifications.len().min(limit);
+        self.pending_notifications.drain(..count).collect()
     }
 
     fn store_completion_for_poll(&mut self, completion: Completion) {
         let token = completion.token;
         if let Entry::Vacant(entry) = self.completions.entry(token) {
             entry.insert(completion);
-            self.pending_notifications.push(token);
+            self.pending_notifications.push_back(token);
         }
     }
 
@@ -1148,6 +1155,30 @@ mod tests {
         assert!(!runtime.has_pending());
         assert!(!runtime.has_completion(later));
         assert!(runtime.try_submit_timer(1).is_err());
+    }
+
+    #[test]
+    fn bounded_poll_preserves_timer_order_and_delivers_each_completion_once() {
+        let mut runtime = IoRuntime::new().unwrap();
+        let clock = ManualClock::new(0);
+        runtime.set_manual_clock(clock.clone()).unwrap();
+        let tokens: Vec<_> = (1..=150)
+            .map(|delay| runtime.try_submit_timer(delay).unwrap())
+            .collect();
+        clock.advance(std::time::Duration::from_nanos(150)).unwrap();
+        assert!(runtime.poll_bounded(0).is_empty());
+        assert!(!runtime.has_completion(tokens[0]));
+        for chunk in tokens.chunks(64) {
+            assert_eq!(runtime.poll_bounded(64), chunk);
+            for &token in chunk {
+                assert!(matches!(
+                    runtime.take_completion(token).result,
+                    Ok(CompletionData::Timer)
+                ));
+            }
+        }
+        assert!(runtime.poll_bounded(64).is_empty());
+        assert!(!runtime.has_pending());
     }
 
     #[test]

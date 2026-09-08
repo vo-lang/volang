@@ -1,6 +1,7 @@
 //! Function builder - manages function-level codegen state.
 
 use std::collections::HashMap;
+use vo_analysis::objects::ObjKey;
 use vo_common::span::Span;
 use vo_common::symbol::Symbol;
 use vo_common_core::bytecode::{FunctionDef, MAX_CLOSURE_CAPTURE_SLOTS};
@@ -161,13 +162,13 @@ pub enum ExprSource {
 #[derive(Debug, Clone)]
 pub struct LocalVar {
     pub symbol: Symbol,
+    object: Option<ObjKey>,
     pub storage: StorageKind,
 }
 
 /// Capture info for closure.
 #[derive(Debug, Clone)]
 pub struct CaptureVar {
-    pub symbol: Symbol,
     pub index: u16, // capture index in closure
     pub slots: u16, // always 1 (GcRef to escaped var)
 }
@@ -199,7 +200,8 @@ pub struct FuncBuilder {
     recv_slots: u16,
     next_slot: u16,
     locals: HashMap<Symbol, LocalVar>,
-    captures: HashMap<Symbol, CaptureVar>, // closure captures
+    local_objects: HashMap<ObjKey, StorageKind>,
+    captures: HashMap<ObjKey, CaptureVar>, // closure captures
     named_return_slots: Vec<(u16, u16, bool)>, // (slot, slots, escaped) for named return variables
     slot_types: Vec<SlotType>,
     stack_array_elem_layouts: HashMap<u16, Vec<SlotType>>,
@@ -244,6 +246,7 @@ impl FuncBuilder {
             recv_slots: 0,
             next_slot: 0,
             locals: HashMap::new(),
+            local_objects: HashMap::new(),
             captures: HashMap::new(),
             named_return_slots: Vec::new(),
             slot_types: Vec::new(),
@@ -404,11 +407,10 @@ impl FuncBuilder {
     }
 
     /// Define a capture variable (for closure)
-    pub fn define_capture(&mut self, sym: Symbol, index: u16) {
+    pub fn define_capture(&mut self, object: ObjKey, index: u16) {
         self.captures.insert(
-            sym,
+            object,
             CaptureVar {
-                symbol: sym,
                 index,
                 slots: 1, // captures are always GcRef
             },
@@ -416,8 +418,8 @@ impl FuncBuilder {
     }
 
     /// Look up a capture variable
-    pub fn lookup_capture(&self, sym: Symbol) -> Option<&CaptureVar> {
-        self.captures.get(&sym)
+    pub fn lookup_capture(&self, object: ObjKey) -> Option<&CaptureVar> {
+        self.captures.get(&object)
     }
 
     // === Parameter definition ===
@@ -460,6 +462,7 @@ impl FuncBuilder {
                 s,
                 LocalVar {
                     symbol: s,
+                    object: None,
                     storage: StorageKind::StackValue { slot, slots },
                 },
             );
@@ -505,15 +508,12 @@ impl FuncBuilder {
         };
 
         let gcref_slot = self.alloc_slots(&[SlotType::GcBase]);
-        self.locals.insert(
+        self.replace_local_storage(
             sym,
-            LocalVar {
-                symbol: sym,
-                storage: StorageKind::HeapBoxed {
-                    gcref_slot,
-                    value_slots,
-                    stores_pointer,
-                },
+            StorageKind::HeapBoxed {
+                gcref_slot,
+                value_slots,
+                stores_pointer,
             },
         );
         // Emit PtrNew + PtrSet
@@ -535,6 +535,7 @@ impl FuncBuilder {
             sym,
             LocalVar {
                 symbol: sym,
+                object: None,
                 storage,
             },
         );
@@ -555,6 +556,31 @@ impl FuncBuilder {
             .get_mut(&sym)
             .expect("replacing storage requires an existing local binding");
         local.storage = storage;
+        if let Some(object) = local.object {
+            self.local_objects.insert(object, storage);
+        }
+    }
+
+    /// Attach the checked declaration identity once its local storage is bound.
+    /// Names remain useful for lexical construction, but captures resolve only
+    /// through object identity, including when an outer name is shadowed.
+    pub fn bind_local_object(
+        &mut self,
+        sym: Symbol,
+        object: Option<ObjKey>,
+    ) -> Result<(), CodegenError> {
+        if let Some(object) = object {
+            let local = self.locals.get_mut(&sym).ok_or_else(|| {
+                CodegenError::Internal(format!("declaration {object:?} has no local storage"))
+            })?;
+            local.object = Some(object);
+            self.local_objects.insert(object, local.storage);
+        }
+        Ok(())
+    }
+
+    pub fn lookup_local_object(&self, object: ObjKey) -> Option<StorageKind> {
+        self.local_objects.get(&object).copied()
     }
 
     /// Stack allocation (non-escaping) for values (struct/primitive).

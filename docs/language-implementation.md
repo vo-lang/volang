@@ -28,6 +28,60 @@ Provider resolution still authenticates identity, ABI and effective effects befo
 freezing the complete registry. Runtime registration and the stdlib conformance
 tests validate implementations against the same declarations.
 
+## Checked frontend contracts
+
+The parser preserves call syntax without reserving `make` or `new` by spelling.
+Name resolution records `CallInfo` for every valid call, distinguishing functions,
+builtins and conversions. Each logical argument records its source expression
+index, optional tuple component, checked source type and parameter type. Statement
+eligibility, suspended calls, island sendability and code generation consume these
+facts. Argument lowering evaluates a tuple producer once, converts each logical
+value and packs variadic values at the parameter boundary. Source arity never
+stands in for the number of returned values.
+
+Constant folding retains the complete logical signature, including an assert
+condition or len/cap operand. Print and assert lower the same checked argument
+bindings before adapting values to their runtime interface ABI. Completed
+no-value expressions carry the empty tuple type; value and call contexts reject
+them before assignment or signature lookup.
+
+Composite literal keys retain their complete expression node and identity.
+Struct checking interprets a bare identifier as a field name; map and indexed
+literals use ordinary expression checking and lowering. Type-switch alternatives
+retain a source span even for `nil`, so both duplicate-case labels are locatable.
+
+Closure capture sets contain runtime variable objects only. Local storage and
+capture lookup preserve declaration `ObjKey` identity through code generation,
+including parameters, named returns and loop variables. Boxing updates the
+object's storage binding. Constructing a capture requires an enclosing heap box
+or an existing capture; a missing binding or unboxed slot is a compilation error.
+
+`Project` stores a dependency-ordered list of `AnalyzedPackage` values. Each value
+owns its files and `TypeInfo`; the root is last. Construction validates package
+identity, uniqueness and dependency order. `main()`, `package(key)` and
+`package_by_path(path)` give consumers consistent views. Package loading completes
+imports before checking, moving one arena and symbol interner through the phases.
+Parsing another file does not clone the accumulated interner.
+
+Successful analysis retains warnings in `Project::diagnostics`. Syntax and type
+errors in dependencies retain the same diagnostic codes, severity, spans and
+source map as root errors; formatting belongs to the consumer. Import resolution
+and module-policy failures remain `AnalysisError::Import`.
+
+The checker has one package pipeline, scoped object contexts and named deferred
+checks. The AST visitor covers signatures and local declarations by reference;
+post-passes use that traversal to include expressions nested in types. Semantic
+maps live in `check::type_info`; the arena adapter for physical layouts lives in
+`vo_analysis::layout` and uses the shared slot-layout algorithms.
+
+Initialization uses a source-ordered ready queue and updates dependencies after
+each initializer. A multi-variable declaration remains one initialization unit.
+An iterative strongly connected component pass resolves and caches shared
+function dependencies before projecting them onto variable declarations. Every
+entry into a mutually recursive function group sees the same dependencies.
+Constant map keys use exact normalized values; interface keys also include their
+dynamic type identity. Both rules have analysis and executable regression cases.
+
 ## UI composition above the engine
 
 Dependency direction is `CLI / Studio / native shell` → `vo-ui-integration` →

@@ -178,8 +178,27 @@ impl<'a> Parser<'a> {
                 self.make_expr(ExprKind::Unary(Box::new(UnaryExpr { op, operand })), span)
             }
             TokenKind::Arrow => {
-                // Receive expression: <-ch
                 self.advance();
+                if self.at(TokenKind::Chan) || self.at(TokenKind::Port) {
+                    let is_port = self.at(TokenKind::Port);
+                    self.advance();
+                    let elem = self.parse_type()?;
+                    let kind = if is_port {
+                        TypeExprKind::Port(Box::new(PortType {
+                            dir: ChanDir::Recv,
+                            elem,
+                        }))
+                    } else {
+                        TypeExprKind::Chan(Box::new(ChanType {
+                            dir: ChanDir::Recv,
+                            elem,
+                        }))
+                    };
+                    let span = Span::new(start, self.current.span.start);
+                    let ty = self.make_type_expr(kind, span)?;
+                    return self.type_to_expr(ty, span);
+                }
+                // Receive expression: <-ch
                 let operand = self.parse_expr_prec(Precedence::Prefix)?;
                 let span = Span::new(start, self.current.span.start);
                 self.make_expr(ExprKind::Receive(Box::new(operand)), span)
@@ -187,14 +206,38 @@ impl<'a> Parser<'a> {
             TokenKind::Func => {
                 self.advance();
                 let sig = self.parse_func_sig()?;
+                if !self.at(TokenKind::LBrace) {
+                    let span = Span::new(start, self.current.span.start);
+                    let ty = self.make_type_expr(
+                        TypeExprKind::Func(Box::new(FuncType {
+                            params: sig.params,
+                            results: sig
+                                .results
+                                .into_iter()
+                                .map(|p| Param {
+                                    names: p.name.into_iter().collect(),
+                                    ty: p.ty,
+                                    span: p.span,
+                                })
+                                .collect(),
+                            variadic: sig.variadic,
+                        })),
+                        span,
+                    )?;
+                    return self.type_to_expr(ty, span);
+                }
                 let body = self.parse_block()?;
                 let span = Span::new(start, self.current.span.start);
                 self.make_expr(ExprKind::FuncLit(Box::new(FuncLit { sig, body })), span)
             }
             // Type-starting tokens for composite literals
-            TokenKind::LBracket | TokenKind::Map | TokenKind::Struct => {
-                self.parse_composite_lit_with_type()
-            }
+            TokenKind::LBracket
+            | TokenKind::Map
+            | TokenKind::Struct
+            | TokenKind::Interface
+            | TokenKind::Chan
+            | TokenKind::Port
+            | TokenKind::Island => self.parse_composite_lit_with_type(),
             _ => {
                 self.error_expected("expression");
                 Err(())
@@ -220,15 +263,8 @@ impl<'a> Parser<'a> {
         if self.at(TokenKind::LBrace) {
             self.parse_composite_lit_body(ty)
         } else {
-            // Type conversion: Type(expr)
-            self.expect(TokenKind::LParen)?;
-            let expr = self.parse_expr()?;
-            self.expect(TokenKind::RParen)?;
-            let span = ty.span.to(self.current.span);
-            self.make_expr(
-                ExprKind::Conversion(Box::new(ConversionExpr { ty, expr })),
-                span,
-            )
+            let span = ty.span;
+            self.type_to_expr(ty, span)
         }
     }
 
@@ -274,11 +310,9 @@ impl<'a> Parser<'a> {
 
         if self.eat(TokenKind::Colon) {
             // Has key
-            let key = if let ExprKind::Ident(ident) = first.kind {
-                CompositeLitKey::Ident(ident)
-            } else {
-                CompositeLitKey::Expr(first)
-            };
+            // Retain expression identity for map/array keys. Struct checking
+            // requires a bare identifier after the literal type is resolved.
+            let key = first;
             // Check if value is anonymous composite literal
             let value = if self.at(TokenKind::LBrace) {
                 self.parse_anonymous_composite_lit()?
@@ -359,51 +393,10 @@ impl<'a> Parser<'a> {
             }
             // Call expression or type conversion
             TokenKind::LParen => {
-                // Check if this is a pointer type conversion: (*T)(x)
-                // Pattern: Paren(Unary(Deref, Ident)) -> Conversion(Pointer(Ident), expr)
-                if let ExprKind::Paren(ref inner) = left.kind {
-                    if let ExprKind::Unary(ref unary) = inner.kind {
-                        if unary.op == UnaryOp::Deref {
-                            if let ExprKind::Ident(ref ident) = unary.operand.kind {
-                                // This is (*T)(x) pattern - parse as type conversion
-                                let ident_clone = *ident;
-                                let ident_span = ident.span;
-                                let left_span = left.span;
-                                self.advance();
-                                let expr = self.parse_expr()?;
-                                self.expect(TokenKind::RParen)?;
-                                let inner_type = self
-                                    .make_type_expr(TypeExprKind::Ident(ident_clone), ident_span)?;
-                                let ptr_type = self.make_type_expr(
-                                    TypeExprKind::Pointer(Box::new(inner_type)),
-                                    left_span,
-                                )?;
-                                let span = Span::new(start, self.current.span.start);
-                                return self.make_expr(
-                                    ExprKind::Conversion(Box::new(ConversionExpr {
-                                        ty: ptr_type,
-                                        expr,
-                                    })),
-                                    span,
-                                );
-                            }
-                        }
-                    }
-                }
-
                 self.advance();
-                // Check if this is a make/new call which takes a type as first argument
-                let is_make_or_new = if let ExprKind::Ident(ref ident) = left.kind {
-                    let name = self.interner.resolve(ident.symbol);
-                    name == Some("make") || name == Some("new")
-                } else {
-                    false
-                };
-                let (args, spread) = if is_make_or_new {
-                    self.parse_make_args()?
-                } else {
-                    self.parse_call_args()?
-                };
+                // Callee identity is resolved by analysis. Type expressions may
+                // occur as arguments, without reserving the names make or new.
+                let (args, spread) = self.parse_call_args()?;
                 let rparen_end = self.current.span.end; // Save RParen's end before advancing
                 self.expect(TokenKind::RParen)?;
                 let span = Span::new(start, rparen_end);
@@ -531,35 +524,6 @@ impl<'a> Parser<'a> {
         }
 
         Ok((args, spread))
-    }
-
-    /// Parse arguments for make/new calls where first argument is a type
-    fn parse_make_args(&mut self) -> ParseResult<(Vec<Expr>, bool)> {
-        let mut args = Vec::new();
-
-        if self.at(TokenKind::RParen) {
-            return Ok((args, false));
-        }
-
-        // First argument is a type - wrap it in a special expression
-        let ty_start = self.current.span.start;
-        let ty = self.parse_type()?;
-        let ty_span = Span::new(ty_start, self.current.span.start);
-
-        // Wrap the type in a TypeExpr expression (using Ident for named types, or we need a new variant)
-        // For simplicity, convert the type to an expression representation
-        let type_expr = self.type_to_expr(ty, ty_span)?;
-        args.push(type_expr);
-
-        // Parse remaining arguments as expressions
-        while self.eat(TokenKind::Comma) {
-            if self.at(TokenKind::RParen) {
-                break;
-            }
-            args.push(self.parse_expr()?);
-        }
-
-        Ok((args, false))
     }
 
     /// Convert a type expression to an expression (for make/new first argument)

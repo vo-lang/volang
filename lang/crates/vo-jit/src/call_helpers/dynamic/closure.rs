@@ -149,12 +149,12 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     let dispatch_key = emitter.builder().ins().bor(capture_shape_key, func_id_key);
 
     let lowering = DynamicCallLowering::new(emitter, inst, ctx, true)?;
-    let (ic_jit_ptr, ic_hit_block, ic_miss_block, merge_block) =
+    let (ic_jit_ptr, ic_entry, ic_hit_block, ic_miss_block, merge_block) =
         lowering.branch_on_ic_key_hit(emitter, dispatch_key, zero);
 
     emitter.builder().switch_to_block(ic_hit_block);
     emitter.builder().seal_block(ic_hit_block);
-    let hit_fields = lowering.load_hit_fields(emitter);
+    let hit_fields = lowering.load_hit_fields(emitter, ic_entry);
     lowering.emit_hit_call(
         emitter,
         closure_ref,
@@ -176,7 +176,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
         &miss,
     )?;
 
-    lowering.finish_miss(emitter, miss, merge_block, Some(dispatch_key))?;
+    lowering.finish_miss(emitter, miss, merge_block)?;
     lowering.copy_returns(emitter);
     Ok(())
 }

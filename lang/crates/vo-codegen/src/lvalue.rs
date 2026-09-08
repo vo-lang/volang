@@ -190,15 +190,19 @@ fn snapshot_gc_base_slot(src: u16, func: &mut FuncBuilder) -> u16 {
     snapshot
 }
 
-fn compile_captured_array_ref(expr: &Expr, func: &mut FuncBuilder) -> Option<u16> {
+fn compile_captured_array_ref(
+    expr: &Expr,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Option<u16> {
     match &expr.kind {
         ExprKind::Ident(ident) => {
-            let capture_index = func.lookup_capture(ident.symbol)?.index;
+            let capture_index = func.lookup_capture(info.get_use(ident))?.index;
             let array_ref = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_op(Opcode::ClosureGet, array_ref, capture_index, 0);
             Some(array_ref)
         }
-        ExprKind::Paren(inner) => compile_captured_array_ref(inner, func),
+        ExprKind::Paren(inner) => compile_captured_array_ref(inner, func, info),
         _ => None,
     }
 }
@@ -412,9 +416,9 @@ fn resolve_lvalue_with_mode(
         ExprKind::Ident(ident) => {
             let obj_key = info.get_use(ident);
             if let Some(spec) = ctx.externalized_local(obj_key).cloned() {
-                let handle = if let Some(local) = func.lookup_local(ident.symbol) {
-                    ExternalizedHandle::Variable(local.storage)
-                } else if let Some(capture) = func.lookup_capture(ident.symbol) {
+                let handle = if let Some(storage) = func.lookup_local_object(obj_key) {
+                    ExternalizedHandle::Variable(storage)
+                } else if let Some(capture) = func.lookup_capture(info.get_use(ident)) {
                     ExternalizedHandle::Capture {
                         capture_index: capture.index,
                     }
@@ -431,8 +435,8 @@ fn resolve_lvalue_with_mode(
                 });
             }
             // Check local variable first - storage is already computed in LocalVar
-            if let Some(local) = func.lookup_local(ident.symbol) {
-                return Ok(LValue::Variable(local.storage));
+            if let Some(storage) = func.lookup_local_object(obj_key) {
+                return Ok(LValue::Variable(storage));
             }
 
             // Check global variable
@@ -444,7 +448,7 @@ fn resolve_lvalue_with_mode(
             }
 
             // Check closure capture
-            if let Some(capture) = func.lookup_capture(ident.symbol) {
+            if let Some(capture) = func.lookup_capture(info.get_use(ident)) {
                 let type_key = info.obj_type(obj_key, "capture must have type");
                 let value_slots = info.type_slot_count(type_key);
                 return Ok(LValue::Capture {
@@ -1115,7 +1119,7 @@ fn resolve_array_index_lvalue(
         }
         crate::func::ExprSource::NeedsCompile => {
             // Check if this is a captured array - capture access has no side effects
-            if let Some(gcref_slot) = compile_captured_array_ref(&idx.expr, func) {
+            if let Some(gcref_slot) = compile_captured_array_ref(&idx.expr, func, info) {
                 let index_value = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
                 let index_reg = snapshot_value_slot(index_value, func);
                 if mode.requires_early_check() {

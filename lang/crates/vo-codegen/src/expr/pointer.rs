@@ -35,7 +35,7 @@ fn global_boxed_struct_index(
 ) -> Option<u16> {
     match &expr.kind {
         ExprKind::Ident(ident) => {
-            if func.lookup_local(ident.symbol).is_some() {
+            if func.lookup_local_object(info.get_use(ident)).is_some() {
                 return None;
             }
             let obj_key = info.get_use(ident);
@@ -72,8 +72,8 @@ pub fn get_addressable_gcref(
 ) -> Option<(u16, u16)> {
     match &expr.kind {
         ExprKind::Ident(ident) => {
-            let local = func.lookup_local(ident.symbol)?;
-            let gcref = get_gcref_slot(&local.storage)?;
+            let storage = func.lookup_local_object(info.get_use(ident))?;
+            let gcref = get_gcref_slot(&storage)?;
             Some((gcref, 0))
         }
         ExprKind::Selector(sel) => {
@@ -192,7 +192,7 @@ pub fn compile_expr_to_ptr(
 
     // Case 4: Captured variable in closure → get GcRef via ClosureGet
     if let ExprKind::Ident(ident) = &expr.kind {
-        if let Some(capture) = func.lookup_capture(ident.symbol) {
+        if let Some(capture) = func.lookup_capture(info.get_use(ident)) {
             // Captured variables are stored as GcRef in closure environment
             // ClosureGet retrieves the GcRef which IS the pointer we need
             func.emit_op(Opcode::ClosureGet, dst, capture.index, 0);
@@ -237,7 +237,7 @@ pub fn compile_addr_of(
 
         for (i, elem) in lit.elems.iter().enumerate() {
             let (offset, field_slots, field_type) = if let Some(key) = &elem.key {
-                if let vo_syntax::ast::CompositeLitKey::Ident(field_ident) = key {
+                if let vo_syntax::ast::ExprKind::Ident(field_ident) = &key.kind {
                     let field_name = info
                         .project
                         .interner

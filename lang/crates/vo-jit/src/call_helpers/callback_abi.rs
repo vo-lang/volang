@@ -46,13 +46,6 @@ pub const STACK_LIMIT_OVERFLOW_CALLSITE: JitContextCallbackCallsite = JitContext
     call_kind: JitContextCallbackCallKind::ReturningJitResult,
 };
 
-pub const CALL_DEPTH_OVERFLOW_CALLSITE: JitContextCallbackCallsite = JitContextCallbackCallsite {
-    name: "call_depth_overflow_fn",
-    lowering: "emit_call_depth_enter",
-    kind: JitContextDependencyKind::StackOverflowFn,
-    call_kind: JitContextCallbackCallKind::ReturningJitResult,
-};
-
 pub const PREPARE_CLOSURE_CALLSITE: JitContextCallbackCallsite = JitContextCallbackCallsite {
     name: "prepare_closure_call_fn",
     lowering: "emit_call_closure",
@@ -110,7 +103,6 @@ pub const NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE: JitContextCallbackCallsit
 pub fn jit_context_callback_callsites() -> &'static [JitContextCallbackCallsite] {
     &[
         STACK_LIMIT_OVERFLOW_CALLSITE,
-        CALL_DEPTH_OVERFLOW_CALLSITE,
         PREPARE_CLOSURE_CALLSITE,
         PREPARE_IFACE_CALLSITE,
         LINK_FUNCTION_CALLSITE,

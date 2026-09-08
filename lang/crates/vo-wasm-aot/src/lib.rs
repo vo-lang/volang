@@ -1308,6 +1308,75 @@ mod tests {
     }
 
     #[test]
+    fn web_module_retains_canonical_array_metadata_above_flat_slot_limit() {
+        use vo_common_core::types::{ValueKind, ValueRttid};
+        use vo_common_core::RuntimeType;
+
+        let target = TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN).unwrap();
+        for (lengths, expected_slots) in [
+            (vec![65_536], vec![65_536]),
+            (vec![256, 256], vec![256, 65_536]),
+            (vec![65_536, 0], vec![65_536, 0]),
+        ] {
+            let mut module = scalar_module();
+            module
+                .runtime_types
+                .push(RuntimeType::Basic(ValueKind::Int));
+            let mut element = ValueRttid::new(0, ValueKind::Int);
+            for len in lengths {
+                let id = module.runtime_types.len() as u32;
+                module
+                    .runtime_types
+                    .push(RuntimeType::Array { len, elem: element });
+                element = ValueRttid::new(id, ValueKind::Array);
+            }
+            let artifact = compile_wasm_aot(&module, &target).unwrap();
+            let metadata = wasmparser::Parser::new(0)
+                .parse_all(&artifact.bytes)
+                .find_map(|payload| match payload.unwrap() {
+                    wasmparser::Payload::CustomSection(section)
+                        if section.name() == WASM_AOT_RUNTIME_METADATA_SECTION =>
+                    {
+                        Some(section.data().to_vec())
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            for (index, slots) in expected_slots.into_iter().enumerate() {
+                let record = 36 + (index + 1) * 52;
+                let read =
+                    |offset| u32::from_le_bytes(metadata[offset..offset + 4].try_into().unwrap());
+                assert_eq!(read(record + 12), slots);
+                assert_eq!(read(record + 16), slots * 8);
+                assert_eq!(read(record + 20) == u32::MAX, slots > u32::from(u16::MAX));
+                assert_eq!(read(record + 24) == u32::MAX, slots > u32::from(u16::MAX));
+            }
+            assert!(wasmparser::validate(&artifact.bytes).is_ok());
+        }
+    }
+
+    #[test]
+    fn web_module_rejects_runtime_array_storage_above_wasm32() {
+        use vo_common_core::types::{ValueKind, ValueRttid};
+        use vo_common_core::RuntimeType;
+
+        let target = TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN).unwrap();
+        let mut module = scalar_module();
+        module
+            .runtime_types
+            .push(RuntimeType::Basic(ValueKind::Int));
+        module.runtime_types.push(RuntimeType::Array {
+            len: 1 << 29,
+            elem: ValueRttid::new(0, ValueKind::Int),
+        });
+        let error = compile_wasm_aot(&module, &target).unwrap_err();
+        assert!(
+            error.to_string().contains("runtime storage exceeds wasm32"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn web_module_preserves_backend_neutral_artifacts() {
         let target = TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN).unwrap();
         let mut module = scalar_module();

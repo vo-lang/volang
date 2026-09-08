@@ -26,12 +26,8 @@ impl CallSigInfo {
         }
     }
 
-    fn calc_arg_slot_types(
-        &self,
-        call_expr: &vo_syntax::ast::CallExpr,
-        info: &TypeInfoWrapper,
-    ) -> Vec<SlotType> {
-        crate::expr::call::calc_arg_slot_types(call_expr, &self.param_types, self.is_variadic, info)
+    fn calc_arg_slot_types(&self, info: &TypeInfoWrapper) -> Vec<SlotType> {
+        crate::expr::call::call_arg_slot_types(&self.param_types, info)
     }
 
     fn compile_args(
@@ -95,6 +91,7 @@ fn compile_defer_impl(
         Opcode::DeferPush
     };
 
+    let call = crate::expr::call::strip_paren_expr(call);
     let ExprKind::Call(call_expr) = &call.kind else {
         return Err(CodegenError::UnsupportedStmt(
             "defer requires a call expression".to_string(),
@@ -106,10 +103,17 @@ fn compile_defer_impl(
     // Must check before treating as method call
     if let ExprKind::Selector(sel) = &callee_expr.kind {
         if let Some(selection) = info.get_selection(callee_expr.id) {
-            if matches!(
+            let tuple_method = matches!(
                 selection.kind(),
-                vo_analysis::selection::SelectionKind::FieldVal
-            ) && info.is_func_type(info.expr_type(callee_expr.id))
+                vo_analysis::selection::SelectionKind::MethodExpr
+            ) && info
+                .call_expr_info(call_expr)
+                .is_some_and(|checked| checked.expands_tuple());
+            if tuple_method
+                || (matches!(
+                    selection.kind(),
+                    vo_analysis::selection::SelectionKind::FieldVal
+                ) && info.is_func_type(info.expr_type(callee_expr.id)))
             {
                 let sig = CallSigInfo::from_call(call_expr, info);
                 let closure = crate::expr::compile_expr(callee_expr, ctx, func, info)?;
@@ -379,7 +383,7 @@ fn compile_call_args(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(u16, u16), CodegenError> {
-    let arg_slot_types = sig.calc_arg_slot_types(call_expr, info);
+    let arg_slot_types = sig.calc_arg_slot_types(info);
     let total_arg_slots = ctx.slot_count_u16_or_record(arg_slot_types.len());
     let args_start = func.alloc_args_typed(&arg_slot_types);
     sig.compile_args(call_expr, args_start, ctx, func, info)?;
@@ -464,7 +468,7 @@ where
     };
     let actual_recv_type = call_info.actual_recv_type(base_type);
     let recv_storage = match &recv_expr.kind {
-        ExprKind::Ident(ident) => func.lookup_local(ident.symbol).map(|local| local.storage),
+        ExprKind::Ident(ident) => func.lookup_local_object(info.get_use(ident)),
         _ => None,
     };
 
@@ -479,7 +483,7 @@ where
     } else {
         info.type_slot_types(actual_recv_type)
     };
-    arg_slot_types.extend(sig.calc_arg_slot_types(call_expr, info));
+    arg_slot_types.extend(sig.calc_arg_slot_types(info));
     let total_arg_slots = ctx.slot_count_u16_or_record(arg_slot_types.len());
     let args_start = func.alloc_args_typed(&arg_slot_types);
 
@@ -515,7 +519,7 @@ where
     F: FnOnce(u32, u16, u16, &mut FuncBuilder),
 {
     let sig = CallSigInfo::from_call(call_expr, info);
-    let arg_slot_types = sig.calc_arg_slot_types(call_expr, info);
+    let arg_slot_types = sig.calc_arg_slot_types(info);
 
     let mut total_arg_slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     total_arg_slot_types.extend(arg_slot_types);
@@ -563,7 +567,7 @@ where
     };
     let actual_recv_type = call_info.actual_recv_type(base_type);
     let recv_storage = match &recv_expr.kind {
-        ExprKind::Ident(ident) => func.lookup_local(ident.symbol).map(|local| local.storage),
+        ExprKind::Ident(ident) => func.lookup_local_object(info.get_use(ident)),
         _ => None,
     };
     let recv_slots = if expects_ptr_recv {
@@ -576,13 +580,7 @@ where
     } else {
         info.type_slot_types(actual_recv_type)
     };
-    arg_slot_types.extend(crate::expr::call::calc_arg_slot_types_for_args(
-        args,
-        spread,
-        param_types,
-        is_variadic,
-        info,
-    ));
+    arg_slot_types.extend(crate::expr::call::call_arg_slot_types(param_types, info));
     let total_arg_slots = ctx.slot_count_u16_or_record(arg_slot_types.len());
     let args_start = func.alloc_args_typed(&arg_slot_types);
 
@@ -629,13 +627,7 @@ fn compile_scheduled_iface_method_expr_call<F>(
 where
     F: FnOnce(u32, u16, u16, &mut FuncBuilder),
 {
-    let arg_slot_types = crate::expr::call::calc_arg_slot_types_for_args(
-        args,
-        spread,
-        param_types,
-        is_variadic,
-        info,
-    );
+    let arg_slot_types = crate::expr::call::call_arg_slot_types(param_types, info);
     let mut total_arg_slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     total_arg_slot_types.extend(arg_slot_types);
     let total_arg_slots = ctx.slot_count_u16_or_record(total_arg_slot_types.len());
@@ -707,7 +699,7 @@ fn compile_defer_pkg_func_call(
     let result_types = info.func_result_types(func_type);
     let returns = crate::expr::call::return_shape_for_type_keys(&result_types, ctx, info)?;
     let sig_info = CallSigInfo::from_call(call_expr, info);
-    let arg_slot_types = sig_info.calc_arg_slot_types(call_expr, info);
+    let arg_slot_types = sig_info.calc_arg_slot_types(info);
 
     let wrapper_id = crate::wrapper::generate_defer_extern_wrapper(
         ctx,
@@ -1095,6 +1087,7 @@ pub(crate) fn compile_go(
 ) -> Result<(), CodegenError> {
     use vo_syntax::ast::ExprKind;
 
+    let call = crate::expr::call::strip_paren_expr(call);
     let ExprKind::Call(call_expr) = &call.kind else {
         return Err(CodegenError::UnsupportedStmt(
             "go requires a call expression".to_string(),
@@ -1128,10 +1121,17 @@ pub(crate) fn compile_go(
 
     if let ExprKind::Selector(sel) = &callee_expr.kind {
         if let Some(selection) = info.get_selection(callee_expr.id) {
-            if matches!(
+            let tuple_method = matches!(
                 selection.kind(),
-                vo_analysis::selection::SelectionKind::FieldVal
-            ) && info.is_func_type(info.expr_type(callee_expr.id))
+                vo_analysis::selection::SelectionKind::MethodExpr
+            ) && info
+                .call_expr_info(call_expr)
+                .is_some_and(|checked| checked.expands_tuple());
+            if tuple_method
+                || (matches!(
+                    selection.kind(),
+                    vo_analysis::selection::SelectionKind::FieldVal
+                ) && info.is_func_type(info.expr_type(callee_expr.id)))
             {
                 let sig = CallSigInfo::from_call(call_expr, info);
                 let closure = crate::expr::compile_expr(callee_expr, ctx, func, info)?;
@@ -1229,7 +1229,7 @@ fn compile_go_pkg_func_call(
     let result_types = info.func_result_types(func_type);
     let returns = crate::expr::call::return_shape_for_type_keys(&result_types, ctx, info)?;
     let sig_info = CallSigInfo::from_call(call_expr, info);
-    let arg_slot_types = sig_info.calc_arg_slot_types(call_expr, info);
+    let arg_slot_types = sig_info.calc_arg_slot_types(info);
     let wrapper_id = crate::wrapper::generate_defer_extern_wrapper(
         ctx,
         &extern_name,

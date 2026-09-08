@@ -8,7 +8,7 @@ use crate::translator::IrEmitter;
 use super::super::PREPARE_IFACE_CALLSITE;
 use super::DynamicCallLowering;
 
-/// Emit an interface method call instruction with monomorphic inline cache.
+/// Emit an interface method call instruction with a bounded polymorphic inline cache.
 ///
 /// CallIface: inst.a = iface_slot (2 slots), inst.b = arg_start. CallIfaceLayout
 /// owns the method identity and argument/return layouts.
@@ -52,13 +52,13 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
 
     let lowering = DynamicCallLowering::new(emitter, inst, ctx, true)?;
 
-    let (ic_jit_ptr, ic_hit_block, ic_miss_block, merge_block) =
+    let (ic_jit_ptr, ic_entry, ic_hit_block, ic_miss_block, merge_block) =
         lowering.branch_on_ic_key_hit(emitter, slot0, zero);
 
     emitter.builder().switch_to_block(ic_hit_block);
     emitter.builder().seal_block(ic_hit_block);
 
-    let hit_fields = lowering.load_hit_fields(emitter);
+    let hit_fields = lowering.load_hit_fields(emitter, ic_entry);
     lowering.emit_hit_call(
         emitter,
         slot1,
@@ -86,7 +86,7 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
         &miss,
     )?;
 
-    lowering.finish_miss(emitter, miss, merge_block, Some(slot0))?;
+    lowering.finish_miss(emitter, miss, merge_block)?;
 
     lowering.copy_returns(emitter);
     Ok(())

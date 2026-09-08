@@ -208,7 +208,7 @@ pub(crate) fn borrowed_expr_ref(
             let ExprKind::Ident(ident) = &peel_parens(expr).kind else {
                 return None;
             };
-            let capture_index = func.lookup_capture(ident.symbol)?.index;
+            let capture_index = func.lookup_capture(info.get_use(ident))?.index;
             let array_ref = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_op(Opcode::ClosureGet, array_ref, capture_index, 0);
             Some(array_ref)

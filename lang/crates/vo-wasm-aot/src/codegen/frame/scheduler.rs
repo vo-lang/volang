@@ -435,12 +435,6 @@ pub(super) fn compile(
         }
         Opcode::GoStart => {
             if instruction.call_shape_is_closure() {
-                reject_nil_reference(
-                    body,
-                    instruction.a,
-                    static_data.nil_reference_panic_ref,
-                    current_block,
-                );
                 let candidates = closure_callsite_candidates(
                     module,
                     function,
@@ -449,6 +443,15 @@ pub(super) fn compile(
                     ClosureResultUse::Discarded,
                 )?;
                 body.instruction(&W::Block(BlockType::Empty));
+                load_slot(body, instruction.a);
+                body.instruction(&W::I64Eqz)
+                    .instruction(&W::If(BlockType::Empty));
+                compile_spawn_trapped_fiber(
+                    body,
+                    runtime_globals,
+                    static_data.nil_function_panic_ref,
+                );
+                body.instruction(&W::Br(1)).instruction(&W::End);
                 for candidate in candidates {
                     let target = candidate.target;
                     let callee = &module.functions[target.function_id as usize];

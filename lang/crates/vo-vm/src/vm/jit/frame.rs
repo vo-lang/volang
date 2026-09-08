@@ -229,7 +229,11 @@ pub extern "C" fn jit_push_resume_point(
                 pending as u64,
             );
         }
-        fiber.resume_stack.push(crate::fiber::ResumePoint {
+        if let Err(error) = fiber.resume_stack.try_reserve(1) {
+            fiber.pending_resource_error = Some(error);
+            return JitResult::JitError;
+        }
+        fiber.resume_stack.push_reserved(crate::fiber::ResumePoint {
             func_id,
             resume_pc,
             bp: bp as usize,

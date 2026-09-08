@@ -949,6 +949,13 @@ fn validate_jit_observation(
     job: &TestJob,
     observation: vo_engine::RunObservation,
 ) -> Result<(), String> {
+    if matches!(job.target.as_str(), "jit-opt" | "gc-jit-opt")
+        && observation.optimizing_functions_executed == 0
+    {
+        return Err(
+            "optimizing JIT target completed without entering optimizing machine code".to_string(),
+        );
+    }
     if uses_eager_function_jit(job) && !observation.executed_jit_code() {
         return Err(
             "JIT backend completed without entering JIT-compiled function or loop code".to_string(),
@@ -1160,6 +1167,27 @@ mod tests {
                 jit_loop_entries_min: None,
             },
         }
+    }
+
+    #[test]
+    fn optimizing_jobs_require_executing_the_optimized_tier() {
+        let job = test_job("jit-opt", "jit", &[("VO_JIT_CALL_THRESHOLD", "1")]);
+        let baseline_only = vo_engine::RunObservation {
+            function_entries: 10,
+            optimizing_compilations: 2,
+            ..Default::default()
+        };
+        assert!(validate_jit_observation(&job, baseline_only).is_err());
+        validate_jit_observation(
+            &job,
+            vo_engine::RunObservation {
+                function_entries: 10,
+                optimizing_compilations: 2,
+                optimizing_functions_executed: 1,
+                ..Default::default()
+            },
+        )
+        .expect("the optimized body actually ran");
     }
 
     #[test]

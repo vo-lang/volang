@@ -170,6 +170,7 @@ fn tiered_entries_freeze_training_profiles_after_tier_up() {
     let profile = unsafe { &*ctx.jit_profile_table };
     assert_eq!((profile.entries, profile.completed), (1, 0));
     assert_eq!(profile.tier_up_state, 2);
+    assert_eq!(profile.optimizing_entered, 1);
 }
 
 #[test]
@@ -366,6 +367,93 @@ fn optimizing_gvn_reuses_a_historical_ssa_value_after_slot_overwrite() {
 
 extern "C" fn reject_tier_up(_ctx: *mut JitContext, _func_id: u32) -> JitResult {
     JitResult::JitError
+}
+
+#[test]
+fn frame_elided_calls_preserve_native_chain_accounting() {
+    #[derive(Default)]
+    struct Observed {
+        floor: [u64; 2],
+        depth: [u32; 2],
+    }
+    extern "C" fn observe(ctx: *mut JitContext, func_id: u32) -> JitResult {
+        unsafe {
+            let observed = &mut *((*ctx).callback_state as *mut Observed);
+            observed.floor[func_id as usize] = (*ctx).native_stack_floor;
+            observed.depth[func_id as usize] = (*ctx).call_depth;
+        }
+        JitResult::Ok
+    }
+    let mut module = VoModule::new("jit-leaf-native-chain".into());
+    module.functions.push(make_func_with_sig(
+        vec![
+            Instruction::new(Opcode::Call, 1, 0, 0),
+            Instruction::new(Opcode::Return, 1, 1, 0),
+        ],
+        1,
+        1,
+        2,
+        1,
+    ));
+    // Exceed the inline budget while retaining pure, frame-elidable effects.
+    let mut code = vec![Instruction::new(Opcode::LoadInt, 1, 1, 0)];
+    code.extend((0..50).map(|_| Instruction::new(Opcode::AddI, 0, 0, 1)));
+    code.push(Instruction::new(Opcode::Return, 0, 1, 0));
+    module.functions.push(make_func_with_sig(code, 1, 1, 2, 1));
+    let loaded = Arc::new(vo_common_core::verifier::verify_loaded_module(module.clone()).unwrap());
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().unwrap();
+    jit.bind_loaded_module_scope(loaded).unwrap();
+    let mut entries = [vo_runtime::jit_api::JitDispatchEntry::unavailable(); 2];
+    for id in 0..2 {
+        jit.compile_loaded_tier(
+            id,
+            default_compile_env(&externs),
+            vo_runtime::jit_api::JitTier::Baseline,
+        )
+        .unwrap();
+        entries[id as usize].native = unsafe {
+            jit.get_func_ptr_for_tier(id, vo_runtime::jit_api::JitTier::Baseline)
+                .unwrap()
+        } as *const u8;
+    }
+    let entry = unsafe {
+        jit.get_func_ptr_for_tier(0, vo_runtime::jit_api::JitTier::Baseline)
+            .unwrap()
+    };
+    let mut stack = [0_u64; 32];
+    stack[0] = 7;
+    let mut ret = [0_u64; 1];
+    let mut parts = JitContextParts::new();
+    parts.callbacks.tier_up_fn = Some(observe);
+    let mut ctx = parts.context(&module, &mut stack);
+    let mut observed = Observed::default();
+    ctx.callback_state = core::ptr::from_mut(&mut observed).cast();
+    ctx.jit_func_table = entries.as_ptr();
+    ctx.jit_func_count = 2;
+    ctx.fiber_sp = 2;
+    ctx.optimizing_threshold = 1;
+    assert_eq!(
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut stack, &mut ret) },
+        JitResult::Ok
+    );
+    assert_eq!(ret, [57]);
+    assert_eq!(observed.depth, [0, 1]);
+    assert_ne!(observed.floor[0], 0);
+    assert_eq!(observed.floor[0], observed.floor[1]);
+    assert_eq!(ctx.call_depth, 0);
+
+    // Simulate an exhausted outer activation: the leaf call must use the VM
+    // trampoline even though it needs no materialized VM execution context.
+    ctx.optimizing_threshold = u64::MAX;
+    ctx.call_depth = 1;
+    ctx.native_stack_floor = u64::MAX;
+    assert_eq!(
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut stack, &mut ret) },
+        JitResult::Call
+    );
+    assert_eq!(ctx.call_depth, 1);
+    assert_eq!(ctx.call_func_id, 1);
 }
 
 #[test]
@@ -631,7 +719,9 @@ fn live_scalar_replacement_materializes_before_a_scheduler_exit() {
         Instruction::new(Opcode::PtrSet, 1, 0, 2),
     ];
     code.resize(region + 1, Instruction::new(Opcode::Hint, 0, 0, 0));
-    code.push(Instruction::new(Opcode::Return, 1, 1, 0));
+    let get_pc = code.len();
+    code.push(Instruction::new(Opcode::PtrGet, 2, 1, 0));
+    code.push(Instruction::new(Opcode::Return, 2, 1, 0));
     let mut function = make_func_with_slot_types_and_sig(
         code,
         vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
@@ -639,8 +729,7 @@ fn live_scalar_replacement_materializes_before_a_scheduler_exit() {
         0,
         1,
     );
-    function.ret_slot_types = vec![SlotType::GcRef];
-    for pc in [1, 3] {
+    for pc in [1, 3, get_pc] {
         function.instruction_metadata[pc] = InstructionMetadata::PtrLayout {
             value_layout: vec![SlotType::Value],
         };
@@ -650,6 +739,13 @@ fn live_scalar_replacement_materializes_before_a_scheduler_exit() {
         ValueMeta::new(0, ValueKind::Int64).to_raw() as i64
     ));
     module.functions.push(function);
+    let ir = crate::ir::FunctionIr::build(&module.functions[0], &module).unwrap();
+    assert!(
+        crate::escape::EscapePlan::analyze(&module.functions[0], &ir)
+            .replacement(1)
+            .is_some(),
+        "this regression must exercise scalar replacement"
+    );
     let loaded = Arc::new(
         vo_common_core::verifier::verify_loaded_module(module.clone())
             .expect("verified scalar replacement materialization module"),
@@ -918,16 +1014,10 @@ fn compiled_artifact_retains_precise_live_gcref_stack_maps() {
 
     let metadata = jit.function_metadata(0).expect("artifact metadata");
     assert!(metadata.code_size > 0);
-    let deopt = metadata
-        .deopt_states
-        .iter()
-        .find(|state| state.resume_pc == 0)
-        .expect("allocating instruction must retain its materializable frame state");
-    assert!(deopt.values.iter().any(|value| {
-        value.slot == 0
-            && value.kind == DeoptValueKind::GcRef
-            && value.location == DeoptValueLocation::FiberSlot(0)
-    }));
+    assert!(
+        metadata.deopt_states.is_empty(),
+        "direct recovery exits retain no runtime deopt snapshots"
+    );
     assert!(
         metadata.stack_maps.iter().any(|map| {
             map.roots
@@ -1153,10 +1243,7 @@ fn osr_artifact_retains_precise_live_gcref_stack_maps() {
     .expect("compile OSR stack-map probe");
 
     let metadata = jit.loop_metadata(0, 0).expect("OSR metadata");
-    assert!(metadata
-        .deopt_states
-        .iter()
-        .any(|state| state.resume_pc == 0));
+    assert!(metadata.deopt_states.is_empty());
     assert!(metadata.stack_maps.iter().any(|map| {
         map.roots
             .iter()
@@ -1905,6 +1992,15 @@ fn optimizing_leaf_inline_charges_expanded_execution_budget() {
     jit.ctx.func.signature =
         crate::abi::native_signature(target_config.default_call_conv, ptr_type);
     jit.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(0xfeed, 0);
+    let self_id = jit
+        .module
+        .declare_function(
+            "inline_probe_self",
+            cranelift_module::Linkage::Local,
+            &jit.ctx.func.signature,
+        )
+        .unwrap();
+    let self_entry = jit.module.declare_func_in_func(self_id, &mut jit.ctx.func);
     let helpers = HelperRefs::new(&mut *jit.module, jit.helper_funcs);
     let instruction_optimization = crate::optimizer::OptimizedFunction::analyze(analysis.ir());
     let compiler = FunctionCompiler::new(
@@ -1917,11 +2013,11 @@ fn optimizing_leaf_inline_charges_expanded_execution_budget() {
         &module_analysis.entry_eligibility,
         helpers,
         &analysis,
-        vo_runtime::jit_api::JitTier::Optimizing,
-        &module_analysis.inline_plan,
-        Some(&optimization_plan),
-        Some(&instruction_optimization),
-        None,
+        crate::func_compiler::FunctionCompilePlan::Optimizing {
+            module: &optimization_plan,
+            instructions: &instruction_optimization,
+            self_entry,
+        },
     );
     let inline = optimization_plan
         .pure_leaf_inline(0, 1)
@@ -1938,7 +2034,7 @@ fn optimizing_leaf_inline_charges_expanded_execution_budget() {
         )
         .expect("declare inline budget probe");
     let staged = jit
-        .stage_function(func_id_cl, "inline budget probe", Vec::new())
+        .stage_function(func_id_cl, "inline budget probe")
         .expect("stage inline budget probe");
     let (code_ptr, _) = jit
         .publish_loop_artifact(staged)
@@ -2470,6 +2566,95 @@ fn compile_loop_rejects_out_of_range_loop_info_instead_of_panicking() {
 }
 
 #[test]
+fn repeated_map_reads_have_linear_native_code_growth() {
+    fn compile_reads(count: u16, tier: JitTier) -> usize {
+        let mut code = vec![Instruction::new(Opcode::LoadInt, 1, 0, 0)];
+        for index in 0..count {
+            code.extend([
+                Instruction::new(Opcode::LoadInt, 2, index, 0),
+                Instruction::new(Opcode::MapGet, 3, 0, 2),
+                Instruction::new(Opcode::AddI, 1, 1, 3),
+            ]);
+        }
+        code.push(Instruction::new(Opcode::Return, 1, 1, 0));
+        let mut func = make_func_with_slot_types_and_sig(
+            code,
+            vec![
+                SlotType::GcBase,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+            ],
+            1,
+            1,
+            1,
+        );
+        for (inst, metadata) in func.code.iter().zip(&mut func.instruction_metadata) {
+            if inst.opcode() == Opcode::MapGet {
+                *metadata = InstructionMetadata::MapGet {
+                    key_layout: vec![SlotType::Value],
+                    val_layout: vec![SlotType::Value],
+                    has_ok: false,
+                };
+            }
+        }
+        let mut module = VoModule::new("map-code-growth".into());
+        module.functions.push(func);
+        let loaded = Arc::new(vo_common_core::verifier::verify_loaded_module(module).unwrap());
+        let mut jit = JitCompiler::new().unwrap();
+        jit.bind_loaded_module_scope(loaded).unwrap();
+        let externs = ResolvedExternTable::empty();
+        jit.compile_loaded_tier(0, default_compile_env(&externs), tier)
+            .unwrap();
+        jit.function_metadata_handle_for_tier(0, tier)
+            .unwrap()
+            .code_size as usize
+    }
+    for tier in [JitTier::Baseline, JitTier::Optimizing] {
+        let small = compile_reads(32, tier);
+        let large = compile_reads(256, tier);
+        assert!(
+            large < small * 10,
+            "8x input grew from {small} to {large} bytes"
+        );
+        assert!(
+            large < 100_000,
+            "recovery duplicated into map exits: {large}"
+        );
+    }
+}
+
+#[test]
+fn long_string_constants_do_not_expand_native_code() {
+    let mut func = make_func_with_slot_types_and_sig(
+        vec![
+            Instruction::new(Opcode::StrNew, 0, 0, 0),
+            Instruction::new(Opcode::Return, 0, 1, 0),
+        ],
+        vec![SlotType::GcBase],
+        0,
+        0,
+        1,
+    );
+    func.ret_slot_types = vec![SlotType::GcBase];
+    let mut module = VoModule::new("large-string".into());
+    module.constants.push(Constant::String("x".repeat(400_000)));
+    module.functions.push(func);
+    let loaded = Arc::new(vo_common_core::verifier::verify_loaded_module(module).unwrap());
+    let mut jit = JitCompiler::new().unwrap();
+    jit.bind_loaded_module_scope(loaded).unwrap();
+    let externs = ResolvedExternTable::empty();
+    jit.compile_loaded_tier(0, default_compile_env(&externs), JitTier::Baseline)
+        .unwrap();
+    assert!(
+        jit.function_metadata_handle_for_tier(0, JitTier::Baseline)
+            .unwrap()
+            .code_size
+            < 4096
+    );
+}
+
+#[test]
 fn native_frame_budget_rejects_oversized_explicit_stack_storage() {
     use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
 
@@ -2486,5 +2671,48 @@ fn native_frame_budget_rejects_oversized_explicit_stack_storage() {
             limit_bytes: MAX_JIT_NATIVE_FRAME_BYTES,
             requested_bytes,
         }) if requested_bytes == MAX_JIT_NATIVE_FRAME_BYTES + 8
+    ));
+}
+
+#[test]
+fn final_frame_budget_includes_alignment_without_gc_stack_maps() {
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind};
+    let mut jit = JitCompiler::new().unwrap();
+    let config = jit.module.target_config();
+    jit.ctx.func.signature =
+        crate::abi::native_signature(config.default_call_conv, config.pointer_type());
+    let mut frontend = cranelift_frontend::FunctionBuilderContext::new();
+    let mut builder = cranelift_frontend::FunctionBuilder::new(&mut jit.ctx.func, &mut frontend);
+    let entry = builder.create_block();
+    builder.append_block_params_for_function_params(entry);
+    builder.switch_to_block(entry);
+    builder.seal_block(entry);
+    let scratch = builder.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        (MAX_JIT_NATIVE_FRAME_BYTES - 8) as u32,
+        16,
+    ));
+    let address = builder.ins().stack_addr(types::I64, scratch, 0);
+    let output = builder.block_params(entry)[2];
+    builder
+        .ins()
+        .store(MemFlagsData::trusted(), address, output, 0);
+    let ok = builder.ins().iconst(types::I32, JitResult::Ok as i64);
+    builder.ins().return_(&[ok]);
+    builder.finalize(config);
+    crate::artifact::verify_lowered_frame(&jit.ctx).unwrap();
+    jit.ctx
+        .compile(jit.module.isa(), &mut Default::default())
+        .unwrap();
+    assert!(jit
+        .ctx
+        .compiled_code()
+        .unwrap()
+        .buffer
+        .user_stack_maps()
+        .is_empty());
+    assert!(matches!(
+        crate::artifact::compiled_metadata(&jit.ctx, "aligned-frame"),
+        Err(JitError::NativeFrameLimitExceeded { .. })
     ));
 }

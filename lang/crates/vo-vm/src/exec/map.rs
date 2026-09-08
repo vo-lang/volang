@@ -4,7 +4,6 @@
 extern crate alloc;
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 
 use vo_runtime::bytecode::ModuleRuntimeMetadata;
 use vo_runtime::gc::{Gc, GcRef};
@@ -24,10 +23,19 @@ use crate::vm::helpers::{stack_get, stack_set};
 /// operation while preserving the bytecode aliasing contract.
 #[derive(Debug, Default)]
 pub struct MapScratch {
-    slots: Vec<u64>,
+    slots: crate::fiber_storage::AuxiliaryVec<u64>,
 }
 
 impl MapScratch {
+    pub(crate) fn new(budget: alloc::sync::Arc<crate::fiber::FiberStorageBudget>) -> Self {
+        Self {
+            slots: crate::fiber_storage::AuxiliaryVec::new(budget),
+        }
+    }
+    pub(crate) fn capacity_bytes(&self) -> usize {
+        self.slots.capacity() * 8
+    }
+
     #[inline]
     fn key_value(
         &mut self,
@@ -38,13 +46,9 @@ impl MapScratch {
             InstructionError::Memory(vo_runtime::gc::MemoryError::AllocationSizeOverflow)
         })?;
         if total > self.slots.len() {
-            self.slots
-                .try_reserve_exact(total - self.slots.len())
-                .map_err(|_| {
-                    InstructionError::Memory(vo_runtime::gc::MemoryError::SystemAllocationFailed)
-                })?;
+            self.slots.try_reserve_exact(total - self.slots.len())?;
         }
-        self.slots.resize(total, 0);
+        self.slots.resize_reserved(total, 0);
         self.slots[..total].fill(0);
         Ok(self.slots[..total].split_at_mut(key_slots))
     }
@@ -52,13 +56,9 @@ impl MapScratch {
     #[inline]
     fn key(&mut self, key_slots: usize) -> Result<&mut [u64], InstructionError> {
         if key_slots > self.slots.len() {
-            self.slots
-                .try_reserve_exact(key_slots - self.slots.len())
-                .map_err(|_| {
-                    InstructionError::Memory(vo_runtime::gc::MemoryError::SystemAllocationFailed)
-                })?;
+            self.slots.try_reserve_exact(key_slots - self.slots.len())?;
         }
-        self.slots.resize(key_slots, 0);
+        self.slots.resize_reserved(key_slots, 0);
         Ok(&mut self.slots[..key_slots])
     }
 }

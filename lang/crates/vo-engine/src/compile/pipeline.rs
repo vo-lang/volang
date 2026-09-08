@@ -232,7 +232,6 @@ impl<F: FileSystem> PreparedProject<F> {
         .map_err(|e| CompileError::Analysis(format!("{}", e)))?;
         let imported_packages = project
             .imported_packages_in_order()
-            .map_err(CompileError::Analysis)?
             .into_iter()
             .map(|(path, _, _, _)| path)
             .collect::<Vec<_>>();
@@ -326,9 +325,9 @@ pub(super) fn compile_analyzed_project(
         .compile_analyzed_project(project)
         .map_err(CompileError::Codegen)?;
     let package_payload = project
-        .packages
+        .packages()
         .iter()
-        .map(|package| project.tc_objs.pkgs[*package].path())
+        .map(|package| project.tc_objs.pkgs[package.key].path())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>()

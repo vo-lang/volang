@@ -133,6 +133,7 @@ impl vo_runtime::island_transport::IslandSender for RecordingIslandSender {
 fn select_state_for_queue_061(ch: GcRef) -> SelectState {
     SelectState {
         cases: vec![SelectCase {
+            _storage: None,
             kind: SelectCaseKind::Recv,
             result_index: 0,
             queue_reg: 0,
@@ -140,7 +141,8 @@ fn select_state_for_queue_061(ch: GcRef) -> SelectState {
             elem_slots: 1,
             elem_layout: None,
             has_ok: false,
-        }],
+        }]
+        .into(),
         expected_cases: 1,
         has_default: false,
         woken_index: None,
@@ -150,13 +152,15 @@ fn select_state_for_queue_061(ch: GcRef) -> SelectState {
             case_index: 0,
             queue: ch,
             kind: SelectCaseKind::Recv,
-        }],
+        }]
+        .into(),
     }
 }
 
 fn select_send_state_for_queue_061(ch: GcRef) -> SelectState {
     SelectState {
         cases: vec![SelectCase {
+            _storage: None,
             kind: SelectCaseKind::Send,
             result_index: 0,
             queue_reg: 0,
@@ -164,7 +168,8 @@ fn select_send_state_for_queue_061(ch: GcRef) -> SelectState {
             elem_slots: 1,
             elem_layout: None,
             has_ok: false,
-        }],
+        }]
+        .into(),
         expected_cases: 1,
         has_default: false,
         woken_index: None,
@@ -174,7 +179,8 @@ fn select_send_state_for_queue_061(ch: GcRef) -> SelectState {
             case_index: 0,
             queue: ch,
             kind: SelectCaseKind::Send,
-        }],
+        }]
+        .into(),
     }
 }
 

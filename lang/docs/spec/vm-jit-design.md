@@ -9,14 +9,18 @@ The JIT is a synchronous Cranelift backend for Vo bytecode. JIT functions run on
 the VM thread and return a `JitResult` to the VM scheduler:
 
 ```rust
-extern "C" fn(ctx: *mut JitContext, args: *mut u64, ret: *mut u64) -> JitResult
+extern "C" fn(
+    ctx: *mut JitContext, frame_bp: u64, ret: *mut u64,
+    arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
+) -> JitResult
 ```
 
-`args` points at the active `Fiber` stack frame. Primitive slots may be promoted
-to Cranelift SSA values, but GC-visible slots remain represented in the VM stack
-at safepoints. If generated code calls a helper that may allocate, block,
-materialize frames, or panic, the helper result is checked before local JIT
-execution continues.
+`frame_bp` is a stable index into the active Fiber stack. The first five
+argument slots also travel in raw native register lanes. Verified slots may
+remain in Cranelift SSA; allocation polls spill live direct references into
+precise native shadow-root maps. Conditional roots require typed VM-frame
+materialization before collection. Stack reallocation rebuilds addresses from
+the stable index. Every non-OK helper result exits before further guest effects.
 
 ## Strict And Best-Effort Modes
 
@@ -57,14 +61,12 @@ rejected before a module can execute or enter strict JIT.
 
 ## Opcode Contract
 
-`vo-jit/src/semantics/` is the compact JIT opcode table. Each row contains the
-register effect specification, backend capability, and effect contract.
-`capability.rs` and `contract.rs` expose those rows without maintaining parallel
-per-opcode matches. Dynamic register writes are enumerated by the shared
-allocation-free visitor in `vo-common-core::instruction_effects`; JIT-specific
-read effects and memory synchronization remain in `effects.rs`. Constant
-analysis consumes the same effects for kill sets and keeps dedicated logic only
-for folding.
+Canonical execution effects, including writes through heap aliases, live in
+`vo-common-core::execution_effects`. Register reads, writes and aliased frame
+ranges live in `vo-common-core::instruction_effects`. Optimizer invalidation,
+frame eligibility and backend lowering consume these contracts. The
+`vo-jit/src/semantics/` rows are test-only cross-checks of capability, metadata,
+ABI and lowering coverage.
 
 ## Lowering Responsibilities
 
@@ -97,9 +99,12 @@ execution path accepts a module.
 - `call_helpers/callback_abi.rs` owns JitContext callback ABI callsites.
 - `call_helpers/result_flow.rs` owns checked helper result routing and non-OK
   JIT call materialization flow.
-- `DynamicCallLowering` in `call_helpers.rs` owns the shared
+- `DynamicCallLowering` in `call_helpers/dynamic/mod.rs` owns the shared
   closure/interface dynamic-call skeleton: inline-cache lookup, hit/miss branch,
-  prepare-callback workspace, IC update, JIT/VM call dispatch, and return copy.
+  prepare-callback workspace, JIT/VM call dispatch, and return copy. The VM
+  callback owns cache publication. Each callsite has four fixed cache lanes;
+  native hits validate the exact key and dispatch generation. Full caches
+  retain existing entries and resolve additional identities without eviction.
   Closure nil checks, closure func-id keys, slot0/capture handling, interface
   receiver pairs, method keys, and method-index rules stay explicit at the
   callsite.
@@ -107,14 +112,54 @@ execution path accepts a module.
   runtime ABI manifest; helper names, `FuncId` fields, and per-function refs are
   no longer maintained as separate lists.
 - `analysis.rs` caches one `FunctionAnalysis` shared by full JIT and every OSR
-  loop. Dynamic calls carry verifier-proven function-local ordinals; a compact
-  `LoadedModule` prefix table maps each function's range into the shared inline
-  cache table without retaining bytecode-PC-sized metadata.
+  loop. Dynamic calls carry verifier-proven module-global callsite identities into
+  the shared cache table without retaining bytecode-PC-sized metadata.
 - `compile_common/` owns common full-function/OSR compile facts and driver
   mechanics: `ControlPolicy`, jump-target discovery, basic-block transition,
-  per-PC flow fact application, and the `CompileDriver` loop. Full-function and
+  instruction selection, and the `CompileDriver` loop. Full-function and
   OSR compilers still own their prologues, return/call lowering, and OSR
   range-exit materialization.
+
+### Optimization and resource ownership
+
+`FunctionCompilePlan` supplies a complete baseline or optimizing configuration.
+The immutable per-function graph and recovery states are shared with OSR.
+Module entry summaries scan literal definitions conservatively and do not build
+cold-function SSA. Per-artifact compiler work is admitted separately from module
+summary retention, so a large cold function cannot reject an unrelated hot one.
+
+Leaf inlining admits only complete acyclic recipes with no residual calls.
+Recursive functions retain ordinary native activations, whose side exits have
+complete VM restoration. Reaching a native depth, stack-byte, or shadow-window
+boundary enters a VM trampoline; the Fiber's guest stack and call-frame limits
+govern language recursion. Each outer native activation sets a stack-pointer
+floor with room for the largest admitted callee. Static, cached dynamic and
+prepared calls consume the same depth and stack-byte guard. Frame-elided calls
+also participate in native activation accounting and preserve the outer floor.
+
+Typed instructions retain their source PC. The shared driver checks that it
+matches the metadata and recovery position before lowering. Prepared-call
+requests carry the caller resume PC and callee frame base in distinct fields;
+their dedicated helper validates payload widths before publication, and the VM
+admits the callee identity and frame when consuming the request.
+
+Scalar replacement preserves the real allocation and its GC/OOM accounting.
+Recovery materializes only objects with live rooted aliases at the resume PC.
+Allocation sites with simultaneously live dynamic instances cannot share a
+single virtual object record.
+
+Container helpers share lifetime-scoped scratch slots with eight-byte alignment.
+One-slot map lookup keeps runtime shape dispatch and its generic fallback in a
+single helper. Conditional traps with identical recovery variables share a
+cold block and pass their kind, arguments, PC and live values on its incoming
+edges. This avoids duplicating prefix computations at every recovery site.
+String allocation copies from the immutable loaded module's constant pool,
+without per-byte generated stores or a literal-sized native stack buffer.
+`artifact.rs` validates final machine frame size, including alignment, spills,
+outgoing arguments and frame setup, and extracts precise stack-map metadata
+for full JIT, OSR and Native AOT. Compile-time recovery states remain available
+for emitted spill code. Runtime deoptimization snapshots are retained only for
+actual deoptimization sites; current lowering emits direct recovery exits.
 
 ## VM Boundary
 
@@ -160,12 +205,12 @@ Opcode maintenance is intentionally row-driven:
   `vo-common-core`.
 - Add or update codegen metadata emission and typed builders when the opcode
   needs per-instruction layout metadata.
-- Update the semantic row in `vo-jit/src/semantics/`: register effects,
-  capability, and effect contract.
+- Update canonical execution and register effects in `vo-common-core`;
+  update capability and semantic cross-checks in `vo-jit`.
 - Add VM-shared slot/layout validation in `vo-common-core/src/verifier.rs`.
 - Add shared write enumeration to `vo-common-core::instruction_effects` when the
-  opcode has operand-, metadata-, or signature-dependent destinations. Add
-  JIT-only reads or synchronization to `effects.rs` when required.
+  opcode has operand-, metadata-, or signature-dependent destinations. Keep
+  reads and frame-memory effects in the same shared contract.
 - Add translate lowering explicitly in the relevant `translate/` module or
   compiler/call-helper owner; do not macro-generate `translate_inst`.
 - Extend focused tests first for behavior changes, then run the JIT and language
@@ -183,3 +228,9 @@ JIT changes should cover the layer they touch:
 - language parity and OSR: repository test targets `vm`, `jit`, `osr`,
   `gc-vm`, and `gc-osr`; OSR contract cases must prove a native loop entry and
   carry the matching VM baseline.
+
+The `jit-opt` and `gc-jit-opt` test targets force optimizing publication and
+require proof of actual optimizing machine-code execution. Compilation success
+and baseline execution alone do not satisfy those targets. Execution JSON
+includes optimizing compilations, failures, deoptimizations and the number of
+distinct functions entered through optimizing code.

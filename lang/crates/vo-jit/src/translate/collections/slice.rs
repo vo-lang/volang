@@ -1,7 +1,6 @@
+use super::emit_return_if_u64_jit_error;
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{
-    types, InstBuilder, MemFlagsData as MemFlags, StackSlotData, StackSlotKind, Value,
-};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData as MemFlags, Value};
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitRuntimeTrapKind;
 
@@ -12,10 +11,7 @@ use crate::translator::{
 use crate::JitError;
 
 use super::array::{emit_typed_write_barrier_single_by_meta, emit_write_barrier_multi_by_meta};
-use super::element::{
-    emit_elem_bytes_i32, emit_return_if_u64_jit_error, load_element, resolve_elem_bytes,
-    store_element,
-};
+use super::element::{emit_elem_bytes_i32, load_element, resolve_elem_bytes, store_element};
 
 use vo_runtime::objects::slice::{
     FIELD_DATA_PTR as SLICE_FIELD_DATA_PTR_SLOT, FIELD_LEN as SLICE_FIELD_LEN_SLOT,
@@ -103,9 +99,7 @@ pub(in crate::translate) fn slice_new<'a>(
     let cap = e.read_var(inst.c + 1);
 
     // Create stack slot for output
-    let out_slot =
-        e.builder()
-            .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
+    let out_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, (8) as usize);
     let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
 
     // Call checked helper: (gc, meta, elem_bytes, len, cap, out) -> error_code

@@ -1,15 +1,8 @@
 package main
 
-type Pair struct {
-	left int
-	right int
-}
-
+// Each other disallowed expression form has an independent diagnostic assertion
+// in vo-analysis/tests/frontend_contracts.rs.
 func main() {
-	x := 1
-	x
-	(x + 1)
-	[1]int{x}
-	Pair{left: x, right: 2}
-	int64(x)
+    x := 1
+    int64(x)
 }

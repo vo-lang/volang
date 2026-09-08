@@ -1,0 +1,137 @@
+package main
+
+var initTrace int
+var a = record(b + 10)
+var b = record(1)
+var c = record(2)
+
+func record(value int) int {
+    initTrace = initTrace * 100 + value
+    return value
+}
+
+type Pair struct { n int; text string }
+type Empty struct{}
+type Pointer *Pair
+type Number int
+type Word string
+type Flag bool
+
+var calls int
+var destination = []int{0, 0}
+var source = []int{3, 4}
+var entries = map[any]int{1: 10, "keep": 20}
+var observed = make([]int, 1, 4)
+
+func copyPair() ([]int, []int) { calls++; return destination, source }
+func deletePair() (map[any]int, any) { calls++; return entries, 1 }
+func appendPair() ([]Pair, Pair) { calls++; return []Pair{{1, "a"}}, Pair{2, "b"} }
+func appendZero() ([][0]Pair, [0]Pair) { calls++; return [][0]Pair{}, [0]Pair{} }
+func appendEmpty() ([]Empty, Empty) { calls++; return []Empty{}, Empty{} }
+func appendAny() ([]any, int) { calls++; return []any{}, 42 }
+func observe() int {
+    assert(observed[:3][1] == 0)
+    return 9
+}
+func replaceDestination() []int {
+    destination = []int{99}
+    return source
+}
+func replaceMap() any {
+    entries = map[any]int{1: 99}
+    return 1
+}
+func setCallCount(value int) { calls = value }
+func deferred() { defer (setCallCount(50)) }
+
+func triple() (int, string, int) { calls++; return 8, "nine", 10 }
+func variadic(first int, rest ...any) {
+    assert(first == 8 && len(rest) == 2 && rest[0].(string) == "nine" && rest[1].(int) == 10)
+}
+func variadicDeferred() { defer variadic(triple()) }
+
+type Sender interface { Send(first int, rest ...any) }
+var methodProduced int
+var sent = make(chan int, 5)
+func (pair Pair) Send(first int, rest ...any) {
+    sent <- pair.n + first + rest[0].(int)
+}
+func methodArgs() (Pair, int, int) {
+    methodProduced++
+    return Pair{1, "receiver"}, 2, 3
+}
+func deferredMethod() { defer Sender.Send(methodArgs()) }
+
+func main() {
+    assert(a == 11 && b == 1 && c == 2 && initTrace == 11102)
+
+    assert(copy(copyPair()) == 2)
+    assert(destination[0] == 3 && destination[1] == 4 && calls == 1)
+    delete(deletePair())
+    assert(len(entries) == 1 && entries["keep"] == 20 && calls == 2)
+    pairs := append(appendPair())
+    assert(len(pairs) == 2 && pairs[1].n == 2 && pairs[1].text == "b" && calls == 3)
+    empty := append(appendEmpty())
+    assert(len(empty) == 1 && calls == 4)
+    boxed := append(appendAny())
+    assert(boxed[0].(int) == 42 && calls == 5)
+
+    bytes := make([]byte, 3)
+    assert(copy(bytes, "abc") == 3 && bytes[0] == 97 && bytes[2] == 99)
+    bytes = append(bytes, "de"...)
+    assert(len(bytes) == 5 && bytes[4] == 101)
+    observed = append(observed, 7, observe())
+    assert(observed[1] == 7 && observed[2] == 9)
+
+    oldDestination := destination
+    assert(copy(destination, replaceDestination()) == 2)
+    assert(oldDestination[0] == 3 && destination[0] == 99)
+    entries[1] = 10
+    oldMap := entries
+    delete(entries, replaceMap())
+    assert(len(oldMap) == 1 && entries[1] == 99)
+
+    var p Pointer = (new)(Pair)
+    (*p).n = 7
+    assert(p.n == 7)
+    assert(((*Pair))(nil) == nil)
+    assert((*(Pair))(nil) == nil)
+    assert((*struct{})(nil) == nil)
+    assert(len((make)([]int, 2)) == 2)
+    {
+        make := func(x int) int { return x + 1 }
+        new := func(x int) int { return x * 2 }
+        assert(make(1 + 2) == 4 && new(3) == 6)
+    }
+
+    keys := map[any]int{1: 1, 1.0: 2, int8(1): 3, Number(1): 4,
+        "a": 5, Word("a"): 6, true: 7, Flag(true): 8}
+    assert(len(keys) == 8 && keys[1] == 1 && keys[1.0] == 2)
+    assert(keys[int8(1)] == 3 && keys[Number(1)] == 4)
+    assert(keys["a"] == 5 && keys[Word("a")] == 6)
+    assert(keys[true] == 7 && keys[Flag(true)] == 8)
+
+    ch := make(chan int, 1)
+    ch <- 6
+    var value int
+    var ok bool
+    select { case value, ok = <-ch: default: panic("receive expected") }
+    assert(value == 6 && ok)
+    deferred()
+    assert(calls == 50)
+    variadic(triple())
+    assert(calls == 51)
+    variadicDeferred()
+    assert(calls == 52)
+    zero := append(appendZero())
+    assert(len(zero) == 1 && calls == 53)
+    for index := 0; index < 50; index++ { variadic(triple()) }
+    assert(calls == 103)
+    Pair.Send(methodArgs())
+    Sender.Send(methodArgs())
+    deferredMethod()
+    go Pair.Send(methodArgs())
+    go Sender.Send(methodArgs())
+    for index := 0; index < 5; index++ { assert(<-sent == 6) }
+    assert(methodProduced == 5)
+}

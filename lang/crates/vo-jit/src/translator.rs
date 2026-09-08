@@ -6,7 +6,6 @@ use cranelift_codegen::ir::{
 };
 use cranelift_frontend::FunctionBuilder;
 use vo_runtime::bytecode::{FunctionDef, InstructionMetadata, Module as VoModule, ResolvedExtern};
-use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitContextField;
 
 use crate::{JitCompileEnv, JitError};
@@ -119,10 +118,12 @@ pub enum NativeScratchKind {
     ExternReturns,
     GcRoots,
     CollectionValue,
+    MapKey,
+    MapIterator,
 }
 
 impl NativeScratchKind {
-    const COUNT: usize = 8;
+    const COUNT: usize = 10;
 
     #[inline]
     const fn index(self) -> usize {
@@ -442,7 +443,7 @@ pub trait MetadataAccess {
     /// Resolve typed array/slice element metadata for JIT lowering.
     fn elem_layout(&self) -> Option<crate::metadata::ElemLayout> {
         self.current_instruction_metadata()
-            .and_then(crate::metadata::elem_layout_from_instruction)
+            .and_then(InstructionMetadata::elem_layout)
     }
 
     /// Whether the verifier-owned element slot layout can carry a managed
@@ -454,69 +455,43 @@ pub trait MetadataAccess {
     }
 
     /// Resolve typed map-get metadata for JIT lowering.
-    fn map_get_layout(&self, inst: &Instruction) -> Option<crate::metadata::MapGetLayout> {
-        let _ = inst;
-        self.current_instruction_metadata()
-            .and_then(crate::metadata::map_get_layout_from_instruction)
+    fn map_get_layout(&self) -> Option<crate::metadata::MapGetLayout> {
+        self.current_instruction_metadata()?.map_get_layout()
     }
 
     /// Resolve typed map-new metadata for JIT lowering.
-    fn map_new_layout(&self, inst: &Instruction) -> Option<crate::metadata::MapNewLayout> {
-        let _ = inst;
-        self.current_instruction_metadata()
-            .and_then(crate::metadata::map_new_layout_from_instruction)
+    fn map_new_layout(&self) -> Option<crate::metadata::MapNewLayout> {
+        self.current_instruction_metadata()?.map_new_layout()
     }
 
     /// Resolve typed map-set metadata for JIT lowering.
-    fn map_set_layout(&self, inst: &Instruction) -> Option<crate::metadata::MapSetLayout> {
-        let _ = inst;
-        self.current_instruction_metadata()
-            .and_then(crate::metadata::map_set_layout_from_instruction)
+    fn map_set_layout(&self) -> Option<crate::metadata::MapSetLayout> {
+        self.current_instruction_metadata()?.map_set_layout()
     }
 
     /// Resolve typed map-delete metadata for JIT lowering.
-    fn map_delete_key_slots(&self, inst: &Instruction) -> Option<u16> {
-        let _ = inst;
-        self.current_instruction_metadata()
-            .and_then(crate::metadata::map_delete_key_slots_from_instruction)
+    fn map_delete_key_slots(&self) -> Option<u16> {
+        self.current_instruction_metadata()?.map_delete_key_slots()
     }
 
     /// Resolve typed map-iterator-next metadata for JIT lowering.
-    fn map_iter_next_layout(
-        &self,
-        inst: &Instruction,
-    ) -> Option<crate::metadata::MapIterNextLayout> {
-        crate::metadata::map_iter_next_layout(
-            inst,
-            crate::metadata::MetadataFacts::from_instruction(self.current_instruction_metadata()),
-        )
+    fn map_iter_next_layout(&self) -> Option<crate::metadata::MapIterNextLayout> {
+        self.current_instruction_metadata()?.map_iter_next_layout()
     }
 
     /// Resolve typed interface-assert result metadata for JIT lowering.
-    fn iface_assert_layout(
-        &self,
-        inst: &Instruction,
-    ) -> Option<crate::metadata::IfaceAssertLayout> {
-        crate::metadata::iface_assert_layout(
-            inst,
-            crate::metadata::MetadataFacts::from_instruction(self.current_instruction_metadata()),
-        )
+    fn iface_assert_layout(&self) -> Option<crate::metadata::IfaceAssertLayout> {
+        self.current_instruction_metadata()?.iface_assert_layout()
     }
 
     /// Resolve queue/select element width from QueueLayout metadata.
-    fn queue_elem_slots(&self, inst: &Instruction) -> Option<u16> {
-        crate::metadata::queue_elem_slots(
-            inst,
-            crate::metadata::MetadataFacts::from_instruction(self.current_instruction_metadata()),
-        )
+    fn queue_elem_slots(&self) -> Option<u16> {
+        self.current_instruction_metadata()?.queue_elem_slots()
     }
 
     /// Resolve SlotGetN/SlotSetN element width from SlotLayout metadata.
-    fn slot_elem_slots(&self, inst: &Instruction) -> Option<u16> {
-        crate::metadata::slot_elem_slots(
-            inst,
-            crate::metadata::MetadataFacts::from_instruction(self.current_instruction_metadata()),
-        )
+    fn slot_elem_slots(&self) -> Option<u16> {
+        self.current_instruction_metadata()?.slot_elem_slots()
     }
 
     /// Resolve pointer allocation/access layout from PtrLayout metadata.
@@ -540,8 +515,21 @@ pub trait RegConstAccess {
     fn get_reg_const(&self, reg: u16) -> Option<i64>;
 }
 
+/// Cold runtime traps with identical recovery variables share one body.
+#[derive(Default)]
+pub struct NativeTrapBlocks {
+    pub(crate) by_variables: std::collections::HashMap<Vec<u32>, cranelift_codegen::ir::Block>,
+}
+
 /// Slow-path frame publication and JitResult return semantics.
 pub trait FrameBoundary {
+    /// SSA values that a conditional cold exit must carry on its incoming edge.
+    /// Explicit edge operands keep recovery arithmetic from being duplicated
+    /// into every cold block by native instruction scheduling.
+    fn cold_recovery_values(&mut self) -> Vec<(cranelift_frontend::Variable, Value)>;
+
+    fn native_trap_blocks(&mut self) -> &mut NativeTrapBlocks;
+
     /// Publish the exact state needed to resume the current bytecode in the VM.
     fn publish_current_frame_state(&mut self);
 }
@@ -677,16 +665,6 @@ pub trait CallBoundary<'a>: IrBuilder<'a> {
 
     /// Compile-time identity of the caller activation.
     fn call_caller_func_id(&mut self) -> Value;
-
-    /// Emit a static call retained inside a bounded inline expansion.
-    ///
-    /// Inline recipes use this boundary to stop recursive expansion after the
-    /// planned depth while preserving the ordinary native call semantics.
-    fn emit_residual_inline_call(
-        &mut self,
-        inst: &Instruction,
-        arguments: &[(Value, bool)],
-    ) -> Result<(), JitError>;
 }
 
 /// Stack base refresh after callbacks or calls that may reallocate fiber.stack.

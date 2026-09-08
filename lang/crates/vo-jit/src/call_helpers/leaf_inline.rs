@@ -19,6 +19,8 @@ pub(crate) const SMALL_INLINE_BUDGET: usize = 256;
 
 /// Fully validated, owned inline plan. Analysis is deliberately separated from
 /// emission so an unsupported candidate cannot leave partially emitted IR.
+/// Only complete, acyclic recipes are admitted: residual calls would require
+/// their own resumable activation, which this leaf expansion does not create.
 pub(crate) struct SmallFunctionInline {
     code: Box<[Instruction]>,
     blocks: Box<[InlineBlock]>,
@@ -30,7 +32,6 @@ pub(crate) struct SmallFunctionInline {
     hidden_param_slots: usize,
     ret_slots: usize,
     cost: usize,
-    recursive_func_id: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -41,29 +42,11 @@ struct InlineBlock {
 
 impl SmallFunctionInline {
     pub(crate) fn analyze_leaf(func: &FunctionDef, module: &Module) -> Option<Self> {
-        Self::analyze(func, module, None)
-    }
-
-    /// Build a one-level expansion for a small scalar self-recursive function.
-    /// Recursive calls inside the recipe remain ordinary native calls, which
-    /// gives a finite and predictable expansion independent of input depth.
-    pub(crate) fn analyze_self_recursive(
-        func_id: u32,
-        func: &FunctionDef,
-        module: &Module,
-    ) -> Option<Self> {
-        Self::analyze(func, module, Some(func_id))
-    }
-
-    fn analyze(
-        func: &FunctionDef,
-        module: &Module,
-        recursive_func_id: Option<u32>,
-    ) -> Option<Self> {
         let local_slots = func.local_slots as usize;
         let param_slots = func.param_slots as usize;
         let ret_slots = func.ret_slots as usize;
-        if func.has_calls != recursive_func_id.is_some()
+        if func.code.len() > MAX_SMALL_INLINE_INSTRUCTIONS
+            || func.has_calls
             || func.has_call_extern
             || func.has_defer
             || func.heap_ret_gcref_count != 0
@@ -73,14 +56,10 @@ impl SmallFunctionInline {
             || func.slot_types.len() != local_slots
             || func.ret_slot_types.len() != ret_slots
             || func.slot_types.iter().any(|ty| {
-                if recursive_func_id.is_some() {
-                    !matches!(ty, SlotType::Value | SlotType::Float)
-                } else {
-                    !matches!(
-                        ty,
-                        SlotType::Value | SlotType::Float | SlotType::GcBase | SlotType::GcRef
-                    )
-                }
+                !matches!(
+                    ty,
+                    SlotType::Value | SlotType::Float | SlotType::GcBase | SlotType::GcRef
+                )
             })
         {
             return None;
@@ -104,7 +83,6 @@ impl SmallFunctionInline {
 
         let mut constant_loads = vec![None; func.code.len()];
         let mut saw_return = false;
-        let mut saw_recursive_call = false;
         for block in &blocks {
             let mut integer_constants = vec![None; local_slots];
             for (pc, constant_load) in constant_loads
@@ -131,20 +109,6 @@ impl SmallFunctionInline {
                         }
                         saw_return = true;
                     }
-                    Opcode::Call
-                        if recursive_func_id.is_some_and(|func_id| {
-                            validate_self_recursive_call(
-                                func_id,
-                                inst,
-                                &func.slot_types,
-                                param_slots,
-                                &func.ret_slot_types,
-                                &mut integer_constants,
-                            )
-                        }) =>
-                    {
-                        saw_recursive_call = true;
-                    }
                     _ if validate_instruction(
                         inst,
                         &func.slot_types,
@@ -160,9 +124,6 @@ impl SmallFunctionInline {
         if !saw_return {
             return None;
         }
-        if recursive_func_id.is_some() && !saw_recursive_call {
-            return None;
-        }
 
         Some(Self {
             code: func.code.clone().into(),
@@ -175,12 +136,7 @@ impl SmallFunctionInline {
             hidden_param_slots,
             ret_slots,
             cost,
-            recursive_func_id,
         })
-    }
-
-    pub(crate) fn is_self_recursive(&self, func_id: u32) -> bool {
-        self.recursive_func_id == Some(func_id)
     }
 
     pub(crate) fn cost(&self) -> usize {
@@ -575,40 +531,6 @@ impl SmallFunctionInline {
                             .collect::<Vec<BlockArg>>();
                         emitter.builder().ins().jump(return_block, &values);
                     }
-                    Opcode::Call => {
-                        let recursive_func_id = self
-                            .recursive_func_id
-                            .expect("validated recursive call entered inline plan");
-                        debug_assert_eq!(inst.static_call_func_id(), recursive_func_id);
-                        let mut arguments = Vec::with_capacity(self.param_slots);
-                        for offset in 0..self.param_slots {
-                            let source = inst.b + offset as u16;
-                            let value = read(emitter, source);
-                            arguments.push((
-                                value,
-                                self.slot_types[usize::from(source)] == SlotType::Float,
-                            ));
-                        }
-                        let mut residual = inst;
-                        residual.b = u16::try_from(arg_start).map_err(|_| {
-                            crate::JitError::Internal(
-                                "bounded inline argument window exceeds bytecode slot range".into(),
-                            )
-                        })?;
-                        emitter.emit_residual_inline_call(&residual, &arguments)?;
-                        let local_ret_start = usize::from(inst.b) + self.param_slots;
-                        let outer_ret_start = arg_start + self.param_slots;
-                        for (offset, ret_type) in self.ret_types.iter().copied().enumerate() {
-                            let value = if ret_type == SlotType::Float {
-                                emitter.read_var_f64((outer_ret_start + offset) as u16)
-                            } else {
-                                emitter.read_var((outer_ret_start + offset) as u16)
-                            };
-                            emitter
-                                .builder()
-                                .def_var(locals[local_ret_start + offset], value);
-                        }
-                    }
                     _ => unreachable!("unsupported opcode entered validated small inline plan"),
                 }
             }
@@ -779,34 +701,6 @@ fn inline_cfg(code: &[Instruction]) -> Option<(Vec<InlineBlock>, Vec<u16>, usize
         .map(|block| usize::from(block.end - block.start))
         .sum();
     Some((blocks, pc_to_block, cost))
-}
-
-fn validate_self_recursive_call(
-    func_id: u32,
-    inst: &Instruction,
-    slot_types: &[SlotType],
-    param_slots: usize,
-    ret_types: &[SlotType],
-    integer_constants: &mut [Option<i64>],
-) -> bool {
-    if inst.static_call_func_id() != func_id || inst.c != 0 {
-        return false;
-    }
-    let arg_start = usize::from(inst.b);
-    let Some(ret_start) = arg_start.checked_add(param_slots) else {
-        return false;
-    };
-    let Some(end) = ret_start.checked_add(ret_types.len()) else {
-        return false;
-    };
-    if end > slot_types.len()
-        || slot_types[arg_start..ret_start] != slot_types[..param_slots]
-        || slot_types[ret_start..end] != *ret_types
-    {
-        return false;
-    }
-    integer_constants[ret_start..end].fill(None);
-    true
 }
 
 fn validate_instruction(
@@ -1049,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_one_level_scalar_self_recursion() {
+    fn rejects_inline_expansion_with_residual_calls() {
         let mut func = function_with_slot_types_and_sig(
             vec![
                 Instruction::new(Opcode::LoadInt, 1, 2, 0),
@@ -1069,10 +963,7 @@ mod tests {
         func.ret_slot_types = vec![SlotType::Value];
         let module = Module::new("recursive-inline-test".into());
 
-        let inline = SmallFunctionInline::analyze_self_recursive(0, &func, &module)
-            .expect("bounded scalar recursion");
-        assert!(inline.is_self_recursive(0));
-        assert_eq!(inline.cost(), 8);
+        assert!(SmallFunctionInline::analyze_leaf(&func, &module).is_none());
     }
 
     #[test]
@@ -1089,6 +980,6 @@ mod tests {
         );
         func.ret_slot_types = vec![SlotType::GcRef];
         let module = Module::new("recursive-inline-roots".into());
-        assert!(SmallFunctionInline::analyze_self_recursive(0, &func, &module).is_none());
+        assert!(SmallFunctionInline::analyze_leaf(&func, &module).is_none());
     }
 }

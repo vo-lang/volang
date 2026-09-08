@@ -1,4 +1,4 @@
-//! Interpreter/JIT-shared monomorphic dynamic-call cache.
+//! Interpreter/JIT-shared bounded polymorphic dynamic-call cache.
 
 use alloc::vec::Vec;
 
@@ -6,9 +6,9 @@ use alloc::vec::Vec;
 ///
 /// The interpreter owns cache population. Native code reads the same stable
 /// C layout when JIT support is enabled.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub struct DynCallIC {
+pub struct DynCallICEntry {
     /// Call-kind-specific dispatch identity. Interface calls use their packed
     /// receiver slot0; closure calls use their function id and capture shape.
     pub dispatch_key: u64,
@@ -24,14 +24,14 @@ pub struct DynCallIC {
     pub jit_frame_elided: u16,
 }
 
-impl Default for DynCallIC {
+impl Default for DynCallICEntry {
     fn default() -> Self {
         // The all-zero representation is the invalid cache state.
         unsafe { core::mem::zeroed() }
     }
 }
 
-impl DynCallIC {
+impl DynCallICEntry {
     pub const SIZE: usize = core::mem::size_of::<Self>();
     pub const OFFSET_DISPATCH_KEY: i32 = core::mem::offset_of!(Self, dispatch_key) as i32;
     pub const OFFSET_JIT_FUNC_PTR: i32 = core::mem::offset_of!(Self, jit_func_ptr) as i32;
@@ -80,7 +80,66 @@ pub struct DynamicCallTarget {
     pub local_slots: u16,
 }
 
-const _: () = assert!(DynCallIC::SIZE == 40);
+/// A small fixed cache preserves the common monomorphic first lane and
+/// alternating receivers without unbounded growth. Once full, new identities
+/// use ordinary resolution; existing lanes remain stable and versioned.
+#[derive(Debug, Default)]
+#[repr(C)]
+pub struct DynCallIC {
+    pub entries: [DynCallICEntry; Self::WAYS],
+}
+
+impl DynCallIC {
+    pub const WAYS: usize = 4;
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+
+    pub fn probe(&self, key: u64) -> Option<DynamicCallTarget> {
+        self.entries.iter().find_map(|entry| entry.probe(key))
+    }
+
+    fn publication_entry(&mut self, key: u64) -> Option<&mut DynCallICEntry> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.valid != 0 && entry.dispatch_key == key)
+            .or_else(|| self.entries.iter().position(|entry| entry.valid == 0))?;
+        Some(&mut self.entries[index])
+    }
+
+    pub fn publish_interpreter_target(&mut self, key: u64, target: DynamicCallTarget) {
+        if let Some(entry) = self.publication_entry(key) {
+            entry.publish_interpreter_target(key, target);
+        }
+    }
+
+    #[cfg(feature = "std")]
+    pub fn publish_native_target(
+        &mut self,
+        key: u64,
+        prepared: &crate::jit_api::PreparedCall,
+    ) -> bool {
+        if prepared.ic_jit_func_ptr.is_null() {
+            return false;
+        }
+        let Some(entry) = self.publication_entry(key) else {
+            return false;
+        };
+        *entry = DynCallICEntry {
+            dispatch_key: key,
+            jit_func_ptr: prepared.ic_jit_func_ptr as u64,
+            local_slots: prepared.callee_local_slots,
+            func_id: prepared.func_id,
+            dispatch_generation: prepared.dispatch_generation,
+            valid: 1,
+            jit_may_gc: prepared.jit_may_gc,
+            jit_frame_elided: prepared.jit_frame_elided,
+        };
+        true
+    }
+}
+
+const _: () = assert!(DynCallICEntry::SIZE == 40);
+const _: () = assert!(DynCallIC::SIZE == DynCallICEntry::SIZE * DynCallIC::WAYS);
 
 pub fn alloc_ic_table(len: usize) -> Vec<DynCallIC> {
     let mut table = Vec::with_capacity(len);
@@ -93,11 +152,30 @@ pub fn alloc_ic_table(len: usize) -> Vec<DynCallIC> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DynCallIC, DynamicCallTarget};
+    use super::{DynCallIC, DynCallICEntry, DynamicCallTarget};
+
+    #[test]
+    fn bounded_polymorphic_cache_preserves_hot_identities_when_full() {
+        let mut cache = DynCallIC::default();
+        for i in 0..8 {
+            cache.publish_interpreter_target(
+                i,
+                DynamicCallTarget {
+                    func_id: i as u32,
+                    local_slots: 3,
+                },
+            );
+        }
+        for i in 0..4 {
+            assert_eq!(cache.probe(i).unwrap().func_id, i as u32);
+        }
+        assert_eq!(cache.probe(4), None);
+        assert_eq!(cache.entries.len(), 4);
+    }
 
     #[test]
     fn interpreter_publication_preserves_native_target_only_for_same_dispatch() {
-        let mut entry = DynCallIC {
+        let mut entry = DynCallICEntry {
             jit_func_ptr: 0x1234,
             dispatch_generation: 9,
             jit_frame_elided: 1,

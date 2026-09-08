@@ -1,16 +1,16 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, Block, InstBuilder, StackSlot, Value};
 
-use vo_runtime::jit_api::{JitContext, JitContextField};
+use vo_runtime::jit_api::JitContextField;
 
 use crate::translator::{HelperKind, IrEmitter};
 
 use super::{
-    emit_call_depth_enter, emit_call_depth_leave, emit_checked_jit_result_indirect_callback_call,
-    emit_effect_aware_jit_call, emit_native_link, emit_raw_jit_context_callback_call,
-    import_jit_func_sig, load_native_arg_lanes_dynamic, restore_caller_execution_context,
-    JitCallGcMode, JitCallOperands, JIT_RESULT_CALL, JIT_RESULT_OK,
-    PREPARED_CALL_POP_FRAME_CALLSITE, PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
+    emit_call_depth_increment, emit_call_depth_leave,
+    emit_checked_jit_result_indirect_callback_call, emit_effect_aware_jit_call, emit_native_link,
+    emit_raw_jit_context_callback_call, import_jit_func_sig, load_native_arg_lanes_dynamic,
+    restore_caller_execution_context, JitCallGcMode, JitCallOperands, JIT_RESULT_CALL,
+    JIT_RESULT_OK, PREPARED_CALL_POP_FRAME_CALLSITE, PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
 };
 
 /// Parameters for the common prepared-call dispatch.
@@ -65,11 +65,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
         .icmp(IntCC::Equal, p.jit_func_ptr, null_ptr);
     let depth = emitter.load_context_field(types::I32, JitContextField::CallDepth);
     let depth_limit = emitter.load_context_field(types::I32, JitContextField::CallDepthLimit);
-    let depth_exhausted =
-        emitter
-            .builder()
-            .ins()
-            .icmp(IntCC::UnsignedGreaterThanOrEqual, depth, depth_limit);
+    let depth_exhausted = super::native_chain_exhausted(emitter, depth, depth_limit);
     let link_or_call_block = crate::compile_common::cold_block(emitter.builder());
     let link_block = crate::compile_common::cold_block(emitter.builder());
     let trampoline_block = crate::compile_common::cold_block(emitter.builder());
@@ -132,13 +128,11 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     // but it leaves caller frame pc uncommitted until VM materialization accepts
     // the prepared transition.
     //
-    // We save callee_bp in call_resume_pc field because ctx.jit_bp may be
-    // overwritten by intermediate JIT non-OK blocks (their push_frame calls).
-    // PREPARED handler reads callee_bp from call_resume_pc, not ctx.jit_bp.
+    // Preserve the callee frame base while restoring the caller context.
     emitter.builder().switch_to_block(trampoline_block);
     emitter.builder().seal_block(trampoline_block);
 
-    // Save callee_bp (set by prepare's push_frame) into call_resume_pc
+    // Save the stable frame base installed by the prepare callback.
     let callee_bp_val = emitter.load_context_field(types::I32, JitContextField::JitBp);
 
     // Restore caller ctx before refreshing locals; prepare may have grown fiber.stack.
@@ -148,26 +142,18 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     // Spill SSA-only vars so VM can read caller state after callee returns.
     emitter.publish_current_frame_state();
 
-    let set_call_request_func = emitter.helper(HelperKind::set_call_request);
-    let prepared_kind = emitter
-        .builder()
-        .ins()
-        .iconst(types::I32, JitContext::CALL_KIND_PREPARED as i64);
-    // For PREPARED: arg_start field stores caller_resume_pc (not arg copying position).
-    // PREPARED doesn't need arg_start: args are already copied by the prepare callback.
-    // The PREPARED handler commits this resume pc only after callee resolution
-    // and materialization preflight succeed.
+    let set_call_request_func = emitter.helper(HelperKind::set_prepared_call_request);
+    // The VM commits the continuation after callee admission succeeds.
     crate::translator::emit_funcref_call_raw(
         emitter,
         set_call_request_func.func_ref(),
         &[
             ctx,
             p.func_id,
-            p.resume_pc_val,
             callee_bp_val,
+            p.resume_pc_val,
             p.ret_slots_val,
             p.ret_reg_val,
-            prepared_kind,
         ],
     );
 
@@ -182,7 +168,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     emitter.builder().seal_block(jit_call_block);
     let jit_func_ptr = emitter.builder().block_params(jit_call_block)[0];
 
-    let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
+    let old_call_depth = emit_call_depth_increment(emitter, depth);
     let jit_func_sig = import_jit_func_sig(emitter);
     let arg_lanes = load_native_arg_lanes_dynamic(emitter, p.callee_args_ptr, p.callee_local_slots);
     let callee_bp = emitter.load_context_field(types::I32, JitContextField::JitBp);

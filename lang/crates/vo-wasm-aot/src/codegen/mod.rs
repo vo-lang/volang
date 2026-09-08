@@ -246,6 +246,7 @@ struct StaticData {
     dynamic_string_refs: BTreeMap<String, u32>,
     runtime_panic_refs: [u32; 15],
     nil_reference_panic_ref: u32,
+    nil_function_panic_ref: u32,
     nil_map_write_panic_ref: u32,
     makeslice_negative_len_panic_ref: u32,
     makeslice_cap_panic_ref: u32,
@@ -280,8 +281,8 @@ struct BasicBlock {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct InterfaceArrayAssertionLayout {
-    len: u16,
+struct InterfaceArrayLayout {
+    len: u32,
     elem_bytes: u32,
     needs_sign_extend: bool,
 }
@@ -1141,6 +1142,7 @@ pub(crate) fn compile_core_module(
         vo_module,
         dispatch_index,
         runtime_globals,
+        static_data.nil_function_panic_ref,
     ));
     code.function(&compile_scheduler_start(
         vo_module,

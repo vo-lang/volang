@@ -24,7 +24,7 @@
 
 use vo_common::span::Span;
 use vo_syntax::ast::ExprId;
-use vo_syntax::ast::{BinaryOp, CompositeLitKey, Expr, ExprKind, UnaryOp};
+use vo_syntax::ast::{BinaryOp, Expr, ExprKind, UnaryOp};
 
 use crate::constant::{
     compare, make_bool, make_int64, try_binary_op, try_float_from_literal, try_int_from_literal,
@@ -36,7 +36,6 @@ use crate::typ::{self, BasicType, Type};
 
 use super::checker::{Checker, UntypedExprShape};
 use super::errors::TypeError;
-use super::MAX_LANGUAGE_LEN;
 
 impl Checker {
     // =========================================================================
@@ -161,7 +160,10 @@ impl Checker {
             }
             UnaryOp::Deref => {
                 // Dereference operation
-                if let Some(ptr) = self.otype(x.typ.unwrap()).try_as_pointer() {
+                if let Some(ptr) = self
+                    .otype(typ::underlying_type(x.typ.unwrap(), self.objs()))
+                    .try_as_pointer()
+                {
                     x.mode = OperandMode::Variable;
                     x.typ = Some(ptr.base());
                 } else {
@@ -826,190 +828,6 @@ impl Checker {
     // Part 8: index, indexed_elems
     // =========================================================================
 
-    /// Checks an index expression for validity.
-    /// max is the upper bound for index (exclusive: index must be < max).
-    /// Returns the value of the index when it's a constant, returns None if it's not.
-    #[allow(clippy::result_unit_err)]
-    pub fn index(&mut self, index: &Expr, max: Option<u64>) -> Result<Option<u64>, ()> {
-        self.check_int_index(index, max, false)
-    }
-
-    /// Checks a slice bound expression for validity.
-    /// max is the upper bound for the slice bound (inclusive: bound must be <= max).
-    /// Returns the value when it's a constant, returns None if it's not.
-    #[allow(clippy::result_unit_err)]
-    pub fn slice_bound(&mut self, bound: &Expr, max: Option<u64>) -> Result<Option<u64>, ()> {
-        self.check_int_index(bound, max, true)
-    }
-
-    /// Common implementation for index/slice_bound checking.
-    /// inclusive: if true, allows value == max (for slice bounds); if false, requires value < max (for array index).
-    fn check_int_index(
-        &mut self,
-        index: &Expr,
-        max: Option<u64>,
-        inclusive: bool,
-    ) -> Result<Option<u64>, ()> {
-        let x = &mut Operand::new();
-        self.expr(x, index);
-        self.check_int_index_operand(x, index.span, max, inclusive)
-    }
-
-    /// Check a bare identifier used before `:` in an array or slice literal.
-    /// The parser keeps such keys as `CompositeLitKey::Ident` because the same
-    /// syntax denotes struct fields. In an indexed literal it is an ordinary
-    /// constant expression and must be resolved through the value namespace.
-    fn check_ident_index(
-        &mut self,
-        ident: &vo_syntax::ast::Ident,
-        max: Option<u64>,
-    ) -> Result<Option<u64>, ()> {
-        let x = &mut Operand::new();
-        self.ident(x, ident, None, false);
-        self.expr_value_err(x);
-        self.check_int_index_operand(x, ident.span, max, false)
-    }
-
-    fn check_int_index_operand(
-        &mut self,
-        x: &mut Operand,
-        span: Span,
-        max: Option<u64>,
-        inclusive: bool,
-    ) -> Result<Option<u64>, ()> {
-        if x.invalid() {
-            return Err(());
-        }
-
-        // An untyped constant must be representable as Int
-        self.convert_untyped(x, self.basic_type(BasicType::Int));
-        if x.invalid() {
-            return Err(());
-        }
-
-        // The index must be of integer type
-        if !typ::is_integer(x.typ.unwrap(), self.objs()) {
-            self.invalid_arg(span, "index must be integer");
-            return Err(());
-        }
-
-        // A constant index i must be in bounds
-        if let OperandMode::Constant(v) = &x.mode {
-            if v.sign() < 0 {
-                self.invalid_arg(span, "index must not be negative");
-                return Err(());
-            }
-            let (i, valid) = v.to_int().int_as_u64();
-            let out_of_bounds = if inclusive {
-                max.is_some_and(|m| i > m) // slice bound: i <= max
-            } else {
-                max.is_some_and(|m| i >= m) // array index: i < max
-            };
-            if !valid || out_of_bounds {
-                self.invalid_arg(span, "index out of bounds");
-                return Err(());
-            }
-            return Ok(Some(i));
-        }
-
-        Ok(None)
-    }
-
-    /// Checks the elements of an array or slice composite literal against the
-    /// literal's element type, and the element indices against the literal length
-    /// if known. It returns the length of the literal (maximum index value + 1).
-    fn indexed_elems(
-        &mut self,
-        elems: &[vo_syntax::ast::CompositeLitElem],
-        t: TypeKey,
-        length: Option<u64>,
-    ) -> u64 {
-        use std::collections::HashSet;
-        use vo_syntax::ast::CompositeLitKey;
-        let mut visited: HashSet<u64> = HashSet::new();
-        let mut index: u64 = 0;
-        let mut max: u64 = 0;
-
-        for elem in elems {
-            let (valid_index, eval) = if let Some(ref key) = elem.key {
-                let kv_index = match key {
-                    CompositeLitKey::Expr(key_expr) => {
-                        let i = self.index(key_expr, length);
-                        if let Ok(Some(idx)) = i {
-                            Some(idx)
-                        } else if i.is_ok() {
-                            self.error_code_msg(
-                                TypeError::InvalidOp,
-                                key_expr.span,
-                                "index must be integer constant",
-                            );
-                            None
-                        } else {
-                            None
-                        }
-                    }
-                    CompositeLitKey::Ident(ident) => {
-                        let i = self.check_ident_index(ident, length);
-                        if let Ok(Some(idx)) = i {
-                            Some(idx)
-                        } else if i.is_ok() {
-                            self.error_code_msg(
-                                TypeError::InvalidOp,
-                                ident.span,
-                                "index must be integer constant",
-                            );
-                            None
-                        } else {
-                            None
-                        }
-                    }
-                };
-                (kv_index, &elem.value)
-            } else if length.is_some_and(|l| index >= l) {
-                self.error_code_msg(
-                    TypeError::InvalidOp,
-                    elem.value.span,
-                    format!("index {} is out of bounds (>= {})", index, length.unwrap()),
-                );
-                (None, &elem.value)
-            } else {
-                (Some(index), &elem.value)
-            };
-
-            if let Some(i) = valid_index {
-                if visited.contains(&i) {
-                    self.error_code_msg(
-                        TypeError::DuplicateCase,
-                        elem.value.span,
-                        format!("duplicate index {} in array or slice literal", i),
-                    );
-                }
-                visited.insert(i);
-
-                if i >= MAX_LANGUAGE_LEN {
-                    self.error_code_msg(
-                        TypeError::ArrayLenTooLarge,
-                        elem.span,
-                        format!(
-                            "array length inferred from index {i} exceeds MaxInt ({MAX_LANGUAGE_LEN})"
-                        ),
-                    );
-                } else {
-                    index = i + 1;
-                    if index > max {
-                        max = index;
-                    }
-                }
-            }
-
-            // Check element against composite literal element type
-            let x = &mut Operand::new();
-            self.raw_expr(x, eval, Some(t));
-            self.assignment(x, Some(t), "array or slice literal");
-        }
-        max
-    }
-
     /// Type-checks an expression with a type hint (for composite literal elements).
     pub fn expr_with_hint(&mut self, x: &mut Operand, e: &Expr, hint: Option<TypeKey>) {
         self.raw_expr(x, e, hint);
@@ -1073,12 +891,15 @@ impl Checker {
 
     /// Records the type/value result and closes a trace frame for one fully
     /// checked expression.
-    fn finish_raw_expr(&mut self, x: &Operand, e: &Expr) {
+    fn finish_raw_expr(&mut self, x: &mut Operand, e: &Expr) {
         let ty = match &x.mode {
             OperandMode::Invalid => self.invalid_type(),
             OperandMode::NoValue => self.universe().no_value_tuple(),
             _ => x.typ.unwrap_or(self.invalid_type()),
         };
+        // Keep the returned operand and recorded facts in agreement. In
+        // particular, a no-value result must never retain its callee's type.
+        x.typ = Some(ty);
 
         if typ::is_untyped(ty, self.objs()) {
             // Delay type and value recording until we know the type
@@ -1190,7 +1011,11 @@ impl Checker {
                         return;
                     }
                     if x.mode == OperandMode::TypeExpr {
-                        x.typ = Some(self.new_t_pointer(x.typ.unwrap()));
+                        let t = self.new_t_pointer_checked(x.typ.unwrap(), u.operand.span);
+                        x.typ = Some(t);
+                        if t == self.invalid_type() {
+                            x.mode = OperandMode::Invalid;
+                        }
                         return;
                     }
                 } else {
@@ -1400,219 +1225,19 @@ impl Checker {
                 x.mode = OperandMode::CommaOk;
                 x.typ = Some(target);
             }
-            ExprKind::CompositeLit(lit) => {
-                // Determine composite literal type (aligns with goscript logic)
-                let ty = if let Some(ref type_expr) = lit.ty {
-                    // Composite literal type present - use it
-                    let t = self.type_expr(type_expr);
-                    if t == self.invalid_type() {
-                        x.mode = OperandMode::Invalid;
-                        return;
-                    }
-                    t
-                } else {
-                    // No composite literal type present - use hint (element type of enclosing type)
-                    if let Some(h) = hint {
-                        // For nested literals, dereference pointer types like goscript's try_deref
-                        let base = typ::underlying_type(h, self.objs());
-                        if let Some(ptr) = self.otype(base).try_as_pointer() {
-                            ptr.base()
-                        } else {
-                            h
-                        }
-                    } else {
-                        self.error_code_msg(
-                            TypeError::InvalidOp,
-                            e.span,
-                            "missing type in composite literal",
-                        );
-                        x.mode = OperandMode::Invalid;
-                        return;
-                    }
-                };
-
-                let utype = typ::underlying_type(ty, self.objs());
-                let utype_val = self.otype(utype);
-
-                match &utype_val {
-                    Type::Struct(detail) => {
-                        let fields = detail.fields().clone();
-                        let mut keyed_form = None;
-                        let mut visited_fields = std::collections::HashSet::new();
-                        // Check elements
-                        for (i, elem) in lit.elems.iter().enumerate() {
-                            let is_keyed = elem.key.is_some();
-                            if let Some(expected_keyed) = keyed_form {
-                                if expected_keyed != is_keyed {
-                                    self.error_code_msg(
-                                        TypeError::InvalidOp,
-                                        elem.span,
-                                        "mixture of keyed and unkeyed elements in struct literal",
-                                    );
-                                }
-                            } else {
-                                keyed_form = Some(is_keyed);
-                            }
-
-                            let field = match &elem.key {
-                                Some(CompositeLitKey::Ident(ident)) => {
-                                    let name = self.resolve_ident(ident).to_string();
-                                    let field = fields
-                                        .iter()
-                                        .copied()
-                                        .find(|&field| self.lobj(field).name() == name);
-                                    if let Some(field) = field {
-                                        if !visited_fields.insert(field) {
-                                            self.error_code_msg(
-                                                TypeError::InvalidOp,
-                                                ident.span,
-                                                format!(
-                                                    "duplicate field {} in struct literal",
-                                                    name
-                                                ),
-                                            );
-                                        }
-                                    } else {
-                                        self.error_code_msg(
-                                            TypeError::InvalidOp,
-                                            ident.span,
-                                            format!("unknown field {} in struct literal", name),
-                                        );
-                                    }
-                                    field
-                                }
-                                Some(CompositeLitKey::Expr(key)) => {
-                                    self.error_code_msg(
-                                        TypeError::InvalidOp,
-                                        key.span,
-                                        "struct literal field name must be an identifier",
-                                    );
-                                    None
-                                }
-                                None => {
-                                    let field = fields.get(i).copied();
-                                    if field.is_none() {
-                                        self.error_code_msg(
-                                            TypeError::InvalidOp,
-                                            elem.span,
-                                            "too many values in struct literal",
-                                        );
-                                    }
-                                    field
-                                }
-                            };
-
-                            let field_type = field.and_then(|field| {
-                                let field_obj = self.lobj(field);
-                                if field_obj.pkg().is_some_and(|pkg| pkg != self.pkg)
-                                    && !field_obj.exported()
-                                {
-                                    self.error_code_msg(
-                                        TypeError::InvalidOp,
-                                        elem.span,
-                                        format!(
-                                            "cannot refer to unexported field {} in struct literal",
-                                            field_obj.name()
-                                        ),
-                                    );
-                                }
-                                field_obj.typ()
-                            });
-
-                            let mut val = Operand::new();
-                            self.expr_with_hint(&mut val, &elem.value, field_type);
-                            if let Some(ft) = field_type.filter(|_| !val.invalid()) {
-                                self.assignment(&mut val, Some(ft), "struct literal");
-                            }
-                        }
-                    }
-                    Type::Array(arr) => {
-                        let elem_type = arr.elem();
-                        let arr_len = arr.len();
-                        let n = self.indexed_elems(&lit.elems, elem_type, arr_len);
-                        // If array has unknown length (e.g. [...]T), set it now
-                        if arr_len.is_none() {
-                            if let Some(arr_mut) = self.otype_mut(utype).try_as_array_mut() {
-                                arr_mut.set_len(n);
-                            }
-                        }
-                    }
-                    Type::Slice(sl) => {
-                        let elem_type = sl.elem();
-                        self.indexed_elems(&lit.elems, elem_type, None);
-                    }
-                    Type::Map(m) => {
-                        let key_type = m.key();
-                        let elem_type = m.elem();
-                        let mut constant_keys = Vec::new();
-                        for elem in &lit.elems {
-                            let mut key_op = Operand::new();
-                            let key_span = match &elem.key {
-                                Some(CompositeLitKey::Expr(key_expr)) => {
-                                    self.expr(&mut key_op, key_expr);
-                                    Some(key_expr.span)
-                                }
-                                Some(CompositeLitKey::Ident(ident)) => {
-                                    self.ident(&mut key_op, ident, None, false);
-                                    Some(ident.span)
-                                }
-                                None => {
-                                    self.error_code_msg(
-                                        TypeError::InvalidOp,
-                                        elem.span,
-                                        "missing key in map literal",
-                                    );
-                                    None
-                                }
-                            };
-                            if !key_op.invalid() {
-                                self.assignment(&mut key_op, Some(key_type), "map literal key");
-                            }
-                            if let (Some(span), OperandMode::Constant(value)) =
-                                (key_span, &key_op.mode)
-                            {
-                                if constant_keys.iter().any(|seen| seen == value) {
-                                    self.error_code_msg(
-                                        TypeError::InvalidOp,
-                                        span,
-                                        format!("duplicate key {} in map literal", value),
-                                    );
-                                } else {
-                                    constant_keys.push(value.clone());
-                                }
-                            }
-                            // Check value (with hint for nested composite literals)
-                            let mut val = Operand::new();
-                            self.expr_with_hint(&mut val, &elem.value, Some(elem_type));
-                            if !val.invalid() {
-                                self.assignment(&mut val, Some(elem_type), "map literal value");
-                            }
-                        }
-                    }
-                    _ => {
-                        self.invalid_op(e.span, "invalid composite literal type");
-                        x.mode = OperandMode::Invalid;
-                        return;
-                    }
-                }
-
-                x.mode = OperandMode::Value;
-                x.typ = Some(ty);
-            }
+            ExprKind::CompositeLit(lit) => self.composite_literal(x, e, lit, hint),
             ExprKind::FuncLit(func) => {
                 // Get function type from signature
                 let t = self.func_type_from_sig(None, &func.sig);
                 if self.otype(t).try_as_signature().is_some() {
                     x.mode = OperandMode::Value;
                     x.typ = Some(t);
-                    // Defer func_body checking via delayed action (like goscript)
-                    let decl = self.octx.decl;
-                    let body = func.body.clone();
-                    let iota = self.octx.iota.clone();
-                    let sig_key = t;
-                    self.later(Box::new(move |checker: &mut Checker| {
-                        checker.func_body(decl, "<function literal>", sig_key, &body, iota);
-                    }));
+                    self.later(super::deferred::DelayedAction::FunctionBody {
+                        decl: self.octx.decl,
+                        sig: t,
+                        body: func.body.clone(),
+                        iota: self.octx.iota.clone(),
+                    });
                 } else {
                     x.mode = OperandMode::Invalid;
                     x.typ = Some(self.invalid_type());
@@ -1891,7 +1516,7 @@ impl Checker {
     }
 
     /// Reports an error if x is not a proper expression value.
-    fn expr_value_err(&self, x: &mut Operand) {
+    pub(super) fn expr_value_err(&self, x: &mut Operand) {
         let msg = match &x.mode {
             OperandMode::NoValue => Some("used as value"),
             OperandMode::Builtin(_) => Some("must be called"),
@@ -1915,7 +1540,7 @@ impl Checker {
                         x.pos(),
                         format!("{}-valued expression where single value is expected", len),
                     );
-                    // Don't set x.mode to Invalid here
+                    x.mode = OperandMode::Invalid;
                 }
             }
         }
@@ -1932,14 +1557,6 @@ impl Checker {
     pub fn multi_expr(&mut self, x: &mut Operand, e: &Expr) {
         self.raw_expr(x, e, None);
         self.expr_value_err(x);
-    }
-
-    /// Simple expression check - for use in stmt.rs where fctx is not available.
-    /// Returns the type of the expression.
-    pub fn check_expr(&mut self, _e: &Expr) -> TypeKey {
-        // Simplified check - just record the expression type
-        // Full checking is done when fctx is available
-        self.invalid_type()
     }
 
     /// Typechecks expression or type e and initializes x with the expression

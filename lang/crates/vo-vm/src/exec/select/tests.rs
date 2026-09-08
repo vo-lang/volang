@@ -30,6 +30,7 @@ fn int_meta() -> (ValueMeta, ValueRttid) {
 fn select_state_with_case(kind: SelectCaseKind) -> Option<SelectState> {
     Some(SelectState {
         cases: vec![SelectCase {
+            _storage: None,
             kind,
             result_index: 0,
             queue_reg: 0,
@@ -37,13 +38,14 @@ fn select_state_with_case(kind: SelectCaseKind) -> Option<SelectState> {
             elem_slots: 1,
             elem_layout: None,
             has_ok: false,
-        }],
+        }]
+        .into(),
         expected_cases: 1,
         has_default: false,
         woken_index: None,
         woken_result: None,
         select_id: 1,
-        registered_queues: Vec::new(),
+        registered_queues: Default::default(),
     })
 }
 
@@ -220,7 +222,10 @@ fn vm_select_case_contract_017_rejects_case_beyond_declared_select_begin_count()
     let err = exec_select_recv_with_layout(&mut fiber.select_state, 0, 1, 1, None, false, 1)
         .expect_err("second case exceeds SelectBegin declaration");
 
-    assert!(err.contains("SelectBegin declared 1 cases"), "{err}");
+    assert!(
+        err.to_string().contains("SelectBegin declared 1 cases"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -237,6 +242,7 @@ fn vm_select_case_contract_017_returns_source_case_index_with_default_middle() {
     let mut select_state = Some(SelectState {
         cases: vec![
             SelectCase {
+                _storage: None,
                 kind: SelectCaseKind::Recv,
                 result_index: 0,
                 queue_reg: 0,
@@ -246,6 +252,7 @@ fn vm_select_case_contract_017_returns_source_case_index_with_default_middle() {
                 has_ok: false,
             },
             SelectCase {
+                _storage: None,
                 kind: SelectCaseKind::Recv,
                 result_index: 2,
                 queue_reg: 1,
@@ -254,13 +261,14 @@ fn vm_select_case_contract_017_returns_source_case_index_with_default_middle() {
                 elem_layout: None,
                 has_ok: false,
             },
-        ],
+        ]
+        .into(),
         expected_cases: 2,
         has_default: true,
         woken_index: None,
         woken_result: None,
         select_id: 1,
-        registered_queues: Vec::new(),
+        registered_queues: Default::default(),
     });
 
     let result = exec_select_exec(
@@ -293,6 +301,7 @@ fn select_recv_rejects_queue_element_width_drift_before_stack_write_035() {
     let mut stack = vec![ch as u64, 99, 88, 0];
     let mut select_state = Some(SelectState {
         cases: vec![SelectCase {
+            _storage: None,
             kind: SelectCaseKind::Recv,
             result_index: 0,
             queue_reg: 0,
@@ -300,13 +309,14 @@ fn select_recv_rejects_queue_element_width_drift_before_stack_write_035() {
             elem_slots: 1,
             elem_layout: None,
             has_ok: false,
-        }],
+        }]
+        .into(),
         expected_cases: 1,
         has_default: false,
         woken_index: None,
         woken_result: None,
         select_id: 1,
-        registered_queues: Vec::new(),
+        registered_queues: Default::default(),
     });
 
     let result = exec_select_exec(
@@ -345,6 +355,7 @@ fn select_send_registration_rejects_queue_element_width_drift_035() {
     let mut stack = vec![ch as u64, 123, 0];
     let mut select_state = Some(SelectState {
         cases: vec![SelectCase {
+            _storage: None,
             kind: SelectCaseKind::Send,
             result_index: 0,
             queue_reg: 0,
@@ -352,13 +363,14 @@ fn select_send_registration_rejects_queue_element_width_drift_035() {
             elem_slots: 1,
             elem_layout: None,
             has_ok: false,
-        }],
+        }]
+        .into(),
         expected_cases: 1,
         has_default: false,
         woken_index: None,
         woken_result: None,
         select_id: 1,
-        registered_queues: Vec::new(),
+        registered_queues: Default::default(),
     });
 
     let result = exec_select_exec(
@@ -406,20 +418,22 @@ fn select_recv_rejects_queue_element_layout_drift_before_stack_write_035() {
     let mut stack = vec![ch as u64, 99, 0];
     let mut select_state = Some(SelectState {
         cases: vec![SelectCase {
+            _storage: None,
             kind: SelectCaseKind::Recv,
             result_index: 0,
             queue_reg: 0,
             val_reg: 1,
             elem_slots: 1,
-            elem_layout: Some(vec![SlotType::Value]),
+            elem_layout: Some(vec![SlotType::Value].into()),
             has_ok: false,
-        }],
+        }]
+        .into(),
         expected_cases: 1,
         has_default: false,
         woken_index: None,
         woken_result: None,
         select_id: 1,
-        registered_queues: Vec::new(),
+        registered_queues: Default::default(),
     });
 
     let result = exec_select_exec(
@@ -491,11 +505,11 @@ fn vm_select_woken_materialization_003_recv_uses_materialized_payload_when_queue
     let mut stack = vec![ch as u64, 0, 0, 99];
     let mut select_state = select_state_with_case(SelectCaseKind::Recv);
     let state = select_state.as_mut().unwrap();
-    state.cases[0].has_ok = true;
+    state.cases.unique_mut().unwrap()[0].has_ok = true;
     state.woken_index = Some(0);
     state.woken_result = Some(SelectWokenResult::Recv {
-        data: vec![42],
-        slot_types: vec![SlotType::Value],
+        data: vec![42].into(),
+        slot_types: vec![SlotType::Value].into(),
         closed: false,
     });
 
@@ -531,12 +545,12 @@ fn vm_select_woken_payload_contract_018_rejects_width_drift_before_stack_write()
     let mut stack = vec![ch as u64, 11, 22, 0];
     let mut select_state = select_state_with_case(SelectCaseKind::Recv);
     let state = select_state.as_mut().unwrap();
-    state.cases[0].elem_slots = 2;
-    state.cases[0].has_ok = true;
+    state.cases.unique_mut().unwrap()[0].elem_slots = 2;
+    state.cases.unique_mut().unwrap()[0].has_ok = true;
     state.woken_index = Some(0);
     state.woken_result = Some(SelectWokenResult::Recv {
-        data: vec![42],
-        slot_types: vec![SlotType::Value],
+        data: vec![42].into(),
+        slot_types: vec![SlotType::Value].into(),
         closed: false,
     });
 
@@ -753,7 +767,7 @@ fn select_send_missing_struct_metadata_is_malformed() {
     module
         .struct_metas
         .push(vo_common_core::bytecode::StructMeta {
-            slot_types: vec![vo_common_core::types::SlotType::GcRef],
+            slot_types: vec![vo_common_core::types::SlotType::GcRef].into(),
             fields: Vec::new(),
             field_index: Default::default(),
         });
@@ -783,7 +797,7 @@ fn vm_queue_remote_direct_txn_002_select_preflight_preserves_waiting_receiver_on
     vm_state.external_island_transport = true;
     let mut module = Module::new("select-remote-direct-preflight".to_string());
     module.struct_metas.push(StructMeta {
-        slot_types: vec![SlotType::GcRef, SlotType::GcRef],
+        slot_types: vec![SlotType::GcRef, SlotType::GcRef].into(),
         fields: vec![
             FieldMeta {
                 name: "port".to_string(),
@@ -826,6 +840,7 @@ fn vm_queue_remote_direct_txn_002_select_preflight_preserves_waiting_receiver_on
     let mut stack = vec![ch as u64, payload_port as u64, 0, 0];
     let mut select_state = Some(SelectState {
         cases: vec![SelectCase {
+            _storage: None,
             kind: SelectCaseKind::Send,
             result_index: 0,
             queue_reg: 0,
@@ -833,13 +848,14 @@ fn vm_queue_remote_direct_txn_002_select_preflight_preserves_waiting_receiver_on
             elem_slots: 2,
             elem_layout: None,
             has_ok: false,
-        }],
+        }]
+        .into(),
         expected_cases: 1,
         has_default: false,
         woken_index: None,
         woken_result: None,
         select_id: 1,
-        registered_queues: Vec::new(),
+        registered_queues: Default::default(),
     });
 
     let result = exec_select_exec(
@@ -876,7 +892,7 @@ fn vm_endpoint_direct_preflight_012_same_island_select_transfer_error_preserves_
     vm_state.current_island_id = 0;
     let mut module = Module::new("select-same-island-endpoint-direct-preflight".to_string());
     module.struct_metas.push(StructMeta {
-        slot_types: vec![SlotType::GcRef, SlotType::GcRef],
+        slot_types: vec![SlotType::GcRef, SlotType::GcRef].into(),
         fields: vec![
             FieldMeta {
                 name: "port".to_string(),
@@ -922,6 +938,7 @@ fn vm_endpoint_direct_preflight_012_same_island_select_transfer_error_preserves_
     let mut stack = vec![ch as u64, payload_port as u64, 0, 0];
     let mut select_state = Some(SelectState {
         cases: vec![SelectCase {
+            _storage: None,
             kind: SelectCaseKind::Send,
             result_index: 0,
             queue_reg: 0,
@@ -929,13 +946,14 @@ fn vm_endpoint_direct_preflight_012_same_island_select_transfer_error_preserves_
             elem_slots: 2,
             elem_layout: None,
             has_ok: false,
-        }],
+        }]
+        .into(),
         expected_cases: 1,
         has_default: false,
         woken_index: None,
         woken_result: None,
         select_id: 1,
-        registered_queues: Vec::new(),
+        registered_queues: Default::default(),
     });
 
     let result = exec_select_exec(

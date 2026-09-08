@@ -5102,7 +5102,7 @@ path = "cases/gc/jit_recursive_inline_gc_yield.vo"
 matrix = "default-gc-jit-only"
 tags = ["jit", "gc", "contract", "regression"]
 owner = "runtime-gc"
-reason = "forces an optimizing scalar-recursive inline to cross a pending GC cooperative yield and validates source-call replay"
+reason = "forces optimizing scalar recursion to cross a pending GC cooperative yield and validates complete activation recovery"
 expect = "pass"
 
 [[case]]
@@ -11835,4 +11835,117 @@ matrix = "native"
 tags = ["stdlib", "filesystem", "symlink", "regression", "smoke"]
 owner = "stdlib"
 reason = "runner probes native symlink capability independently; unavailable hosts must return an error without creating an entry"
+expect = "pass"
+
+[[case]]
+id = "frontend-semantic-contracts"
+kind = "file"
+path = "cases/typechecker/frontend_semantic_contracts.vo"
+matrix = "default"
+tags = ["typechecker", "regression", "language-contract", "builtin", "initialization"]
+owner = "typechecker"
+reason = "Checked call bindings preserve tuple arity, conversions, dynamic key identity, and evaluation order"
+expect = "pass"
+
+[[case]]
+id = "frontend-binding-contracts"
+kind = "file"
+path = "cases/typechecker/frontend_binding_contracts.vo"
+matrix = "default-gc"
+tags = ["typechecker", "regression", "language-contract", "closure", "builtin", "literal"]
+owner = "typechecker"
+reason = "Declaration identity, expression keys and complete argument bindings preserve execution across syntax forms and storage tiers"
+expect = "pass"
+
+[[case]]
+id = "frontend-island-captures"
+kind = "file"
+path = "cases/typechecker/frontend_island_captures.vo"
+matrix = "default-gc"
+tags = ["typechecker", "regression", "closure", "island", "port"]
+owner = "typechecker"
+skip = ["wasm", "wasm-aot"]
+reason = "Cross-island closure transfer requires native threading; local type and constant names never become runtime captures"
+expect = "pass"
+
+[[case]]
+id = "vm-defer-entry-traps"
+kind = "file"
+path = "cases/runtime/core/vm_defer_entry_traps.vo"
+matrix = "default-gc"
+tags = ["runtime", "regression", "vm-review"]
+owner = "runtime"
+reason = "Failed deferred-call entry preserves the caller and iteratively unwinds long nil-defer chains"
+expect = "pass"
+
+[[case]]
+id = "vm-runtime-panic-types"
+kind = "file"
+path = "cases/runtime/core/vm_runtime_panic_types.vo"
+matrix = "default-gc"
+tags = ["runtime", "regression", "vm-review"]
+owner = "runtime"
+reason = "Runtime panic strings carry the canonical string RTTID through recovery, formatting, and interface equality"
+expect = "pass"
+
+[[case]]
+id = "vm-timer-runnable-progress"
+kind = "file"
+path = "cases/runtime/core/vm_timer_runnable_progress.vo"
+matrix = "default-gc"
+tags = ["runtime", "regression", "vm-review"]
+owner = "runtime"
+reason = "Ready timers are delivered while another fiber remains continuously runnable; time provider unavailable in nostd"
+expect = "pass"
+skip = ["nostd"]
+
+[[case]]
+id = "vm-island-runnable-progress"
+kind = "file"
+path = "cases/runtime/core/vm_island_runnable_progress.vo"
+matrix = "default-gc"
+tags = ["runtime", "regression", "vm-review"]
+owner = "runtime"
+reason = "A child Island processes later commands while an earlier fiber remains runnable; time provider unavailable in nostd"
+expect = "pass"
+skip = ["nostd", "wasm"]
+
+[[case]]
+id = "jit-optimizer-append-alias"
+kind = "file"
+path = "cases/jit/optimizer_append_alias.vo"
+matrix = "jit-optimizer-contract"
+tags = ["jit", "gc", "regression", "optimizer"]
+owner = "jit"
+reason = "GVN invalidates aliased field values after appending into existing slice backing"
+expect = "pass"
+
+[[case]]
+id = "jit-optimizer-scalar-lifetime"
+kind = "file"
+path = "cases/jit/optimizer_scalar_lifetime.vo"
+matrix = "jit-optimizer-contract"
+tags = ["jit", "gc", "regression", "optimizer"]
+owner = "jit"
+reason = "Scalar replacement recovery follows precise GC liveness across cell reuse"
+expect = "pass"
+
+[[case]]
+id = "jit-optimizer-recursive-recovery"
+kind = "file"
+path = "cases/jit/optimizer_recursive_recovery.vo"
+matrix = "jit-optimizer-contract"
+tags = ["jit", "gc", "regression", "optimizer"]
+owner = "jit"
+reason = "Every recursive activation survives native capacity, depth and scheduler exits"
+expect = "pass"
+
+[[case]]
+id = "jit-optimizer-polymorphic-dispatch"
+kind = "file"
+path = "cases/jit/optimizer_polymorphic_dispatch.vo"
+matrix = "jit-optimizer-contract"
+tags = ["jit", "gc", "regression", "optimizer"]
+owner = "jit"
+reason = "PIC preserves receiver identity and hot entries across tier publication, capacity overflow and GC"
 expect = "pass"

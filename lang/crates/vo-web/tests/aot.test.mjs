@@ -54,6 +54,26 @@ test('Core Wasm host rejects an invalid debug frame-walk layout', async () => {
   await assert.rejects(runAot(image), /invalid Volang debug frame layout/);
 });
 
+test('Core Wasm host still requires flat descriptors for ordinary runtime values', async () => {
+  const image = Buffer.from(await readAotImage());
+  const metadata = image.indexOf(Buffer.from('VORT0001', 'ascii'));
+  assert.ok(metadata >= 0);
+  assert.ok(image.readUInt32LE(metadata + 12) > 0, 'fixture contains runtime types');
+  const firstRecord = metadata + 36;
+  image.writeUInt32LE(0xffff_ffff, firstRecord + 20);
+  await assert.rejects(runAot(image), /invalid Volang runtime type layout/);
+});
+
+test('Core Wasm host rejects oversized flat layouts for non-array values', async () => {
+  const image = Buffer.from(await readAotImage());
+  const metadata = image.indexOf(Buffer.from('VORT0001', 'ascii'));
+  assert.ok(metadata >= 0);
+  const firstRecord = metadata + 36;
+  assert.notEqual(image[firstRecord + 9], 2, 'first fixture type is not an array');
+  image.writeUInt32LE(0x1_0000, firstRecord + 12);
+  await assert.rejects(runAot(image), /invalid Volang runtime type layout/);
+});
+
 test('Core Wasm host bounds process arguments before compiling the image', async () => {
   const image = await readAotImage();
   await assert.rejects(runAot(image, Array(1025).fill('x')), /arguments exceed the host contract/);

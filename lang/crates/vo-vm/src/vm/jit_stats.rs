@@ -106,6 +106,8 @@ pub struct JitExecutionStats {
     pub function_compilations: u64,
     /// Successfully published optimizing-tier artifacts.
     pub optimizing_compilations: u64,
+    /// Distinct functions actually entered through optimizing native code.
+    pub optimizing_functions_executed: u64,
     /// Optional optimizing compilations rejected while baseline remained live.
     pub optimizing_failures: u64,
     /// Assumption failures handled through versioned deoptimization metadata.

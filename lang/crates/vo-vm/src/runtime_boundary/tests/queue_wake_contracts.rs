@@ -291,6 +291,7 @@ fn vm_select_woken_payload_contract_019_rejects_slot_kind_drift_before_storage()
         let fiber = vm.scheduler.get_fiber_mut(fiber_id);
         fiber.select_state = Some(SelectState {
             cases: vec![SelectCase {
+                _storage: None,
                 kind: SelectCaseKind::Recv,
                 result_index: 0,
                 queue_reg: 0,
@@ -298,7 +299,8 @@ fn vm_select_woken_payload_contract_019_rejects_slot_kind_drift_before_storage()
                 elem_slots: 1,
                 elem_layout: None,
                 has_ok: false,
-            }],
+            }]
+            .into(),
             expected_cases: 1,
             has_default: false,
             woken_index: None,
@@ -308,7 +310,8 @@ fn vm_select_woken_payload_contract_019_rejects_slot_kind_drift_before_storage()
                 case_index: 0,
                 queue: ch,
                 kind: SelectCaseKind::Recv,
-            }],
+            }]
+            .into(),
         });
     }
     vm.scheduler.schedule_next().unwrap();
@@ -336,8 +339,8 @@ fn vm_select_woken_payload_contract_019_rejects_slot_kind_drift_before_storage()
     transition.wakes.push(WakeCommand::queue_waiter_with_result(
         waiter,
         SelectWokenResult::Recv {
-            data: vec![forged_root as u64],
-            slot_types: vec![vo_runtime::SlotType::Value],
+            data: vec![forged_root as u64].into(),
+            slot_types: vec![vo_runtime::SlotType::Value].into(),
             closed: false,
         },
     ));
@@ -639,6 +642,7 @@ fn duplicate_select_wakes_reject_before_partial_apply_055() {
         fiber.select_state = Some(SelectState {
             cases: vec![
                 SelectCase {
+                    _storage: None,
                     kind: SelectCaseKind::Recv,
                     result_index: 0,
                     queue_reg: 0,
@@ -648,6 +652,7 @@ fn duplicate_select_wakes_reject_before_partial_apply_055() {
                     has_ok: false,
                 },
                 SelectCase {
+                    _storage: None,
                     kind: SelectCaseKind::Recv,
                     result_index: 0,
                     queue_reg: 0,
@@ -656,7 +661,8 @@ fn duplicate_select_wakes_reject_before_partial_apply_055() {
                     elem_layout: None,
                     has_ok: false,
                 },
-            ],
+            ]
+            .into(),
             expected_cases: 2,
             has_default: false,
             woken_index: None,
@@ -673,7 +679,8 @@ fn duplicate_select_wakes_reject_before_partial_apply_055() {
                     queue: ch,
                     kind: SelectCaseKind::Recv,
                 },
-            ],
+            ]
+            .into(),
         });
     }
     vm.scheduler.schedule_next().unwrap();
@@ -779,6 +786,7 @@ fn accepted_select_wake_cancels_sibling_waiters_056() {
         fiber.select_state = Some(SelectState {
             cases: vec![
                 SelectCase {
+                    _storage: None,
                     kind: SelectCaseKind::Recv,
                     result_index: 0,
                     queue_reg: 0,
@@ -788,6 +796,7 @@ fn accepted_select_wake_cancels_sibling_waiters_056() {
                     has_ok: false,
                 },
                 SelectCase {
+                    _storage: None,
                     kind: SelectCaseKind::Recv,
                     result_index: 0,
                     queue_reg: 2,
@@ -796,7 +805,8 @@ fn accepted_select_wake_cancels_sibling_waiters_056() {
                     elem_layout: None,
                     has_ok: false,
                 },
-            ],
+            ]
+            .into(),
             expected_cases: 2,
             has_default: false,
             woken_index: None,
@@ -813,7 +823,8 @@ fn accepted_select_wake_cancels_sibling_waiters_056() {
                     queue: sibling,
                     kind: SelectCaseKind::Recv,
                 },
-            ],
+            ]
+            .into(),
         });
     }
     let selected_waiter = QueueWaiter::try_select(

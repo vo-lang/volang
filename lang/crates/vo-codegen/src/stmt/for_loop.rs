@@ -43,7 +43,7 @@ fn is_safe_limit_expr(
             info.try_const_int(expr).is_some()
                 || ident.symbol == loop_var
                 || matches!(
-                    func.lookup_local(ident.symbol).map(|local| local.storage),
+                    func.lookup_local_object(info.get_use(ident)),
                     Some(StorageKind::StackValue { slots: 1, .. })
                 )
         }
@@ -213,6 +213,7 @@ fn compile_simple_for(
     // Define loop variable
     let type_key = info.obj_type(pattern.obj_key, "loop var must have type");
     func.define_local_at(pattern.var_name, idx_slot, 1);
+    func.bind_local_object(pattern.var_name, Some(pattern.obj_key))?;
 
     // Compile limit expression (must be single variable or constant)
     let limit_slot = crate::expr::compile_expr(pattern.limit_expr, ctx, func, info)?;

@@ -132,8 +132,8 @@ pub fn get_expr_source(
             if ctx.externalized_local(object).is_some() {
                 return ExprSource::NeedsCompile;
             }
-            if let Some(local) = func.lookup_local(ident.symbol) {
-                return ExprSource::Location(local.storage);
+            if let Some(storage) = func.lookup_local_object(object) {
+                return ExprSource::Location(storage);
             }
             let obj_key = object;
             if let Some(global_idx) = ctx.get_global_index(obj_key) {
@@ -216,7 +216,8 @@ pub(super) fn expr_runtime_slot_types(
 fn is_captured_array_expr(expr: &Expr, func: &FuncBuilder, info: &TypeInfoWrapper) -> bool {
     match &expr.kind {
         ExprKind::Ident(ident) => {
-            func.lookup_capture(ident.symbol).is_some() && info.is_array(info.expr_type(expr.id))
+            func.lookup_capture(info.get_use(ident)).is_some()
+                && info.is_array(info.expr_type(expr.id))
         }
         ExprKind::Paren(inner) => is_captured_array_expr(inner, func, info),
         _ => false,
@@ -231,7 +232,7 @@ fn is_global_array_expr(
 ) -> bool {
     match &expr.kind {
         ExprKind::Ident(ident) => {
-            if func.lookup_local(ident.symbol).is_some() {
+            if func.lookup_local_object(info.get_use(ident)).is_some() {
                 return false;
             }
             let obj_key = info.get_use(ident);
@@ -463,7 +464,7 @@ pub fn compile_expr_to(
                 ExprSource::NeedsCompile => {
                     let obj_key = object;
                     // Closure capture: ClosureGet returns GcRef to the captured storage
-                    if let Some(capture) = func.lookup_capture(ident.symbol) {
+                    if let Some(capture) = func.lookup_capture(info.get_use(ident)) {
                         let capture_index = capture.index;
                         // Arrays: capture stores GcRef to [ArrayHeader][elems], use directly
                         // Others: capture stores GcRef to box [value], need PtrGet to read value

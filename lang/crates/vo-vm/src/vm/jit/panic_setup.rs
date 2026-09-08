@@ -67,12 +67,6 @@ fn jit_runtime_trap_message(kind: RuntimeTrapKind, arg0: u64, arg1: u64) -> Stri
     }
 }
 
-fn interface_string(gc: &mut vo_runtime::gc::Gc, msg: String) -> InterfaceSlot {
-    let msg_str = vo_runtime::objects::string::new_from_string(gc, msg);
-    let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-    InterfaceSlot::new(slot0, msg_str as u64)
-}
-
 /// Shared JIT panic setup: materialize frames, capture source location, resolve panic message.
 ///
 /// For user panics the message comes from ctx (set by JIT extern callback); for runtime errors
@@ -100,7 +94,10 @@ pub(super) fn setup_jit_panic(
                 ctx.ctx.runtime_trap_arg0,
                 ctx.ctx.runtime_trap_arg1,
             );
-            fiber.set_recoverable_trap(kind, interface_string(gc, msg));
+            fiber.set_recoverable_trap(
+                kind,
+                vo_runtime::objects::interface::diagnostic_string(gc, module, msg),
+            );
         }
     }
     let trap_kind = match fiber.panic_state {

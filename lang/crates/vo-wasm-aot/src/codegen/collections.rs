@@ -2408,26 +2408,68 @@ pub(super) fn compile_spawn_fiber(
         offset: FIBER_DIRECT_BUDGET_OFFSET,
         align: 3,
         memory_index: 0,
-    }))
-    .instruction(&W::GlobalGet(globals.fiber_tail))
-    .instruction(&W::LocalTee(CAPACITY_LOCAL))
-    .instruction(&W::If(BlockType::Empty))
-    .instruction(&W::LocalGet(CAPACITY_LOCAL))
-    .instruction(&W::LocalGet(LENGTH_LOCAL))
-    .instruction(&W::I64ExtendI32U)
-    .instruction(&W::I64Store(MemArg {
-        offset: FIBER_NEXT_OFFSET,
-        align: 3,
-        memory_index: 0,
-    }))
-    .instruction(&W::Else)
-    .instruction(&W::LocalGet(LENGTH_LOCAL))
-    .instruction(&W::GlobalSet(globals.fiber_head))
-    .instruction(&W::End)
-    .instruction(&W::LocalGet(LENGTH_LOCAL))
-    .instruction(&W::GlobalSet(globals.fiber_tail));
-    mark_scheduler_progress(body, globals);
+    }));
+    publish_spawned_fiber(body, globals);
     Ok(())
+}
+
+/// A saved nil invocation has no guest frame. The scheduler reports its panic
+/// only when this new Fiber receives a turn, preserving launcher semantics.
+pub(super) fn compile_spawn_trapped_fiber(
+    body: &mut Function,
+    globals: RuntimeGlobals,
+    message_ref: u32,
+) {
+    body.instruction(&W::I32Const(
+        (FRAME_STATE_BYTES + FIBER_RECORD_BYTES) as i32,
+    ))
+    .instruction(&W::I32Const(FRAME_ALLOC_ZEROED))
+    .instruction(&W::Call(FRAME_ALLOC_FUNCTION_INDEX))
+    .instruction(&W::LocalTee(LENGTH_LOCAL))
+    .instruction(&W::I32Eqz)
+    .instruction(&W::If(BlockType::Empty));
+    return_status(body, STATUS_OUT_OF_MEMORY);
+    body.instruction(&W::End)
+        .instruction(&W::LocalGet(LENGTH_LOCAL))
+        .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
+        .instruction(&W::I32Add)
+        .instruction(&W::LocalSet(LENGTH_LOCAL));
+    for (offset, value) in [
+        (FIBER_PANIC_SLOT0_OFFSET, (17u64 << 8 | 17) as i64),
+        (FIBER_PANIC_SLOT1_OFFSET, i64::from(message_ref)),
+        (FIBER_PANIC_GENERATION_OFFSET, 1),
+        (FIBER_ACTIVE_PANIC_GENERATION_OFFSET, 1),
+    ] {
+        body.instruction(&W::LocalGet(LENGTH_LOCAL))
+            .instruction(&W::I64Const(value))
+            .instruction(&W::I64Store(MemArg {
+                offset,
+                align: 3,
+                memory_index: 0,
+            }));
+    }
+    publish_spawned_fiber(body, globals);
+}
+
+fn publish_spawned_fiber(body: &mut Function, globals: RuntimeGlobals) {
+    body.instruction(&W::GlobalGet(globals.fiber_tail))
+        .instruction(&W::LocalTee(CAPACITY_LOCAL))
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::LocalGet(CAPACITY_LOCAL))
+        .instruction(&W::LocalGet(LENGTH_LOCAL))
+        .instruction(&W::I64ExtendI32U)
+        .instruction(&W::I64Store(MemArg {
+            offset: FIBER_NEXT_OFFSET,
+            align: 3,
+            memory_index: 0,
+        }))
+        .instruction(&W::Else)
+        .instruction(&W::LocalGet(LENGTH_LOCAL))
+        .instruction(&W::GlobalSet(globals.fiber_head))
+        .instruction(&W::End)
+        .instruction(&W::LocalGet(LENGTH_LOCAL))
+        .instruction(&W::GlobalSet(globals.fiber_tail));
+    mark_scheduler_progress(body, globals);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2442,11 +2484,8 @@ pub(super) fn compile_defer_push_instruction(
     materialized: &BTreeSet<u32>,
     globals: RuntimeGlobals,
     allocation_descriptors: &AllocationDescriptors,
-    nil_panic_ref: u32,
-    current_block: u32,
 ) -> Result<(), WasmAotError> {
     let arg_slots = if instruction.call_shape_is_closure() {
-        reject_nil_reference(body, instruction.a, nil_panic_ref, current_block);
         let arg_slots = function
             .instruction_metadata
             .get(pc)
@@ -2466,6 +2505,17 @@ pub(super) fn compile_defer_push_instruction(
             ClosureResultUse::Discarded,
         )?;
         body.instruction(&W::Block(BlockType::Empty));
+        // A nil deferred call is still registered. Its saved invocation fails
+        // during unwind, after subsequent statements and registrations run.
+        load_slot(body, instruction.a);
+        body.instruction(&W::I64Eqz)
+            .instruction(&W::If(BlockType::Empty))
+            .instruction(&W::I32Const(0))
+            .instruction(&W::LocalSet(FRAME_LIMIT_LOCAL))
+            .instruction(&W::I64Const(0))
+            .instruction(&W::LocalSet(PACKED_LOCAL))
+            .instruction(&W::Br(1))
+            .instruction(&W::End);
         for candidate in candidates {
             let target = candidate.target;
             let frame_bytes =

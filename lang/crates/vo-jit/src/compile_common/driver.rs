@@ -98,7 +98,6 @@ pub(crate) trait CompileDriver {
     }
     fn set_current_pc(&mut self, pc: usize);
     fn enter_pc_block(&mut self, pc: usize, block_terminated: &mut bool) -> Result<(), JitError>;
-    fn apply_pc_facts(&mut self, pc: usize) -> Result<(), JitError>;
     fn instruction_for_pc(&self, pc: usize) -> Result<LoweringInstruction, JitError>;
     fn should_skip_instruction(&self, _inst: LoweringInstruction) -> bool {
         false
@@ -322,8 +321,13 @@ pub(crate) fn drive_compile(driver: &mut impl CompileDriver) -> Result<(), JitEr
         }
         driver.set_current_pc(pc);
         driver.enter_pc_block(pc, &mut block_terminated)?;
-        driver.apply_pc_facts(pc)?;
         let inst = driver.instruction_for_pc(pc)?;
+        if inst.typed().pc() != pc {
+            return Err(JitError::Internal(format!(
+                "lowering instruction pc {} does not match metadata/recovery pc {pc}",
+                inst.typed().pc()
+            )));
+        }
         if driver.should_skip_instruction(inst) {
             continue;
         }

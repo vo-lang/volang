@@ -112,60 +112,61 @@ impl Checker {
                 // Create a new octx for the checker
                 let mut octx = ObjContext::new();
                 octx.scope = Some(d.file_scope());
-                std::mem::swap(&mut self.octx, &mut octx);
-
-                let lobj = &self.lobj(okey);
-                match lobj.entity_type() {
-                    EntityType::Const { .. } => {
-                        self.octx.decl = Some(dkey);
-                        if let DeclInfo::Const(cd) = self.decl_info(dkey) {
-                            let (typ, init) = (cd.typ.clone(), cd.init.clone());
-                            self.const_decl(okey, &typ, &init);
-                        }
-                    }
-                    EntityType::Var { .. } => {
-                        self.octx.decl = Some(dkey);
-                        if let DeclInfo::Var(vd) = self.decl_info(dkey) {
-                            let (lhs, typ, rhs) = (vd.lhs.clone(), vd.typ.clone(), vd.rhs.clone());
-
-                            // All variables in a VarSpec share one declaration.
-                            // Mark the whole group in progress before checking
-                            // any RHS so references to a sibling are recognized
-                            // as an initialization cycle instead of recursively
-                            // checking the same declaration.
-                            for &other in &lhs {
-                                if other != okey && self.lobj(other).color() == ObjColor::White {
-                                    self.lobj_mut(other).set_color(ObjColor::Gray(idx));
-                                }
-                            }
-                            self.var_decl(&lhs, &typ, &rhs);
-                            for &other in &lhs {
-                                if other != okey {
-                                    if self.lobj(other).typ().is_none() {
-                                        let invalid = self.invalid_type();
-                                        self.lobj_mut(other).set_type(Some(invalid));
-                                    }
-                                    if matches!(self.lobj(other).color(), ObjColor::Gray(_)) {
-                                        self.lobj_mut(other).set_color(ObjColor::Black);
-                                    }
-                                }
+                self.with_context(octx, |checker| {
+                    let lobj = &checker.lobj(okey);
+                    match lobj.entity_type() {
+                        EntityType::Const { .. } => {
+                            checker.octx.decl = Some(dkey);
+                            if let DeclInfo::Const(cd) = checker.decl_info(dkey) {
+                                let (typ, init) = (cd.typ.clone(), cd.init.clone());
+                                checker.const_decl(okey, &typ, &init);
                             }
                         }
-                    }
-                    EntityType::TypeName => {
-                        if let DeclInfo::Type(td) = self.decl_info(dkey) {
-                            let (typ, alias) = (td.typ.clone(), td.alias);
-                            self.type_decl(okey, &typ, def, alias);
-                        }
-                    }
-                    EntityType::Func { .. } => {
-                        self.func_decl(okey, dkey);
-                    }
-                    _ => {}
-                }
+                        EntityType::Var { .. } => {
+                            checker.octx.decl = Some(dkey);
+                            if let DeclInfo::Var(vd) = checker.decl_info(dkey) {
+                                let (lhs, typ, rhs) =
+                                    (vd.lhs.clone(), vd.typ.clone(), vd.rhs.clone());
 
-                // Restore octx
-                std::mem::swap(&mut self.octx, &mut octx);
+                                // All variables in a VarSpec share one declaration.
+                                // Mark the whole group in progress before checking
+                                // any RHS so references to a sibling are recognized
+                                // as an initialization cycle instead of recursively
+                                // checking the same declaration.
+                                for &other in &lhs {
+                                    if other != okey
+                                        && checker.lobj(other).color() == ObjColor::White
+                                    {
+                                        checker.lobj_mut(other).set_color(ObjColor::Gray(idx));
+                                    }
+                                }
+                                checker.var_decl(&lhs, &typ, &rhs);
+                                for &other in &lhs {
+                                    if other != okey {
+                                        if checker.lobj(other).typ().is_none() {
+                                            let invalid = checker.invalid_type();
+                                            checker.lobj_mut(other).set_type(Some(invalid));
+                                        }
+                                        if matches!(checker.lobj(other).color(), ObjColor::Gray(_))
+                                        {
+                                            checker.lobj_mut(other).set_color(ObjColor::Black);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        EntityType::TypeName => {
+                            if let DeclInfo::Type(td) = checker.decl_info(dkey) {
+                                let (typ, alias) = (td.typ.clone(), td.alias);
+                                checker.type_decl(okey, &typ, def, alias);
+                            }
+                        }
+                        EntityType::Func { .. } => {
+                            checker.func_decl(okey, dkey);
+                        }
+                        _ => {}
+                    }
+                });
                 let popped = self.pop_obj_path();
                 self.lobj_mut(popped).set_color(ObjColor::Black);
             }
@@ -424,7 +425,7 @@ impl Checker {
             let lobj = &self.lobj(okey);
             if sig.recv().is_none()
                 && lobj.name() == "init"
-                && (sig.params_count(self.objs()) > 0 || sig.results_count(self.objs()) > 0)
+                && (sig.declared_param_count(self.objs()) > 0 || sig.results_count(self.objs()) > 0)
             {
                 self.error_code(TypeError::InvalidInitSignature, self.obj_span(okey));
             }
@@ -432,19 +433,18 @@ impl Checker {
             let is_entry_main = sig.recv().is_none()
                 && lobj.name() == "main"
                 && self.package(self.pkg).name().as_deref() == Some("main");
-            if is_entry_main && sig.params_count(self.objs()) > 0 {
+            if is_entry_main && sig.declared_param_count(self.objs()) > 0 {
                 self.error_code(TypeError::InvalidMainSignature, self.obj_span(okey));
             }
 
             // Queue function body for later checking
-            if fdecl.body.is_some() {
-                let name = lobj.name().to_string();
-                let body = fdecl.body.clone();
-                self.later(Box::new(move |checker: &mut Checker| {
-                    if let Some(b) = &body {
-                        checker.func_body(Some(dkey), &name, sig_key, b, None);
-                    }
-                }));
+            if let Some(body) = &fdecl.body {
+                self.later(super::deferred::DelayedAction::FunctionBody {
+                    decl: Some(dkey),
+                    sig: sig_key,
+                    body: body.clone(),
+                    iota: None,
+                });
             }
         }
     }

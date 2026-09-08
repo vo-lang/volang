@@ -1111,6 +1111,10 @@ impl Vm {
                 });
                 ExecResult::Transition(transition)
             }
+            ExecResult::ResourceError(error) => {
+                self.discard_pending_runtime_transitions();
+                ExecResult::ResourceError(error)
+            }
             ExecResult::MemoryError(error) => {
                 self.discard_pending_runtime_transitions();
                 ExecResult::MemoryError(error)
@@ -1471,6 +1475,7 @@ impl Vm {
             ExecResult::TimesliceExpired | ExecResult::Interrupted => RuntimeBoundary::Yield,
             ExecResult::Block(reason) => RuntimeBoundary::Block(reason.clone()),
             ExecResult::Panic => RuntimeBoundary::Panic("fiber panic".to_string()),
+            ExecResult::ResourceError(error) => RuntimeBoundary::FatalInfra(error.message()),
             ExecResult::MemoryError(error) => {
                 RuntimeBoundary::FatalInfra(format!("Island managed-memory failure: {error}"))
             }
@@ -2630,17 +2635,17 @@ impl Vm {
         if select_state.select_id != select.select_id {
             return;
         }
-        let mut registered_queues = core::mem::take(&mut select_state.registered_queues);
-        registered_queues.sort_unstable_by_key(|registered| registered.queue as usize);
-        let mut selected = Vec::new();
+        let registered_queues = &mut select_state.registered_queues;
+        if let Some(queues) = registered_queues.unique_mut() {
+            queues.sort_unstable_by_key(|registered| registered.queue as usize);
+        }
         let mut cancelled_queue = None;
-        for registered in registered_queues {
+        for registered in registered_queues.iter() {
             let is_selected = registered.case_index == select.case_index
                 && registered.queue as u64 == select.queue_ref
                 && registered.kind.wait_kind() == select.kind;
-            if is_selected {
-                selected.push(registered);
-            } else if !registered.queue.is_null()
+            if !is_selected
+                && !registered.queue.is_null()
                 && cancelled_queue != Some(registered.queue as usize)
             {
                 // Safety: the select state keeps every registered queue rooted and live.
@@ -2654,7 +2659,13 @@ impl Vm {
                 cancelled_queue = Some(registered.queue as usize);
             }
         }
-        select_state.registered_queues = selected;
+        if let Some(queues) = registered_queues.unique_mut() {
+            queues.retain(|registered| {
+                registered.case_index == select.case_index
+                    && registered.queue as u64 == select.queue_ref
+                    && registered.kind.wait_kind() == select.kind
+            });
+        }
     }
 
     fn cancel_select_sibling_waiters_for_wake(&mut self, waiter: &QueueWaiter) {

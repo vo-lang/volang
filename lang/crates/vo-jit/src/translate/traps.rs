@@ -74,3 +74,33 @@ where
     emit_nil_ptr_check(e, ptr);
     e.mark_checked_non_nil(ptr_slot);
 }
+
+pub(in crate::translate) fn emit_return_if_u64_jit_error<'a>(
+    e: &mut impl crate::translator::IrBuilder<'a>,
+    result: Value,
+) {
+    let sentinel = e
+        .builder()
+        .ins()
+        .iconst(types::I64, vo_runtime::jit_api::JIT_HELPER_U64_ERROR as i64);
+    let is_error = e.builder().ins().icmp(IntCC::Equal, result, sentinel);
+    let error_block = crate::compile_common::cold_block(e.builder());
+    let ok_block = e.builder().create_block();
+    e.builder()
+        .ins()
+        .brif(is_error, error_block, &[], ok_block, &[]);
+
+    e.builder().switch_to_block(error_block);
+    e.builder().seal_block(error_block);
+    // This is a terminal infrastructure failure. The VM reports the context
+    // error and never resumes this frame, so publishing local values adds no
+    // observable state and can dramatically widen otherwise pure helpers.
+    let jit_error = e
+        .builder()
+        .ins()
+        .iconst(types::I32, vo_runtime::jit_api::JitResult::JitError as i64);
+    e.builder().ins().return_(&[jit_error]);
+
+    e.builder().switch_to_block(ok_block);
+    e.builder().seal_block(ok_block);
+}

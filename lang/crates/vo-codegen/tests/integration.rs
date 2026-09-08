@@ -1,6 +1,5 @@
 //! Integration tests: parse → check → codegen → VM
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use vo_analysis::importer::NullImporter;
 use vo_analysis::vfs::{ModSource, PackageResolver, StdSource};
@@ -48,18 +47,19 @@ fn analyze_source(source: &str) -> Result<Project, AnalysisError> {
         return Err(AnalysisError::Check(diags, source_map));
     }
 
-    Ok(Project {
-        tc_objs: checker.tc_objs,
+    Project::from_packages(
+        checker.tc_objs,
         interner,
-        packages: vec![main_pkg_key],
-        main_package: main_pkg_key,
-        type_info: checker.result,
-        files: vec![file],
-        imported_files: BTreeMap::new(),
-        imported_type_infos: BTreeMap::new(),
+        vec![vo_analysis::AnalyzedPackage {
+            key: main_pkg_key,
+            files: vec![file],
+            type_info: checker.result,
+        }],
         source_map,
-        extensions: Vec::new(),
-    })
+        checker.diagnostics.into_inner(),
+        Vec::new(),
+    )
+    .map_err(AnalysisError::Import)
 }
 
 /// Helper: compile Vo source to Module
@@ -5109,4 +5109,62 @@ func main() {{
     );
 
     compile_and_run(&source);
+}
+
+#[test]
+fn frontend_semantic_contracts_execute_with_verified_metadata() {
+    let source =
+        include_str!("../../../../tests/lang/cases/typechecker/frontend_semantic_contracts.vo");
+    let module = compile_source_with_core(source);
+    verify_module(&module).expect("frontend contract bytecode must verify");
+    let mut vm = Vm::new();
+    vm.load(module).expect("frontend contract module must load");
+    vm.run().expect("frontend contract runtime assertions");
+}
+
+#[test]
+fn checked_conversion_forms_lower_without_syntax_shape_assumptions() {
+    for conversion in [
+        "(*S)(nil)",
+        "(((*S)))(nil)",
+        "(*(S))(nil)",
+        "(*struct{})(nil)",
+        "(int64)(1)",
+        "([]int)(nil)",
+        "(map[int]int)(nil)",
+        "(chan int)(nil)",
+        "(func(int)int)(f)",
+        "interface{}(1)",
+    ] {
+        let source = format!("package main\ntype S struct{{}};func f(x int)int{{return x}};func main(){{_={conversion}}}");
+        let project =
+            analyze_source(&source).unwrap_or_else(|error| panic!("{conversion}: {error}"));
+        let module =
+            compile_project(&project).unwrap_or_else(|error| panic!("{conversion}: {error}"));
+        verify_module(&module).unwrap_or_else(|error| panic!("{conversion}: {error}"));
+    }
+    let module = compile_project_with_dependency(
+        "package main\nimport \"github.com/acme/lib\";func main(){_=(*lib.S)(nil);_=((*(lib.S)))(nil)}",
+        "github.com/acme/lib", "package lib\ntype S struct{}",
+    );
+    verify_module(&module).expect("qualified pointer conversions");
+}
+
+#[test]
+fn frontend_binding_contracts_execute_with_verified_metadata() {
+    let source =
+        include_str!("../../../../tests/lang/cases/typechecker/frontend_binding_contracts.vo");
+    let module = compile_source_with_core(source);
+    verify_module(&module).expect("binding contract bytecode must verify");
+    let mut vm = Vm::new();
+    vm.load(module).expect("binding contract module must load");
+    vm.run().expect("binding contract runtime assertions");
+}
+
+#[test]
+fn malformed_no_value_calls_stop_before_codegen() {
+    let error = analyze_source("package main\nfunc f(){};func main(){f()()}")
+        .err()
+        .expect("no-value callee must be rejected by analysis");
+    assert!(matches!(error, AnalysisError::Check(..)));
 }

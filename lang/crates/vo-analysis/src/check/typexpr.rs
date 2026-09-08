@@ -3,6 +3,7 @@
 //! This module converts AST type expressions (TypeExpr) to internal types (TypeKey).
 //! It handles type-checking of type expressions and resolves them to TypeKey values.
 
+use super::deferred::DelayedAction;
 use vo_common::span::Span;
 use vo_syntax::ast::Ident;
 
@@ -187,16 +188,7 @@ impl Checker {
 
                 // Check map key is comparable (like goscript: delayed check via self.later)
                 let key_span = map.key.span;
-                let f = move |checker: &mut Checker| {
-                    if !crate::typ::comparable(key, &checker.tc_objs) {
-                        checker.error_code_msg(
-                            TypeError::InvalidOp,
-                            key_span,
-                            "invalid map key type",
-                        );
-                    }
-                };
-                self.later(Box::new(f));
+                self.later(DelayedAction::MapKey { key, key_span });
 
                 Some(t)
             }
@@ -229,24 +221,10 @@ impl Checker {
                 // Delay this check because the base type may not be fully resolved yet
                 // (e.g., recursive types like `type Node struct { left *Node }`)
                 let base_span = base.span;
-                let f = move |checker: &mut Checker| {
-                    let invalid_type = checker.invalid_type();
-                    if base_type == invalid_type {
-                        return;
-                    }
-                    let underlying = typ::underlying_type(base_type, checker.objs());
-                    if checker.otype(underlying).try_as_struct().is_none() {
-                        checker.error_code_msg(
-                            TypeError::PointerToNonStruct,
-                            base_span,
-                            format!(
-                                "invalid pointer type *{} (base must be struct)",
-                                checker.type_str(base_type)
-                            ),
-                        );
-                    }
-                };
-                self.later(Box::new(f));
+                self.later(DelayedAction::PointerBase {
+                    base_type,
+                    base_span,
+                });
 
                 Some(t)
             }
@@ -933,7 +911,7 @@ impl Checker {
     /// Resolves one embedded interface after package declarations have been
     /// established. Interface elements are not ordinary `TypeExpr` nodes, so
     /// they need the same name/package validation and use recording here.
-    fn resolve_embedded_interface(
+    pub(super) fn resolve_embedded_interface(
         &mut self,
         scope_key: ScopeKey,
         elem: &InterfaceElem,
@@ -1084,17 +1062,11 @@ impl Checker {
         // Delay embedded interface checking (like goscript: self.later)
         // Only collects embeds - does NOT call complete() here
         if !embedded_elems.is_empty() {
-            let f = move |checker: &mut Checker| {
-                let embeds = embedded_elems
-                    .iter()
-                    .filter_map(|elem| checker.resolve_embedded_interface(embedded_scope, elem))
-                    .collect();
-
-                if let Type::Interface(iface_detail) = &mut checker.tc_objs.types[itype] {
-                    *iface_detail.embeddeds_mut() = embeds;
-                }
-            };
-            self.later(Box::new(f));
+            self.later(DelayedAction::InterfaceEmbeds {
+                embedded_scope,
+                embedded_elems,
+                itype,
+            });
         }
 
         // Compute method set using info_from_type_lit (like goscript)
@@ -1126,19 +1098,7 @@ impl Checker {
         // Correct receiver type for all methods explicitly declared
         // by this interface after we're done with type-checking at this level.
         // (like goscript's second self.later)
-        let f = move |checker: &mut Checker| {
-            if let Some(iface_detail) = checker.tc_objs.types[itype].try_as_interface() {
-                for &m in iface_detail.methods().iter() {
-                    let t = checker.tc_objs.lobjs[m].typ().unwrap();
-                    if let Type::Signature(sig) = &checker.tc_objs.types[t] {
-                        if let Some(recv_var) = sig.recv() {
-                            checker.tc_objs.lobjs[*recv_var].set_type(Some(recv_type));
-                        }
-                    }
-                }
-            }
-        };
-        self.later(Box::new(f));
+        self.later(DelayedAction::InterfaceReceiver { itype, recv_type });
 
         // Two-phase processing (like goscript):
         // Phase 1: Create method objects with empty signatures, call set_func
@@ -1203,7 +1163,6 @@ impl Checker {
 
         // Phase 2: Fix signatures now that we have collected all methods
         // (possibly embedded) methods must be type-checked within their scope
-        let saved_context = self.octx.clone();
         for minfo in sig_fix {
             let src_index = minfo.src_index().unwrap();
             let method_ast = match &iface.elems[src_index] {
@@ -1212,35 +1171,35 @@ impl Checker {
             };
 
             // Type-check method signature within its scope (like goscript)
-            self.octx = ObjContext::new();
-            self.octx.scope = minfo.scope();
+            let mut context = ObjContext::new();
+            context.scope = minfo.scope();
+            self.with_context(context, |checker| {
+                // Type-check the method signature
+                let sig_type = checker.func_type_from_sig(None, &method_ast.sig);
+                let method_name = checker.resolve_ident(&method_ast.name).to_string();
+                checker.validate_reserved_dyn_protocol_method(
+                    &method_name,
+                    sig_type,
+                    method_ast.name.span,
+                );
 
-            // Type-check the method signature
-            let sig_type = self.func_type_from_sig(None, &method_ast.sig);
-            let method_name = self.resolve_ident(&method_ast.name).to_string();
-            self.validate_reserved_dyn_protocol_method(
-                &method_name,
-                sig_type,
-                method_ast.name.span,
-            );
+                // Update the method's signature, keeping the receiver
+                let fun_key = minfo.func().unwrap();
+                let old_sig_type = checker.lobj(fun_key).typ().unwrap();
+                let recv = if let Type::Signature(old_sig) = &checker.otype(old_sig_type) {
+                    *old_sig.recv()
+                } else {
+                    None
+                };
 
-            // Update the method's signature, keeping the receiver
-            let fun_key = minfo.func().unwrap();
-            let old_sig_type = self.lobj(fun_key).typ().unwrap();
-            let recv = if let Type::Signature(old_sig) = &self.otype(old_sig_type) {
-                *old_sig.recv()
-            } else {
-                None
-            };
+                if let Type::Signature(sig) = &mut checker.otype_mut(sig_type) {
+                    sig.set_recv(recv);
+                }
 
-            if let Type::Signature(sig) = &mut self.otype_mut(sig_type) {
-                sig.set_recv(recv);
-            }
-
-            // Update the function's type to the new signature
-            self.lobj_mut(fun_key).set_type(Some(sig_type));
+                // Update the function's type to the new signature
+                checker.lobj_mut(fun_key).set_type(Some(sig_type));
+            });
         }
-        self.octx = saved_context;
 
         // Some overlaps involve an explicitly declared method whose signature was
         // unavailable while the embedded method set was collected. Now every method
