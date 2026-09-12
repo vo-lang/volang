@@ -134,6 +134,19 @@ impl<'a> CompilerCore<'a> {
         self.checked_non_nil.clear();
     }
 
+    pub(crate) fn begin_instruction(&mut self, pc: usize) {
+        self.current_pc = pc;
+        if let Some(range) = self
+            .analysis
+            .ir()
+            .instruction(pc)
+            .and_then(|inst| inst.frame_write_range())
+        {
+            self.checked_non_nil
+                .retain(|&slot| !range.contains(&usize::from(slot)));
+        }
+    }
+
     pub(crate) fn lowered_value_for_slot(&self, slot: u16) -> Option<cranelift_codegen::ir::Value> {
         let ir = self.analysis.ir();
         ir.input_value(self.current_pc, slot)

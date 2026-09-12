@@ -16,11 +16,20 @@ extern "C" fn(
 ```
 
 `frame_bp` is a stable index into the active Fiber stack. The first five
-argument slots also travel in raw native register lanes. Verified slots may
-remain in Cranelift SSA; allocation polls spill live direct references into
-precise native shadow-root maps. Conditional roots require typed VM-frame
-materialization before collection. Stack reallocation rebuilds addresses from
-the stable index. Every non-OK helper result exits before further guest effects.
+argument words are authoritative in raw native register lanes; their shadow
+slots need not be initialized by a native caller. Wide argument tails remain
+in the capacity-checked Fiber window. Ordinary callees initialize alias-backed
+leading slots before any guest safepoint and publish leading arguments on the
+cold tier-up path before a possible entry rejection. VM/prepared-call entries
+load lanes from their initialized frames. Continuations use their separate
+canonical-frame import contract and never treat the resume PC as an argument.
+Verified slots may remain in Cranelift SSA; allocation polls spill live direct
+references and complete tagged interface pairs into precise native shadow-root maps. The
+collector interprets each interface payload using its adjacent runtime tag.
+Exhausting the bounded native/root scan requires typed VM-frame materialization
+before returning to the scheduler, so native stack addresses never escape that
+execution. Stack reallocation rebuilds addresses from the stable index. Every
+non-OK helper result exits before further guest effects.
 
 ## Strict And Best-Effort Modes
 
@@ -54,6 +63,15 @@ verifier checks metadata kind, width, slot layout, and opcode compatibility.
 `vo-jit/src/metadata.rs` provides allocation-free typed views used by lowering
 and effect analysis; it does not define a second acceptance policy.
 
+Binary32 arithmetic and comparisons have distinct verified opcodes (`AddF32`,
+`SubF32`, `MulF32`, `DivF32`, `NegF32`, and the six ordered/unordered comparison
+operations). Their operands use the low 32 bits of scalar `Value` or `Float`
+slots. Arithmetic outputs clear the upper 32 bits; comparison outputs are
+canonical Boolean `Value` slots. Every arithmetic instruction preserves its
+binary32 rounding boundary. Inlining and value propagation MUST NOT widen the
+operation or combine rounding boundaries through reassociation or fused
+multiply-add. Explicit width conversions retain their existing opcodes.
+
 `vo-common-core` owns bytecode serialization. Current-version bytecode that has
 a `instruction_metadata` table must keep `instruction_metadata.len() == code.len()`. Older
 bytecode versions and removed metadata tags are not accepted input; they are
@@ -67,6 +85,17 @@ ranges live in `vo-common-core::instruction_effects`. Optimizer invalidation,
 frame eligibility and backend lowering consume these contracts. The
 `vo-jit/src/semantics/` rows are test-only cross-checks of capability, metadata,
 ABI and lowering coverage.
+
+`vo-common-core::instruction_registers` owns encoded register identities for
+frame transformations. Empty argument/result windows retain valid boundary
+anchors. Dynamic calls also reserve a prefix cell before their argument window
+for a borrowed callee's closure or receiver; this storage is part of the frame
+ABI even though it carries no ordinary caller register value. Transformations
+must preserve these prefixes, contiguous operand ranges, fixed entry slots,
+interface pairs and implicit unwind roots, and remap select case metadata with
+the case-building instructions. Compiler-owned PC relocation updates branches,
+ForLoop edges, loop metadata and source locations before dynamic callsite IDs
+are assigned and the resulting module is verified.
 
 ## Lowering Responsibilities
 
@@ -124,6 +153,13 @@ execution path accepts a module.
 
 `FunctionCompilePlan` supplies a complete baseline or optimizing configuration.
 The immutable per-function graph and recovery states are shared with OSR.
+Static Native AOT recovery bodies build an entry-specific graph: every exported
+recovery PC has an external canonical-frame edge. Entry values and range facts
+must not inherit assumptions established before that PC. Dominance uses a
+common virtual predecessor for these entries, and sparse entry loads include
+both value liveness and the complete direct/conditional root projection. An
+analysis-budget fallback retains baseline slot semantics; recovery compilation
+must not enable ordinary-entry object virtualization.
 Module entry summaries scan literal definitions conservatively and do not build
 cold-function SSA. Per-artifact compiler work is admitted separately from module
 summary retention, so a large cold function cannot reject an unrelated hot one.

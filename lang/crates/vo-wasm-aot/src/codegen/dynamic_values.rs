@@ -60,7 +60,7 @@ pub(super) fn emit_store_packed_element(body: &mut Function, bytes: u32) {
 }
 
 pub(super) fn dynamic_element_bytes(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     elem: ValueRttid,
 ) -> Result<(u32, usize), WasmAotError> {
     let layout = module.slot_layout_for_value_rttid(elem).ok_or_else(|| {
@@ -84,7 +84,7 @@ pub(super) fn dynamic_element_bytes(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_dynamic_box_from_address(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     actual: ValueRttid,
     source_address_local: u32,
     source_bytes: u32,
@@ -318,7 +318,7 @@ pub(super) fn dynamic_kind_accepts_nil(kind: ValueKind) -> bool {
 
 pub(super) fn emit_dynamic_value_assignable(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     value_slot0: u16,
     target: ValueRttid,
 ) {
@@ -382,7 +382,7 @@ pub(super) fn emit_dynamic_integer_value(body: &mut Function, target: ValueKind,
 
 pub(super) fn emit_dynamic_store_value(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     target: ValueRttid,
     value_slot0: u16,
     value_slot1: u16,
@@ -555,7 +555,7 @@ pub(super) fn dynamic_integer_kind(kind: ValueKind) -> bool {
 
 pub(super) fn emit_dynamic_value_compatible(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     value_slot0: u16,
     target: ValueRttid,
 ) {
@@ -569,7 +569,7 @@ pub(super) fn emit_dynamic_value_compatible(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_dynamic_prepare_scratch(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     target: ValueRttid,
     value_slot0: u16,
     value_slot1: u16,
@@ -627,7 +627,7 @@ pub(super) fn emit_dynamic_prepare_scratch(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_dynamic_get_success(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     actual: ValueRttid,
     instruction: vo_common_core::instruction::Instruction,
     expected: Option<(u16, u16)>,
@@ -748,7 +748,7 @@ pub(super) fn emit_dynamic_get_success(
 }
 
 pub(super) fn dynamic_basic_value_rttid(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     kind: ValueKind,
 ) -> Result<ValueRttid, WasmAotError> {
     module
@@ -760,7 +760,7 @@ pub(super) fn dynamic_basic_value_rttid(
 }
 
 pub(super) fn dynamic_map_key_source_assignable(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     target: ValueRttid,
     source: DynamicMapKeySource,
 ) -> Result<bool, WasmAotError> {
@@ -777,7 +777,7 @@ pub(super) fn dynamic_map_key_source_assignable(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_dynamic_prepare_map_key(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     target: ValueRttid,
     source: DynamicMapKeySource,
     frame_scratch: u16,
@@ -862,7 +862,7 @@ pub(super) fn emit_dynamic_prepare_map_key(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_protocol_get(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     caller: &FunctionDef,
     pc: usize,
     instruction: vo_common_core::instruction::Instruction,
@@ -939,7 +939,7 @@ pub(super) fn compile_dynamic_protocol_get(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_map_get(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     instruction: vo_common_core::instruction::Instruction,
     key_source: DynamicMapKeySource,
     expected: Option<(u16, u16)>,
@@ -1087,7 +1087,7 @@ pub(super) fn compile_dynamic_map_get(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_index_get(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     caller: &FunctionDef,
     pc: usize,
     instruction: vo_common_core::instruction::Instruction,
@@ -1383,7 +1383,7 @@ pub(super) fn compile_dynamic_index_get(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_method_get_for_value(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     value_rttid: ValueRttid,
     instruction: vo_common_core::instruction::Instruction,
     expected: Option<(u16, u16)>,
@@ -1505,7 +1505,7 @@ pub(super) fn compile_dynamic_method_get_for_value(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_field_get(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     caller: &FunctionDef,
     pc: usize,
     instruction: vo_common_core::instruction::Instruction,
@@ -1740,7 +1740,10 @@ pub(super) fn compile_dynamic_field_get(
     Ok(())
 }
 
-pub(super) fn dynamic_struct_meta_id(module: &VoModule, value_rttid: ValueRttid) -> Option<u32> {
+pub(super) fn dynamic_struct_meta_id(
+    module: &ModuleAnalysis<'_>,
+    value_rttid: ValueRttid,
+) -> Option<u32> {
     let resolver = module.runtime_type_resolver();
     let (_, runtime_type) = resolver.resolve_value_rttid(value_rttid)?;
     let struct_value = match runtime_type {
@@ -1772,7 +1775,7 @@ pub(super) fn emit_dynamic_name_matches(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_protocol_set(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     caller: &FunctionDef,
     pc: usize,
     instruction: vo_common_core::instruction::Instruction,
@@ -1845,7 +1848,7 @@ pub(super) fn compile_dynamic_protocol_set(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_field_set(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     caller: &FunctionDef,
     pc: usize,
     instruction: vo_common_core::instruction::Instruction,
@@ -2006,7 +2009,7 @@ pub(super) fn compile_dynamic_field_set(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_slice_set(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     instruction: vo_common_core::instruction::Instruction,
     globals: RuntimeGlobals,
     static_data: &StaticData,
@@ -2140,7 +2143,7 @@ pub(super) fn compile_dynamic_slice_set(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_map_set(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     instruction: vo_common_core::instruction::Instruction,
     key_source: DynamicMapKeySource,
     value_slot0: u16,
@@ -2401,7 +2404,7 @@ pub(super) fn compile_dynamic_map_set(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_index_set(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     caller: &FunctionDef,
     pc: usize,
     instruction: vo_common_core::instruction::Instruction,

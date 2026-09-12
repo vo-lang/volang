@@ -106,6 +106,7 @@ struct ArtifactLowering {
 /// An OSR entry imports VM locals without guards, so its entry values start
 /// overdefined and SCCP is re-run over the structural loop region.
 struct ArtifactFlow {
+    entries: Vec<crate::ir::BlockId>,
     executable_blocks: Vec<bool>,
     successors: Vec<Vec<crate::ir::BlockEdge>>,
     constants: Vec<Option<i64>>,
@@ -140,6 +141,12 @@ impl ArtifactFlow {
             Self::for_osr(ir, pc_range)
         } else {
             Self {
+                entries: ir
+                    .blocks()
+                    .iter()
+                    .filter(|block| block.external_entry)
+                    .map(|block| block.id)
+                    .collect(),
                 executable_blocks: ir
                     .blocks()
                     .iter()
@@ -160,6 +167,7 @@ impl ArtifactFlow {
     fn for_osr(ir: &crate::ir::FunctionIr, pc_range: &std::ops::Range<usize>) -> Self {
         let block_count = ir.blocks().len();
         let empty = || Self {
+            entries: Vec::new(),
             executable_blocks: vec![false; block_count],
             successors: vec![Vec::new(); block_count],
             constants: vec![None; ir.value_count()],
@@ -301,6 +309,7 @@ impl ArtifactFlow {
             })
             .collect();
         Self {
+            entries: vec![entry],
             executable_blocks,
             successors,
             constants,
@@ -536,6 +545,26 @@ impl OptimizedFunction {
             instructions,
             scalar_live_ranges: Box::default(),
         }
+    }
+
+    /// Continuations use a graph whose external edges supply unknown frame
+    /// values. Scalar simplification and guarded checks consume that graph;
+    /// object virtualization remains exclusive to ordinary function entries.
+    pub(crate) fn analyze_continuations(
+        ir: &crate::ir::FunctionIr,
+        module: &ModuleInlinePlan,
+        caller_id: u32,
+    ) -> Self {
+        let mut result = Self::baseline_with_module(ir, module, caller_id);
+        let lowering = analyze_artifact_lowering(ir, 0..ir.instruction_count(), false);
+        for (pc, instruction) in result.instructions.iter_mut().enumerate() {
+            instruction.block_executable =
+                lowering.executable_blocks[instruction.typed.block().index()];
+            instruction.action = lowering.actions[pc];
+            instruction.bounds_check_elided = bit_is_set(&lowering.elided_bounds_checks, pc);
+            instruction.nil_check_elided = bit_is_set(&lowering.elided_nil_checks, pc);
+        }
+        result
     }
     #[cfg(test)]
     pub(crate) fn analyze(ir: &crate::ir::FunctionIr) -> Self {
@@ -988,17 +1017,23 @@ fn global_gvn(
         };
     }
 
-    let Some(entry) = ir
-        .instruction(pc_range.start)
-        .map(|instruction| instruction.block())
-    else {
+    let entries = flow
+        .entries
+        .iter()
+        .copied()
+        .filter(|entry| {
+            let block = &ir.blocks()[entry.index()];
+            (block.start_pc as usize) < pc_range.end && (block.end_pc as usize) > pc_range.start
+        })
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
         return GvnPlan {
             replacement_values: replacements,
             redundant_instructions,
             elided_bounds_checks,
             elided_nil_checks,
         };
-    };
+    }
     let block_count = ir.blocks().len();
     let mut incoming = vec![Vec::<(crate::ir::BlockId, crate::ir::BlockEdge)>::new(); block_count];
     for block in ir.blocks() {
@@ -1013,7 +1048,7 @@ fn global_gvn(
         }
     }
 
-    let rpo = region_reverse_postorder(ir, flow, entry, &pc_range);
+    let rpo = region_reverse_postorder(ir, flow, &entries, &pc_range);
     if rpo.is_empty() {
         return GvnPlan {
             replacement_values: replacements,
@@ -1022,15 +1057,27 @@ fn global_gvn(
             elided_nil_checks,
         };
     }
-    let mut rpo_index = vec![usize::MAX; block_count];
+    // A virtual predecessor supplies independent frame values to every
+    // external entry. No real entry can dominate another external edge.
+    let virtual_entry = crate::ir::BlockId::from_index(block_count);
+    let mut entry_mask = vec![false; block_count];
+    let mut rpo_index = vec![usize::MAX; block_count + 1];
+    rpo_index[virtual_entry.index()] = 0;
     for (index, block) in rpo.iter().copied().enumerate() {
-        rpo_index[block.index()] = index;
+        rpo_index[block.index()] = index + 1;
     }
-    let mut idom = vec![None; block_count];
-    idom[entry.index()] = Some(entry);
+    let mut idom = vec![None; block_count + 1];
+    idom[virtual_entry.index()] = Some(virtual_entry);
+    for &entry in &entries {
+        entry_mask[entry.index()] = true;
+        idom[entry.index()] = Some(virtual_entry);
+    }
     loop {
         let mut changed = false;
-        for &block in rpo.iter().skip(1) {
+        for &block in &rpo {
+            if entry_mask[block.index()] {
+                continue;
+            }
             let mut predecessors = incoming[block.index()]
                 .iter()
                 .map(|(source, _)| *source)
@@ -1053,8 +1100,8 @@ fn global_gvn(
         }
     }
 
-    let mut dominator_children = vec![Vec::new(); block_count];
-    for &block in rpo.iter().skip(1) {
+    let mut dominator_children = vec![Vec::new(); block_count + 1];
+    for &block in &rpo {
         if let Some(parent) = idom[block.index()] {
             dominator_children[parent.index()].push(block);
         }
@@ -1095,7 +1142,10 @@ fn global_gvn(
     }
     loop {
         let mut changed = false;
-        for &block in rpo.iter().skip(1) {
+        for &block in &rpo {
+            if entry_mask[block.index()] {
+                continue;
+            }
             for parameter in ir.block_parameters(block) {
                 let parameter_leader = find_leader(&mut leaders, parameter.value);
                 let mut incoming_leader = None;
@@ -1142,6 +1192,7 @@ fn global_gvn(
         &pc_range,
         &incoming,
         &rpo,
+        &entry_mask,
         &mut leaders,
         &mut elided_bounds_checks,
     );
@@ -1159,7 +1210,12 @@ fn global_gvn(
     let mut checked_bounds = HashSet::<BoundsCheckKey>::new();
     let mut non_nil_values = HashSet::<u32>::new();
     let mut field_values = HashMap::<FieldKey, crate::ir::ValueId>::new();
-    let mut visits = vec![Visit::Enter(entry)];
+    let mut visits = dominator_children[virtual_entry.index()]
+        .iter()
+        .rev()
+        .copied()
+        .map(Visit::Enter)
+        .collect::<Vec<_>>();
     while let Some(visit) = visits.pop() {
         match visit {
             Visit::Enter(block) => {
@@ -1357,6 +1413,7 @@ fn mark_range_proven_bounds_checks(
     pc_range: &std::ops::Range<usize>,
     incoming: &[Vec<(crate::ir::BlockId, crate::ir::BlockEdge)>],
     rpo: &[crate::ir::BlockId],
+    entry_mask: &[bool],
     leaders: &mut [u32],
     elided_bounds_checks: &mut [u64],
 ) {
@@ -1416,9 +1473,9 @@ fn mark_range_proven_bounds_checks(
         }
     }
 
-    let Some(&entry) = rpo.first() else {
+    if rpo.is_empty() {
         return;
-    };
+    }
     let mut in_region = vec![false; ir.blocks().len()];
     for &block in rpo {
         in_region[block.index()] = true;
@@ -1427,36 +1484,47 @@ fn mark_range_proven_bounds_checks(
     // Range facts live on CFG edges and are renamed through the successor's
     // block parameters. This one representation covers canonical ForLoop,
     // ordinary compare/branch/backedge loops and nested control flow.
+    // Keep one incoming/outgoing set per block and visit only affected
+    // successors. Both transient clones and fact tables have a finite budget;
+    // exhausting it simply leaves the original bounds checks in place.
     let mut block_facts = vec![None::<HashSet<RangeFact>>; ir.blocks().len()];
-    block_facts[entry.index()] = Some(HashSet::new());
-    let mut converged = false;
-    let max_iterations = rpo.len().saturating_mul(4).max(8);
-    for _ in 0..max_iterations {
-        let mut block_out = vec![None::<HashSet<RangeFact>>; ir.blocks().len()];
-        for &block in rpo {
-            let Some(mut facts) = block_facts[block.index()].clone() else {
-                continue;
-            };
-            let record = &ir.blocks()[block.index()];
-            for pc in (record.start_pc as usize).max(pc_range.start)
-                ..(record.end_pc as usize).min(pc_range.end)
-            {
-                transfer_range_instruction(ir, flow, pc, leaders, &mut facts);
-            }
-            block_out[block.index()] = Some(facts);
-        }
-
-        let mut next = vec![None::<HashSet<RangeFact>>; ir.blocks().len()];
-        next[entry.index()] = Some(HashSet::new());
-        for &target in rpo.iter().filter(|&&block| block != entry) {
-            let mut merged = None::<HashSet<RangeFact>>;
+    let mut block_out = vec![None::<HashSet<RangeFact>>; ir.blocks().len()];
+    let mut queue = std::collections::VecDeque::new();
+    let mut queued = vec![false; ir.blocks().len()];
+    for &entry in rpo.iter().filter(|block| entry_mask[block.index()]) {
+        queue.push_back(entry);
+        queued[entry.index()] = true;
+    }
+    let mut remaining_work = 8usize * 1024 * 1024;
+    let mut retained_fact_bytes = 0usize;
+    let work_limit = crate::MAX_JIT_COMPILE_WORK_BYTES / 4;
+    let fact_bytes = |facts: &HashSet<RangeFact>| {
+        facts
+            .capacity()
+            .saturating_mul(core::mem::size_of::<RangeFact>() + 8)
+    };
+    while let Some(target) = queue.pop_front() {
+        queued[target.index()] = false;
+        let mut merged = entry_mask[target.index()].then(HashSet::new);
+        if !entry_mask[target.index()] {
             for (source, edge) in &incoming[target.index()] {
                 if !in_region[source.index()] {
                     continue;
                 }
-                let Some(mut candidate) = block_out[source.index()].clone() else {
+                let Some(output) = block_out[source.index()].as_ref() else {
                     continue;
                 };
+                let cost = output.len().saturating_add(1);
+                let Some(remaining) = remaining_work.checked_sub(cost) else {
+                    return;
+                };
+                remaining_work = remaining;
+                if retained_fact_bytes.saturating_add(fact_bytes(output).saturating_mul(4))
+                    > work_limit
+                {
+                    return;
+                }
+                let mut candidate = output.clone();
                 candidate.extend(edge_range_facts(
                     ir,
                     *source,
@@ -1474,16 +1542,50 @@ fn mark_range_proven_bounds_checks(
                     Some(current) => current.retain(|fact| candidate.contains(fact)),
                 }
             }
-            next[target.index()] = merged;
         }
-        if next == block_facts {
-            converged = true;
-            break;
+        let Some(facts) = merged else {
+            continue;
+        };
+        if block_facts[target.index()].as_ref() == Some(&facts) {
+            continue;
         }
-        block_facts = next;
-    }
-    if !converged {
-        return;
+        let before = block_facts[target.index()].as_ref().map_or(0, &fact_bytes);
+        retained_fact_bytes = retained_fact_bytes
+            .saturating_sub(before)
+            .saturating_add(fact_bytes(&facts));
+        if retained_fact_bytes.saturating_add(fact_bytes(&facts).saturating_mul(2)) > work_limit {
+            return;
+        }
+        block_facts[target.index()] = Some(facts.clone());
+        let mut facts = facts;
+        let record = &ir.blocks()[target.index()];
+        for pc in (record.start_pc as usize).max(pc_range.start)
+            ..(record.end_pc as usize).min(pc_range.end)
+        {
+            let Some(remaining) = remaining_work.checked_sub(1) else {
+                return;
+            };
+            remaining_work = remaining;
+            transfer_range_instruction(ir, flow, pc, leaders, &mut facts);
+            if retained_fact_bytes.saturating_add(fact_bytes(&facts).saturating_mul(2)) > work_limit
+            {
+                return;
+            }
+        }
+        if block_out[target.index()].as_ref() == Some(&facts) {
+            continue;
+        }
+        let before = block_out[target.index()].as_ref().map_or(0, &fact_bytes);
+        retained_fact_bytes = retained_fact_bytes
+            .saturating_sub(before)
+            .saturating_add(fact_bytes(&facts));
+        block_out[target.index()] = Some(facts);
+        for edge in ir.executable_successors(target) {
+            if in_region[edge.target.index()] && !queued[edge.target.index()] {
+                queued[edge.target.index()] = true;
+                queue.push_back(edge.target);
+            }
+        }
     }
 
     for &block in rpo {
@@ -1720,12 +1822,17 @@ fn translate_range_fact(
 fn region_reverse_postorder(
     ir: &crate::ir::FunctionIr,
     flow: &ArtifactFlow,
-    entry: crate::ir::BlockId,
+    entries: &[crate::ir::BlockId],
     pc_range: &std::ops::Range<usize>,
 ) -> Vec<crate::ir::BlockId> {
     let mut visited = vec![false; ir.blocks().len()];
     let mut postorder = Vec::new();
-    let mut pending = vec![(entry, false)];
+    let mut pending = entries
+        .iter()
+        .rev()
+        .copied()
+        .map(|entry| (entry, false))
+        .collect::<Vec<_>>();
     while let Some((block, expanded)) = pending.pop() {
         if expanded {
             postorder.push(block);
@@ -1818,10 +1925,15 @@ fn expression_key(
                 | Opcode::MulI
                 | Opcode::NegI
                 | Opcode::AddF
+                | Opcode::AddF32
                 | Opcode::SubF
+                | Opcode::SubF32
                 | Opcode::MulF
+                | Opcode::MulF32
                 | Opcode::DivF
+                | Opcode::DivF32
                 | Opcode::NegF
+                | Opcode::NegF32
                 | Opcode::EqI
                 | Opcode::NeI
                 | Opcode::LtI
@@ -1833,11 +1945,17 @@ fn expression_key(
                 | Opcode::GtU
                 | Opcode::GeU
                 | Opcode::EqF
+                | Opcode::EqF32
                 | Opcode::NeF
+                | Opcode::NeF32
                 | Opcode::LtF
+                | Opcode::LtF32
                 | Opcode::LeF
+                | Opcode::LeF32
                 | Opcode::GtF
+                | Opcode::GtF32
                 | Opcode::GeF
+                | Opcode::GeF32
                 | Opcode::Not
                 | Opcode::BoolNot
                 | Opcode::And
@@ -1973,6 +2091,26 @@ fn outputs_are_dead(ir: &crate::ir::FunctionIr, pc: usize, uses: &[u32]) -> bool
         .all(|output| uses[output.index()] == 0)
 }
 
+/// One admission rule for emitted copies and entry-effect proofs. A rejected
+/// candidate leaves the remaining budget unchanged.
+#[derive(Default)]
+struct InlineBudget {
+    used: usize,
+}
+
+impl InlineBudget {
+    fn admit(&mut self, recipe: &SmallFunctionInline) -> bool {
+        let Some(next) = self.used.checked_add(recipe.duplication_work()) else {
+            return false;
+        };
+        if next > SMALL_INLINE_BUDGET {
+            return false;
+        }
+        self.used = next;
+        true
+    }
+}
+
 fn plan_inlines(
     ir: &crate::ir::FunctionIr,
     pc_range: &std::ops::Range<usize>,
@@ -1982,14 +2120,26 @@ fn plan_inlines(
 ) -> (Vec<u32>, Vec<u32>) {
     let mut targets = vec![NO_DYNAMIC_TARGET; ir.instruction_count()];
     let mut costs = vec![0_u32; ir.instruction_count()];
-    let mut retained_cost = 0usize;
-    for pc in pc_range.clone() {
+    let mut budget = InlineBudget::default();
+    // Preserve ordinary-entry admission priority, then cover static calls that
+    // become executable when OSR or a continuation imports different values.
+    // These recipes depend on the immutable callee, never on caller constants.
+    // Planning the dormant calls here also makes the complete-entry proof use
+    // the same admitted expansions as every projected artifact.
+    let executable = pc_range.clone().filter(|&pc| {
+        ir.instruction(pc)
+            .is_some_and(|instruction| ir.is_executable_block(instruction.block()))
+    });
+    let dormant_static_calls = pc_range.clone().filter(|&pc| {
+        ir.instruction(pc).is_some_and(|instruction| {
+            !ir.is_executable_block(instruction.block())
+                && instruction.source().opcode() == Opcode::Call
+        })
+    });
+    for pc in executable.chain(dormant_static_calls) {
         let Some(instruction) = ir.instruction(pc).copied() else {
             continue;
         };
-        if !ir.is_executable_block(instruction.block()) {
-            continue;
-        }
         let source = instruction.source();
         let target = match source.opcode() {
             Opcode::Call => source.static_call_func_id(),
@@ -2002,7 +2152,7 @@ fn plan_inlines(
             }
             _ => continue,
         };
-        let recipe = module.pure_leaf_inline(caller_id, target);
+        let recipe = module.small_inline(caller_id, target);
         let Some(recipe) = recipe else {
             continue;
         };
@@ -2013,17 +2163,17 @@ fn plan_inlines(
                 2
             };
             let arg_slots = ir.inputs(instruction).len().saturating_sub(receiver_slots);
-            if !recipe.supports_dynamic_layout(arg_slots, ir.outputs(instruction).len()) {
+            if !recipe.supports_dynamic_layout(
+                source.opcode(),
+                arg_slots,
+                ir.outputs(instruction).len(),
+            ) {
                 continue;
             }
         }
-        let Some(next_cost) = retained_cost.checked_add(recipe.cost()) else {
-            continue;
-        };
-        if next_cost > SMALL_INLINE_BUDGET {
+        if !budget.admit(recipe) {
             continue;
         }
-        retained_cost = next_cost;
         targets[pc] = target;
         costs[pc] = recipe.cost().try_into().unwrap_or(u32::MAX);
     }
@@ -2367,8 +2517,11 @@ impl ModuleInlinePlan {
                 limit_bytes,
                 requested_bytes: fixed_bytes,
             })?;
-        for function in &module.functions {
-            let inline = SmallFunctionInline::analyze_leaf(function, module).map(Arc::new);
+        for (func_id, function) in module.functions.iter().enumerate() {
+            let inline = u32::try_from(func_id)
+                .ok()
+                .and_then(|func_id| SmallFunctionInline::analyze_leaf(func_id, function, module))
+                .map(Arc::new);
             retained_bytes = retained_bytes.saturating_add(
                 inline
                     .as_deref()
@@ -2381,6 +2534,36 @@ impl ModuleInlinePlan {
                 });
             }
             small_inlines.push(inline);
+        }
+        // Resolve one dependency depth per pass, independent of declaration
+        // order. Unresolved cycles retain calls. Shared recipes avoid copying
+        // complete subtrees into every wrapper's retained analysis.
+        for _ in 1..SmallFunctionInline::MAX_DEPTH {
+            let mut additions = Vec::new();
+            for (func_id, function) in module.functions.iter().enumerate() {
+                if small_inlines[func_id].is_some() || !function.has_calls {
+                    continue;
+                }
+                let Some(inline) = u32::try_from(func_id).ok().and_then(|func_id| {
+                    SmallFunctionInline::analyze_chain(func_id, function, module, &small_inlines)
+                }) else {
+                    continue;
+                };
+                let requested = retained_bytes.saturating_add(inline.retained_bytes());
+                if requested > limit_bytes {
+                    // Optional wrapper retention cannot reject an otherwise
+                    // admitted module or an unrelated hot function.
+                    continue;
+                }
+                retained_bytes = requested;
+                additions.push((func_id, Arc::new(inline)));
+            }
+            if additions.is_empty() {
+                break;
+            }
+            for (func_id, inline) in additions {
+                small_inlines[func_id] = Some(inline);
+            }
         }
         Ok(Self {
             graph,
@@ -2404,7 +2587,7 @@ impl ModuleInlinePlan {
             )
     }
 
-    pub(crate) fn pure_leaf_inline(
+    pub(crate) fn small_inline(
         &self,
         caller_id: u32,
         callee_id: u32,
@@ -2415,6 +2598,40 @@ impl ModuleInlinePlan {
             return None;
         }
         self.small_inlines.get(callee)?.as_deref()
+    }
+
+    /// Every artifact can erase these static calls within its existing budget.
+    ///
+    /// Inspect every source PC, including ordinary-unreachable blocks. Exclude
+    /// dynamic calls and every conservative non-Call effect, so neither entry
+    /// constants nor preceding dynamic expansions can invalidate this proof.
+    /// Ordinary, OSR and continuation plans consume subsets of this same set.
+    pub(crate) fn has_total_static_inline_cover(
+        &self,
+        caller_id: u32,
+        function: &FunctionDef,
+    ) -> bool {
+        let mut budget = InlineBudget::default();
+        let mut saw_call = false;
+        for instruction in &function.code {
+            if instruction.opcode() != Opcode::Call {
+                if crate::contract::opcode_contract(instruction.opcode())
+                    != crate::contract::EffectContract::PURE
+                {
+                    return false;
+                }
+                continue;
+            }
+            let Some(recipe) = self.small_inline(caller_id, instruction.static_call_func_id())
+            else {
+                return false;
+            };
+            if !recipe.is_total_scalar() || !budget.admit(recipe) {
+                return false;
+            }
+            saw_call = true;
+        }
+        saw_call
     }
 
     fn direct_self_call(&self, caller_id: u32, callee_id: u32) -> bool {
@@ -2539,12 +2756,12 @@ impl ModuleOptimizationPlan {
             )
     }
 
-    pub(crate) fn pure_leaf_inline(
+    pub(crate) fn small_inline(
         &self,
         caller_id: u32,
         callee_id: u32,
     ) -> Option<&SmallFunctionInline> {
-        self.inline_plan.pure_leaf_inline(caller_id, callee_id)
+        self.inline_plan.small_inline(caller_id, callee_id)
     }
 
     pub(crate) fn direct_self_call(&self, caller_id: u32, callee_id: u32) -> bool {
@@ -2628,8 +2845,8 @@ mod tests {
 
         let plan = ModuleOptimizationPlan::build(&module);
         assert!(plan.direct_self_call(0, 0));
-        assert!(plan.pure_leaf_inline(0, 0).is_none());
-        assert!(plan.pure_leaf_inline(0, 1).is_some());
+        assert!(plan.small_inline(0, 0).is_none());
+        assert!(plan.small_inline(0, 1).is_some());
 
         let ir = crate::ir::FunctionIr::build(&module.functions[0], &module).unwrap();
         let baseline = OptimizedFunction::baseline_with_module(&ir, &plan.inline_plan, 0);
@@ -2881,6 +3098,55 @@ mod tests {
         assert!(plan.eliminates(2));
         assert!(plan.eliminates(3));
         assert!(!plan.eliminates(4));
+    }
+
+    #[test]
+    fn continuation_entries_keep_independent_gvn_scopes() {
+        let mut module = Module::new("continuation-gvn".into());
+        module.functions.push(function_with_sig(
+            vec![
+                Instruction::new(Opcode::AddI, 2, 0, 1),
+                Instruction::new(Opcode::AddI, 3, 0, 1),
+                Instruction::new(Opcode::AddI, 4, 0, 1),
+                Instruction::new(Opcode::AddI, 5, 3, 4),
+                Instruction::new(Opcode::Return, 5, 1, 0),
+            ],
+            2,
+            2,
+            6,
+            1,
+        ));
+        let ir = crate::ir::FunctionIr::build_with_entry_points(
+            &module.functions[0],
+            &module,
+            &[],
+            &[1],
+            crate::MAX_JIT_ANALYSIS_BYTES,
+        )
+        .unwrap();
+        let module_plan = ModuleOptimizationPlan::build(&module);
+        let plan = OptimizedFunction::analyze_continuations(&ir, &module_plan.inline_plan, 0);
+        assert_eq!(plan.replacement_value(1), None);
+        assert_eq!(plan.replacement_value(2), ir.output_value(1, 3));
+        assert!(!plan.eliminates(1));
+    }
+
+    #[test]
+    fn continuation_entry_does_not_inherit_loop_range_checks() {
+        let module = canonical_slice_loop(0);
+        let ordinary = crate::ir::FunctionIr::build(&module.functions[0], &module).unwrap();
+        assert!(OptimizedFunction::analyze(&ordinary).elides_bounds_check(4));
+        let ir = crate::ir::FunctionIr::build_with_entry_points(
+            &module.functions[0],
+            &module,
+            &[],
+            &[4],
+            crate::MAX_JIT_ANALYSIS_BYTES,
+        )
+        .unwrap();
+        let module_plan = ModuleOptimizationPlan::build(&module);
+        let plan = OptimizedFunction::analyze_continuations(&ir, &module_plan.inline_plan, 0);
+        assert!(!plan.elides_bounds_check(4));
     }
 
     #[test]

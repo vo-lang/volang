@@ -9,7 +9,7 @@ mod scheduler;
 
 #[derive(Clone, Copy)]
 pub(super) struct FrameContext<'a> {
-    pub(super) module: &'a VoModule,
+    pub(super) module: &'a ModuleAnalysis<'a>,
     pub(super) resolved_externs: &'a ResolvedExternTable,
     pub(super) function_id: u32,
     pub(super) function: &'a FunctionDef,

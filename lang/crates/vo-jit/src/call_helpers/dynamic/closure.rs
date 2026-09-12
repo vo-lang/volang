@@ -19,7 +19,8 @@ use super::DynamicCallLowering;
 /// Verified `GcBase` identity makes the immutable allocation header directly
 /// readable. The first call for a target additionally owns module-specific
 /// call-shape validation, frame push, and argument layout in the prepare
-/// callback. Captured state remains in slot 0 on every hit.
+/// callback. Every hit uses its validated zero/one hidden-slot layout,
+/// including captureless functions whose user arguments begin at slot 0.
 pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     inst: &Instruction,

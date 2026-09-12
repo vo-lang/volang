@@ -92,7 +92,7 @@ pub(super) fn extern_requires_host(
     )
 }
 
-pub(super) fn global_slot(module: &VoModule, name: &str) -> Option<u32> {
+pub(super) fn global_slot(module: &ModuleAnalysis<'_>, name: &str) -> Option<u32> {
     let mut slot = 0u32;
     for global in &module.globals {
         if global.name == name {

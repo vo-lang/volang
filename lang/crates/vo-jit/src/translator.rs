@@ -655,6 +655,15 @@ macro_rules! impl_shared_compiler_traits {
 
 pub(crate) use impl_shared_compiler_traits;
 
+/// Inputs authenticated by the existing dynamic IC key and generation guards.
+pub struct DynamicInlineHit {
+    pub(crate) instruction: vo_runtime::instruction::Instruction,
+    pub(crate) func_id: Value,
+    pub(crate) arg_offset: Value,
+    pub(crate) return_ptr: Value,
+    pub(crate) merge: cranelift_codegen::ir::Block,
+}
+
 /// Call boundary values used by direct JIT and prepared-call lowering.
 pub trait CallBoundary<'a>: IrBuilder<'a> {
     /// Caller bp value to record for a call boundary.
@@ -665,6 +674,12 @@ pub trait CallBoundary<'a>: IrBuilder<'a> {
 
     /// Compile-time identity of the caller activation.
     fn call_caller_func_id(&mut self) -> Value;
+
+    /// Optional guarded hit expansion. The current block on return still owns
+    /// the complete generic call; an emitted fast path joins `hit.merge`.
+    fn try_emit_dynamic_inline_hit(&mut self, _hit: DynamicInlineHit) -> Result<(), JitError> {
+        Ok(())
+    }
 }
 
 /// Stack base refresh after callbacks or calls that may reallocate fiber.stack.

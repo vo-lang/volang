@@ -17,7 +17,9 @@ const MAX_ROOTS_PER_STACK_MAP: usize = 1_000_000;
 const MAX_DEOPT_STATES_PER_FUNCTION: usize = 1_000_000;
 const MAX_DEOPT_VALUES_PER_STATE: usize = 1_000_000;
 
-pub const NATIVE_AOT_ABI_VERSION: u32 = 2;
+// Version 14 embeds VOB24 compact source coordinates and inline metadata. Native images and
+// compiler-free runtime archives must agree on the semantic module decoder.
+pub const NATIVE_AOT_ABI_VERSION: u32 = 15;
 
 #[derive(Debug, Clone)]
 pub struct NativeAotMetadata {
@@ -86,59 +88,28 @@ pub fn encode_native_aot_metadata(
         push_u32(&mut output, function.func_id);
         push_u8(&mut output, eligibility_bits(function.entry_eligibility));
         output.extend_from_slice(&[0; 3]);
-        push_u32(&mut output, function.metadata.code_size);
-        push_u32(
-            &mut output,
-            checked_u32(function.metadata.stack_maps.len(), "stack-map count")?,
-        );
-        for map in &function.metadata.stack_maps {
-            push_u32(&mut output, map.safepoint_id);
-            push_u32(&mut output, map.return_address_offset);
-            push_u32(&mut output, map.frame_size);
-            push_u32(&mut output, map.anchor_sp_offset);
-            push_u32(&mut output, checked_u32(map.roots.len(), "root count")?);
-            for root in &map.roots {
-                push_u32(&mut output, root.sp_offset);
-                push_u8(
-                    &mut output,
-                    match root.kind {
-                        NativeRootKind::GcRef => 0,
-                        NativeRootKind::InterfacePair => 1,
-                    },
-                );
-                output.extend_from_slice(&[0; 3]);
+        encode_artifact(&mut output, &function.metadata)?;
+        if let Some(continuation) = &function.continuation {
+            if continuation.pcs.is_empty()
+                || continuation.pcs.len() > MAX_DEOPT_STATES_PER_FUNCTION
+                || continuation.pcs[0] == 0
+                || continuation.pcs.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return Err(JitError::Internal(
+                    "AOT continuation PCs must be nonempty, positive, ordered, and bounded"
+                        .to_string(),
+                ));
             }
-        }
-
-        push_u32(
-            &mut output,
-            checked_u32(function.metadata.deopt_states.len(), "deopt-state count")?,
-        );
-        for state in &function.metadata.deopt_states {
-            push_u32(&mut output, state.state_id);
-            push_u32(&mut output, state.resume_pc);
-            push_u32(&mut output, state.parent_state_id);
             push_u32(
                 &mut output,
-                checked_u32(state.values.len(), "deopt-value count")?,
+                checked_u32(continuation.pcs.len(), "continuation count")?,
             );
-            for value in &state.values {
-                push_u16(&mut output, value.slot);
-                push_u8(&mut output, value.kind as u8);
-                match value.location {
-                    DeoptValueLocation::FiberSlot(slot) => {
-                        push_u8(&mut output, 0);
-                        push_u16(&mut output, slot);
-                        push_u16(&mut output, 0);
-                        push_u64(&mut output, 0);
-                    }
-                    DeoptValueLocation::Constant(constant) => {
-                        push_u8(&mut output, 1);
-                        push_u32(&mut output, 0);
-                        push_u64(&mut output, constant);
-                    }
-                }
+            for &pc in continuation.pcs.iter() {
+                push_u32(&mut output, pc);
             }
+            encode_artifact(&mut output, &continuation.metadata)?;
+        } else {
+            push_u32(&mut output, 0);
         }
     }
     if output.len() > MAX_METADATA_BYTES {
@@ -147,6 +118,64 @@ pub fn encode_native_aot_metadata(
         ));
     }
     Ok(output)
+}
+
+fn encode_artifact(output: &mut Vec<u8>, metadata: &JitArtifactMetadata) -> Result<(), JitError> {
+    push_u32(output, metadata.code_size);
+    push_u32(
+        output,
+        checked_u32(metadata.stack_maps.len(), "stack-map count")?,
+    );
+    for map in &metadata.stack_maps {
+        push_u32(output, map.safepoint_id);
+        push_u32(output, map.return_address_offset);
+        push_u32(output, map.frame_size);
+        push_u32(output, map.anchor_sp_offset);
+        push_u32(output, checked_u32(map.roots.len(), "root count")?);
+        for root in &map.roots {
+            push_u32(output, root.sp_offset);
+            push_u8(
+                output,
+                match root.kind {
+                    NativeRootKind::GcRef => 0,
+                    NativeRootKind::InterfacePair => 1,
+                },
+            );
+            output.extend_from_slice(&[0; 3]);
+        }
+    }
+
+    push_u32(
+        output,
+        checked_u32(metadata.deopt_states.len(), "deopt-state count")?,
+    );
+    for state in &metadata.deopt_states {
+        push_u32(output, state.state_id);
+        push_u32(output, state.resume_pc);
+        push_u32(output, state.parent_state_id);
+        push_u32(
+            output,
+            checked_u32(state.values.len(), "deopt-value count")?,
+        );
+        for value in &state.values {
+            push_u16(output, value.slot);
+            push_u8(output, value.kind as u8);
+            match value.location {
+                DeoptValueLocation::FiberSlot(slot) => {
+                    push_u8(output, 0);
+                    push_u16(output, slot);
+                    push_u16(output, 0);
+                    push_u64(output, 0);
+                }
+                DeoptValueLocation::Constant(constant) => {
+                    push_u8(output, 1);
+                    push_u32(output, 0);
+                    push_u64(output, constant);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 struct Reader<'a> {
@@ -275,97 +304,35 @@ pub fn decode_native_aot_metadata(bytes: &[u8]) -> Result<NativeAotMetadata, Jit
             static_prepared_shadow: eligibility & 4 != 0,
             may_gc: eligibility & 8 != 0,
         };
-        let code_size = reader.u32("code size")?;
-        let stack_map_count = reader.count("stack-map count", MAX_STACK_MAPS_PER_FUNCTION)?;
-        let mut stack_maps = Vec::with_capacity(stack_map_count);
-        for _ in 0..stack_map_count {
-            let safepoint_id = reader.u32("safepoint id")?;
-            let return_address_offset = reader.u32("return address")?;
-            let frame_size = reader.u32("frame size")?;
-            let anchor_sp_offset = reader.u32("frame anchor")?;
-            let root_count = reader.count("root count", MAX_ROOTS_PER_STACK_MAP)?;
-            let mut roots = Vec::with_capacity(root_count);
-            for _ in 0..root_count {
-                let sp_offset = reader.u32("root offset")?;
-                let kind = match reader.u8("root kind")? {
-                    0 => NativeRootKind::GcRef,
-                    1 => NativeRootKind::InterfacePair,
-                    raw => {
-                        return Err(JitError::Internal(format!(
-                            "AOT metadata has unknown native root kind {raw}"
-                        )));
-                    }
-                };
-                if reader.read(3, "root reserved bytes")? != [0; 3] {
+        let symbol = format!("vo_aot_fn_{func_id}");
+        let metadata = decode_artifact(&mut reader, &symbol)?;
+        let continuation_count = reader.count("continuation count", 1_000_000)?;
+        let continuation = if continuation_count == 0 {
+            None
+        } else {
+            let mut pcs = Vec::with_capacity(continuation_count);
+            for _ in 0..continuation_count {
+                let pc = reader.u32("continuation pc")?;
+                if pc == 0 || pcs.last().is_some_and(|previous| *previous >= pc) {
                     return Err(JitError::Internal(
-                        "AOT root metadata has non-zero reserved bytes".to_string(),
+                        "AOT continuation PCs must be positive and ordered".into(),
                     ));
                 }
-                roots.push(NativeStackRoot { sp_offset, kind });
+                pcs.push(pc);
             }
-            stack_maps.push(NativeStackMap {
-                safepoint_id,
-                return_address_offset,
-                frame_size,
-                anchor_sp_offset,
-                roots: roots.into_boxed_slice(),
-            });
-        }
-
-        let deopt_count = reader.count("deopt-state count", MAX_DEOPT_STATES_PER_FUNCTION)?;
-        let mut deopt_states = Vec::with_capacity(deopt_count);
-        for _ in 0..deopt_count {
-            let state_id = reader.u32("deopt state id")?;
-            let resume_pc = reader.u32("deopt resume pc")?;
-            let parent_state_id = reader.u32("deopt parent id")?;
-            let value_count = reader.count("deopt-value count", MAX_DEOPT_VALUES_PER_STATE)?;
-            let mut values = Vec::with_capacity(value_count);
-            for _ in 0..value_count {
-                let slot = reader.u16("deopt value slot")?;
-                let kind = decode_deopt_kind(reader.u8("deopt value kind")?)?;
-                let location_tag = reader.u8("deopt location kind")?;
-                let location_slot = reader.u16("deopt location slot")?;
-                let reserved = reader.u16("deopt reserved bytes")?;
-                let payload = reader.u64("deopt location payload")?;
-                let location = match location_tag {
-                    0 if reserved == 0 && payload == 0 => {
-                        DeoptValueLocation::FiberSlot(location_slot)
-                    }
-                    1 if location_slot == 0 && reserved == 0 => {
-                        DeoptValueLocation::Constant(payload)
-                    }
-                    _ => {
-                        return Err(JitError::Internal(
-                            "AOT deopt location has invalid reserved fields".to_string(),
-                        ));
-                    }
-                };
-                values.push(DeoptValue {
-                    slot,
-                    kind,
-                    location,
-                });
-            }
-            deopt_states.push(DeoptFrameState {
-                state_id,
-                resume_pc,
-                parent_state_id,
-                values: values.into_boxed_slice(),
-            });
-        }
-
-        let symbol = format!("vo_aot_fn_{func_id}");
-        let metadata = Arc::new(JitArtifactMetadata::try_from_parts(
-            code_size,
-            stack_maps,
-            deopt_states,
-            &symbol,
-        )?);
+            let symbol = format!("vo_aot_resume_{func_id}");
+            Some(crate::NativeAotContinuation {
+                metadata: decode_artifact(&mut reader, &symbol)?,
+                symbol,
+                pcs: pcs.into(),
+            })
+        };
         functions.push(NativeAotFunction {
             func_id,
             symbol,
             metadata,
             entry_eligibility,
+            continuation,
         });
     }
     reader.finish()?;
@@ -375,6 +342,95 @@ pub fn decode_native_aot_metadata(bytes: &[u8]) -> Result<NativeAotMetadata, Jit
     })
 }
 
+fn decode_artifact(
+    reader: &mut Reader<'_>,
+    symbol: &str,
+) -> Result<Arc<JitArtifactMetadata>, JitError> {
+    let code_size = reader.u32("code size")?;
+    let stack_map_count = reader.count("stack-map count", MAX_STACK_MAPS_PER_FUNCTION)?;
+    let mut stack_maps = Vec::with_capacity(stack_map_count);
+    for _ in 0..stack_map_count {
+        let safepoint_id = reader.u32("safepoint id")?;
+        let return_address_offset = reader.u32("return address")?;
+        let frame_size = reader.u32("frame size")?;
+        let anchor_sp_offset = reader.u32("frame anchor")?;
+        let root_count = reader.count("root count", MAX_ROOTS_PER_STACK_MAP)?;
+        let mut roots = Vec::with_capacity(root_count);
+        for _ in 0..root_count {
+            let sp_offset = reader.u32("root offset")?;
+            let kind = match reader.u8("root kind")? {
+                0 => NativeRootKind::GcRef,
+                1 => NativeRootKind::InterfacePair,
+                raw => {
+                    return Err(JitError::Internal(format!(
+                        "AOT metadata has unknown native root kind {raw}"
+                    )));
+                }
+            };
+            if reader.read(3, "root reserved bytes")? != [0; 3] {
+                return Err(JitError::Internal(
+                    "AOT root metadata has non-zero reserved bytes".to_string(),
+                ));
+            }
+            roots.push(NativeStackRoot { sp_offset, kind });
+        }
+        stack_maps.push(NativeStackMap {
+            safepoint_id,
+            return_address_offset,
+            frame_size,
+            anchor_sp_offset,
+            roots: roots.into_boxed_slice(),
+        });
+    }
+
+    let deopt_count = reader.count("deopt-state count", MAX_DEOPT_STATES_PER_FUNCTION)?;
+    let mut deopt_states = Vec::with_capacity(deopt_count);
+    for _ in 0..deopt_count {
+        let state_id = reader.u32("deopt state id")?;
+        let resume_pc = reader.u32("deopt resume pc")?;
+        let parent_state_id = reader.u32("deopt parent id")?;
+        let value_count = reader.count("deopt-value count", MAX_DEOPT_VALUES_PER_STATE)?;
+        let mut values = Vec::with_capacity(value_count);
+        for _ in 0..value_count {
+            let slot = reader.u16("deopt value slot")?;
+            let kind = decode_deopt_kind(reader.u8("deopt value kind")?)?;
+            let location_tag = reader.u8("deopt location kind")?;
+            let location_slot = reader.u16("deopt location slot")?;
+            let reserved = reader.u16("deopt reserved bytes")?;
+            let payload = reader.u64("deopt location payload")?;
+            let location = match location_tag {
+                0 if reserved == 0 && payload == 0 => DeoptValueLocation::FiberSlot(location_slot),
+                1 if location_slot == 0 && reserved == 0 => DeoptValueLocation::Constant(payload),
+                _ => {
+                    return Err(JitError::Internal(
+                        "AOT deopt location has invalid reserved fields".to_string(),
+                    ));
+                }
+            };
+            values.push(DeoptValue {
+                slot,
+                kind,
+                location,
+            });
+        }
+        deopt_states.push(DeoptFrameState {
+            state_id,
+            resume_pc,
+            parent_state_id,
+            values: values.into_boxed_slice(),
+        });
+    }
+
+    let metadata = Arc::new(JitArtifactMetadata::try_from_parts(
+        code_size,
+        stack_maps,
+        deopt_states,
+        symbol,
+    )?);
+
+    Ok(metadata)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +438,7 @@ mod tests {
     #[test]
     fn metadata_round_trip_and_truncation_rejection() {
         let function = NativeAotFunction {
+            continuation: None,
             func_id: 0,
             symbol: "vo_aot_fn_0".to_string(),
             metadata: Arc::new(
@@ -402,5 +459,53 @@ mod tests {
         assert_eq!(decoded.functions.len(), 1);
         assert!(decoded.functions[0].entry_eligibility.frame_elided);
         assert!(decode_native_aot_metadata(&encoded[..encoded.len() - 1]).is_err());
+        for version in [NATIVE_AOT_ABI_VERSION - 1, NATIVE_AOT_ABI_VERSION + 1] {
+            let mut incompatible = encoded.clone();
+            incompatible[MAGIC.len()..MAGIC.len() + 4].copy_from_slice(&version.to_le_bytes());
+            let error = decode_native_aot_metadata(&incompatible).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains(&format!("ABI version {version} is unsupported")));
+        }
+    }
+    #[test]
+    fn continuation_metadata_round_trips_and_requires_ordered_nonzero_pcs() {
+        let metadata =
+            Arc::new(JitArtifactMetadata::try_from_parts(16, vec![], vec![], "resume").unwrap());
+        let mut function = NativeAotFunction {
+            func_id: 0,
+            symbol: "vo_aot_fn_0".into(),
+            metadata: Arc::clone(&metadata),
+            entry_eligibility: JitFrameEntryEligibility {
+                frame_elided: false,
+                prepared_shadow: false,
+                static_prepared_shadow: false,
+                may_gc: true,
+            },
+            continuation: Some(crate::NativeAotContinuation {
+                symbol: "vo_aot_resume_0".into(),
+                pcs: Arc::from([1, 7, 23]),
+                metadata,
+            }),
+        };
+        let bytes =
+            encode_native_aot_metadata("aarch64-apple-darwin", &[function.clone()]).unwrap();
+        let decoded = decode_native_aot_metadata(&bytes).unwrap();
+        let continuation = decoded.functions[0].continuation.as_ref().unwrap();
+        assert_eq!(&*continuation.pcs, &[1, 7, 23]);
+        assert_eq!(continuation.symbol, "vo_aot_resume_0");
+        assert_eq!(continuation.metadata.code_size, 16);
+        for end in 0..bytes.len() {
+            assert!(
+                decode_native_aot_metadata(&bytes[..end]).is_err(),
+                "truncated at {end}"
+            );
+        }
+        for pcs in [vec![], vec![0], vec![7, 1], vec![7, 7]] {
+            function.continuation.as_mut().unwrap().pcs = pcs.into();
+            assert!(
+                encode_native_aot_metadata("aarch64-apple-darwin", &[function.clone()]).is_err()
+            );
+        }
     }
 }

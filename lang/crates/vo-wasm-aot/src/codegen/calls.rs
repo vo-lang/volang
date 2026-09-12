@@ -3,7 +3,7 @@ use super::*;
 
 pub(super) fn compile_validated_direct_indirect_call(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     targets: impl IntoIterator<Item = u32>,
     current_block: u32,
     materialized: &BTreeSet<u32>,
@@ -34,7 +34,7 @@ pub(super) fn compile_validated_direct_indirect_call(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_direct_closure_indirect_call(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     function_id: u32,
     function: &FunctionDef,
     pc: usize,
@@ -166,7 +166,7 @@ pub(super) fn compile_direct_closure_indirect_call(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_direct_interface_indirect_call(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     function_id: u32,
     function: &FunctionDef,
     pc: usize,
@@ -314,7 +314,7 @@ pub(super) fn spill_unwind_visible_scalars(
 
 pub(super) fn sync_scalar_reads(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     function: &FunctionDef,
     pc: usize,
     instruction: &vo_common_core::instruction::Instruction,

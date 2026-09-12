@@ -1,0 +1,14 @@
+package main
+func main() {
+    m := make(map[int]int)
+    for i := 0; i < 4096; i++ { m[i * 17] = i * 3 + 1 }
+    sum := 0
+    for round := 0; round < 128; round++ {
+        for i := 0; i < 8192; i++ {
+            value, found := m[i * 17]
+            if found { sum += value }
+        }
+    }
+    assert(sum == 3220963328)
+    println(sum)
+}

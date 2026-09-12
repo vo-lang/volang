@@ -42,7 +42,47 @@ use vo_runtime::island_transport::{
 /// Shared registry of island senders.
 /// Island VMs use this shared map as their command-routing source.
 #[cfg(feature = "std")]
-pub type IslandRegistry = Arc<Mutex<StdHashMap<u32, Arc<dyn IslandSender>>>>;
+pub type IslandRegistry = Arc<IslandFamily>;
+
+/// A process-local Island family owns one routing table and identity domain.
+/// Identity allocation is independent of route lifetime; removing a route never
+/// permits that identity to be issued again.
+#[cfg(feature = "std")]
+pub struct IslandFamily {
+    senders: Mutex<StdHashMap<u32, Arc<dyn IslandSender>>>,
+    // Zero is the main Island and doubles as the terminal exhausted sentinel.
+    next_id: std::sync::atomic::AtomicU32,
+}
+
+#[cfg(feature = "std")]
+impl IslandFamily {
+    pub(super) fn new(next_id: Option<u32>) -> Self {
+        Self {
+            senders: Mutex::new(StdHashMap::new()),
+            next_id: std::sync::atomic::AtomicU32::new(next_id.unwrap_or(0)),
+        }
+    }
+
+    pub(super) fn lock(
+        &self,
+    ) -> std::sync::LockResult<std::sync::MutexGuard<'_, StdHashMap<u32, Arc<dyn IslandSender>>>>
+    {
+        self.senders.lock()
+    }
+
+    fn allocate_id(&self) -> Result<u32, VmIdentityExhausted> {
+        self.next_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                (next != 0).then(|| next.checked_add(1).unwrap_or(0))
+            })
+            .map_err(|_| VmIdentityExhausted::Island)
+    }
+
+    fn next_id(&self) -> Option<u32> {
+        let next = self.next_id.load(Ordering::Relaxed);
+        (next != 0).then_some(next)
+    }
+}
 
 #[cfg(feature = "std")]
 #[derive(Debug)]
@@ -390,11 +430,89 @@ pub enum GcRootEffect {
     AllRootsDirty,
 }
 
-/// Runtime error location for debug info lookup.
+/// Runtime error source with one canonical, validated representation.
+/// Keeping the nonzero instruction identity also keeps optional locations
+/// compact when carried through normal scheduler result values.
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy)]
 pub struct ErrorLocation {
-    pub func_id: u32,
-    pub pc: u32,
+    source: vo_common_core::debug_info::DiagnosticSource,
+}
+
+impl From<vo_common_core::debug_info::DiagnosticSource> for ErrorLocation {
+    fn from(source: vo_common_core::debug_info::DiagnosticSource) -> Self {
+        Self { source }
+    }
+}
+
+impl ErrorLocation {
+    pub const fn func_id(self) -> u32 {
+        self.source.instruction().func_id()
+    }
+
+    pub const fn pc(self) -> u32 {
+        self.source.instruction().pc()
+    }
+
+    pub const fn inlined_in(self) -> Option<vo_common_core::debug_info::InstructionSource> {
+        self.source.inlined_in()
+    }
+
+    /// Preserve a composed source chain without keeping the module or runtime
+    /// frames alive. Ordinary single-frame errors require no trace allocation.
+    pub fn resolve_inline_frames(
+        &self,
+        module: &vo_runtime::bytecode::Module,
+    ) -> Vec<vo_common_core::debug_info::ResolvedSourceFrame> {
+        let mut frames = self.logical_frames(&module.debug_info);
+        let (Some(first), Some(second)) = (frames.next(), frames.next()) else {
+            return Vec::new();
+        };
+        core::iter::once(first)
+            .chain(core::iter::once(second))
+            .chain(frames)
+            .map(|frame| module.debug_info.resolve_frame(frame, &module.functions))
+            .collect()
+    }
+
+    pub fn logical_frames<'a>(
+        &self,
+        debug: &'a vo_common_core::debug_info::DebugInfo,
+    ) -> impl Iterator<Item = vo_common_core::debug_info::LogicalSourceFrame> + 'a {
+        self.source.logical_frames(debug)
+    }
+}
+
+#[cfg(test)]
+mod error_location_tests {
+    use super::*;
+    use vo_common_core::debug_info::{DebugInfo, DiagnosticSource, InstructionSource};
+
+    #[test]
+    fn optional_error_locations_retain_the_shared_source_niche() {
+        assert_eq!(
+            core::mem::size_of::<Option<ErrorLocation>>(),
+            core::mem::size_of::<vo_common_core::debug_info::DiagnosticSource>()
+        );
+        let instruction = InstructionSource::from_parts(7, u32::MAX).unwrap();
+        let parent = InstructionSource::from_parts(3, 5);
+        let source = DiagnosticSource::from_instruction(instruction, parent);
+        let location = ErrorLocation::from(source);
+        assert_eq!(location.func_id(), 7);
+        assert_eq!(location.pc(), u32::MAX);
+        assert_eq!(location.inlined_in(), parent);
+        let debug = DebugInfo::default();
+        assert_eq!(
+            location.logical_frames(&debug).collect::<Vec<_>>(),
+            source.logical_frames(&debug).collect::<Vec<_>>()
+        );
+        let error = VmError::PanicUnwound {
+            msg: None,
+            loc: Some(location),
+        };
+        assert_eq!(error.source_location().unwrap().inlined_in(), parent);
+        assert!(VmError::Interrupted.source_location().is_none());
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -463,6 +581,15 @@ pub enum VmError {
     Jit(String),
 }
 
+impl VmError {
+    pub fn source_location(&self) -> Option<&ErrorLocation> {
+        match self {
+            Self::RuntimeTrap { loc, .. } | Self::PanicUnwound { loc, .. } => loc.as_ref(),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmResourceError {
     Limit {
@@ -500,7 +627,7 @@ impl std::error::Error for VmResourceError {}
 pub enum VmConstructionError {
     #[cfg(feature = "std")]
     Io(std::io::Error),
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     Jit(vo_jit::JitError),
     Memory(MemoryError),
     /// Keeps the error type explicitly uninhabited when VM state construction
@@ -550,7 +677,7 @@ impl core::fmt::Display for VmConstructionError {
         match self {
             #[cfg(feature = "std")]
             Self::Io(error) => write!(_f, "VM I/O runtime initialization failed: {error}"),
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             Self::Jit(error) => write!(_f, "VM JIT initialization failed: {error}"),
             Self::Memory(error) => write!(_f, "VM memory initialization failed: {error:?}"),
             #[cfg(not(feature = "std"))]
@@ -564,7 +691,7 @@ impl std::error::Error for VmConstructionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             Self::Jit(error) => Some(error),
             Self::Memory(_) => None,
         }
@@ -578,7 +705,7 @@ impl From<std::io::Error> for VmConstructionError {
     }
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 impl From<vo_jit::JitError> for VmConstructionError {
     fn from(error: vo_jit::JitError) -> Self {
         Self::Jit(error)
@@ -682,9 +809,14 @@ pub struct VmState {
     pub sentinel_errors: SentinelErrorCache,
     /// Next island ID to assign
     pub(crate) next_island_id: Option<u32>,
-    /// Active island threads (index = island_id - 1, since main island is 0)
+    /// Child workers owned by this VM. Entries carry family-wide Island IDs;
+    /// vector position is independent of the Island identity.
     #[cfg(feature = "std")]
     pub island_threads: Vec<IslandThread>,
+    /// Shared wake hint for this parent's child event receivers. Receiver
+    /// contents and worker lifecycle remain authoritative. Admitted lazily.
+    #[cfg(feature = "std")]
+    pub(crate) island_event_signal: Option<Arc<AtomicBool>>,
     #[cfg(feature = "std")]
     pub entry_island_events: VecDeque<EntryIslandEvent>,
     /// Shared registry used by island VMs for in-thread command routing.
@@ -709,7 +841,7 @@ pub struct VmState {
     pub endpoint_registry: EndpointRegistry,
     pub command_queue: VecDeque<IslandCommandEnvelope>,
     pub(crate) outbound_commands: VecDeque<(u32, IslandCommandEnvelope)>,
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub(crate) jit_osr_borrow_lease_depth: u32,
     pub(crate) pending_island_responses: u32,
     /// Conservative root-dirty marker for incremental GC sweep. Set when host
@@ -850,6 +982,49 @@ impl VmState {
         Ok(Self::from_runtime_parts_with_gc(gc))
     }
 
+    /// Publish both routes before the worker can run initialization. A failed
+    /// spawn owns no worker, so neither route may survive that failure.
+    #[cfg(feature = "std")]
+    pub(super) fn spawn_registered_island_thread(
+        &mut self,
+        island_id: u32,
+        sender: Arc<dyn IslandSender>,
+        spawn: impl FnOnce(IslandRegistry) -> std::io::Result<JoinHandle<()>>,
+    ) -> Result<(IslandRegistry, JoinHandle<()>), VmError> {
+        let registry = self
+            .island_registry
+            .as_ref()
+            .ok_or_else(|| VmError::Jit("create_island missing island registry".to_string()))?
+            .clone();
+        {
+            let mut routes = registry
+                .lock()
+                .map_err(|_| VmError::Jit("create_island island registry poisoned".to_string()))?;
+            if routes.contains_key(&island_id) || self.island_senders.contains_key(&island_id) {
+                return Err(VmError::Jit(format!(
+                    "island {island_id} already registered"
+                )));
+            }
+            routes.insert(island_id, sender.clone());
+        }
+        self.island_senders.insert(island_id, sender);
+        match spawn(registry.clone()) {
+            Ok(worker) => Ok((registry, worker)),
+            Err(error) => {
+                // Recovery only: remove our own unpublished worker's route even
+                // if another worker poisoned the mutex. Keep the poison flag.
+                registry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&island_id);
+                self.island_senders.remove(&island_id);
+                Err(VmError::Jit(format!(
+                    "island {island_id} thread creation failed: {error}"
+                )))
+            }
+        }
+    }
+
     /// Stop and join every island thread owned by this VM.
     ///
     /// The operation is idempotent so terminal guest shutdown and `Drop` can
@@ -876,6 +1051,12 @@ impl VmState {
         self.island_threads.clear();
 
         if let Some(registry) = self.island_registry.take() {
+            // A later module load continues after every identity consumed by
+            // this family, including failed spawns and descendants.
+            self.next_island_id = match (self.next_island_id, registry.next_id()) {
+                (Some(local), Some(shared)) => Some(local.max(shared)),
+                _ => None,
+            };
             if let Ok(mut registry) = registry.lock() {
                 if self.current_island_id == 0 {
                     registry.clear();
@@ -924,6 +1105,8 @@ impl VmState {
             #[cfg(feature = "std")]
             island_threads: Vec::new(),
             #[cfg(feature = "std")]
+            island_event_signal: None,
+            #[cfg(feature = "std")]
             entry_island_events: VecDeque::new(),
             #[cfg(feature = "std")]
             island_registry: None,
@@ -940,7 +1123,7 @@ impl VmState {
             endpoint_registry: EndpointRegistry::new(),
             command_queue: VecDeque::new(),
             outbound_commands: VecDeque::new(),
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             jit_osr_borrow_lease_depth: 0,
             pending_island_responses: 0,
             gc_roots_dirty_all: true,
@@ -1137,6 +1320,10 @@ impl VmState {
     /// Allocate a VM-wide island ID. Every value is issued at most once;
     /// `None` permanently records exhaustion after `u32::MAX` is consumed.
     pub fn allocate_island_id(&mut self) -> Result<u32, VmIdentityExhausted> {
+        #[cfg(feature = "std")]
+        if let Some(family) = &self.island_registry {
+            return family.allocate_id();
+        }
         let id = self.next_island_id.ok_or(VmIdentityExhausted::Island)?;
         self.next_island_id = id.checked_add(1);
         Ok(id)
@@ -1260,6 +1447,130 @@ mod tests {
 
         assert_eq!(state.allocate_island_id(), Ok(u32::MAX));
         assert_eq!(state.allocate_island_id(), Err(VmIdentityExhausted::Island));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn failed_island_spawn_removes_both_routes_and_keeps_other_owners() {
+        use std::sync::Arc;
+        use vo_runtime::island_transport::{InThreadTransport, IslandSender};
+
+        let mut state = VmState::new();
+        let (main_sender, _main_transport) = InThreadTransport::new();
+        let main_sender: Arc<dyn IslandSender> = Arc::new(main_sender);
+        let registry = Arc::new(super::IslandFamily::new(Some(1)));
+        registry.lock().unwrap().insert(0, main_sender.clone());
+        state.island_registry = Some(registry.clone());
+        state.island_senders.insert(0, main_sender.clone());
+
+        for _ in 0..2 {
+            let island_id = state.allocate_island_id().unwrap();
+            let (sender, transport) = InThreadTransport::new();
+            let sender: Arc<dyn IslandSender> = Arc::new(sender);
+            let weak_sender = Arc::downgrade(&sender);
+            let Err(error) = state.spawn_registered_island_thread(island_id, sender, |routes| {
+                assert!(routes.lock().unwrap().contains_key(&island_id));
+                drop(transport);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "injected thread limit",
+                ))
+            }) else {
+                panic!("injected thread limit must reject creation")
+            };
+            assert!(matches!(error, super::VmError::Jit(message)
+                if message.contains("thread creation failed") && message.contains("injected thread limit")));
+            assert!(weak_sender.upgrade().is_none());
+            assert!(state.island_threads.is_empty());
+            assert_eq!(state.island_senders.len(), 1);
+            let routes = registry.lock().unwrap();
+            assert_eq!(routes.len(), 1);
+            assert!(Arc::ptr_eq(routes.get(&0).unwrap(), &main_sender));
+            assert!(Arc::ptr_eq(
+                state.island_senders.get(&0).unwrap(),
+                &main_sender
+            ));
+            assert_eq!(registry.next_id(), Some(island_id + 1));
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn island_spawn_rejects_existing_identity_before_invoking_spawner() {
+        use std::sync::Arc;
+        use vo_runtime::island_transport::{InThreadTransport, IslandSender};
+
+        let mut state = VmState::new();
+        let (sender, _transport) = InThreadTransport::new();
+        let sender: Arc<dyn IslandSender> = Arc::new(sender);
+        let registry = Arc::new(super::IslandFamily::new(Some(8)));
+        registry.lock().unwrap().insert(7, sender.clone());
+        state.island_registry = Some(registry.clone());
+        state.island_senders.insert(7, sender.clone());
+        let Err(error) = state.spawn_registered_island_thread(7, sender.clone(), |_| {
+            panic!("duplicate identity must never reach the spawner")
+        }) else {
+            panic!("duplicate identity must reject creation")
+        };
+        assert!(
+            matches!(error, super::VmError::Jit(message) if message.contains("already registered"))
+        );
+        assert!(Arc::ptr_eq(
+            registry.lock().unwrap().get(&7).unwrap(),
+            &sender
+        ));
+        assert!(Arc::ptr_eq(state.island_senders.get(&7).unwrap(), &sender));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn concurrent_island_family_identities_are_unique_and_exhaustion_is_sticky() {
+        use std::sync::Arc;
+        let family = Arc::new(super::IslandFamily::new(Some(1)));
+        let workers = (0..8)
+            .map(|_| {
+                let family = family.clone();
+                std::thread::spawn(move || {
+                    (0..256)
+                        .map(|_| family.allocate_id().unwrap())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut ids = workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, (1..=2048).collect::<Vec<_>>());
+        assert_eq!(family.allocate_id(), Ok(2049));
+
+        let last = super::IslandFamily::new(Some(u32::MAX));
+        assert_eq!(last.allocate_id(), Ok(u32::MAX));
+        for _ in 0..3 {
+            assert_eq!(last.allocate_id(), Err(VmIdentityExhausted::Island));
+        }
+        assert_eq!(last.next_id(), None);
+        assert_eq!(super::IslandFamily::new(Some(1)).allocate_id(), Ok(1));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn descendants_share_ids_and_module_shutdown_preserves_the_high_water_mark() {
+        use std::sync::Arc;
+        let family = Arc::new(super::IslandFamily::new(Some(2)));
+        let mut root = VmState::new();
+        root.next_island_id = Some(2);
+        root.island_registry = Some(family.clone());
+        let mut child = VmState::new();
+        child.current_island_id = 1;
+        child.island_registry = Some(family.clone());
+        assert_eq!(child.allocate_island_id(), Ok(2));
+        assert_eq!(root.allocate_island_id(), Ok(3));
+        assert_eq!(child.allocate_island_id(), Ok(4));
+        child.shutdown_island_threads();
+        root.shutdown_island_threads();
+        assert_eq!(root.allocate_island_id(), Ok(5));
     }
 
     #[test]

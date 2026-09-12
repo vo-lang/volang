@@ -22,5 +22,5 @@ pub use ast::*;
 pub use formatter::format_source;
 pub use identifier::{is_exported_name, is_identifier_continue, is_identifier_start};
 pub use lexer::Lexer;
-pub use parser::{parse, parse_with_interner, Parser};
+pub use parser::{parse, parse_import_paths, parse_with_interner, Parser};
 pub use token::{Token, TokenKind};

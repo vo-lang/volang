@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{types, BlockArg, InstBuilder, MemFlagsData as MemFlags, Value};
 use cranelift_frontend::Variable;
-use vo_runtime::bytecode::{Constant, FunctionDef, Module};
+use vo_runtime::bytecode::{Constant, FunctionDef, InstructionMetadata, Module};
 use vo_runtime::instruction::{Instruction, Opcode, CONV_FLAG_FLOAT32, CONV_FLAG_UNSIGNED};
 use vo_runtime::SlotType;
 
@@ -22,6 +24,7 @@ pub(crate) const SMALL_INLINE_BUDGET: usize = 256;
 /// Only complete, acyclic recipes are admitted: residual calls would require
 /// their own resumable activation, which this leaf expansion does not create.
 pub(crate) struct SmallFunctionInline {
+    source_func_id: u32,
     code: Box<[Instruction]>,
     blocks: Box<[InlineBlock]>,
     pc_to_block: Box<[u16]>,
@@ -31,7 +34,11 @@ pub(crate) struct SmallFunctionInline {
     param_slots: usize,
     hidden_param_slots: usize,
     ret_slots: usize,
+    // Guest bytecode work and compiler duplication work have distinct budgets.
     cost: usize,
+    expansion_work: usize,
+    depth: usize,
+    children: Box<[Option<Arc<SmallFunctionInline>>]>,
 }
 
 #[derive(Clone, Copy)]
@@ -41,12 +48,42 @@ struct InlineBlock {
 }
 
 impl SmallFunctionInline {
-    pub(crate) fn analyze_leaf(func: &FunctionDef, module: &Module) -> Option<Self> {
+    pub(crate) const MAX_DEPTH: usize = 8;
+
+    pub(crate) fn analyze_leaf(
+        source_func_id: u32,
+        func: &FunctionDef,
+        module: &Module,
+    ) -> Option<Self> {
+        Self::analyze(source_func_id, func, module, None)
+    }
+
+    pub(crate) fn analyze_chain(
+        source_func_id: u32,
+        func: &FunctionDef,
+        module: &Module,
+        callees: &[Option<Arc<Self>>],
+    ) -> Option<Self> {
+        // Observer, heap and suspension instructions cannot enter a complete
+        // scalar recipe. Ordinary heap-reading leaves keep their separate route.
+        if !func.has_calls {
+            return None;
+        }
+        Self::analyze(source_func_id, func, module, Some(callees))
+    }
+
+    fn analyze(
+        source_func_id: u32,
+        func: &FunctionDef,
+        module: &Module,
+        callees: Option<&[Option<Arc<Self>>]>,
+    ) -> Option<Self> {
         let local_slots = func.local_slots as usize;
         let param_slots = func.param_slots as usize;
         let ret_slots = func.ret_slots as usize;
-        if func.code.len() > MAX_SMALL_INLINE_INSTRUCTIONS
-            || func.has_calls
+        if source_func_id == u32::MAX
+            || func.code.len() > MAX_SMALL_INLINE_INSTRUCTIONS
+            || (func.has_calls && callees.is_none())
             || func.has_call_extern
             || func.has_defer
             || func.heap_ret_gcref_count != 0
@@ -64,6 +101,15 @@ impl SmallFunctionInline {
         {
             return None;
         }
+        if callees.is_some()
+            && !func
+                .slot_types
+                .iter()
+                .chain(&func.ret_slot_types)
+                .all(|ty| matches!(ty, SlotType::Value | SlotType::Float))
+        {
+            return None;
+        }
         let hidden_param_slots = if func.is_closure {
             if func.recv_slots != 0 {
                 return None;
@@ -76,11 +122,24 @@ impl SmallFunctionInline {
             return None;
         }
 
-        let (blocks, pc_to_block, cost) = inline_cfg(&func.code)?;
+        let (blocks, pc_to_block, mut cost) = inline_cfg(&func.code)?;
         if cost > MAX_SMALL_INLINE_INSTRUCTIONS || blocks.len() > MAX_SMALL_INLINE_BLOCKS {
             return None;
         }
 
+        // Count initialization, parameter/result copies and block structure in
+        // compiler work. Guest fuel retains the transitive bytecode count.
+        let mut expansion_work = cost
+            .checked_add(local_slots.checked_mul(2)?)?
+            .checked_add(param_slots)?
+            .checked_add(ret_slots.checked_mul(2)?)?
+            .checked_add(blocks.len().checked_mul(2)?)?;
+        let mut depth = 1;
+        let mut children = if callees.is_some() {
+            vec![None; func.code.len()]
+        } else {
+            Vec::new()
+        };
         let mut constant_loads = vec![None; func.code.len()];
         let mut saw_return = false;
         for block in &blocks {
@@ -97,7 +156,37 @@ impl SmallFunctionInline {
                     Opcode::JumpIf | Opcode::JumpIfNot
                         if usize::from(inst.a) < local_slots
                             && func.slot_types[inst.a as usize] != SlotType::Float => {}
+                    Opcode::Call => {
+                        let child = callees?
+                            .get(inst.static_call_func_id() as usize)?
+                            .as_ref()?;
+                        let arg_start = usize::from(inst.b);
+                        let ret_start = arg_start.checked_add(child.param_slots)?;
+                        let ret_end = ret_start.checked_add(child.ret_slots)?;
+                        if inst.c != 0
+                            || !child.is_total_scalar()
+                            || child.depth >= Self::MAX_DEPTH
+                            || func.slot_types.get(arg_start..ret_start)?
+                                != &child.slot_types[..child.param_slots]
+                            || func.slot_types.get(ret_start..ret_end)? != child.ret_types.as_ref()
+                        {
+                            return None;
+                        }
+                        depth = depth.max(child.depth + 1);
+                        cost = cost.checked_add(child.cost)?;
+                        expansion_work = expansion_work.checked_add(child.expansion_work)?;
+                        if expansion_work > SMALL_INLINE_BUDGET {
+                            return None;
+                        }
+                        // Return windows overwrite the parent's old constants;
+                        // arguments remain private copies inside the child.
+                        integer_constants[ret_start..ret_end].fill(None);
+                        children[pc] = Some(Arc::clone(child));
+                    }
                     Opcode::Return => {
+                        if usize::from(inst.b) != ret_slots {
+                            return None;
+                        }
                         let return_start = usize::from(inst.a);
                         if return_start.checked_add(ret_slots)? > local_slots {
                             return None;
@@ -108,6 +197,36 @@ impl SmallFunctionInline {
                             }
                         }
                         saw_return = true;
+                    }
+                    Opcode::SliceGet | Opcode::SliceSet => {
+                        // Only direct leaves with one non-reference payload
+                        // slot are admitted. A store needs no barrier; every
+                        // access retains its own bounds trap and source PC.
+                        if callees.is_some()
+                            || !scalar_slice_access(
+                                inst,
+                                func.instruction_metadata.get(pc),
+                                &func.slot_types,
+                            )
+                        {
+                            return None;
+                        }
+                        if inst.opcode() == Opcode::SliceGet {
+                            integer_constants[usize::from(inst.a)] = None;
+                        }
+                    }
+                    Opcode::CopyN => {
+                        if !validate_instruction(
+                            inst,
+                            &func.slot_types,
+                            &module.constants,
+                            &mut integer_constants,
+                            constant_load,
+                            func.is_closure,
+                        ) {
+                            return None;
+                        }
+                        expansion_work = expansion_work.checked_add(usize::from(inst.c))?;
                     }
                     _ if validate_instruction(
                         inst,
@@ -126,6 +245,7 @@ impl SmallFunctionInline {
         }
 
         Some(Self {
+            source_func_id,
             code: func.code.clone().into(),
             blocks: blocks.into_boxed_slice(),
             pc_to_block: pc_to_block.into_boxed_slice(),
@@ -136,7 +256,33 @@ impl SmallFunctionInline {
             hidden_param_slots,
             ret_slots,
             cost,
+            expansion_work,
+            depth,
+            children: children.into_boxed_slice(),
         })
+    }
+
+    pub(crate) fn is_total_scalar(&self) -> bool {
+        self.slot_types
+            .iter()
+            .chain(self.ret_types.iter())
+            .all(|ty| matches!(ty, SlotType::Value | SlotType::Float))
+    }
+
+    pub(crate) fn duplication_work(&self) -> usize {
+        if self.children.is_empty() {
+            // Preserve existing direct-leaf admission while separately charging
+            // every transitive initialization/copy in composed recipes.
+            self.code.iter().fold(self.cost, |work, inst| {
+                work.saturating_add(if inst.opcode() == Opcode::CopyN {
+                    usize::from(inst.c)
+                } else {
+                    0
+                })
+            })
+        } else {
+            self.expansion_work
+        }
     }
 
     pub(crate) fn cost(&self) -> usize {
@@ -144,7 +290,8 @@ impl SmallFunctionInline {
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
-        self.code
+        let buffers = self
+            .code
             .len()
             .saturating_mul(core::mem::size_of::<Instruction>())
             .saturating_add(
@@ -171,6 +318,13 @@ impl SmallFunctionInline {
                 self.constant_loads
                     .len()
                     .saturating_mul(core::mem::size_of::<Option<Constant>>()),
+            );
+        core::mem::size_of::<Self>()
+            .saturating_add(buffers)
+            .saturating_add(
+                self.children
+                    .len()
+                    .saturating_mul(core::mem::size_of::<Option<Arc<Self>>>()),
             )
     }
 
@@ -191,9 +345,38 @@ impl SmallFunctionInline {
         self.emit_with_layout(emitter, None, arg_start, arg_start + self.param_slots)
     }
 
-    pub(crate) fn supports_dynamic_layout(&self, arg_slots: usize, ret_slots: usize) -> bool {
-        self.hidden_param_slots == 1
-            && self.param_slots == arg_slots.saturating_add(1)
+    pub(crate) fn supports_dynamic_layout(
+        &self,
+        opcode: Opcode,
+        arg_slots: usize,
+        ret_slots: usize,
+    ) -> bool {
+        // Sequence recipes are initially restricted to verified static calls.
+        // Dynamic receivers retain their existing admission and root contract.
+        if self
+            .code
+            .iter()
+            .any(|inst| matches!(inst.opcode(), Opcode::SliceGet | Opcode::SliceSet))
+        {
+            return false;
+        }
+        let supported_hidden = match opcode {
+            // Zero-hidden support only expands total scalar recipes. Heap-read
+            // recipes retain their existing admission until logical trap/frame
+            // provenance is represented across transitive inlining.
+            Opcode::CallClosure => {
+                self.hidden_param_slots == 1
+                    || (self.hidden_param_slots == 0
+                        && self
+                            .slot_types
+                            .iter()
+                            .all(|ty| matches!(ty, SlotType::Value | SlotType::Float)))
+            }
+            Opcode::CallIface => self.hidden_param_slots == 1,
+            _ => false,
+        };
+        supported_hidden
+            && self.param_slots == arg_slots.saturating_add(self.hidden_param_slots)
             && self.ret_slots == ret_slots
     }
 
@@ -226,29 +409,22 @@ impl SmallFunctionInline {
             ) => (arg_layout.len(), ret_layout.len()),
             _ => return Ok(false),
         };
-        if !self.supports_dynamic_layout(arg_slots, ret_slots) {
+        if !self.supports_dynamic_layout(inst.opcode(), arg_slots, ret_slots) {
             return Ok(false);
         }
-        let receiver = match inst.opcode() {
-            Opcode::CallClosure => inst.a,
-            Opcode::CallIface => inst.a + 1,
-            _ => unreachable!("dynamic call admitted above"),
+        let receiver = if self.hidden_param_slots == 1 {
+            let slot = match inst.opcode() {
+                Opcode::CallClosure => inst.a,
+                Opcode::CallIface => inst.a + 1,
+                _ => unreachable!("dynamic call admitted above"),
+            };
+            Some(emitter.read_var(slot))
+        } else {
+            None
         };
-        let slot0 = emitter.read_var(receiver);
         let arg_start = usize::from(inst.b);
-        self.emit_dynamic(emitter, slot0, arg_start, arg_start + arg_slots)?;
+        self.emit_with_layout(emitter, receiver, arg_start, arg_start + arg_slots)?;
         Ok(true)
-    }
-
-    pub(crate) fn emit_dynamic<'a, E: IrEmitter<'a>>(
-        &self,
-        emitter: &mut E,
-        slot0: Value,
-        arg_start: usize,
-        ret_start: usize,
-    ) -> Result<(), crate::JitError> {
-        debug_assert_eq!(self.hidden_param_slots, 1);
-        self.emit_with_layout(emitter, Some(slot0), arg_start, ret_start)
     }
 
     fn emit_with_layout<'a, E: IrEmitter<'a>>(
@@ -258,6 +434,43 @@ impl SmallFunctionInline {
         arg_start: usize,
         ret_start: usize,
     ) -> Result<(), crate::JitError> {
+        let mut inputs = Vec::with_capacity(self.param_slots);
+        for slot in 0..self.param_slots {
+            let value = if let (0, Some(value)) = (slot, slot0) {
+                value
+            } else {
+                let caller_slot = (arg_start + slot - usize::from(slot0.is_some())) as u16;
+                if self.slot_types[slot] == SlotType::Float {
+                    emitter.read_var_f64(caller_slot)
+                } else {
+                    emitter.read_var(caller_slot)
+                }
+            };
+            inputs.push(value);
+        }
+        let outputs = self.emit_values(emitter, &inputs)?;
+        for (index, value) in outputs.into_iter().enumerate() {
+            if self.ret_types[index] == SlotType::Float {
+                emitter.write_var_f64((ret_start + index) as u16, value);
+            } else {
+                emitter.write_var((ret_start + index) as u16, value);
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit only into private typed SSA locals. Call-site adapters own the
+    /// physical caller window; nested recipes never mutate caller variables.
+    fn emit_values<'a, E: IrEmitter<'a>>(
+        &self,
+        emitter: &mut E,
+        inputs: &[Value],
+    ) -> Result<Vec<Value>, crate::JitError> {
+        if inputs.len() != self.param_slots {
+            return Err(crate::JitError::Internal(
+                "inline parameter width drift".into(),
+            ));
+        }
         let zero_i64 = emitter.builder().ins().iconst(types::I64, 0);
         let zero_f64 = emitter.builder().ins().f64const(0.0);
         let locals = self
@@ -274,15 +487,8 @@ impl SmallFunctionInline {
             })
             .collect::<Vec<Variable>>();
         for (slot, slot_type) in self.slot_types.iter().copied().enumerate() {
-            let value = if let (0, Some(value)) = (slot, slot0) {
-                value
-            } else if slot < self.param_slots {
-                let caller_slot = arg_start + slot - usize::from(slot0.is_some());
-                if slot_type == SlotType::Float {
-                    emitter.read_var_f64(caller_slot as u16)
-                } else {
-                    emitter.read_var(caller_slot as u16)
-                }
+            let value = if slot < self.param_slots {
+                inputs[slot]
             } else if slot_type == SlotType::Float {
                 zero_f64
             } else {
@@ -316,6 +522,20 @@ impl SmallFunctionInline {
                     emitter.builder().use_var(locals[usize::from(slot)])
                 };
                 match inst.opcode() {
+                    Opcode::Call => {
+                        let child = self.children[pc]
+                            .as_ref()
+                            .expect("complete scalar inline dependency");
+                        let arg_start = usize::from(inst.b);
+                        let inputs = (arg_start..arg_start + child.param_slots)
+                            .map(|slot| emitter.builder().use_var(locals[slot]))
+                            .collect::<Vec<_>>();
+                        let outputs = child.emit_values(emitter, &inputs)?;
+                        let ret_start = arg_start + child.param_slots;
+                        for (offset, value) in outputs.into_iter().enumerate() {
+                            emitter.builder().def_var(locals[ret_start + offset], value);
+                        }
+                    }
                     Opcode::LoadInt => {
                         let value = emitter
                             .builder()
@@ -347,6 +567,18 @@ impl SmallFunctionInline {
                         let value = read(emitter, inst.b);
                         emitter.builder().def_var(locals[inst.a as usize], value);
                     }
+                    Opcode::CopyN => {
+                        // Snapshot all sources before publishing any destination;
+                        // overlap follows the bytecode's memmove semantics.
+                        let values: Vec<_> = (0..inst.c)
+                            .map(|offset| read(emitter, inst.b + offset))
+                            .collect();
+                        for (offset, value) in values.into_iter().enumerate() {
+                            emitter
+                                .builder()
+                                .def_var(locals[usize::from(inst.a) + offset], value);
+                        }
+                    }
                     Opcode::ClosureGet => {
                         let offset =
                             ((vo_runtime::objects::closure::HEADER_SLOTS + usize::from(inst.b))
@@ -363,12 +595,19 @@ impl SmallFunctionInline {
                     Opcode::PtrGet => {
                         let ptr = read(emitter, inst.b);
                         let is_nil = emitter.builder().ins().icmp_imm_u(IntCC::Equal, ptr, 0);
-                        crate::contract::emit_runtime_trap_if(
+                        crate::contract::emit_runtime_trap_if_at(
                             emitter,
                             is_nil,
                             vo_runtime::jit_api::JitRuntimeTrapKind::NilPointerDereference,
                             None,
                             None,
+                            Some(
+                                vo_common_core::debug_info::InstructionSource::from_parts(
+                                    self.source_func_id,
+                                    pc as u32,
+                                )
+                                .expect("validated inline source"),
+                            ),
                         );
                         let value = emitter.builder().ins().load(
                             types::I64,
@@ -377,6 +616,51 @@ impl SmallFunctionInline {
                             i32::from(inst.c) * vo_runtime::slot::SLOT_BYTES as i32,
                         );
                         emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::SliceGet | Opcode::SliceSet => {
+                        let (slice_slot, index_slot) = if inst.opcode() == Opcode::SliceGet {
+                            (inst.b, inst.c)
+                        } else {
+                            (inst.a, inst.b)
+                        };
+                        let slice = read(emitter, slice_slot);
+                        let index = read(emitter, index_slot);
+                        let origin = vo_common_core::debug_info::InstructionSource::from_parts(
+                            self.source_func_id,
+                            pc as u32,
+                        )
+                        .expect("validated inline source");
+                        let data = crate::translate::emit_slice_bounds_check_at(
+                            emitter,
+                            slice,
+                            index,
+                            false,
+                            Some(origin),
+                        );
+                        let (_, address) = crate::translate::emit_slice_storage_address(
+                            emitter,
+                            slice,
+                            data,
+                            index,
+                            vo_runtime::slot::SLOT_BYTES,
+                        );
+                        if inst.opcode() == Opcode::SliceGet {
+                            let value = emitter.builder().ins().load(
+                                types::I64,
+                                MemFlags::trusted(),
+                                address,
+                                0,
+                            );
+                            emitter
+                                .builder()
+                                .def_var(locals[usize::from(inst.a)], value);
+                        } else {
+                            let value = read(emitter, inst.c);
+                            emitter
+                                .builder()
+                                .ins()
+                                .store(MemFlags::trusted(), value, address, 0);
+                        }
                     }
                     Opcode::AddI | Opcode::SubI | Opcode::MulI | Opcode::DivI => {
                         let lhs = read(emitter, inst.b);
@@ -394,6 +678,49 @@ impl SmallFunctionInline {
                         let input = read(emitter, inst.b);
                         let value = emitter.builder().ins().ineg(input);
                         emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::AddF32
+                    | Opcode::SubF32
+                    | Opcode::MulF32
+                    | Opcode::DivF32
+                    | Opcode::NegF32
+                    | Opcode::EqF32
+                    | Opcode::NeF32
+                    | Opcode::LtF32
+                    | Opcode::LeF32
+                    | Opcode::GtF32
+                    | Opcode::GeF32 => {
+                        let read_bits = |emitter: &mut E, slot: u16| {
+                            let value = read(emitter, slot);
+                            if self.slot_types[usize::from(slot)] == SlotType::Float {
+                                emitter
+                                    .builder()
+                                    .ins()
+                                    .bitcast(types::I64, MemFlags::new(), value)
+                            } else {
+                                value
+                            }
+                        };
+                        let lhs = read_bits(emitter, inst.b);
+                        let rhs =
+                            (inst.opcode() != Opcode::NegF32).then(|| read_bits(emitter, inst.c));
+                        let bits = crate::translate::emit_float32_bits(
+                            emitter.builder(),
+                            inst.opcode(),
+                            lhs,
+                            rhs,
+                        );
+                        let value = if self.slot_types[usize::from(inst.a)] == SlotType::Float {
+                            emitter
+                                .builder()
+                                .ins()
+                                .bitcast(types::F64, MemFlags::new(), bits)
+                        } else {
+                            bits
+                        };
+                        emitter
+                            .builder()
+                            .def_var(locals[usize::from(inst.a)], value);
                     }
                     Opcode::AddF | Opcode::SubF | Opcode::MulF | Opcode::DivF => {
                         let lhs = read(emitter, inst.b);
@@ -549,15 +876,7 @@ impl SmallFunctionInline {
 
         emitter.builder().switch_to_block(return_block);
         emitter.builder().seal_block(return_block);
-        for index in 0..self.ret_slots {
-            let value = emitter.builder().block_params(return_block)[index];
-            if self.ret_types[index] == SlotType::Float {
-                emitter.write_var_f64((ret_start + index) as u16, value);
-            } else {
-                emitter.write_var((ret_start + index) as u16, value);
-            }
-        }
-        Ok(())
+        Ok(emitter.builder().block_params(return_block).to_vec())
     }
 }
 
@@ -703,6 +1022,32 @@ fn inline_cfg(code: &[Instruction]) -> Option<(Vec<InlineBlock>, Vec<u16>, usize
     Some((blocks, pc_to_block, cost))
 }
 
+fn scalar_slice_access(
+    inst: &Instruction,
+    metadata: Option<&InstructionMetadata>,
+    slot_types: &[SlotType],
+) -> bool {
+    let Some(InstructionMetadata::ElemLayout {
+        elem_bytes: 8,
+        slot_layout,
+        ..
+    }) = metadata
+    else {
+        return false;
+    };
+    if slot_layout.as_slice() != [SlotType::Value] {
+        return false;
+    }
+    let (slice, index, value) = match inst.opcode() {
+        Opcode::SliceGet => (inst.b, inst.c, inst.a),
+        Opcode::SliceSet => (inst.a, inst.b, inst.c),
+        _ => return false,
+    };
+    slot_types.get(usize::from(slice)) == Some(&SlotType::GcBase)
+        && slot_types.get(usize::from(index)) == Some(&SlotType::Value)
+        && slot_types.get(usize::from(value)) == Some(&SlotType::Value)
+}
+
 fn validate_instruction(
     inst: &Instruction,
     slot_types: &[SlotType],
@@ -719,6 +1064,14 @@ fn validate_instruction(
     };
     let all_integer = |slots: &[u16]| slots.iter().all(|slot| in_range(*slot) && !is_float(*slot));
     let all_float = |slots: &[u16]| slots.iter().all(|slot| in_range(*slot) && is_float(*slot));
+    let all_scalar_bits = |slots: &[u16]| {
+        slots.iter().all(|slot| {
+            matches!(
+                slot_types.get(usize::from(*slot)),
+                Some(SlotType::Value | SlotType::Float)
+            )
+        })
+    };
 
     match inst.opcode() {
         Opcode::LoadInt if all_integer(&[inst.a]) => {
@@ -744,6 +1097,20 @@ fn validate_instruction(
             if in_range(inst.a) && in_range(inst.b) && is_float(inst.a) == is_float(inst.b) =>
         {
             integer_constants[inst.a as usize] = integer_constants[inst.b as usize];
+        }
+        Opcode::CopyN => {
+            let source = usize::from(inst.b)..usize::from(inst.b) + usize::from(inst.c);
+            let destination = usize::from(inst.a)..usize::from(inst.a) + usize::from(inst.c);
+            let (Some(src_types), Some(dst_types)) = (
+                slot_types.get(source.clone()),
+                slot_types.get(destination.clone()),
+            ) else {
+                return false;
+            };
+            if src_types != dst_types {
+                return false;
+            }
+            integer_constants.copy_within(source, destination.start);
         }
         Opcode::ClosureGet
             if is_closure
@@ -784,6 +1151,25 @@ fn validate_instruction(
         Opcode::NegI if all_integer(&[inst.a, inst.b]) => {
             integer_constants[inst.a as usize] =
                 integer_constants[inst.b as usize].map(i64::wrapping_neg);
+        }
+        Opcode::AddF32 | Opcode::SubF32 | Opcode::MulF32 | Opcode::DivF32
+            if all_scalar_bits(&[inst.a, inst.b, inst.c]) =>
+        {
+            integer_constants[usize::from(inst.a)] = None;
+        }
+        Opcode::NegF32 if all_scalar_bits(&[inst.a, inst.b]) => {
+            integer_constants[usize::from(inst.a)] = None;
+        }
+        Opcode::EqF32
+        | Opcode::NeF32
+        | Opcode::LtF32
+        | Opcode::LeF32
+        | Opcode::GtF32
+        | Opcode::GeF32
+            if slot_types.get(usize::from(inst.a)) == Some(&SlotType::Value)
+                && all_scalar_bits(&[inst.b, inst.c]) =>
+        {
+            integer_constants[usize::from(inst.a)] = None;
         }
         Opcode::AddF | Opcode::SubF | Opcode::MulF | Opcode::DivF
             if all_float(&[inst.a, inst.b, inst.c]) =>
@@ -837,6 +1223,37 @@ mod tests {
     use super::*;
     use crate::test_fixtures::function_with_slot_types_and_sig;
 
+    #[test]
+    fn zero_hidden_dynamic_admission_keeps_heap_reads_and_interface_layouts_out() {
+        let module = Module::new("zero-hidden-admission".into());
+        let scalar = function_with_slot_types_and_sig(
+            vec![Instruction::new(Opcode::Return, 0, 1, 0)],
+            vec![SlotType::Value],
+            1,
+            1,
+            1,
+        );
+        let recipe = SmallFunctionInline::analyze_leaf(0, &scalar, &module).unwrap();
+        assert!(recipe.supports_dynamic_layout(Opcode::CallClosure, 1, 1));
+        assert!(!recipe.supports_dynamic_layout(Opcode::CallIface, 1, 1));
+        assert!(!recipe.supports_dynamic_layout(Opcode::CallClosure, 0, 1));
+        assert!(!recipe.supports_dynamic_layout(Opcode::Call, 1, 1));
+
+        let mut heap_read = function_with_slot_types_and_sig(
+            vec![
+                Instruction::new(Opcode::PtrGet, 1, 0, 0),
+                Instruction::new(Opcode::Return, 1, 1, 0),
+            ],
+            vec![SlotType::GcRef, SlotType::Value],
+            1,
+            1,
+            1,
+        );
+        heap_read.ret_slot_types = vec![SlotType::Value];
+        let recipe = SmallFunctionInline::analyze_leaf(0, &heap_read, &module).unwrap();
+        assert!(!recipe.supports_dynamic_layout(Opcode::CallClosure, 1, 1));
+    }
+
     fn branch(opcode: Opcode, condition: u16, offset: i32) -> Instruction {
         Instruction::with_flags(
             opcode,
@@ -857,8 +1274,8 @@ mod tests {
                 Instruction::new(Opcode::DivI, 8, 7, 10),
                 Instruction::new(Opcode::ConvI2F, 5, 8, 0),
                 Instruction::new(Opcode::DivF, 2, 4, 5),
-                Instruction::new(Opcode::Return, 2, 0, 0),
-                Instruction::new(Opcode::Return, 2, 0, 0),
+                Instruction::new(Opcode::Return, 2, 1, 0),
+                Instruction::new(Opcode::Return, 2, 1, 0),
             ],
             vec![
                 SlotType::Value,
@@ -886,7 +1303,7 @@ mod tests {
         let func = spectral_leaf(2);
         let mut module = Module::new("inline-test".into());
         module.constants.push(Constant::Float(1.0));
-        assert!(SmallFunctionInline::analyze_leaf(&func, &module).is_some());
+        assert!(SmallFunctionInline::analyze_leaf(0, &func, &module).is_some());
     }
 
     #[test]
@@ -894,7 +1311,7 @@ mod tests {
         let func = spectral_leaf(0);
         let mut module = Module::new("inline-test".into());
         module.constants.push(Constant::Float(1.0));
-        assert!(SmallFunctionInline::analyze_leaf(&func, &module).is_none());
+        assert!(SmallFunctionInline::analyze_leaf(0, &func, &module).is_none());
     }
 
     #[test]
@@ -906,7 +1323,7 @@ mod tests {
                 Instruction::new(Opcode::Copy, 3, 1, 0),
                 branch(Opcode::Jump, 0, 2),
                 Instruction::new(Opcode::Copy, 3, 0, 0),
-                Instruction::new(Opcode::Return, 3, 0, 0),
+                Instruction::new(Opcode::Return, 3, 1, 0),
             ],
             vec![
                 SlotType::Value,
@@ -921,7 +1338,7 @@ mod tests {
         func.ret_slot_types = vec![SlotType::Value];
         let module = Module::new("graph-inline-test".into());
         let inline =
-            SmallFunctionInline::analyze_leaf(&func, &module).expect("acyclic inline graph");
+            SmallFunctionInline::analyze_leaf(0, &func, &module).expect("acyclic inline graph");
         assert_eq!(inline.blocks.len(), 4);
         assert_eq!(inline.cost(), 6);
     }
@@ -939,7 +1356,7 @@ mod tests {
             0,
         );
         let module = Module::new("cyclic-inline-test".into());
-        assert!(SmallFunctionInline::analyze_leaf(&func, &module).is_none());
+        assert!(SmallFunctionInline::analyze_leaf(0, &func, &module).is_none());
     }
 
     #[test]
@@ -963,7 +1380,7 @@ mod tests {
         func.ret_slot_types = vec![SlotType::Value];
         let module = Module::new("recursive-inline-test".into());
 
-        assert!(SmallFunctionInline::analyze_leaf(&func, &module).is_none());
+        assert!(SmallFunctionInline::analyze_leaf(0, &func, &module).is_none());
     }
 
     #[test]
@@ -980,6 +1397,10 @@ mod tests {
         );
         func.ret_slot_types = vec![SlotType::GcRef];
         let module = Module::new("recursive-inline-roots".into());
-        assert!(SmallFunctionInline::analyze_leaf(&func, &module).is_none());
+        assert!(SmallFunctionInline::analyze_leaf(0, &func, &module).is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "leaf_inline/chain_tests.rs"]
+mod chain_tests;

@@ -1,0 +1,33 @@
+package main
+
+type Payload struct {
+	Values [128]int
+}
+
+type Getter interface {
+	Get() int
+	Extra() int
+}
+
+type Getter2 interface {
+	Get() int
+}
+
+func (p Payload) Extra() int {
+	return 1
+}
+
+func (p Payload) Get() int {
+	return p.Values[0]
+}
+
+func main() {
+	var p Payload
+	p.Values[0] = 7
+	var source Getter = p
+	var destination Getter2
+	for i := 0; i < 400000; i++ {
+		destination = source
+	}
+	assert(destination.Get() == 7)
+}

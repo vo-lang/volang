@@ -1,0 +1,23 @@
+package main
+
+func mix(x int) int {
+	return (x * 33) ^ 17
+}
+
+func main() {
+	table := []func(int) int{
+		func(x int) int {
+			return mix(x) + 1
+		},
+		func(x int) int {
+			return mix(x) + 2
+		},
+	}
+	total := 0
+	for i := 0; i < 200000; i++ {
+		index := i & 1
+		total += table[index](i & 1023)
+	}
+	assert(total == 3372482880, "dynamic target/value mismatch")
+	println(total)
+}

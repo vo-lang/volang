@@ -98,6 +98,7 @@ fn assert_trapped_prepared_call(out: &PreparedCall) {
     assert!(out.ic_jit_func_ptr.is_null());
     assert_eq!(out.callee_local_slots, 0);
     assert_eq!(out.func_id, 0);
+    assert_eq!(out.ic_arg_offset, 0);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -128,6 +129,7 @@ fn test_context(
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: u32::MAX,
+        runtime_trap_origin: 0,
         current_func_id: u32::MAX,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut::<c_void>(),
@@ -962,6 +964,87 @@ fn vm_jit_closure_ic_061_frame_elided_closure_publishes_native_entry() {
 }
 
 #[test]
+fn captureless_function_ic_uses_zero_hidden_argument_slots() {
+    let mut module = Module::new("jit-closure-ic-publication".to_string());
+    let mut callee = func(false, false, false);
+    callee.is_closure = false;
+    callee.param_count = 1;
+    callee.param_slots = 1;
+    callee.local_slots = 1;
+    callee.slot_types = vec![SlotType::Value];
+    callee.capture_slot_types = Vec::new();
+    callee.code = vec![vo_runtime::instruction::Instruction::new(
+        vo_runtime::instruction::Opcode::Return,
+        0,
+        0,
+        0,
+    )];
+    assert!(vo_jit::can_elide_frame_for_direct_jit(&callee));
+    callee.instruction_metadata = vec![InstructionMetadata::None; 10];
+    callee.instruction_metadata[9] = InstructionMetadata::CallLayout {
+        arg_layout: vec![SlotType::Value],
+        ret_layout: Vec::new(),
+    };
+    module.functions.push(callee);
+
+    let mut gc = Gc::new();
+    let closure_ref = closure::create(&mut gc, 0, 0);
+    let mut itab_cache = ItabCache::new();
+    let mut panic_flag = false;
+    let mut is_user_panic = false;
+    let mut panic_msg = InterfaceSlot::nil();
+    let program_args = Vec::new();
+    let mut sentinel_errors = SentinelErrorCache::new();
+    let output = CaptureSink::new();
+    let mut host_output = None;
+    let mut stack = [0_u64; 16];
+    let mut ctx = test_context(
+        &mut gc,
+        &module,
+        &mut itab_cache,
+        &mut stack,
+        &mut panic_flag,
+        &mut is_user_panic,
+        &mut panic_msg,
+        &program_args,
+        &mut sentinel_errors,
+        &output,
+        &mut host_output,
+    );
+    let mut fiber = Fiber::new(0);
+    attach_current_frame(&mut ctx, &mut fiber, 0);
+    let entry = 1_usize as *const u8;
+    let jit_table = [vo_runtime::jit_api::JitDispatchEntry {
+        native: entry,
+        generation: 1,
+        tier: vo_runtime::jit_api::JitTier::Baseline as u8,
+        reserved: [0; 7],
+    }];
+    ctx.jit_func_table = jit_table.as_ptr();
+    ctx.jit_func_count = jit_table.len() as u32;
+    let mut out = PreparedCall::default();
+
+    let args = [55_u64];
+    let result = jit_prepare_closure_call(
+        &mut ctx,
+        closure_ref as u64,
+        0,
+        0,
+        10,
+        args.as_ptr(),
+        1,
+        &mut out,
+    );
+
+    assert_eq!(result, JitResult::Ok);
+    assert_eq!(out.jit_func_ptr, entry);
+    assert_eq!(out.ic_jit_func_ptr, entry);
+    assert_eq!(out.jit_frame_elided, 1);
+    assert_eq!(out.ic_arg_offset, 0);
+    assert_eq!(stack[0], 55);
+}
+
+#[test]
 fn vm_jit_shadow_capacity_roots_062_prepare_closure_null_push_frame_is_fatal() {
     let mut module = Module::new("jit-closure-null-frame-test".to_string());
     let mut callee = func(false, false, false);
@@ -1014,6 +1097,7 @@ fn vm_jit_shadow_capacity_roots_062_prepare_closure_null_push_frame_is_fatal() {
         jit_may_gc: 1,
         native_link_eligible: 1,
         jit_frame_elided: 0,
+        ic_arg_offset: 1,
         dispatch_generation: 0,
     };
 
@@ -1154,6 +1238,7 @@ fn vm_jit_shadow_capacity_roots_062_prepare_iface_uses_shadow_entry_and_rejects_
         jit_may_gc: 1,
         native_link_eligible: 1,
         jit_frame_elided: 0,
+        ic_arg_offset: 1,
         dispatch_generation: 0,
     };
 

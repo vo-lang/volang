@@ -1,0 +1,22 @@
+package main
+
+func grow(seed int) int {
+	values := make([]int, 0)
+	for i := 0; i < 4096; i++ {
+		values = append(values, seed + i)
+	}
+	sum := 0
+	for _, value := range values {
+		sum += value
+	}
+	return sum
+}
+
+func main() {
+	sum := 0
+	for i := 0; i < 128; i++ {
+		sum += grow(i)
+	}
+	assert(sum == 1106771968)
+	println(sum)
+}

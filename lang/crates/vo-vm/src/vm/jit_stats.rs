@@ -87,7 +87,7 @@ impl JitSideExitReasonStats {
     }
 
     #[inline]
-    #[cfg(any(feature = "jit", test))]
+    #[cfg(any(feature = "native", test))]
     pub(crate) fn increment(&mut self, reason: JitSideExitReason) {
         self.counts[reason.index()] = self.counts[reason.index()].saturating_add(1);
     }
@@ -97,10 +97,13 @@ impl JitSideExitReasonStats {
 pub struct JitExecutionStats {
     /// VM-to-JIT full-function dispatches that reached the native entry.
     pub function_entries: u64,
+    /// Static AOT recovery-body entries, included in function_entries.
+    pub aot_continuation_entries: u64,
     /// Loop OSR dispatches that reached the native entry.
     pub loop_entries: u64,
     pub side_exit_reasons: JitSideExitReasonStats,
     pub low_progress_function_disables: u64,
+    pub low_progress_continuation_disables: u64,
     pub low_progress_loop_disables: u64,
     /// Successfully published full-function artifacts for this VM owner.
     pub function_compilations: u64,

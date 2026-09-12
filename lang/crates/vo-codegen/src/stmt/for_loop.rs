@@ -3,6 +3,8 @@
 //!
 //! Note: for-range loops are in for_range.rs
 
+mod invariants;
+
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_common::symbol::Symbol;
 use vo_common_core::instruction::Opcode;
@@ -23,25 +25,32 @@ use super::{compile_block, compile_stmt};
 /// This means:
 /// - Live one-slot stack variable: SAFE (ForLoop sees body updates)
 /// - Global/captured/heap-boxed variable: NOT SAFE (expression lowering copies it)
-/// - Constant literal: SAFE (never changes)
-/// - Expressions (n-1, len(arr)): NOT SAFE (evaluated once, stored in temp slot)
+/// - Checked constant: SAFE (never changes)
+/// - len of a proven invariant local descriptor: SAFE
+/// - Other computed expressions: require ordinary per-iteration evaluation
 ///
 /// Go semantics: condition is re-evaluated every iteration.
 /// So `for i := 0; i < n-1; i++ { n = 10 }` should see updated n-1 each time.
 /// ForLoop can't do this - it evaluates n-1 once and stores in a slot.
 fn is_safe_limit_expr(
-    expr: &Expr,
+    mut expr: &Expr,
+    body: &vo_syntax::ast::Block,
     loop_var: Symbol,
     func: &FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> bool {
+    while let ExprKind::Paren(inner) = &expr.kind {
+        expr = inner;
+    }
+    if info.try_const_int(expr).is_some() || invariants::stable_length(expr, body, func, info) {
+        return true;
+    }
     match &expr.kind {
         // A constant identifier is immutable. A variable identifier is safe
         // only when codegen will read its live one-slot stack storage; globals,
         // captures, and heap-boxed locals would otherwise be snapshotted once.
         ExprKind::Ident(ident) => {
-            info.try_const_int(expr).is_some()
-                || ident.symbol == loop_var
+            ident.symbol == loop_var
                 || matches!(
                     func.lookup_local_object(info.get_use(ident)),
                     Some(StorageKind::StackValue { slots: 1, .. })
@@ -49,12 +58,7 @@ fn is_safe_limit_expr(
         }
         // Constant literals: never change, always safe
         ExprKind::IntLit(_) => true,
-        // Parenthesized: check inner
-        ExprKind::Paren(inner) => is_safe_limit_expr(inner, loop_var, func, info),
-        // Everything else: NOT safe
-        // - Binary (n-1): evaluated once, stored in temp
-        // - Call (len(arr)): evaluated once
-        // - Selector, Conversion, etc: may involve computation
+        // Unproved computations must be re-evaluated on every iteration.
         _ => false,
     }
 }
@@ -83,7 +87,7 @@ struct SimpleForPattern<'a> {
 /// Also supports `i += 1` and `i -= 1` as post expressions.
 ///
 /// NOT supported (fallback to traditional loop):
-/// - Complex limit expressions (n-1, len(arr)): evaluated once, won't update
+/// - Computed limits without an invariant proof
 /// - Function calls in limit (getLimit()): side effects
 /// - Escaped loop vars: Go 1.22 per-iteration heap alloc
 ///
@@ -92,6 +96,7 @@ fn try_match_simple_for<'a>(
     init: Option<&'a Stmt>,
     cond: Option<&'a Expr>,
     post: Option<&'a Stmt>,
+    body: &vo_syntax::ast::Block,
     func: &FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Option<SimpleForPattern<'a>> {
@@ -144,8 +149,8 @@ fn try_match_simple_for<'a>(
         return None;
     }
 
-    // Limit must be single variable or constant (not expression)
-    if !is_safe_limit_expr(limit_expr, var_name, func, info) {
+    // The limit must stay valid in one slot across the loop body.
+    if !is_safe_limit_expr(limit_expr, body, var_name, func, info) {
         return None;
     }
 
@@ -215,7 +220,7 @@ fn compile_simple_for(
     func.define_local_at(pattern.var_name, idx_slot, 1);
     func.bind_local_object(pattern.var_name, Some(pattern.obj_key))?;
 
-    // Compile limit expression (must be single variable or constant)
+    // Compile the live scalar limit or the proven invariant expression once.
     let limit_slot = crate::expr::compile_expr(pattern.limit_expr, ctx, func, info)?;
 
     // Initial bounds check BEFORE HINT_LOOP (executed once)
@@ -393,11 +398,10 @@ pub(super) fn compile_for_cond(
     func.enter_loop(label);
     let loop_start = func.current_pc();
 
-    let end_jump = if let Some(cond) = cond_opt {
-        let cond_reg = crate::expr::compile_expr(cond, ctx, func, info)?;
-        Some(func.emit_jump(Opcode::JumpIfNot, cond_reg))
+    let end_jumps = if let Some(cond) = cond_opt {
+        crate::expr::condition::compile_jump(cond, false, ctx, func, info)?
     } else {
-        None
+        Vec::new()
     };
 
     compile_block(&for_stmt.body, ctx, func, info)?;
@@ -409,7 +413,7 @@ pub(super) fn compile_for_cond(
     func.emit_jump_to(Opcode::Jump, 0, loop_start);
 
     let exit_pc = func.current_pc();
-    if let Some(j) = end_jump {
+    for j in end_jumps {
         func.patch_jump(j, exit_pc);
     }
 
@@ -440,7 +444,7 @@ pub(super) fn compile_for_three(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     // Try to use ForLoop optimization for simple pattern: for i := 0; i < n; i++
-    if let Some(pattern) = try_match_simple_for(init, cond, post, func, info) {
+    if let Some(pattern) = try_match_simple_for(init, cond, post, &for_stmt.body, func, info) {
         return compile_simple_for(for_stmt, pattern, label, ctx, func, info);
     }
 
@@ -560,11 +564,10 @@ pub(super) fn compile_for_three(
     func.enter_loop(label);
     let loop_start = func.current_pc();
 
-    let end_jump = if let Some(cond) = cond {
-        let cond_reg = crate::expr::compile_expr(cond, ctx, func, info)?;
-        Some(func.emit_jump(Opcode::JumpIfNot, cond_reg))
+    let end_jumps = if let Some(cond) = cond {
+        crate::expr::condition::compile_jump(cond, false, ctx, func, info)?
     } else {
-        None
+        Vec::new()
     };
 
     compile_block(&for_stmt.body, ctx, func, info)?;
@@ -586,7 +589,7 @@ pub(super) fn compile_for_three(
     func.emit_jump_to(Opcode::Jump, 0, loop_start);
 
     let exit_pc = func.current_pc();
-    if let Some(j) = end_jump {
+    for j in end_jumps {
         func.patch_jump(j, exit_pc);
     }
 

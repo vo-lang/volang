@@ -1,0 +1,43 @@
+package main
+
+func scalar0(x int) int {
+    return (x * 1664525 + 1013904223) & 65535
+}
+
+func scalar1(x int) int {
+    return scalar0(x) + 1
+}
+
+func scalar2(x int) int {
+    return scalar1(x) + 1
+}
+
+func scalar3(x int) int {
+    return scalar2(x) + 1
+}
+
+func scalar4(x int) int {
+    return scalar3(x) + 1
+}
+
+func scalar5(x int) int {
+    return scalar4(x) + 1
+}
+
+func scalar6(x int) int {
+    return scalar5(x) + 1
+}
+
+func scalar7(x int) int {
+    return scalar6(x) + 1
+}
+
+func main() {
+    sum := 0
+    for i := 0; i < 2000000; i++ {
+        sum += scalar7(i & 1023)
+    }
+    // Expected value sums the 1024-input period plus the final remainder.
+    assert(sum == 65598918080)
+    println(sum)
+}

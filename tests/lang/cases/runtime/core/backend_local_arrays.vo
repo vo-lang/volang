@@ -1,0 +1,177 @@
+package main
+
+import "runtime/mem"
+
+type Node struct {
+	value int
+}
+
+type Pair struct {
+	left *Node
+	text string
+}
+
+var shared [3]int
+
+func mutate() int {
+	shared[0] = 99
+	return 7
+}
+
+func fromGlobal() {
+	shared = [3]int{1, 2, 3}
+	a, marker := shared, mutate()
+	assert(marker == 7 && a[0] == 1 && shared[0] == 99)
+	var b, next = shared, mutate()
+	b[0] = 11
+	assert(next == 7 && shared[0] == 99)
+	{
+		a, b := a, b
+		a[1] = 41
+		b[1] = 42
+		assert(a[1] == 41 && b[1] == 42)
+	}
+	assert(a[1] == 2 && b[1] == 2)
+}
+
+func localValues(i int) int {
+	a := [4]int{i, i + 1, i + 2, i + 3}
+	b := a
+	b[0] = 100
+	var c = [8]int{3: i, 7: i + 7}
+	d := [2][3]uint8{{1, 2, uint8(i)}, {4, 5, 6}}
+	e := d
+	e[0][0] = 99
+	assert(a[0] == i && b[0] == 100 && d[0][0] == 1)
+	assert(c[0] == 0 && c[3] == i && c[7] == i + 7)
+	assert(d[0][2] == uint8(i) && e[1][2] == 6)
+	return a[i & 3] + c[3]
+}
+
+func roots(i int) {
+	x := Node{value: i + 10}
+	a := [2]Pair{{&x, "first"}, {nil, "second"}}
+	b := a
+	a[0].text = "changed"
+	var boxed [2]any = [2]any{b[0], i}
+	assert(mem.GCCollect())
+	assert(b[0].left.value == i + 10 && b[0].text == "first")
+	pair := boxed[0].(Pair)
+	assert(pair.left.value == i + 10 && pair.text == "first")
+	assert(boxed[1].(int) == i)
+}
+
+func escaping(i int) {
+	a := [3]int{i, i + 1, i + 2}
+	view := a[:]
+	read := func() int { return a[0] }
+	b := a
+	a = [3]int{i + 3, i + 4, i + 5}
+	assert(view[0] == i + 3 && read() == i + 3 && b[0] == i)
+	assert(mem.GCCollect())
+	view[0] = 55
+	assert(read() == 55 && b[0] == i)
+}
+
+func failedInitializer() {
+	value := [2]int{7, 8}
+	defer func() {
+		assert(recover() != nil)
+		assert(value[0] == 7 && value[1] == 8)
+	}()
+	value = [2]int{1, explode()}
+	panic("unreachable")
+}
+
+func explode() int {
+	panic("element")
+}
+
+func arrayArgument(a [2]Pair, index int) int {
+	copy := a[index]
+	a[index].text = "callee"
+	assert(mem.GCCollect())
+	assert(copy.text == "argument")
+	return copy.left.value
+}
+
+func flatArguments(i int) {
+	node := Node{value: i}
+	a := [2]Pair{{&node, "argument"}, {&node, "argument"}}
+	assert(arrayArgument(a, i & 1) == i)
+	assert(a[0].text == "argument" && a[1].text == "argument")
+}
+
+func scalarProjection(a [4]int, i int, j int) (int, [4]int) {
+	a[i] = a[j]
+	return a[i], a
+}
+
+func narrowProjection(a [3][2]uint8, i int, j int) [3][2]uint8 {
+	a[i] = a[j]
+	return a
+}
+
+func referenceProjection(a [3]*Node, i int, j int) [3]*Node {
+	a[i] = a[j]
+	return a
+}
+
+func emptyProjection(a [3]struct{}, i int, j int) [3]struct{} {
+	a[i] = a[j]
+	return a
+}
+
+func typedAggregates(i int) {
+	a := [4]int{i, i + 1, i + 2, i + 3}
+	index, source := i & 3, (i + 1) & 3
+	value, copied := scalarProjection(a, index, source)
+	assert(value == a[source] && copied[index] == a[source])
+	for k := 0; k < 4; k++ {
+		if k != index { assert(copied[k] == a[k]) }
+		assert(a[k] == i + k)
+	}
+	narrow := [3][2]uint8{{uint8(i), uint8(i + 1)}, {3, 4}, {5, 6}}
+	wide := narrowProjection(narrow, i % 3, (i + 1) % 3)
+	assert(wide[i % 3] == narrow[(i + 1) % 3])
+	assert(narrow[0][0] == uint8(i))
+	left, right := Node{value: i}, Node{value: i + 1}
+	nodes := [3]*Node{&left, &right, nil}
+	refs := referenceProjection(nodes, i % 3, (i + 1) % 3)
+	assert(mem.GCCollect())
+	assert(refs[i % 3] == nodes[(i + 1) % 3])
+	assert(nodes[0].value == i && nodes[1].value == i + 1)
+	empty := [3]struct{}{}
+	result := emptyProjection(empty, i % 3, (i + 1) % 3)
+	assert(len(result) == 3)
+}
+
+func projectionBounds() {
+	a := [4]int{1, 2, 3, 4}
+	returned := false
+	defer func() {
+		assert(recover() != nil && !returned)
+		assert(a[0] == 1 && a[3] == 4)
+	}()
+	_, _ = scalarProjection(a, -1, 0)
+	returned = true
+	panic("bounds check was skipped")
+}
+
+func main() {
+	fromGlobal()
+	sum := 0
+	for i := 0; i < 300; i++ {
+		sum += localValues(i)
+		if i % 31 == 0 {
+			typedAggregates(i)
+			flatArguments(i)
+			roots(i)
+			escaping(i)
+		}
+	}
+	assert(sum == 90150)
+	projectionBounds()
+	failedInitializer()
+	println("local arrays ok")
+}

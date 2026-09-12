@@ -1,0 +1,15 @@
+package main
+func main() {
+    keys := make([][4]int, 512)
+    m := make(map[[4]int]int)
+    for i := 0; i < 512; i++ {
+        keys[i] = [4]int{i, i+1, i+2, i+3}
+        m[keys[i]] = i * 3 + 1
+    }
+    sum := 0
+    for round := 0; round < 1024; round++ {
+        for i := 0; i < 512; i++ { sum += m[keys[i]] }
+    }
+    assert(sum == 402391040)
+    println(sum)
+}

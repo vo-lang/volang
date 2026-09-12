@@ -348,3 +348,130 @@ fn struct_key_map_new_module(key_meta: ValueMeta, key_rttid_const: i64) -> Modul
     module.functions.push(func);
     module
 }
+
+#[test]
+fn float32_opcodes_require_scalar_bits_and_boolean_comparison_results() {
+    for opcode in [
+        Opcode::AddF32,
+        Opcode::SubF32,
+        Opcode::MulF32,
+        Opcode::DivF32,
+        Opcode::NegF32,
+        Opcode::EqF32,
+        Opcode::NeF32,
+        Opcode::LtF32,
+        Opcode::LeF32,
+        Opcode::GtF32,
+        Opcode::GeF32,
+    ] {
+        let comparison = matches!(
+            opcode,
+            Opcode::EqF32
+                | Opcode::NeF32
+                | Opcode::LtF32
+                | Opcode::LeF32
+                | Opcode::GtF32
+                | Opcode::GeF32
+        );
+        for operand in [SlotType::Value, SlotType::Float] {
+            let destination = if comparison { SlotType::Value } else { operand };
+            let mut function = function_with_slot_types(vec![operand, operand, destination]);
+            function.code = vec![
+                Instruction::new(opcode, 2, 0, 1),
+                Instruction::new(Opcode::Return, 0, 0, 0),
+            ];
+            function.instruction_metadata = vec![InstructionMetadata::None; 2];
+            let mut module = Module::new("f32-slot-contract".into());
+            module.functions.push(function);
+            super::verify_module(&module).unwrap();
+            for slot in if opcode == Opcode::NegF32 {
+                &[0, 2][..]
+            } else {
+                &[0, 1, 2][..]
+            } {
+                let mut invalid = module.clone();
+                invalid.functions[0].slot_types[*slot] = SlotType::GcRef;
+                assert!(
+                    super::verify_module(&invalid).is_err(),
+                    "{opcode:?} slot {slot}"
+                );
+            }
+            if comparison {
+                module.functions[0].slot_types[2] = SlotType::Float;
+                assert!(
+                    super::verify_module(&module).is_err(),
+                    "{opcode:?} boolean destination"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn transfer_scratch_reads_overlapping_copies_from_the_complete_input() {
+    let module = Module::new("overlapping-transfer".into());
+    let mut func = function_with_slot_types(vec![SlotType::Value; 3]);
+    func.code.push(Instruction::new(Opcode::CopyN, 1, 0, 2));
+    func.instruction_metadata.push(InstructionMetadata::None);
+    let slots = [0, 1, 2];
+    let input = [
+        ConstantFact::Int(11),
+        ConstantFact::Int(22),
+        ConstantFact::Int(33),
+    ];
+    let mut output = [ConstantFact::Conflict; 3];
+    apply_constant_fact_transfer(&func, &module, 0, &slots, &input, &mut output);
+    assert_eq!(
+        output,
+        [
+            ConstantFact::Int(11),
+            ConstantFact::Int(11),
+            ConstantFact::Int(22)
+        ]
+    );
+    assert_eq!(
+        input,
+        [
+            ConstantFact::Int(11),
+            ConstantFact::Int(22),
+            ConstantFact::Int(33)
+        ]
+    );
+
+    let constants = ConstantFactAnalysis {
+        slots: Vec::new(),
+        before: Vec::new(),
+    };
+    let input = [
+        IndexCheckFact::Checked { len: 11 },
+        IndexCheckFact::Checked { len: 22 },
+        IndexCheckFact::Checked { len: 33 },
+    ];
+    let mut output = [IndexCheckFact::Conflict; 3];
+    apply_index_check_transfer(&func, &module, &constants, 0, &slots, &input, &mut output);
+    assert_eq!(
+        output,
+        [
+            IndexCheckFact::Checked { len: 11 },
+            IndexCheckFact::Checked { len: 11 },
+            IndexCheckFact::Checked { len: 22 }
+        ]
+    );
+
+    let queue = ContainerLayoutFact::Queue {
+        elem_layout: Arc::from([SlotType::Value]),
+    };
+    let map = ContainerLayoutFact::Map {
+        key_layout: Arc::from([SlotType::Value]),
+        val_layout: Arc::from([SlotType::GcRef]),
+    };
+    let input = [queue.clone(), map.clone(), ContainerLayoutFact::Unknown];
+    let mut output = core::array::from_fn::<_, 3, _>(|_| ContainerLayoutFact::Conflict);
+    apply_container_layout_transfer(&func, &module, 0, &slots, &[None], &input, &mut output);
+    assert_eq!(output, [queue.clone(), queue, map]);
+
+    // A reused row must overwrite stale facts even for an instruction with no writes.
+    func.code[0] = Instruction::new(Opcode::Hint, 0, 0, 0);
+    apply_container_layout_transfer(&func, &module, 0, &slots, &[None], &input, &mut output);
+    assert_eq!(output, input);
+}

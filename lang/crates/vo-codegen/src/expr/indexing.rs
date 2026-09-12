@@ -7,7 +7,7 @@ use vo_syntax::ast::Expr;
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
 use crate::func::FuncBuilder;
-use crate::type_info::{encode_i32, TypeInfoWrapper};
+use crate::type_info::TypeInfoWrapper;
 
 use super::{compile_expr, compile_map_key_expr};
 
@@ -18,15 +18,9 @@ fn emit_u64_layout_constant(
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
 ) -> Result<(), CodegenError> {
-    if let Ok(value) = i32::try_from(value) {
-        let (b, c) = encode_i32(value);
-        func.emit_op(Opcode::LoadInt, dst, b, c);
-        return Ok(());
-    }
     let value = i64::try_from(value)
         .map_err(|_| CodegenError::Internal(format!("{label} exceeds fixed-width int")))?;
-    let constant = ctx.const_int(value);
-    func.emit_op(Opcode::LoadConst, dst, constant, 0);
+    func.emit_int(dst, value, ctx);
     Ok(())
 }
 
@@ -43,23 +37,24 @@ pub fn compile_index(
 
     if info.is_map(container_type) {
         let map_value = compile_expr(&idx.expr, ctx, func, info)?;
-        let map_reg = func.alloc_slots(&[SlotType::GcBase]);
-        func.emit_copy(map_reg, map_value, 1);
+        let map_reg = if super::preserves_preexisting_storage(&idx.index) {
+            map_value
+        } else {
+            let snapshot = func.alloc_slots(&[SlotType::GcBase]);
+            func.emit_copy(snapshot, map_value, 1);
+            snapshot
+        };
         let (key_type, val_type) = info.map_key_val_types(container_type);
         let key_slot_types = info.type_slot_types(key_type);
         let val_slot_types = info.type_slot_types(val_type);
-        let key_slots = info
-            .checked_slot_count(key_slot_types.len())
-            .map_err(CodegenError::Internal)?;
+        // Key lowering already owns a contiguous, correctly converted value.
         let key_reg = compile_map_key_expr(&idx.index, key_type, ctx, func, info)?;
         let result_type = info.expr_type(expr.id);
         let is_comma_ok = info.is_tuple(result_type);
-        let key_start = func.alloc_slots(&key_slot_types);
-        func.emit_copy(key_start, key_reg, key_slots);
         func.emit_map_get(
             dst,
             map_reg,
-            key_start,
+            key_reg,
             &key_slot_types,
             &val_slot_types,
             is_comma_ok,
@@ -173,17 +168,13 @@ pub fn compile_slice_expr(
     } else if info.is_slice(container_type) {
         func.emit_op(Opcode::SliceLen, params_start + 1, container_reg, 0);
     } else if info.is_array(container_type) {
-        let len = info.array_len(container_type);
-        if let Ok(len) = i32::try_from(len) {
-            let (b, c) = encode_i32(len);
-            func.emit_op(Opcode::LoadInt, params_start + 1, b, c);
-        } else {
-            let len = i64::try_from(len).map_err(|_| {
-                CodegenError::Internal("array length exceeds fixed-width int".to_string())
-            })?;
-            let constant = ctx.const_int(len);
-            func.emit_op(Opcode::LoadConst, params_start + 1, constant, 0);
-        }
+        emit_u64_layout_constant(
+            params_start + 1,
+            info.array_len(container_type),
+            "array length",
+            ctx,
+            func,
+        )?;
     } else {
         func.emit_op(Opcode::LoadInt, params_start + 1, 0, 0);
     }

@@ -40,6 +40,7 @@ fn dynamic_ic_match(
 
 struct DynamicCallLowering {
     plan: DynamicCallPlan,
+    instruction: Instruction,
     ctx: Value,
     arg_start: usize,
     arg_slots: usize,
@@ -103,6 +104,7 @@ impl DynamicCallLowering {
 
         Ok(Self {
             plan,
+            instruction: *inst,
             ctx,
             arg_start,
             arg_slots,
@@ -189,6 +191,13 @@ impl DynamicCallLowering {
         merge_block: Block,
         capacity_materialize_block: Block,
     ) -> Result<(), crate::JitError> {
+        emitter.try_emit_dynamic_inline_hit(crate::translator::DynamicInlineHit {
+            instruction: self.instruction,
+            func_id: fields.func_id,
+            arg_offset: fields.arg_offset,
+            return_ptr: self.ret_ptr,
+            merge: merge_block,
+        })?;
         emit_ic_hit_call_and_result(
             emitter,
             IcHitParams {
@@ -199,6 +208,7 @@ impl DynamicCallLowering {
                 ic_func_id: fields.func_id,
                 ic_may_gc: fields.may_gc,
                 ic_frame_elided: fields.frame_elided,
+                ic_arg_offset: fields.arg_offset,
                 ret_ptr: self.ret_ptr,
                 caller_bp: self.caller_bp,
                 old_fiber_sp: self.old_fiber_sp,

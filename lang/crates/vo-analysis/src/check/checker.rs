@@ -476,24 +476,32 @@ impl Checker {
         files: &[File],
         importer: Option<&mut dyn Importer>,
     ) -> Result<PackageKey, ()> {
-        self.constant_fold_work_bytes = 0;
-        self.check_files_pkg_name(files)?;
-        self.collect_objects(files, importer);
-        self.package_objects();
-        self.process_delayed(0);
-        self.init_order();
-        self.unused_imports();
-        self.record_untyped();
+        vo_common::compiler_phase!(TypeCheck, {
+            self.constant_fold_work_bytes = 0;
+            self.check_files_pkg_name(files)?;
+            self.collect_objects(files, importer);
+            self.package_objects();
+            self.process_delayed(0);
+            self.init_order();
+            self.unused_imports();
+            self.record_untyped();
+            Ok::<(), ()>(())
+        })?;
 
-        // Escape analysis pass
-        let escape_result = super::escape::analyze(files, &self.result, &self.tc_objs);
+        // Escape and capture share one traversal.
+        let escape_result = vo_common::compiler_phase!(
+            EscapeCapture,
+            super::escape::analyze(files, &self.result, &self.tc_objs)
+        );
         self.result.escaped_vars = escape_result.escaped;
         self.result.closure_captures = escape_result.closure_captures;
         self.result.loop_defined_vars = escape_result.loop_defined_vars;
 
         // go @(island) sendability post-pass (needs closure_captures from escape analysis)
-        let go_island_diags =
-            super::go_island::check_go_island_sendability(files, &self.result, &self.tc_objs);
+        let go_island_diags = vo_common::compiler_phase!(
+            Sendability,
+            super::go_island::check_go_island_sendability(files, &self.result, &self.tc_objs)
+        );
         for diag in go_island_diags {
             self.error_code_msg(diag.code, diag.span, diag.message);
         }

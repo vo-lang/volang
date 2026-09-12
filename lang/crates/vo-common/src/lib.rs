@@ -9,7 +9,21 @@
 //! - Common type definitions (ValueKind) - re-exported from vo-common-core
 
 pub mod abi;
+#[cfg(feature = "compiler-profile")]
+pub mod compiler_profile;
 pub mod diagnostics;
+
+/// Execute an expression without diagnostic work in ordinary compiler builds.
+#[cfg(not(feature = "compiler-profile"))]
+#[macro_export]
+macro_rules! compiler_phase {
+    ($phase:ident, $operation:expr) => {{
+        // Keep return/? scoped identically in profiled and ordinary builds.
+        #[allow(clippy::redundant_closure_call)]
+        (|| $operation)()
+    }};
+}
+
 pub mod slot_layout;
 pub mod source;
 pub mod span;

@@ -219,7 +219,7 @@ pub extern "C" fn jit_push_resume_point(
     }
 
     // Push to resume_stack (builds chain in reverse: innermost callee first, outermost caller last)
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     {
         let pending = fiber.resume_stack.len().saturating_add(1);
         if fiber.try_reserve_call_frames(pending).is_err() {
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn vm_jit_shadow_capacity_roots_062_push_frame_capacity_before_publication_is_fatal() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-push-frame-contract-test".to_string());
         module.functions.push(function(1));
         vm.load(module).unwrap();
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn vm_jit_resume_point_abi_006_rejects_ret_register_width_drift_before_push() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         vm.finish_load(Module::new("jit-resume-point-contract-test".to_string()));
         let mut fiber = Fiber::new(7);
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn vm_jit_shadow_capacity_roots_062_push_resume_point_capacity_before_publication_is_fatal() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-resume-point-capacity-test".to_string());
         module.functions.push(function(1));
         vm.finish_load(module);
@@ -360,7 +360,7 @@ mod tests {
         ret_reg: u32,
         ret_slots: u32,
     ) {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         vm.finish_load(module);
         let mut fiber = Fiber::new(7);
         fiber.push_frame(current_func_id, 1, 0, 0);
@@ -386,7 +386,7 @@ mod tests {
         ret_reg: u32,
         ret_slots: u32,
     ) {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         vm.finish_load(module);
         let mut fiber = Fiber::new(7);
         fiber.push_frame(current_func_id, 1, 0, 0);

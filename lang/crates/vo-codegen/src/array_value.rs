@@ -14,13 +14,16 @@ use vo_syntax::ast::{Expr, ExprKind};
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
 use crate::func::{ElemLayoutSpec, ExprSource, FuncBuilder, StorageKind};
-use crate::type_info::{encode_i32, TypeInfoWrapper};
+use crate::type_info::TypeInfoWrapper;
 
 /// A prepared fixed-array value and its physical representation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ArrayValue {
     /// Logical array elements laid out consecutively in VM value slots.
     FlatSlots(u16),
+    /// A freshly evaluated flattened snapshot, independent of every existing
+    /// variable. A new local may adopt this interval after all RHS evaluation.
+    OwnedFlatSlots(u16),
     /// A canonical array owned elsewhere. Value-consuming boundaries must copy it.
     BorrowedRef(u16),
     /// A fresh canonical array that already represents an independent value copy.
@@ -37,7 +40,7 @@ impl ArrayValue {
         info: &TypeInfoWrapper,
     ) -> Result<u16, CodegenError> {
         match self {
-            Self::FlatSlots(slot) => Ok(slot),
+            Self::FlatSlots(slot) | Self::OwnedFlatSlots(slot) => Ok(slot),
             Self::BorrowedRef(array_ref) | Self::OwnedRef(array_ref) => {
                 let slot_types = info
                     .try_type_slot_types(array_type)
@@ -59,7 +62,7 @@ impl ArrayValue {
         info: &TypeInfoWrapper,
     ) -> Result<(), CodegenError> {
         match self {
-            Self::FlatSlots(src) => {
+            Self::FlatSlots(src) | Self::OwnedFlatSlots(src) => {
                 func.emit_copy(dst, src, info.type_slot_count(array_type));
                 Ok(())
             }
@@ -81,7 +84,9 @@ impl ArrayValue {
         match self {
             Self::OwnedRef(array_ref) => Ok(array_ref),
             Self::BorrowedRef(array_ref) => clone_ref(array_ref, array_type, ctx, func, info),
-            Self::FlatSlots(src) => materialize_flat(src, array_type, ctx, func, info),
+            Self::FlatSlots(src) | Self::OwnedFlatSlots(src) => {
+                materialize_flat(src, array_type, ctx, func, info)
+            }
         }
     }
 
@@ -96,7 +101,9 @@ impl ArrayValue {
         info: &TypeInfoWrapper,
     ) -> Result<(), CodegenError> {
         match self {
-            Self::FlatSlots(src) => emit_flat_to_ref(src, dst_ref, array_type, ctx, func, info),
+            Self::FlatSlots(src) | Self::OwnedFlatSlots(src) => {
+                emit_flat_to_ref(src, dst_ref, array_type, ctx, func, info)
+            }
             Self::BorrowedRef(src_ref) | Self::OwnedRef(src_ref) => {
                 emit_ref_to_ref(src_ref, dst_ref, array_type, ctx, func, info)
             }
@@ -104,9 +111,45 @@ impl ArrayValue {
     }
 }
 
+/// Evaluate directly into an existing flattened value destination. A known
+/// frame location can be copied immediately, before the next argument or RHS
+/// is evaluated. General expressions still use the established snapshot and
+/// canonical-array paths, retaining allocation and evaluation order.
+pub(crate) fn emit_expr_to_flat(
+    expr: &Expr,
+    dst: u16,
+    array_type: TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    match crate::expr::get_expr_source(expr, ctx, func, info) {
+        ExprSource::Location(
+            storage @ (StorageKind::StackValue { .. } | StorageKind::StackArray { .. }),
+        ) => func.with_source_span(expr.span, |func| {
+            func.emit_storage_load(storage, dst);
+            Ok(())
+        }),
+        _ => prepare_expr(expr, array_type, ctx, func, info)?
+            .emit_to_flat(dst, array_type, ctx, func, info),
+    }
+}
+
 /// Prepare an array expression without erasing its physical representation.
 /// The expression is evaluated exactly once.
 pub(crate) fn prepare_expr(
+    expr: &Expr,
+    array_type: TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<ArrayValue, CodegenError> {
+    func.with_source_span(expr.span, |func| {
+        prepare_expr_inner(expr, array_type, ctx, func, info)
+    })
+}
+
+fn prepare_expr_inner(
     expr: &Expr,
     array_type: TypeKey,
     ctx: &mut CodegenContext,
@@ -128,6 +171,41 @@ pub(crate) fn prepare_expr(
     let flat = func.alloc_slots(&slot_types);
     crate::expr::compile_expr_to(expr, flat, ctx, func, info)?;
     Ok(ArrayValue::FlatSlots(flat))
+}
+
+/// Evaluate a declaration initializer before publishing any new binding.
+/// The escape/boxing owner chooses whether the local requires canonical heap
+/// identity. A flat initializer owns an independent snapshot, including when
+/// the source is a captured/global array or a later RHS mutates that source.
+pub(crate) fn prepare_initializer(
+    expr: &Expr,
+    array_type: TypeKey,
+    needs_box: bool,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<ArrayValue, CodegenError> {
+    if needs_box {
+        let value = prepare_expr(expr, array_type, ctx, func, info)?;
+        return match value {
+            ArrayValue::BorrowedRef(_) => value
+                .into_owned_ref(array_type, ctx, func, info)
+                .map(ArrayValue::OwnedRef),
+            value => Ok(value),
+        };
+    }
+    func.with_source_span(expr.span, |func| {
+        let slot_types = info
+            .try_type_slot_types(array_type)
+            .map_err(CodegenError::Internal)?;
+        let flat = func.alloc_slots(&slot_types);
+        if let Some(array_ref) = borrowed_expr_ref(expr, ctx, func, info) {
+            emit_ref_to_flat(array_ref, flat, array_type, ctx, func, info)?;
+        } else {
+            crate::expr::compile_expr_to(expr, flat, ctx, func, info)?;
+        }
+        Ok(ArrayValue::OwnedFlatSlots(flat))
+    })
 }
 
 /// Prepare an array expression as an independent canonical value snapshot.
@@ -237,8 +315,7 @@ fn compile_literal_to_owned_ref(
     for elem in &literal.elems {
         let index = crate::expr::literal::resolve_elem_index(elem, &mut current_index, info)?;
         crate::expr::compile_elem_to(&elem.value, value, elem_type, ctx, func, info)?;
-        let index_idx = ctx.const_int(index as i64);
-        func.emit_op(Opcode::LoadConst, index_reg, index_idx, 0);
+        load_array_index(index_reg, index, ctx, func);
         func.emit_array_set(
             array_ref,
             index_reg,
@@ -283,14 +360,7 @@ pub(crate) fn emit_new_ref_at(
     func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
 
     let len_reg = func.alloc_slots(&[SlotType::Value]);
-    if let Ok(len32) = i32::try_from(array_len) {
-        let (b, c) = encode_i32(len32);
-        func.emit_op(Opcode::LoadInt, len_reg, b, c);
-    } else {
-        // VM slots are u64. Constant::Int preserves the full bit pattern.
-        let len_idx = ctx.const_int(array_len as i64);
-        func.emit_op(Opcode::LoadConst, len_reg, len_idx, 0);
-    }
+    func.emit_int(len_reg, array_len as i64, ctx);
     func.emit_array_new(
         dst,
         meta_reg,
@@ -450,13 +520,7 @@ fn checked_element_slot(
 }
 
 fn load_array_index(index_reg: u16, index: u64, ctx: &mut CodegenContext, func: &mut FuncBuilder) {
-    if let Ok(index32) = i32::try_from(index) {
-        let (b, c) = encode_i32(index32);
-        func.emit_op(Opcode::LoadInt, index_reg, b, c);
-    } else {
-        let index_idx = ctx.const_int(index as i64);
-        func.emit_op(Opcode::LoadConst, index_reg, index_idx, 0);
-    }
+    func.emit_int(index_reg, index as i64, ctx);
 }
 
 pub(crate) fn validate_len_for_pointer_width(

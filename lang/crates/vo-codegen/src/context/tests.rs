@@ -846,10 +846,25 @@ fn function_and_serialized_table_id_boundaries_are_checked_without_allocations()
 fn finish_assigns_one_dense_dynamic_callsite_identity_space() {
     let mut ctx = CodegenContext::new("dynamic-callsite-identities");
     let mut first = minimal_function(3);
-    first.code[0] = Instruction::with_flags(Opcode::CallClosure, 0xff, 0, 0, 0xffff);
+    first.local_slots = 3;
+    first.slot_types = vec![SlotType::Interface0, SlotType::Interface1, SlotType::GcBase];
+    first.code[0] = Instruction::with_flags(Opcode::CallClosure, 0xff, 2, 0, 0xffff);
     first.code[1] = Instruction::with_flags(Opcode::CallIface, 0xff, 0, 0, 0xffff);
+    first.instruction_metadata[0] = InstructionMetadata::CallLayout {
+        arg_layout: Vec::new(),
+        ret_layout: Vec::new(),
+    };
+    first.instruction_metadata[1] = InstructionMetadata::CallIfaceLayout {
+        iface_meta_id: 0,
+        method_idx: 0,
+        arg_layout: Vec::new(),
+        ret_layout: Vec::new(),
+    };
     let mut second = minimal_function(2);
+    second.local_slots = 1;
+    second.slot_types = vec![SlotType::GcBase];
     second.code[0] = Instruction::with_flags(Opcode::CallClosure, 0xff, 0, 0, 0xffff);
+    second.instruction_metadata[0] = first.instruction_metadata[0].clone();
     ctx.module.functions.extend([first, second]);
 
     let module = ctx.finish().expect("assign dynamic callsite identities");

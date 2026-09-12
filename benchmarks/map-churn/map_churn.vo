@@ -1,0 +1,14 @@
+package main
+func main() {
+    m := make(map[int]int)
+    for i := 0; i < 4096; i++ { m[i] = i }
+    for round := 0; round < 64; round++ {
+        for i := 0; i < 4096; i += 2 { delete(m, i) }
+        for i := 0; i < 4096; i += 2 { m[i] = i + round }
+    }
+    sum := 0
+    for key, value := range m { sum += key + value }
+    assert(len(m) == 4096)
+    assert(sum == 16902144)
+    println(sum)
+}

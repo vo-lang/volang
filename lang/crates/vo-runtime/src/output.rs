@@ -7,7 +7,7 @@
 //!
 //! # Provided sinks
 //! - **`StdoutSink`** (std): writes to process stdout (default for CLI).
-//! - **`CaptureSink`** (std): collects output into a `Mutex<Vec<u8>>`.
+//! - **`CaptureSink`**: collects output into an instance-owned synchronized buffer.
 //!   Caller keeps an `Arc` clone and calls `.take()` after execution.
 //! - **`GlobalBufferSink`** (no_std/WASM): wraps the existing global
 //!   `OUTPUT_BUFFER` + optional `WRITE_HOOK` for console.log.
@@ -78,7 +78,7 @@ impl OutputSink for StdoutSink {
 }
 
 // =============================================================================
-// CaptureSink (std only)
+// CaptureSink (all targets)
 // =============================================================================
 
 /// Captures output into a byte buffer protected by a `Mutex`.
@@ -90,12 +90,15 @@ impl OutputSink for StdoutSink {
 /// let captured = sink.take();
 /// ```
 #[cfg(feature = "std")]
-pub struct CaptureSink(std::sync::Mutex<Vec<u8>>);
+type CaptureBuffer = std::sync::Mutex<Vec<u8>>;
+#[cfg(not(feature = "std"))]
+type CaptureBuffer = OutputBuffer;
 
-#[cfg(feature = "std")]
+pub struct CaptureSink(CaptureBuffer);
+
 impl CaptureSink {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self(std::sync::Mutex::new(Vec::new())))
+        Arc::new(Self(CaptureBuffer::new(Vec::new())))
     }
 
     /// Take captured output as display text. Invalid bytes are rendered as
@@ -106,27 +109,33 @@ impl CaptureSink {
 
     /// Take all captured output exactly and reset the buffer.
     pub fn take_bytes(&self) -> Vec<u8> {
-        std::mem::take(&mut self.buffer())
+        self.with_buffer(core::mem::take)
     }
 
-    fn buffer(&self) -> std::sync::MutexGuard<'_, Vec<u8>> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn with_buffer<R>(&self, f: impl FnOnce(&mut Vec<u8>) -> R) -> R {
+        #[cfg(feature = "std")]
+        {
+            f(&mut self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner))
+        }
+        #[cfg(not(feature = "std"))]
+        self.0.with(f)
     }
 }
 
-#[cfg(feature = "std")]
 impl OutputSink for CaptureSink {
     #[inline]
     fn write_bytes(&self, bytes: &[u8]) {
-        self.buffer().extend_from_slice(bytes);
+        self.with_buffer(|buffer| buffer.extend_from_slice(bytes));
     }
     #[inline]
     fn writeln_bytes(&self, bytes: &[u8]) {
-        let mut buf = self.buffer();
-        buf.extend_from_slice(bytes);
-        buf.push(b'\n');
+        self.with_buffer(|buffer| {
+            buffer.extend_from_slice(bytes);
+            buffer.push(b'\n');
+        });
     }
 }
 
@@ -188,6 +197,13 @@ pub fn set_write_hook(hook: fn(&str)) {
 
 #[cfg(not(feature = "std"))]
 impl OutputBuffer {
+    const fn new(value: Vec<u8>) -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            value: UnsafeCell::new(value),
+        }
+    }
+
     fn with<R>(&self, f: impl FnOnce(&mut Vec<u8>) -> R) -> R {
         while self
             .locked

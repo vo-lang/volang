@@ -19,5 +19,5 @@ toolchain-host = ["dep:vo-ui-integration"]
 
 [dependencies]
 vo-aot-runtime-core = { path = "../vo-aot-runtime-core" }
-vo-vm = { path = "../vo-vm", features = ["jit"] }
+vo-vm = { path = "../vo-vm", features = ["native"] }
 vo-ui-integration = { path = "../vo-ui-integration", optional = true }

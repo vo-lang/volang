@@ -1,3 +1,6 @@
+import { canonicalExternName } from './aot_abi.js';
+import { AotMemoryRuntime } from './aot_memory.js';
+import { parseAotMemoryMetadata } from './aot_trace.js';
 // =============================================================================
 // vo-web JavaScript API
 // =============================================================================
@@ -16,14 +19,23 @@ import {
   AotJsonError,
   AotStructuredJsonHost,
   type AotStructuredJsonOperations,
-  type AotRuntimeMetadata,
   type AotRuntimeType,
-  type AotStructField,
-  type AotStructType,
 } from './aot_json.js';
+import { parseVolangFloat, formatVolangFloat, bitLength, float64FromBits, float32Bits, copyFloat64Sign, frexpFloat64, ldexpFloat64, fusedMultiplyAdd } from './aot_float.js';
+import { driveAotScheduler, yieldAotHost } from './aot_scheduler.js';
 import { AotPlatformHost } from './aot_platform.js';
 import { AotFmtScanHost } from './aot_fmt_scan.js';
 import { AotRegexpHost } from './aot_regexp.js';
+
+import { AOT_RUNTIME_MODULE, AOT_RUNTIME_FUNCTION, AOT_MEMORY_EXPORT, AOT_ENTRY_EXPORT, AOT_ALLOC_EXPORT, AOT_SEQUENCE_ALLOC_EXPORT, AOT_TYPED_ALLOC_EXPORT, AOT_PANIC_MESSAGE_EXPORT, AOT_PANIC_TYPE_EXPORT, AOT_PANIC_DATA_EXPORT, AOT_RAISE_HOST_PANIC_EXPORT, AOT_FUEL_EXPORT, MAX_AOT_IMAGE_BYTES, MAX_AOT_ARGUMENT_BYTES, MAX_AOT_STDIN_BYTES, DEFAULT_AOT_MEMORY_LIMIT_PAGES } from './aot_abi.js';
+import type { AotExecutionResult, AotExternCall, AotExternDescriptor, AotExternHandler, AotExternProvider, AotRunOptions, AotRunResult } from './aot_types.js';
+export type * from './aot_types.js';
+export type { AotMemoryOptions, AotMemoryControl, AotGcLease } from './aot_memory.js';
+export { parseAotDebugMetadata } from './aot_metadata.js';
+export type { AotDebugMetadata } from './aot_metadata.js';
+export { lookupAotLogicalSources } from './aot_inline_sources.js';
+export type { AotLogicalSourceFrame, AotSourceSpan } from './aot_inline_sources.js';
+import { parseAotManifest, parseAotExterns, parseAotRuntimeMetadata, parseAotDebugMetadata, validateAotShape, type AotDebugLocation } from './aot_metadata.js';
 
 // Re-export
 export { vfs, VirtualFS, registerVFSBindings };
@@ -35,584 +47,6 @@ export * from './ui_aot.js';
 
 // WASM module reference
 let wasmModule: typeof import('../pkg/vo_web.js') | null = null;
-
-const AOT_MANIFEST_SECTION = 'volang.aot.v5';
-const AOT_EXTERN_SECTION = 'volang.externs.v3';
-const AOT_RUNTIME_METADATA_SECTION = 'volang.runtime.v1';
-const AOT_DEBUG_METADATA_SECTION = 'volang.debug.v2';
-const AOT_RUNTIME_MODULE = 'volang:runtime/v3';
-const AOT_RUNTIME_FUNCTION = 'call-extern';
-const AOT_MEMORY_EXPORT = 'memory';
-const AOT_ENTRY_EXPORT = 'vo_start';
-const AOT_ALLOC_EXPORT = 'vo_alloc';
-const AOT_SEQUENCE_ALLOC_EXPORT = 'vo_alloc_sequence';
-const AOT_TYPED_ALLOC_EXPORT = 'vo_alloc_typed';
-const AOT_MAP_LOOKUP_EXPORT = 'vo_map_lookup';
-const AOT_PANIC_MESSAGE_EXPORT = 'vo_panic_message';
-const AOT_PANIC_TYPE_EXPORT = 'vo_panic_type';
-const AOT_PANIC_DATA_EXPORT = 'vo_panic_data';
-const AOT_RAISE_HOST_PANIC_EXPORT = 'vo_raise_host_panic';
-const AOT_FUEL_EXPORT = 'vo_fuel';
-const AOT_ABI_VERSION = 5;
-const AOT_CORE_MODULE_KIND = 1;
-const MAX_AOT_IMAGE_BYTES = 128 * 1024 * 1024;
-const MAX_AOT_ARGUMENT_BYTES = 16 * 1024 * 1024;
-const MAX_AOT_STDIN_BYTES = 64 * 1024 * 1024;
-const DEFAULT_AOT_MEMORY_LIMIT_PAGES = 4096;
-const MAX_EXTERN_COUNT = 1_000_000;
-
-export interface AotManifest {
-  readonly abiVersion: number;
-  readonly target: string;
-  readonly semanticModuleLength: number;
-  readonly memoryPages: number;
-  readonly moduleSha256: Uint8Array;
-}
-
-export interface AotExecutionResult {
-  readonly status: 'ok' | 'error';
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly exitCode?: number;
-}
-
-export interface AotRunResult {
-  readonly instance: WebAssembly.Instance;
-  readonly manifest: AotManifest;
-  readonly result: AotExecutionResult;
-  readonly exitCode: number;
-}
-
-export interface AotExternCall {
-  readonly descriptor: AotExternDescriptor;
-  readonly name: string;
-  readonly externId: number;
-  readonly memory: WebAssembly.Memory;
-  readonly frame: number;
-  readonly destination: number;
-  readonly argumentsStart: number;
-  readonly argumentSlots: number;
-  readonly args: readonly string[];
-  readSlot(slot: number): bigint;
-  writeSlot(slot: number, value: bigint): void;
-  readFloat64(slot: number): number;
-  writeFloat64(slot: number, value: number): void;
-  readString(reference: bigint): string;
-  readStringBytes(reference: bigint): Uint8Array;
-  readStringSlice(reference: bigint): readonly string[];
-  readByteSlice(reference: bigint): Uint8Array;
-  writeByteSlice(reference: bigint, bytes: Uint8Array): number;
-  allocate(bytes: number): number;
-  allocateSequence(bytes: number, elementMeta: number): number;
-  allocateString(value: string): bigint;
-  allocateStringBytes(value: Uint8Array): bigint;
-  allocateStringSlice(values: readonly string[]): bigint;
-  allocateStringBytesSlice(values: readonly Uint8Array[]): bigint;
-  allocateByteSlice(value: Uint8Array): bigint;
-  allocateIntSlice(values: readonly bigint[]): bigint;
-  allocateInterfaceSlice(values: readonly (readonly [bigint, bigint])[]): bigint;
-  allocateNamedStructSlice(
-    typeName: string,
-    values: readonly Readonly<Record<string, bigint>>[],
-  ): bigint;
-  writeError(slot: number, message: string, cause?: readonly [bigint, bigint]): void;
-  clearError(slot: number): void;
-  writeOutput(fd: number, bytes: Uint8Array): void;
-  exit(code: number): number;
-  panic(message: string): number;
-}
-
-export type AotExternHandler = (
-  call: AotExternCall,
-) => number | void | Promise<number | void>;
-
-export interface AotExternDescriptor {
-  readonly id: number;
-  readonly name: string;
-  readonly required: boolean;
-  readonly paramSlots?: number;
-  readonly returnSlots: number;
-  readonly allowedEffects: bigint;
-  readonly effectiveEffects: bigint;
-  readonly abiFingerprint: bigint;
-  readonly providerIdentity: bigint;
-  readonly source: number;
-  readonly returnSlotTypes: Uint8Array;
-}
-
-export interface AotExternProvider {
-  readonly handler: AotExternHandler;
-  readonly abiFingerprint?: bigint;
-  readonly supportedEffects?: bigint;
-}
-
-export interface AotRunOptions {
-  readonly args?: readonly string[];
-  /** Complete process-standard-input byte stream. Reads consume one line at a time. */
-  readonly stdin?: string | Uint8Array;
-  readonly externs?: Readonly<Record<string, AotExternHandler | AotExternProvider>>;
-  readonly memoryLimitPages?: number;
-  /** Guest basic-block budget. Omit for unlimited execution. */
-  readonly fuel?: number | bigint;
-  /** Optional precompiled vo-aot-support-wasm module for non-browser hosts. */
-  readonly supportModule?: BufferSource | WebAssembly.Module;
-}
-
-interface AotDebugLocation {
-  readonly pc: number;
-  readonly file: string;
-  readonly line: number;
-}
-
-interface AotDebugMetadata {
-  readonly functions: readonly ReadonlyMap<number, AotDebugLocation>[];
-  readonly frameStateBytes: number;
-  readonly frameFunctionIdOffset: number;
-  readonly frameParentOffset: number;
-  readonly frameDebugPcOffset: number;
-}
-
-function readU16(view: DataView, offset: number): number {
-  if (offset + 2 > view.byteLength) throw new Error('truncated Volang AOT manifest');
-  return view.getUint16(offset, true);
-}
-
-function readU32(view: DataView, offset: number): number {
-  if (offset + 4 > view.byteLength) throw new Error('truncated Volang AOT manifest');
-  return view.getUint32(offset, true);
-}
-
-function readU64(view: DataView, offset: number): bigint {
-  if (offset + 8 > view.byteLength) throw new Error('truncated Volang AOT manifest');
-  return view.getBigUint64(offset, true);
-}
-
-function parseAotManifest(module: WebAssembly.Module): AotManifest {
-  const sections = WebAssembly.Module.customSections(module, AOT_MANIFEST_SECTION);
-  if (sections.length !== 1) {
-    throw new Error(`expected one ${AOT_MANIFEST_SECTION} section`);
-  }
-  const bytes = new Uint8Array(sections[0]);
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const magic = new TextDecoder('ascii', { fatal: true }).decode(bytes.subarray(0, 8));
-  if (magic !== 'VOAOTW05') throw new Error('invalid Volang AOT manifest magic');
-  const abiVersion = readU16(view, 8);
-  if (abiVersion !== AOT_ABI_VERSION) {
-    throw new Error(`unsupported Volang AOT ABI ${abiVersion}`);
-  }
-  if (bytes[10] !== AOT_CORE_MODULE_KIND) throw new Error('artifact is not a Core Wasm AOT module');
-  if (bytes[11] !== 0) throw new Error('Volang AOT manifest has unknown flags');
-  const semanticModuleLength = readU32(view, 12);
-  const memoryPages = readU32(view, 16);
-  if (semanticModuleLength < 1) throw new Error('Volang AOT semantic module is empty');
-  if (memoryPages < 1 || memoryPages > 65_536) {
-    throw new Error(`Volang AOT memory size ${memoryPages} exceeds the wasm32 contract`);
-  }
-  if (bytes.byteLength < 56) throw new Error('truncated Volang AOT manifest');
-  const moduleSha256 = bytes.slice(20, 52);
-  const targetLength = readU16(view, 52);
-  if (targetLength < 1 || targetLength > 255 || readU16(view, 54) !== 0) {
-    throw new Error('invalid Volang AOT target encoding');
-  }
-  if (56 + targetLength !== bytes.byteLength) {
-    throw new Error('Volang AOT manifest length is inconsistent');
-  }
-  const target = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(56));
-  if (target !== 'wasm32-unknown-unknown') {
-    throw new Error(`unsupported Core Wasm AOT target ${target}`);
-  }
-  return { abiVersion, target, semanticModuleLength, memoryPages, moduleSha256 };
-}
-
-function parseAotExterns(module: WebAssembly.Module): readonly AotExternDescriptor[] {
-  const sections = WebAssembly.Module.customSections(module, AOT_EXTERN_SECTION);
-  if (sections.length !== 1) throw new Error(`expected one ${AOT_EXTERN_SECTION} section`);
-  const bytes = new Uint8Array(sections[0]);
-  if (bytes.byteLength < 12) throw new Error('truncated Volang extern manifest');
-  const magic = new TextDecoder('ascii', { fatal: true }).decode(bytes.subarray(0, 8));
-  if (magic !== 'VOEXT003') throw new Error('invalid Volang extern manifest magic');
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const count = readU32(view, 8);
-  if (count > MAX_EXTERN_COUNT) throw new Error('Volang extern count exceeds host limits');
-  const externs: AotExternDescriptor[] = [];
-  let offset = 12;
-  for (let index = 0; index < count; index += 1) {
-    const length = readU16(view, offset);
-    offset += 2;
-    if (length < 1 || offset + length > bytes.byteLength) {
-      throw new Error('truncated Volang extern name');
-    }
-    const name = new TextDecoder('utf-8', { fatal: true })
-      .decode(bytes.subarray(offset, offset + length));
-    offset += length;
-    if (offset + 39 > bytes.byteLength) throw new Error('truncated Volang extern ABI');
-    const flags = readU16(view, offset);
-    const paramShape = bytes[offset + 2];
-    const paramSlotsValue = readU16(view, offset + 3);
-    const returnSlots = readU16(view, offset + 5);
-    const allowedEffects = readU64(view, offset + 7);
-    const effectiveEffects = readU64(view, offset + 15);
-    const abiFingerprint = readU64(view, offset + 23);
-    const providerIdentity = readU64(view, offset + 31);
-    offset += 39;
-    const source = bytes[offset];
-    const reserved = bytes[offset + 1];
-    const returnTypeCount = readU16(view, offset + 2);
-    offset += 4;
-    if ((flags & ~1) !== 0 || (paramShape !== 0 && paramShape !== 1) || reserved !== 0) {
-      throw new Error(`invalid Volang extern ABI flags for ${name}`);
-    }
-    if (paramShape === 1 && paramSlotsValue !== 0) {
-      throw new Error(`variadic Volang extern ${name} has a fixed slot count`);
-    }
-    if (returnTypeCount !== 0 && returnTypeCount !== returnSlots) {
-      throw new Error(`Volang extern ${name} has an inconsistent return layout`);
-    }
-    if (offset + returnTypeCount > bytes.byteLength) {
-      throw new Error('truncated Volang extern return layout');
-    }
-    const returnSlotTypes = bytes.slice(offset, offset + returnTypeCount);
-    if (returnSlotTypes.some((slot) => slot > 5)) {
-      throw new Error(`Volang extern ${name} has an unknown return slot type`);
-    }
-    offset += returnTypeCount;
-    externs.push({
-      id: index,
-      name,
-      required: (flags & 1) !== 0,
-      ...(paramShape === 0 ? { paramSlots: paramSlotsValue } : {}),
-      returnSlots,
-      allowedEffects,
-      effectiveEffects,
-      abiFingerprint,
-      providerIdentity,
-      source,
-      returnSlotTypes,
-    });
-  }
-  if (offset !== bytes.byteLength) throw new Error('Volang extern manifest has trailing bytes');
-  return externs;
-}
-
-function parseAotRuntimeMetadata(module: WebAssembly.Module): AotRuntimeMetadata {
-  const sections = WebAssembly.Module.customSections(module, AOT_RUNTIME_METADATA_SECTION);
-  if (sections.length !== 1) {
-    throw new Error(`expected one ${AOT_RUNTIME_METADATA_SECTION} section`);
-  }
-  const bytes = new Uint8Array(sections[0]);
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (bytes.byteLength < 36) throw new Error('truncated Volang runtime metadata');
-  const magic = new TextDecoder('ascii', { fatal: true }).decode(bytes.subarray(0, 8));
-  if (magic !== 'VORT0001') throw new Error('invalid Volang runtime metadata magic');
-  const descriptorCount = readU32(view, 8);
-  const typeCount = readU32(view, 12);
-  const structCount = readU32(view, 16);
-  if (descriptorCount === 0 || descriptorCount > MAX_EXTERN_COUNT
-    || typeCount > MAX_EXTERN_COUNT || structCount > MAX_EXTERN_COUNT) {
-    throw new Error('Volang runtime metadata count exceeds host limits');
-  }
-  const absent = 0xffff_ffff;
-  const rawErrorValue = readU32(view, 20);
-  const rawErrorDescriptor = readU32(view, 24);
-  const errorSlots = readU16(view, 28);
-  const errorMessageOffset = readU16(view, 30);
-  const errorCauseOffset = readU16(view, 32);
-  if (readU16(view, 34) !== 0) throw new Error('Volang runtime metadata has unknown flags');
-  const decodeDescriptor = (descriptor: number): number | undefined => {
-    if (descriptor === absent) return undefined;
-    if (descriptor >= descriptorCount) {
-      throw new Error('Volang runtime metadata references an invalid allocation descriptor');
-    }
-    return descriptor;
-  };
-  const errorDescriptor = decodeDescriptor(rawErrorDescriptor);
-  const errorValueRaw = rawErrorValue === absent ? undefined : rawErrorValue;
-  if ((errorValueRaw === undefined) !== (errorDescriptor === undefined)
-    || (errorValueRaw !== undefined
-      && (errorSlots === 0 || errorMessageOffset >= errorSlots || errorCauseOffset + 1 >= errorSlots))) {
-    throw new Error('Volang runtime error metadata is incomplete');
-  }
-
-  let offset = 36;
-  const decoder = new TextDecoder('utf-8', { fatal: true });
-  const types = new Map<number, AotRuntimeType>();
-  for (let index = 0; index < typeCount; index += 1) {
-    if (offset + 52 > bytes.byteLength) throw new Error('truncated Volang runtime type metadata');
-    const raw = readU32(view, offset);
-    const canonicalMeta = readU32(view, offset + 4);
-    const kind = bytes[offset + 8];
-    const tag = bytes[offset + 9];
-    const typeNameLength = readU16(view, offset + 10);
-    if (kind !== (raw & 0xff) || tag > 10) {
-      throw new Error('invalid Volang runtime type record');
-    }
-    const slotCount = readU32(view, offset + 12);
-    const storageBytes = readU32(view, offset + 16);
-    const fixedDescriptor = decodeDescriptor(readU32(view, offset + 20));
-    const sequenceDescriptor = decodeDescriptor(readU32(view, offset + 24));
-    const mapDescriptor = decodeDescriptor(readU32(view, offset + 28));
-    const mapEntriesDescriptor = decodeDescriptor(readU32(view, offset + 32));
-    const first = readU32(view, offset + 36);
-    const second = readU32(view, offset + 40);
-    const length = readU64(view, offset + 44);
-    const canonicalArrayOnly = tag === 2 && kind === 14 && slotCount > 0xffff;
-    const validDescriptors = canonicalArrayOnly
-      ? fixedDescriptor === undefined && sequenceDescriptor === undefined
-      : fixedDescriptor !== undefined && sequenceDescriptor !== undefined;
-    if ((slotCount > 0xffff && !canonicalArrayOnly) || storageBytes > 0xffff_ffff
-      || types.has(raw) || (canonicalMeta & 0xff) !== kind
-      || !validDescriptors
-      || (tag === 2 && length > BigInt(Number.MAX_SAFE_INTEGER))) {
-      throw new Error('invalid Volang runtime type layout');
-    }
-    const expectedStorageBytes = kind === 0 ? 0
-      : ([1, 3, 8].includes(kind) ? 1
-        : ([4, 9].includes(kind) ? 2
-          : ([5, 10, 12].includes(kind) ? 4
-            : (kind === 16 ? 16
-              : ([14, 15].includes(kind) ? slotCount * 8 : 8)))));
-    if (storageBytes !== expectedStorageBytes) {
-      throw new Error('Volang runtime type storage width is inconsistent');
-    }
-    offset += 52;
-    if (offset + typeNameLength > bytes.byteLength) {
-      throw new Error('truncated Volang runtime type name');
-    }
-    let typeName: string | undefined;
-    if (typeNameLength !== 0) {
-      try {
-        typeName = decoder.decode(bytes.subarray(offset, offset + typeNameLength));
-      } catch {
-        throw new Error('invalid UTF-8 in Volang runtime type name');
-      }
-      if (typeName.length === 0) throw new Error('empty Volang runtime type name');
-    }
-    types.set(raw, {
-      raw,
-      canonicalMeta,
-      kind,
-      tag,
-      slotCount,
-      storageBytes,
-      fixedDescriptor,
-      sequenceDescriptor,
-      mapDescriptor,
-      mapEntriesDescriptor,
-      first,
-      second,
-      length,
-      ...(typeName === undefined ? {} : { typeName }),
-    });
-    offset += typeNameLength;
-  }
-
-  const structs: AotStructType[] = [];
-  for (let structIndex = 0; structIndex < structCount; structIndex += 1) {
-    if (offset + 4 > bytes.byteLength) throw new Error('truncated Volang struct metadata');
-    const slotCount = readU16(view, offset);
-    const fieldCount = readU16(view, offset + 2);
-    offset += 4;
-    const fields: AotStructField[] = [];
-    for (let fieldIndex = 0; fieldIndex < fieldCount; fieldIndex += 1) {
-      if (offset + 20 > bytes.byteLength) throw new Error('truncated Volang struct field metadata');
-      const nameLength = readU32(view, offset);
-      const tagLength = readU32(view, offset + 4);
-      const fieldOffset = readU16(view, offset + 8);
-      const fieldSlots = readU16(view, offset + 10);
-      const typeRaw = readU32(view, offset + 12);
-      const flags = bytes[offset + 16];
-      if (flags > 3 || bytes[offset + 17] !== 0 || bytes[offset + 18] !== 0
-        || bytes[offset + 19] !== 0 || fieldOffset + fieldSlots > slotCount) {
-        throw new Error('invalid Volang struct field layout');
-      }
-      offset += 20;
-      const textLength = nameLength + tagLength;
-      if (!Number.isSafeInteger(textLength) || offset + textLength > bytes.byteLength) {
-        throw new Error('truncated Volang struct field text');
-      }
-      let name: string;
-      let tag: string;
-      try {
-        name = decoder.decode(bytes.subarray(offset, offset + nameLength));
-        tag = decoder.decode(bytes.subarray(offset + nameLength, offset + textLength));
-      } catch {
-        throw new Error('invalid UTF-8 in Volang struct metadata');
-      }
-      fields.push({
-        name,
-        tag,
-        offset: fieldOffset,
-        slotCount: fieldSlots,
-        typeRaw,
-        embedded: (flags & 1) !== 0,
-        exported: (flags & 2) !== 0,
-      });
-      offset += textLength;
-    }
-    structs.push({ slotCount, fields });
-  }
-  if (offset !== bytes.byteLength) throw new Error('Volang runtime metadata has trailing bytes');
-
-  for (const type of types.values()) {
-    const referenced = type.tag === 1 || type.tag === 2 || type.tag === 3
-      ? [type.first]
-      : (type.tag === 4 ? [type.first, type.second] : []);
-    if (referenced.some((raw) => !types.has(raw))) {
-      throw new Error('Volang runtime type references missing child metadata');
-    }
-    if (type.tag === 2 && (type.kind !== 14
-      || BigInt(type.slotCount) !== type.length * BigInt(types.get(type.first)!.slotCount))) {
-      throw new Error('Volang array runtime type has an inconsistent logical layout');
-    }
-    if (type.tag === 5 && (type.first >= structs.length
-      || structs[type.first].slotCount !== type.slotCount)) {
-      throw new Error('Volang runtime type references missing struct metadata');
-    }
-    if (type.tag === 4 && (type.mapDescriptor === undefined
-      || type.mapEntriesDescriptor === undefined)) {
-      throw new Error('Volang map runtime type lacks allocation metadata');
-    }
-  }
-  for (const struct of structs) {
-    if (struct.fields.some((field) => {
-      const type = types.get(field.typeRaw);
-      return type === undefined || field.slotCount !== type.slotCount;
-    })) {
-      throw new Error('Volang struct field references missing runtime type metadata');
-    }
-  }
-  if (errorValueRaw !== undefined) {
-    const errorPointer = types.get(errorValueRaw);
-    const errorStruct = errorPointer?.tag === 1 ? types.get(errorPointer.first) : undefined;
-    if (errorPointer?.kind !== 22 || errorStruct?.tag !== 5
-      || errorStruct.slotCount !== errorSlots
-      || errorStruct.fixedDescriptor !== errorDescriptor) {
-      throw new Error('Volang runtime error type metadata is inconsistent');
-    }
-  }
-  return {
-    descriptorCount,
-    types,
-    structs,
-    errorValueRaw,
-    errorDescriptor,
-    errorSlots,
-    errorMessageOffset,
-    errorCauseOffset,
-  };
-}
-
-function parseAotDebugMetadata(module: WebAssembly.Module): AotDebugMetadata {
-  const sections = WebAssembly.Module.customSections(module, AOT_DEBUG_METADATA_SECTION);
-  if (sections.length !== 1) {
-    throw new Error(`expected one ${AOT_DEBUG_METADATA_SECTION} section`);
-  }
-  const bytes = new Uint8Array(sections[0]);
-  if (bytes.byteLength < 32) throw new Error('truncated Volang debug metadata');
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const magic = new TextDecoder('ascii', { fatal: true }).decode(bytes.subarray(0, 8));
-  if (magic !== 'VODBG002') throw new Error('invalid Volang debug metadata magic');
-  const fileCount = readU32(view, 8);
-  const functionCount = readU32(view, 12);
-  const frameStateBytes = readU32(view, 16);
-  const frameFunctionIdOffset = readU32(view, 20);
-  const frameParentOffset = readU32(view, 24);
-  const frameDebugPcOffset = readU32(view, 28);
-  if (fileCount > MAX_EXTERN_COUNT || functionCount > MAX_EXTERN_COUNT) {
-    throw new Error('Volang debug metadata count exceeds host limits');
-  }
-  if (frameStateBytes === 0 || frameStateBytes > 64 * 1024
-    || frameFunctionIdOffset + 4 > frameStateBytes
-    || frameParentOffset + 4 > frameStateBytes
-    || frameDebugPcOffset + 4 > frameStateBytes
-    || [frameStateBytes, frameFunctionIdOffset, frameParentOffset, frameDebugPcOffset]
-      .some((value) => value % 4 !== 0)
-    || new Set([frameFunctionIdOffset, frameParentOffset, frameDebugPcOffset]).size !== 3) {
-    throw new Error('invalid Volang debug frame layout');
-  }
-  const decoder = new TextDecoder('utf-8', { fatal: true });
-  const files: string[] = [];
-  let offset = 32;
-  for (let index = 0; index < fileCount; index += 1) {
-    const length = readU32(view, offset);
-    offset += 4;
-    if (offset + length > bytes.byteLength) throw new Error('truncated Volang debug file path');
-    try {
-      files.push(decoder.decode(bytes.subarray(offset, offset + length)));
-    } catch {
-      throw new Error('invalid UTF-8 in Volang debug file path');
-    }
-    offset += length;
-  }
-  const functions: Array<ReadonlyMap<number, AotDebugLocation>> = [];
-  for (let functionId = 0; functionId < functionCount; functionId += 1) {
-    const entryCount = readU32(view, offset);
-    offset += 4;
-    if (entryCount > MAX_EXTERN_COUNT || offset + entryCount * 20 > bytes.byteLength) {
-      throw new Error('truncated Volang debug locations');
-    }
-    const entries = new Map<number, AotDebugLocation>();
-    let previousPc = -1;
-    for (let index = 0; index < entryCount; index += 1) {
-      const pc = readU32(view, offset);
-      const fileId = readU32(view, offset + 4);
-      const line = readU32(view, offset + 8);
-      const col = readU32(view, offset + 12);
-      const length = readU32(view, offset + 16);
-      offset += 20;
-      if (fileId >= files.length || pc <= previousPc || line === 0 || col === 0 || length === 0) {
-        throw new Error('invalid Volang debug location');
-      }
-      previousPc = pc;
-      entries.set(pc, { pc, file: files[fileId], line });
-    }
-    functions.push(entries);
-  }
-  if (offset !== bytes.byteLength) throw new Error('Volang debug metadata has trailing bytes');
-  return {
-    functions,
-    frameStateBytes,
-    frameFunctionIdOffset,
-    frameParentOffset,
-    frameDebugPcOffset,
-  };
-}
-
-function validateAotShape(module: WebAssembly.Module): void {
-  const imports = WebAssembly.Module.imports(module);
-  const expectedImports = new Map([
-    [`${AOT_RUNTIME_MODULE}\0${AOT_RUNTIME_FUNCTION}`, 'function'],
-    [`${AOT_RUNTIME_MODULE}\0${AOT_MEMORY_EXPORT}`, 'memory'],
-  ]);
-  if (
-    imports.length !== expectedImports.size ||
-    imports.some(
-      (entry) => expectedImports.get(`${entry.module}\0${entry.name}`) !== entry.kind,
-    )
-  ) {
-    throw new Error('Volang AOT module imports do not match AOT ABI v5');
-  }
-  const exports = new Map(WebAssembly.Module.exports(module).map((entry) => [entry.name, entry.kind]));
-  const expectedExports = new Map([
-    [AOT_ENTRY_EXPORT, 'function'],
-    [AOT_ALLOC_EXPORT, 'function'],
-    [AOT_SEQUENCE_ALLOC_EXPORT, 'function'],
-    [AOT_TYPED_ALLOC_EXPORT, 'function'],
-    [AOT_MAP_LOOKUP_EXPORT, 'function'],
-    [AOT_PANIC_MESSAGE_EXPORT, 'function'],
-    [AOT_PANIC_TYPE_EXPORT, 'function'],
-    [AOT_PANIC_DATA_EXPORT, 'function'],
-    [AOT_RAISE_HOST_PANIC_EXPORT, 'function'],
-    [AOT_FUEL_EXPORT, 'global'],
-    [AOT_MEMORY_EXPORT, 'memory'],
-  ]);
-  if (
-    exports.size !== expectedExports.size ||
-    [...expectedExports].some(([name, kind]) => exports.get(name) !== kind)
-  ) {
-    throw new Error('Volang AOT module exports do not match AOT ABI v5');
-  }
-}
 
 function statusMessage(status: number): string {
   const messages: Record<number, string> = {
@@ -635,11 +69,6 @@ function statusMessage(status: number): string {
   return messages[status] ?? `runtime status ${status}`;
 }
 
-function canonicalExternName(packageName: string, functionName: string): string {
-  const encoder = new TextEncoder();
-  return `vo1:${encoder.encode(packageName).byteLength}:${packageName}`
-    + `:${encoder.encode(functionName).byteLength}:${functionName}`;
-}
 
 function isStdlibExtern(
   descriptor: AotExternDescriptor,
@@ -838,537 +267,6 @@ function unicodeMap(rune: number, ranges: readonly UnicodeRange[]): number {
   return validUnicodeScalar(rune) ? rune + unicodeRangeValue(ranges, rune, 0) : rune;
 }
 
-function roundRationalToEven(numerator: bigint, denominator: bigint): bigint {
-  const quotient = numerator / denominator;
-  const remainder = numerator % denominator;
-  const doubled = remainder * 2n;
-  return doubled > denominator || (doubled === denominator && (quotient & 1n) !== 0n)
-    ? quotient + 1n : quotient;
-}
-
-function rationalBinaryExponent(numerator: bigint, denominator: bigint): number {
-  let exponent = bitLength(numerator) - bitLength(denominator);
-  if (exponent >= 0) {
-    if (numerator < (denominator << BigInt(exponent))) exponent -= 1;
-  } else if ((numerator << BigInt(-exponent)) < denominator) exponent -= 1;
-  return exponent;
-}
-
-function rationalToFloat(
-  numerator: bigint,
-  denominator: bigint,
-  negative: boolean,
-  bitSize: number,
-): { value: number; overflow: boolean } {
-  const precision = bitSize === 32 ? 24 : 53;
-  const minimumNormal = bitSize === 32 ? -126 : -1022;
-  const maximum = bitSize === 32 ? 127 : 1023;
-  const bias = bitSize === 32 ? 127 : 1023;
-  const fractionBits = precision - 1;
-  const sign = negative ? 1n << BigInt(bitSize - 1) : 0n;
-  if (numerator === 0n) {
-    return {
-      value: bitSize === 32
-        ? float32FromBits(Number(sign)) : float64FromBits(sign),
-      overflow: false,
-    };
-  }
-  let exponent = rationalBinaryExponent(numerator, denominator);
-  if (exponent > maximum) {
-    return { value: negative ? -Infinity : Infinity, overflow: true };
-  }
-  let encoded: bigint;
-  if (exponent >= minimumNormal) {
-    const shift = fractionBits - exponent;
-    let significand = shift >= 0
-      ? roundRationalToEven(numerator << BigInt(shift), denominator)
-      : roundRationalToEven(numerator, denominator << BigInt(-shift));
-    if (significand === 1n << BigInt(precision)) {
-      significand >>= 1n;
-      exponent += 1;
-      if (exponent > maximum) {
-        return { value: negative ? -Infinity : Infinity, overflow: true };
-      }
-    }
-    encoded = BigInt(exponent + bias) << BigInt(fractionBits);
-    encoded |= significand & ((1n << BigInt(fractionBits)) - 1n);
-  } else {
-    const quantum = minimumNormal - fractionBits;
-    encoded = quantum < 0
-      ? roundRationalToEven(numerator << BigInt(-quantum), denominator)
-      : roundRationalToEven(numerator, denominator << BigInt(quantum));
-  }
-  encoded |= sign;
-  return {
-    value: bitSize === 32 ? float32FromBits(Number(encoded)) : float64FromBits(encoded),
-    overflow: false,
-  };
-}
-
-function validFloatUnderscores(text: string, hexadecimal: boolean): boolean {
-  const start = /^[+\-]/.test(text) ? 1 : 0;
-  const prefixed = /^0[xX]/.test(text.slice(start));
-  hexadecimal ||= prefixed;
-  const isDigit = (character: string | undefined) => character !== undefined
-    && (/[0-9]/.test(character) || (hexadecimal && /[a-fA-F]/.test(character)));
-  for (let index = start; index < text.length; index += 1) {
-    if (text[index] !== '_') continue;
-    const followsPrefix = prefixed && index === start + 2;
-    if ((!followsPrefix && !isDigit(text[index - 1])) || !isDigit(text[index + 1])) return false;
-  }
-  return true;
-}
-
-function parseVolangFloat(text: string, bitSizeValue: bigint): {
-  value: number;
-  status: number;
-} {
-  const bitSize = bitSizeValue === 32n ? 32 : 64;
-  if (/^nan$/i.test(text)) {
-    return {
-      value: bitSize === 32 ? float32FromBits(0x7fc0_0000) : float64FromBits(0x7ff8_0000_0000_0001n),
-      status: 0,
-    };
-  }
-  const infinity = /^([+\-]?)(inf(?:inity)?)$/i.exec(text);
-  if (infinity) return { value: infinity[1] === '-' ? -Infinity : Infinity, status: 0 };
-  const negative = text.startsWith('-');
-  const unsigned = /^[+\-]/.test(text) ? text.slice(1) : text;
-  const hexadecimal = /^0[xX]/.test(unsigned);
-  if (text.includes('_') && !validFloatUnderscores(text, hexadecimal)) {
-    return { value: 0, status: 1 };
-  }
-  const clean = text.replace(/_/g, '');
-  if (hexadecimal) {
-    const match = /^[+\-]?0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?[pP]([+\-]?\d+)$/.exec(clean);
-    if (!match || (match[1].length === 0 && (match[2]?.length ?? 0) === 0)) {
-      return { value: 0, status: 1 };
-    }
-    const fraction = match[2] ?? '';
-    const coefficientText = (match[1] + fraction).replace(/^0+/, '') || '0';
-    const coefficient = BigInt(`0x${coefficientText}`);
-    const exponent = Number(match[3]) - fraction.length * 4;
-    if (!Number.isSafeInteger(exponent)) {
-      return exponent > 0
-        ? { value: negative ? -Infinity : Infinity, status: 2 }
-        : rationalToFloat(0n, 1n, negative, bitSize).value === 0
-          ? { value: negative ? -0 : 0, status: 0 } : { value: 0, status: 1 };
-    }
-    if (exponent > 5000) return { value: negative ? -Infinity : Infinity, status: 2 };
-    if (exponent < -5000) return { value: negative ? -0 : 0, status: 0 };
-    const converted = exponent >= 0
-      ? rationalToFloat(coefficient << BigInt(exponent), 1n, negative, bitSize)
-      : rationalToFloat(coefficient, 1n << BigInt(-exponent), negative, bitSize);
-    return { value: converted.value, status: converted.overflow ? 2 : 0 };
-  }
-  const match = /^[+\-]?(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+\-]?\d+))?$/.exec(clean);
-  if (!match) return { value: 0, status: 1 };
-  const integer = match[1] ?? '';
-  const fraction = match[2] ?? match[3] ?? '';
-  const digits = (integer + fraction).replace(/^0+/, '') || '0';
-  const explicitExponent = Number(match[4] ?? '0');
-  if (!Number.isSafeInteger(explicitExponent)) {
-    return explicitExponent > 0
-      ? { value: negative ? -Infinity : Infinity, status: 2 }
-      : { value: negative ? -0 : 0, status: 0 };
-  }
-  const decimalExponent = explicitExponent - fraction.length;
-  const adjustedExponent = decimalExponent + digits.length - 1;
-  const overflowBoundary = bitSize === 32 ? 50 : 320;
-  const underflowBoundary = bitSize === 32 ? -60 : -340;
-  if (adjustedExponent > overflowBoundary) {
-    return { value: negative ? -Infinity : Infinity, status: 2 };
-  }
-  if (adjustedExponent < underflowBoundary) return { value: negative ? -0 : 0, status: 0 };
-  const coefficient = BigInt(digits);
-  const converted = decimalExponent >= 0
-    ? rationalToFloat(coefficient * (10n ** BigInt(decimalExponent)), 1n, negative, bitSize)
-    : rationalToFloat(coefficient, 10n ** BigInt(-decimalExponent), negative, bitSize);
-  return { value: converted.value, status: converted.overflow ? 2 : 0 };
-}
-
-interface FiniteFloatParts {
-  readonly negative: boolean;
-  readonly coefficient: bigint;
-  readonly exponent: number;
-  readonly formatExponent: number;
-  readonly fractionBits: number;
-}
-
-function finiteFloatParts(value: number, bitSize: number): FiniteFloatParts {
-  if (bitSize === 32) {
-    const bits = float32Bits(value);
-    const encodedExponent = (bits >>> 23) & 0xff;
-    const fraction = bits & 0x007f_ffff;
-    return {
-      negative: (bits >>> 31) !== 0,
-      coefficient: BigInt(encodedExponent === 0 ? fraction : fraction | 0x0080_0000),
-      exponent: encodedExponent === 0 ? -149 : encodedExponent - 150,
-      formatExponent: encodedExponent === 0 ? -126 : encodedExponent - 127,
-      fractionBits: 23,
-    };
-  }
-  const bits = float64Bits(value);
-  const encodedExponent = Number((bits >> 52n) & 0x7ffn);
-  const fraction = bits & 0x000f_ffff_ffff_ffffn;
-  return {
-    negative: (bits >> 63n) !== 0n,
-    coefficient: encodedExponent === 0 ? fraction : fraction | (1n << 52n),
-    exponent: encodedExponent === 0 ? -1074 : encodedExponent - 1075,
-    formatExponent: encodedExponent === 0 ? -1022 : encodedExponent - 1023,
-    fractionBits: 52,
-  };
-}
-
-function roundFloatAtDecimalScale(value: number, scale: number, bitSize: number): bigint {
-  const parts = finiteFloatParts(value, bitSize);
-  let numerator = parts.coefficient;
-  let denominator = 1n;
-  if (parts.exponent >= 0) numerator <<= BigInt(parts.exponent);
-  else denominator <<= BigInt(-parts.exponent);
-  if (scale >= 0) numerator *= 10n ** BigInt(scale);
-  else denominator *= 10n ** BigInt(-scale);
-  return roundRationalToEven(numerator, denominator);
-}
-
-function compareFloatToPower10(value: number, exponent: number, bitSize: number): number {
-  const parts = finiteFloatParts(value, bitSize);
-  let numerator = parts.coefficient;
-  let denominator = 1n;
-  if (parts.exponent >= 0) numerator <<= BigInt(parts.exponent);
-  else denominator <<= BigInt(-parts.exponent);
-  if (exponent >= 0) denominator *= 10n ** BigInt(exponent);
-  else numerator *= 10n ** BigInt(-exponent);
-  return numerator < denominator ? -1 : (numerator > denominator ? 1 : 0);
-}
-
-function exactDecimalExponent(value: number, bitSize: number): number {
-  let exponent = Math.floor(Math.log10(Math.abs(value)));
-  while (compareFloatToPower10(value, exponent, bitSize) < 0) exponent -= 1;
-  while (compareFloatToPower10(value, exponent + 1, bitSize) >= 0) exponent += 1;
-  return exponent;
-}
-
-interface DecimalParts {
-  readonly negative: boolean;
-  readonly digits: string;
-  readonly decimalPoint: number;
-}
-
-function parseDecimalParts(text: string, negative: boolean): DecimalParts {
-  const match = /^[+\-]?(\d+)(?:\.(\d*))?(?:[eE]([+\-]?\d+))?$/.exec(text);
-  if (!match) throw new Error(`invalid internal decimal float ${text}`);
-  const before = match[1];
-  let digits = before + (match[2] ?? '');
-  let decimalPoint = before.length + Number(match[3] ?? '0');
-  while (digits.length > 1 && digits.startsWith('0')) {
-    digits = digits.slice(1);
-    decimalPoint -= 1;
-  }
-  while (digits.length > 1 && digits.endsWith('0')) digits = digits.slice(0, -1);
-  return { negative, digits, decimalPoint };
-}
-
-function decimalPartsToFixed(parts: DecimalParts): string {
-  const sign = parts.negative ? '-' : '';
-  if (parts.decimalPoint <= 0) {
-    return `${sign}0.${'0'.repeat(-parts.decimalPoint)}${parts.digits}`;
-  }
-  if (parts.decimalPoint >= parts.digits.length) {
-    return sign + parts.digits + '0'.repeat(parts.decimalPoint - parts.digits.length);
-  }
-  return `${sign}${parts.digits.slice(0, parts.decimalPoint)}.${parts.digits.slice(parts.decimalPoint)}`;
-}
-
-function decimalExponentSuffix(exponent: number): string {
-  return `${exponent < 0 ? '-' : '+'}${String(Math.abs(exponent)).padStart(2, '0')}`;
-}
-
-function decimalPartsToExponent(parts: DecimalParts, upper: boolean): string {
-  const fraction = parts.digits.length > 1 ? `.${parts.digits.slice(1)}` : '';
-  return `${parts.negative ? '-' : ''}${parts.digits[0]}${fraction}`
-    + `${upper ? 'E' : 'e'}${decimalExponentSuffix(parts.decimalPoint - 1)}`;
-}
-
-function shortestDecimalParts(value: number, bitSize: number): DecimalParts {
-  const negative = Object.is(value, -0) || value < 0;
-  const magnitude = Math.abs(bitSize === 32 ? Math.fround(value) : value);
-  if (magnitude === 0) return { negative, digits: '0', decimalPoint: 1 };
-  if (bitSize === 64) return parseDecimalParts(String(magnitude), negative);
-  const expected = float32Bits(magnitude);
-  for (let significant = 1; significant <= 9; significant += 1) {
-    const candidate = magnitude.toExponential(significant - 1);
-    if (float32Bits(Number(candidate)) === expected) {
-      return parseDecimalParts(candidate, negative);
-    }
-  }
-  return parseDecimalParts(magnitude.toExponential(8), negative);
-}
-
-function formatFixedFloat(value: number, precision: number, bitSize: number): string {
-  const negative = finiteFloatParts(value, bitSize).negative;
-  const rounded = roundFloatAtDecimalScale(Math.abs(value), precision, bitSize).toString();
-  if (precision === 0) return `${negative ? '-' : ''}${rounded}`;
-  const padded = rounded.padStart(precision + 1, '0');
-  return `${negative ? '-' : ''}${padded.slice(0, -precision)}.${padded.slice(-precision)}`;
-}
-
-function formatExponentFloat(
-  value: number,
-  precision: number,
-  bitSize: number,
-  upper: boolean,
-): string {
-  const negative = finiteFloatParts(value, bitSize).negative;
-  if (value === 0) {
-    return `${negative ? '-' : ''}0${precision > 0 ? `.${'0'.repeat(precision)}` : ''}`
-      + `${upper ? 'E' : 'e'}+00`;
-  }
-  let exponent = exactDecimalExponent(value, bitSize);
-  let rounded = roundFloatAtDecimalScale(Math.abs(value), precision - exponent, bitSize);
-  if (rounded.toString().length > precision + 1) {
-    exponent += 1;
-    rounded = roundFloatAtDecimalScale(Math.abs(value), precision - exponent, bitSize);
-  }
-  const digits = rounded.toString().padStart(precision + 1, '0');
-  return `${negative ? '-' : ''}${digits[0]}${precision > 0 ? `.${digits.slice(1)}` : ''}`
-    + `${upper ? 'E' : 'e'}${decimalExponentSuffix(exponent)}`;
-}
-
-function formatHexFloat(value: number, precision: number, bitSize: number, upper: boolean): string {
-  const parts = finiteFloatParts(value, bitSize);
-  const mask64 = (1n << 64n) - 1n;
-  let mantissa = parts.coefficient << BigInt(60 - parts.fractionBits);
-  let exponent = parts.formatExponent;
-  if (mantissa === 0n) exponent = 0;
-  while (mantissa !== 0n && (mantissa & (1n << 60n)) === 0n) {
-    mantissa <<= 1n;
-    exponent -= 1;
-  }
-  if (precision >= 0 && precision < 15) {
-    const shift = precision * 4;
-    const extra = ((mantissa << BigInt(shift)) & mask64) & ((1n << 60n) - 1n);
-    mantissa >>= BigInt(60 - shift);
-    if ((extra | (mantissa & 1n)) > 1n << 59n) mantissa += 1n;
-    mantissa <<= BigInt(60 - shift);
-    if ((mantissa & (1n << 61n)) !== 0n) {
-      mantissa >>= 1n;
-      exponent += 1;
-    }
-  }
-  const alphabet = upper ? '0123456789ABCDEF' : '0123456789abcdef';
-  let result = `${parts.negative ? '-' : ''}0${upper ? 'X' : 'x'}${Number((mantissa >> 60n) & 1n)}`;
-  mantissa = (mantissa << 4n) & mask64;
-  if (precision < 0 && mantissa !== 0n) {
-    result += '.';
-    while (mantissa !== 0n) {
-      result += alphabet[Number((mantissa >> 60n) & 15n)];
-      mantissa = (mantissa << 4n) & mask64;
-    }
-  } else if (precision > 0) {
-    result += '.';
-    for (let index = 0; index < precision; index += 1) {
-      result += alphabet[Number((mantissa >> 60n) & 15n)];
-      mantissa = (mantissa << 4n) & mask64;
-    }
-  }
-  return `${result}${upper ? 'P' : 'p'}${decimalExponentSuffix(exponent)}`;
-}
-
-function formatVolangFloat(
-  input: number,
-  formatByte: number,
-  precisionValue: bigint,
-  bitSizeValue: bigint,
-): Uint8Array {
-  const bitSize = bitSizeValue === 32n ? 32 : 64;
-  const value = bitSize === 32 ? Math.fround(input) : input;
-  if (Number.isNaN(value)) return new TextEncoder().encode('NaN');
-  if (!Number.isFinite(value)) return new TextEncoder().encode(value < 0 ? '-Inf' : '+Inf');
-  if (precisionValue > 1_000_000n) throw new Error('strconv precision exceeds AOT host limits');
-  const precision = precisionValue < -1n ? -1 : Number(precisionValue);
-  const format = String.fromCharCode(formatByte);
-  let result: string;
-  if (format === 'b') {
-    const parts = finiteFloatParts(value, bitSize);
-    result = `${parts.negative ? '-' : ''}${parts.coefficient}`
-      + `p${parts.exponent >= 0 ? '+' : ''}${parts.exponent}`;
-  } else if (format === 'x' || format === 'X') {
-    result = formatHexFloat(value, precision, bitSize, format === 'X');
-  } else if (format === 'f') {
-    result = precision < 0
-      ? decimalPartsToFixed(shortestDecimalParts(value, bitSize))
-      : formatFixedFloat(value, precision, bitSize);
-  } else if (format === 'e' || format === 'E') {
-    result = precision < 0
-      ? decimalPartsToExponent(shortestDecimalParts(value, bitSize), format === 'E')
-      : formatExponentFloat(value, precision, bitSize, format === 'E');
-  } else if (format === 'g' || format === 'G') {
-    if (value === 0) result = finiteFloatParts(value, bitSize).negative ? '-0' : '0';
-    else if (precision < 0) {
-      const parts = shortestDecimalParts(value, bitSize);
-      const exponent = parts.decimalPoint - 1;
-      result = exponent < -4 || exponent >= 6
-        ? decimalPartsToExponent(parts, format === 'G') : decimalPartsToFixed(parts);
-    } else {
-      const significant = precision === 0 ? 1 : precision;
-      const rounded = parseDecimalParts(
-        formatExponentFloat(value, significant - 1, bitSize, false).replace('e', 'e'),
-        value < 0,
-      );
-      const exponent = rounded.decimalPoint - 1;
-      result = exponent < -4 || exponent >= significant
-        ? decimalPartsToExponent(rounded, format === 'G') : decimalPartsToFixed(rounded);
-    }
-  } else return Uint8Array.of(0x25, formatByte);
-  return new TextEncoder().encode(result);
-}
-
-function roundShiftToEven(value: bigint, shift: number): bigint {
-  if (shift <= 0) return value << BigInt(-shift);
-  const distance = BigInt(shift);
-  const quotient = value >> distance;
-  const remainder = value - (quotient << distance);
-  const halfway = 1n << (distance - 1n);
-  return remainder > halfway || (remainder === halfway && (quotient & 1n) !== 0n)
-    ? quotient + 1n
-    : quotient;
-}
-
-function bitLength(value: bigint): number {
-  return value === 0n ? 0 : value.toString(2).length;
-}
-
-function float64FromBits(bits: bigint): number {
-  const storage = new DataView(new ArrayBuffer(8));
-  storage.setBigUint64(0, BigInt.asUintN(64, bits), true);
-  return storage.getFloat64(0, true);
-}
-
-function float32FromBits(bits: number): number {
-  const storage = new DataView(new ArrayBuffer(4));
-  storage.setUint32(0, bits >>> 0, true);
-  return storage.getFloat32(0, true);
-}
-
-function float32Bits(value: number): number {
-  const storage = new DataView(new ArrayBuffer(4));
-  storage.setFloat32(0, value, true);
-  return storage.getUint32(0, true);
-}
-
-function float64Bits(value: number): bigint {
-  const storage = new DataView(new ArrayBuffer(8));
-  storage.setFloat64(0, value, true);
-  return storage.getBigUint64(0, true);
-}
-
-function copyFloat64Sign(value: number, signSource: number): number {
-  return float64FromBits(
-    (float64Bits(value) & 0x7fff_ffff_ffff_ffffn)
-      | (float64Bits(signSource) & 0x8000_0000_0000_0000n),
-  );
-}
-
-function frexpFloat64(value: number): readonly [number, bigint] {
-  if (value === 0 || !Number.isFinite(value)) return [value, 0n];
-  const bits = float64Bits(value);
-  const sign = bits & 0x8000_0000_0000_0000n;
-  const encodedExponent = (bits >> 52n) & 0x7ffn;
-  const mantissa = bits & 0x000f_ffff_ffff_ffffn;
-  if (encodedExponent === 0n) {
-    const [fraction, exponent] = frexpFloat64(value * 18_014_398_509_481_984);
-    return [fraction, exponent - 54n];
-  }
-  return [
-    float64FromBits(sign | 0x3fe0_0000_0000_0000n | mantissa),
-    encodedExponent - 1022n,
-  ];
-}
-
-function ldexpFloat64(fraction: number, requestedExponent: bigint): number {
-  if (fraction === 0 || !Number.isFinite(fraction)) return fraction;
-  let normalized = fraction;
-  let exponent = requestedExponent;
-  if (Math.abs(normalized) < 2.2250738585072014e-308) {
-    normalized *= 4_503_599_627_370_496;
-    exponent -= 52n;
-  }
-  let bits = float64Bits(normalized);
-  const encodedExponent = (bits >> 52n) & 0x7ffn;
-  exponent += encodedExponent - 1023n;
-  if (exponent < -1075n) return copyFloat64Sign(0, fraction);
-  if (exponent > 1023n) return copyFloat64Sign(Number.POSITIVE_INFINITY, fraction);
-  let multiplier = 1;
-  if (exponent < -1022n) {
-    exponent += 53n;
-    multiplier = 1 / 9_007_199_254_740_992;
-  }
-  bits &= 0x800f_ffff_ffff_ffffn;
-  bits |= (exponent + 1023n) << 52n;
-  return multiplier * float64FromBits(bits);
-}
-
-function decomposeFiniteFloat64(value: number): { coefficient: bigint; exponent: number } {
-  const storage = new DataView(new ArrayBuffer(8));
-  storage.setFloat64(0, value, true);
-  const bits = storage.getBigUint64(0, true);
-  const negative = (bits >> 63n) !== 0n;
-  const encodedExponent = Number((bits >> 52n) & 0x7ffn);
-  const fraction = bits & 0x000f_ffff_ffff_ffffn;
-  const significand = encodedExponent === 0 ? fraction : (1n << 52n) | fraction;
-  return {
-    coefficient: negative ? -significand : significand,
-    exponent: encodedExponent === 0 ? -1074 : encodedExponent - 1075,
-  };
-}
-
-/** IEEE-754 binary64 fused multiply-add with one round-to-nearest-even step. */
-function fusedMultiplyAdd(x: number, y: number, z: number): number {
-  if (Number.isNaN(x) || Number.isNaN(y) || Number.isNaN(z)) return Number.NaN;
-  if (!Number.isFinite(x) || !Number.isFinite(y)) {
-    if (x === 0 || y === 0) return Number.NaN;
-    const product = x * y;
-    return !Number.isFinite(z) && Object.is(product, -z) ? Number.NaN : product;
-  }
-  if (!Number.isFinite(z)) return z;
-
-  const left = decomposeFiniteFloat64(x);
-  const right = decomposeFiniteFloat64(y);
-  const addend = decomposeFiniteFloat64(z);
-  const productCoefficient = left.coefficient * right.coefficient;
-  const productExponent = left.exponent + right.exponent;
-  const commonExponent = Math.min(productExponent, addend.exponent);
-  const exact = (productCoefficient << BigInt(productExponent - commonExponent))
-    + (addend.coefficient << BigInt(addend.exponent - commonExponent));
-  if (exact === 0n) return x * y + z;
-
-  const negative = exact < 0n;
-  const magnitude = negative ? -exact : exact;
-  const bits = bitLength(magnitude);
-  let topExponent = commonExponent + bits - 1;
-  const sign = negative ? 1n << 63n : 0n;
-  if (topExponent > 1023) return negative ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY;
-
-  if (topExponent >= -1022) {
-    let significand = roundShiftToEven(magnitude, bits - 53);
-    if (significand === 1n << 53n) {
-      significand >>= 1n;
-      topExponent += 1;
-      if (topExponent > 1023) {
-        return negative ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY;
-      }
-    }
-    const encodedExponent = BigInt(topExponent + 1023) << 52n;
-    return float64FromBits(sign | encodedExponent | (significand - (1n << 52n)));
-  }
-
-  const subnormal = roundShiftToEven(magnitude, -(commonExponent + 1074));
-  if (subnormal === 0n) return float64FromBits(sign);
-  if (subnormal >= 1n << 52n) return float64FromBits(sign | (1n << 52n));
-  return float64FromBits(sign | subnormal);
-}
-
 function builtInAotExtern(descriptor: AotExternDescriptor): boolean {
   const { name } = descriptor;
   if ([
@@ -1385,6 +283,7 @@ function builtInAotExtern(descriptor: AotExternDescriptor): boolean {
     || isStdlibExtern(descriptor, 'time', 'blocking_sleepNano')) return true;
   if ((descriptor.source === 0 || descriptor.source === 1)
     && descriptor.name === canonicalExternName('runtime', 'Caller')) return true;
+  if ((descriptor.source === 0 || descriptor.source === 1) && ['ReadStats', 'GCStep', 'GCCollect'].some(name => descriptor.name === canonicalExternName('runtime/mem', name))) return true;
   if (mathBitsOperation(descriptor) !== undefined) return true;
   if (unicodeOperation(descriptor) !== undefined) return true;
   if (stringOperation(descriptor) !== undefined) return true;
@@ -1521,6 +420,10 @@ export async function runAot(
   }
   validateAotShape(module);
   const manifest = parseAotManifest(module);
+  if (options.requireMemoryContract !== undefined
+    && options.requireMemoryContract !== manifest.memoryContract) {
+    throw new Error(`Core Wasm provides ${manifest.memoryContract}; required memory contract ${options.requireMemoryContract} is unavailable`);
+  }
   const externDescriptors = parseAotExterns(module);
   const runtimeMetadata = parseAotRuntimeMetadata(module);
   const debugMetadata = parseAotDebugMetadata(module);
@@ -1540,15 +443,30 @@ export async function runAot(
     initial: manifest.memoryPages,
     maximum: memoryLimitPages,
   });
+  const memoryMetadata = parseAotMemoryMetadata(module);
+  if (memoryMetadata.stackLimit !== manifest.memoryPages * 65536) {
+    throw new Error('memory layout exceeds the admitted image');
+  }
+  if (memoryMetadata.frameBytes !== debugMetadata.frameStateBytes
+    || memoryMetadata.frameFunction !== debugMetadata.frameFunctionIdOffset
+    || memoryMetadata.frameParent !== debugMetadata.frameParentOffset) {
+    throw new Error('inconsistent memory and debug frame layouts');
+  }
+  const managedMemory = new AotMemoryRuntime(memory, memoryLimitPages, memoryMetadata, options.memory);
   let instance: WebAssembly.Instance | undefined;
   let stdout = '';
   let stderr = '';
   let requestedExitCode: number | undefined;
+  // Instance-local control transfer: os.Exit must stop the current Wasm call
+  // before any other fiber or deferred guest effect can run.
+  const guestExit = new Error('Volang guest requested process exit');
   interface AsyncExternState {
     settled: boolean;
     status: number;
     error?: unknown;
     readonly wake: Promise<void>;
+    readonly release: () => void;
+    readonly cancel: () => void;
   }
   const asyncExterns = new Map<string, AsyncExternState>();
   const wordMask = 0xffff_ffff_ffff_ffffn;
@@ -1582,7 +500,7 @@ export async function runAot(
   };
   const boundedRandom = (limit: bigint): bigint => {
     if ((limit & (limit - 1n)) === 0n) return nextRandomU64() & (limit - 1n);
-    for (;;) {
+    for (; ;) {
       const product = nextRandomU64() * limit;
       const low = product & wordMask;
       const threshold = ((-limit) & wordMask) % limit;
@@ -1590,15 +508,22 @@ export async function runAot(
     }
   };
 
-  const view = () => new DataView(memory.buffer);
+  const view = () => managedMemory.provider.view();
   const slotAddress = (frame: number, slot: number) => frame + slot * 8;
-  const readSlot = (frame: number, slot: number) => view().getBigUint64(slotAddress(frame, slot), true);
+  const readSlot = (frame: number, slot: number) => managedMemory.stagedSlot(frame, slot) ?? view().getBigUint64(slotAddress(frame, slot), true);
   const writeSlot = (frame: number, slot: number, value: bigint) => {
+    if (managedMemory.stageSlot(frame, slot, BigInt.asUintN(64, value))) return;
     view().setBigUint64(slotAddress(frame, slot), BigInt.asUintN(64, value), true);
+    managedMemory.write(slotAddress(frame, slot), 8);
   };
-  const readFloat64 = (frame: number, slot: number) => view().getFloat64(slotAddress(frame, slot), true);
+  const floatBits = new DataView(new ArrayBuffer(8));
+  const readFloat64 = (frame: number, slot: number) => {
+    floatBits.setBigUint64(0, readSlot(frame, slot), true);
+    return floatBits.getFloat64(0, true);
+  };
   const writeFloat64 = (frame: number, slot: number, value: number) => {
-    view().setFloat64(slotAddress(frame, slot), value, true);
+    floatBits.setFloat64(0, value, true);
+    writeSlot(frame, slot, floatBits.getBigUint64(0, true));
   };
   const readString = (reference: bigint): string => {
     if (reference === 0n) return '';
@@ -2254,6 +1179,7 @@ export async function runAot(
     metadata: runtimeMetadata,
     memory: () => memory,
     view,
+    writeBarrier: (address, bytes) => managedMemory.write(address, bytes),
     allocateTyped,
     allocateSequence,
     allocateStringBytes,
@@ -2344,916 +1270,958 @@ export async function runAot(
         argumentsStart: number,
         argumentSlots: number,
       ): number => {
+        if (externId < 0) return managedMemory.call(externId, frame, destination, argumentsStart, argumentSlots);
         const descriptor = externDescriptors[externId];
         if (descriptor === undefined) throw new Error(`missing Volang extern ${externId}`);
-        const { name } = descriptor;
-        if (descriptor.paramSlots !== undefined && descriptor.paramSlots !== argumentSlots) {
-          throw new Error(
-            `Volang extern ${name} received ${argumentSlots} slots; expected ${descriptor.paramSlots}`,
-          );
-        }
-        const call: AotExternCall = {
-          descriptor,
-          name,
-          externId,
-          memory,
-          frame,
-          destination,
-          argumentsStart,
-          argumentSlots,
-          args,
-          readSlot: (slot) => readSlot(frame, slot),
-          writeSlot: (slot, value) => writeSlot(frame, slot, value),
-          readFloat64: (slot) => readFloat64(frame, slot),
-          writeFloat64: (slot, value) => writeFloat64(frame, slot, value),
-          readString,
-          readStringBytes: (reference) => readStringBytes(reference).slice(),
-          readStringSlice,
-          readByteSlice: (reference) => readByteSlice(reference).slice(),
-          writeByteSlice: (reference, bytes) => {
-            const destinationBytes = readByteSlice(reference);
-            const count = Math.min(destinationBytes.byteLength, bytes.byteLength);
-            destinationBytes.set(bytes.subarray(0, count));
-            return count;
-          },
-          allocate,
-          allocateSequence,
-          allocateString,
-          allocateStringBytes,
-          allocateStringSlice,
-          allocateStringBytesSlice,
-          allocateByteSlice,
-          allocateIntSlice,
-          allocateInterfaceSlice,
-          allocateNamedStructSlice,
-          writeError: (slot, message, cause) => writeGuestError(frame, slot, message, cause),
-          clearError: (slot) => {
-            writeSlot(frame, slot, 0n);
-            writeSlot(frame, slot + 1, 0n);
-          },
-          writeOutput: (fd, bytes) => {
-            const output = new TextDecoder().decode(bytes);
-            if (fd === 2) stderr += output;
-            else stdout += output;
-          },
-          exit: (code) => {
-            if (!Number.isInteger(code) || code < -0x8000_0000 || code > 0x7fff_ffff) {
-              throw new Error(`Volang exit code ${code} is outside the signed 32-bit domain`);
-            }
-            requestedExitCode = code;
-            return 5;
-          },
-          panic: (message) => {
-            if (!instance) throw new Error('Volang panic raised before instantiation');
-            const raise = instance.exports[AOT_RAISE_HOST_PANIC_EXPORT];
-            if (typeof raise !== 'function') {
-              throw new Error('Volang AOT host-panic export is missing');
-            }
-            const messageReference = allocateString(message);
-            return raise(frame, Number(messageReference)) as number;
-          },
-        };
-        const asyncKey = `${externId}:${frame}:${destination}:${argumentsStart}:${argumentSlots}`;
-        const executeHandler = (handler: AotExternHandler): number => {
-          const replay = asyncExterns.get(asyncKey);
-          if (replay) {
-            if (!replay.settled) return 5;
-            asyncExterns.delete(asyncKey);
-            if (replay.error !== undefined) throw replay.error;
-            return replay.status;
-          }
-          const outcome = handler(call);
-          if (!(outcome instanceof Promise)) return outcome ?? 0;
-          const replayEffects = (1n << 2n) | (1n << 3n) | (1n << 4n);
-          if ((descriptor.effectiveEffects & replayEffects) === 0n) {
-            throw new Error(`Volang extern ${name} returned a Promise without a replay effect`);
-          }
-          let resolveWake: (() => void) | undefined;
-          const state: AsyncExternState = {
-            settled: false,
-            status: 0,
-            wake: new Promise<void>((resolvePromise) => { resolveWake = resolvePromise; }),
-          };
-          asyncExterns.set(asyncKey, state);
-          void outcome.then(
-            (status) => {
-              state.status = status ?? 0;
-              state.settled = true;
-              resolveWake?.();
-            },
-            (error) => {
-              state.error = error;
-              state.settled = true;
-              resolveWake?.();
-            },
-          );
-          return 5;
-        };
-        const custom = externProvider(options.externs?.[name]);
-        if (custom) return executeHandler(custom.handler);
-        if (platformHost.supports(descriptor)) {
-          return executeHandler((platformCall) => platformHost.handle(platformCall));
-        }
-        if (fmtScanHost.supports(descriptor)) return fmtScanHost.handle(call) ?? 0;
-        if (regexpHost.supports(descriptor)) return regexpHost.handle(call) ?? 0;
-        if ((descriptor.source === 0 || descriptor.source === 1)
-          && name === canonicalExternName('runtime', 'Caller')) {
-          const skip = BigInt.asIntN(64, readSlot(frame, argumentsStart));
-          let callerFrame = frame;
-          let remaining = skip;
-          let location: AotDebugLocation | undefined;
-          let functionId = 0;
-          let pc = 0;
-          while (remaining >= 0n && callerFrame !== 0) {
-            const rawFrame = callerFrame - debugMetadata.frameStateBytes;
-            if (rawFrame < 0
-              || rawFrame + debugMetadata.frameStateBytes > memory.buffer.byteLength) {
-              callerFrame = 0;
-              break;
-            }
-            functionId = view().getUint32(
-              rawFrame + debugMetadata.frameFunctionIdOffset,
-              true,
-            );
-            pc = view().getUint32(rawFrame + debugMetadata.frameDebugPcOffset, true);
-            if (remaining === 0n) {
-              location = debugMetadata.functions[functionId]?.get(pc);
-              break;
-            }
-            callerFrame = view().getUint32(rawFrame + debugMetadata.frameParentOffset, true);
-            remaining -= 1n;
-          }
-          if (skip < 0n || location === undefined) {
-            writeSlot(frame, destination, 0n);
-            writeSlot(frame, destination + 1, 0n);
-            writeSlot(frame, destination + 2, 0n);
-            writeSlot(frame, destination + 3, 0n);
-          } else {
-            const logicalPc = (BigInt(functionId) + 1n) << 32n | BigInt(pc);
-            writeSlot(frame, destination, logicalPc);
-            writeSlot(frame, destination + 1, allocateString(location.file));
-            writeSlot(frame, destination + 2, BigInt(location.line));
-            writeSlot(frame, destination + 3, 1n);
-          }
-          return 0;
-        }
-        if (isStdlibExtern(descriptor, 'encoding/json', 'marshalAny')) {
+        // Successful built-in assertions have no allocation, return roots, or
+        // host lifetime to retain. Custom providers still use the full contract.
+        if (descriptor.source === 0 && descriptor.name === 'vo_assert'
+          && options.externs?.[descriptor.name] === undefined
+          && (descriptor.paramSlots === undefined || descriptor.paramSlots === argumentSlots)
+          && readSlot(frame, argumentsStart + 1) !== 0n) return 0;
+        const callScope = managedMemory.openCall(frame, destination, descriptor.returnSlots, descriptor.returnSlotTypes, descriptor.effectiveEffects);
+        return callScope.run(() => {
           try {
-            const encoded = structuredJson.marshal(
-              readSlot(frame, argumentsStart),
-              readSlot(frame, argumentsStart + 1),
-            );
-            writeSlot(frame, destination, allocateByteSlice(encoded));
-            writeSlot(frame, destination + 1, 0n);
-            writeSlot(frame, destination + 2, 0n);
-          } catch (error) {
-            if (!(error instanceof AotJsonError)) throw error;
-            writeSlot(frame, destination, 0n);
-            writeGuestError(frame, destination + 1, error.message);
-          }
-          return 0;
-        }
-        if (isStdlibExtern(descriptor, 'encoding/json', 'unmarshalAny')) {
-          const encoded = readByteSlice(readSlot(frame, argumentsStart)).slice();
-          activeJsonRoot = { frame, destination };
-          try {
-            structuredJson.unmarshal(
-              encoded,
-              readSlot(frame, argumentsStart + 1),
-              readSlot(frame, argumentsStart + 2),
-            );
-          } catch (error) {
-            if (!(error instanceof AotJsonError)) throw error;
-            writeGuestError(frame, destination, error.message);
-          } finally {
-            activeJsonRoot = undefined;
-          }
-          return 0;
-        }
-        if (isStdlibExtern(descriptor, 'encoding/toml', 'marshalAny')) {
-          try {
-            const encoded = structuredToml.marshal(
-              readSlot(frame, argumentsStart),
-              readSlot(frame, argumentsStart + 1),
-            );
-            writeSlot(frame, destination, allocateByteSlice(encoded));
-            writeSlot(frame, destination + 1, 0n);
-            writeSlot(frame, destination + 2, 0n);
-          } catch (error) {
-            if (!(error instanceof AotJsonError)) throw error;
-            writeSlot(frame, destination, 0n);
-            writeGuestError(frame, destination + 1, error.message);
-          }
-          return 0;
-        }
-        if (isStdlibExtern(descriptor, 'encoding/toml', 'unmarshalAny')) {
-          const encoded = readByteSlice(readSlot(frame, argumentsStart)).slice();
-          activeJsonRoot = { frame, destination };
-          try {
-            structuredToml.unmarshal(
-              encoded,
-              readSlot(frame, argumentsStart + 1),
-              readSlot(frame, argumentsStart + 2),
-            );
-          } catch (error) {
-            if (!(error instanceof AotJsonError)) throw error;
-            writeGuestError(frame, destination, error.message);
-          } finally {
-            activeJsonRoot = undefined;
-          }
-          return 0;
-        }
-        if (name === 'vo_print' || name === 'vo_println') {
-          const fields: string[] = [];
-          for (let slot = 0; slot + 1 < argumentSlots; slot += 2) {
-            fields.push(formatInterface(readSlot(frame, argumentsStart + slot), readSlot(frame, argumentsStart + slot + 1)));
-          }
-          stdout += fields.join(' ');
-          if (name === 'vo_println') stdout += '\n';
-          return 0;
-        }
-        if (isStdlibExtern(descriptor, 'fmt', 'nativeReadLine')) {
-          if (stdinOffset >= stdin.byteLength) {
-            writeSlot(frame, destination, allocateStringBytes(new Uint8Array()));
-            platformHost.writeIoError(call, destination + 1, 'EOF');
-            return 0;
-          }
-          const relativeNewline = stdin.subarray(stdinOffset).indexOf(0x0a);
-          const end = relativeNewline < 0 ? stdin.byteLength : stdinOffset + relativeNewline;
-          let contentEnd = end;
-          if (contentEnd > stdinOffset && stdin[contentEnd - 1] === 0x0d) contentEnd -= 1;
-          writeSlot(
-            frame,
-            destination,
-            allocateStringBytes(stdin.subarray(stdinOffset, contentEnd)),
-          );
-          stdinOffset = relativeNewline < 0 ? stdin.byteLength : end + 1;
-          writeSlot(frame, destination + 1, 0n);
-          writeSlot(frame, destination + 2, 0n);
-          return 0;
-        }
-        const formatSlice = (reference: bigint, newline: boolean): string => {
-          if (reference === 0n) return newline ? '\n' : '';
-          const header = Number(reference);
-          const length = Number(view().getBigUint64(header + 8, true));
-          const data = Number(view().getBigUint64(header, true));
-          const stride = Number(view().getBigUint64(header + 24, true));
-          if (stride < 16) throw new Error(`invalid []interface{} stride ${stride}`);
-          let formatted = '';
-          let previousKind: number | undefined;
-          for (let index = 0; index < length; index += 1) {
-            const element = data + index * stride;
-            const slot0 = view().getBigUint64(element, true);
-            const kind = Number(slot0 & 0xffn);
-            if (index > 0 && (newline || (previousKind !== 17 && kind !== 17))) {
-              formatted += ' ';
-            }
-            formatted += formatInterface(slot0, view().getBigUint64(element + 8, true));
-            previousKind = kind;
-          }
-          return formatted + (newline ? '\n' : '');
-        };
-        if (isStdlibExtern(descriptor, 'fmt', 'nativeWrite')) {
-          const text = readString(readSlot(frame, argumentsStart));
-          stdout += text;
-          return 0;
-        }
-        if (isStdlibExtern(descriptor, 'fmt', 'nativeSprintln')) {
-          writeSlot(frame, destination, allocateString(formatSlice(
-            readSlot(frame, argumentsStart),
-            true,
-          )));
-          return 0;
-        }
-        if (isStdlibExtern(descriptor, 'fmt', 'nativeSprint')) {
-          writeSlot(frame, destination, allocateString(formatSlice(
-            readSlot(frame, argumentsStart),
-            false,
-          )));
-          return 0;
-        }
-        if (isStdlibExtern(descriptor, 'fmt', 'nativeSprintf')) {
-          writeSlot(frame, destination, formatSprintf(
-            readSlot(frame, argumentsStart),
-            readSlot(frame, argumentsStart + 1),
-          ));
-          return 0;
-        }
-        if (name === 'vo_conv_int_str') {
-          const raw = readSlot(frame, argumentsStart);
-          const codePoint = raw <= 0xffff_ffffn ? Number(raw) : 0xfffd;
-          const valid = codePoint <= 0x10ffff && !(codePoint >= 0xd800 && codePoint <= 0xdfff);
-          writeSlot(frame, destination, allocateString(String.fromCodePoint(valid ? codePoint : 0xfffd)));
-          return 0;
-        }
-        if (name === 'vo_conv_str_bytes') {
-          // allocateSlice may grow WebAssembly memory and detach every guest
-          // view. Copy the source before allocating the destination so a
-          // conversion remains valid at the exact growth boundary.
-          const encoded = readStringBytes(readSlot(frame, argumentsStart)).slice();
-          const { header, data } = allocateSlice(encoded.byteLength, encoded.byteLength, 1, 8);
-          new Uint8Array(memory.buffer, data, encoded.byteLength).set(encoded);
-          writeSlot(frame, destination, BigInt(header));
-          return 0;
-        }
-        if (name === 'vo_conv_bytes_str') {
-          const source = Number(readSlot(frame, argumentsStart));
-          if (source === 0) {
-            writeSlot(frame, destination, 0n);
-            return 0;
-          }
-          const data = Number(view().getBigUint64(source, true));
-          const length = Number(view().getBigUint64(source + 8, true));
-          const stride = Number(view().getBigUint64(source + 24, true));
-          if (stride !== 1) throw new Error(`byte slice has invalid stride ${stride}`);
-          writeSlot(frame, destination, allocateStringBytes(
-            new Uint8Array(memory.buffer, data, length),
-          ));
-          return 0;
-        }
-        if (name === 'vo_conv_str_runes') {
-          const encoded = readStringBytes(readSlot(frame, argumentsStart));
-          const runes: number[] = [];
-          for (let offset = 0; offset < encoded.byteLength;) {
-            const [rune, width] = decodeUtf8Rune(encoded, offset);
-            runes.push(rune);
-            offset += width;
-          }
-          const { header, data } = allocateSlice(runes.length, runes.length, 4, 5);
-          runes.forEach((rune, index) => view().setUint32(data + index * 4, rune, true));
-          writeSlot(frame, destination, BigInt(header));
-          return 0;
-        }
-        if (name === 'vo_conv_runes_str') {
-          const source = Number(readSlot(frame, argumentsStart));
-          if (source === 0) {
-            writeSlot(frame, destination, 0n);
-            return 0;
-          }
-          const data = Number(view().getBigUint64(source, true));
-          const length = Number(view().getBigUint64(source + 8, true));
-          const stride = Number(view().getBigUint64(source + 24, true));
-          if (stride !== 4) throw new Error(`rune slice has invalid stride ${stride}`);
-          let value = '';
-          for (let index = 0; index < length; index += 1) {
-            const rune = view().getUint32(data + index * stride, true);
-            const valid = rune <= 0x10ffff && !(rune >= 0xd800 && rune <= 0xdfff);
-            value += String.fromCodePoint(valid ? rune : 0xfffd);
-          }
-          writeSlot(frame, destination, allocateString(value));
-          return 0;
-        }
-        if (name === 'vo_copy' || name === 'vo_copy_string') {
-          const destinationRef = Number(readSlot(frame, argumentsStart));
-          const sourceRef = Number(readSlot(frame, argumentsStart + 1));
-          if (destinationRef === 0 || sourceRef === 0) {
-            writeSlot(frame, destination, 0n);
-            return 0;
-          }
-          const destinationLength = Number(view().getBigUint64(destinationRef + 8, true));
-          const destinationStride = Number(view().getBigUint64(destinationRef + 24, true));
-          const sourceStride = Number(view().getBigUint64(sourceRef + 24, true));
-          const sourceIsString = name === 'vo_copy_string';
-          const sourceLength = Number(view().getBigUint64(
-            sourceRef + (sourceIsString ? 0 : 8),
-            true,
-          ));
-          const count = Math.min(destinationLength, sourceLength);
-          const destinationData = Number(view().getBigUint64(destinationRef, true));
-          const sourceData = Number(view().getBigUint64(
-            sourceRef + (sourceIsString ? 8 : 0),
-            true,
-          ));
-          const sourceElementBytes = sourceIsString ? 1 : sourceStride;
-          if (sourceIsString && destinationStride !== 1) {
-            throw new Error('vo_copy_string destination element layout is not byte-sized');
-          }
-          if (!sourceIsString && destinationStride !== sourceStride) {
-            const compactStride = Math.min(destinationStride, sourceStride);
-            const flatStride = Math.max(destinationStride, sourceStride);
-            if (flatStride !== 8 || ![1, 2, 4].includes(compactStride)) {
-              throw new Error('vo_copy element layouts differ');
-            }
-            // Slices of compact primitive arrays may expose either packed
-            // backing storage or one 64-bit VM slot per element. Stage each
-            // logical value so overlap still follows memmove semantics.
-            const staged = new Uint8Array(count * compactStride);
-            for (let index = 0; index < count; index += 1) {
-              staged.set(new Uint8Array(
-                memory.buffer,
-                sourceData + index * sourceStride,
-                compactStride,
-              ), index * compactStride);
-            }
-            for (let index = 0; index < count; index += 1) {
-              const destinationElement = new Uint8Array(
-                memory.buffer,
-                destinationData + index * destinationStride,
-                compactStride,
+            const { name } = descriptor;
+            if (descriptor.paramSlots !== undefined && descriptor.paramSlots !== argumentSlots) {
+              throw new Error(
+                `Volang extern ${name} received ${argumentSlots} slots; expected ${descriptor.paramSlots}`,
               );
-              destinationElement.set(staged.subarray(
-                index * compactStride,
-                (index + 1) * compactStride,
+            }
+            const call: AotExternCall = {
+              descriptor,
+              name,
+              externId,
+              get memory() { return callScope.borrowMemory(); },
+              frame,
+              destination,
+              argumentsStart,
+              argumentSlots,
+              args,
+              readSlot: (slot) => readSlot(frame, slot),
+              writeSlot: (slot, value) => writeSlot(frame, slot, value),
+              readFloat64: (slot) => readFloat64(frame, slot),
+              writeFloat64: (slot, value) => writeFloat64(frame, slot, value),
+              readString,
+              readStringBytes: (reference) => readStringBytes(reference).slice(),
+              readStringSlice,
+              readByteSlice: (reference) => readByteSlice(reference).slice(),
+              writeByteSlice: (reference, bytes) => {
+                const destinationBytes = readByteSlice(reference);
+                const count = Math.min(destinationBytes.byteLength, bytes.byteLength);
+                destinationBytes.set(bytes.subarray(0, count));
+                return count;
+              },
+              allocate,
+              lease: reference => managedMemory.lease(reference),
+              allocateSequence,
+              allocateString,
+              allocateStringBytes,
+              allocateStringSlice,
+              allocateStringBytesSlice,
+              allocateByteSlice,
+              allocateIntSlice,
+              allocateInterfaceSlice,
+              allocateNamedStructSlice,
+              writeError: (slot, message, cause) => writeGuestError(frame, slot, message, cause),
+              clearError: (slot) => {
+                writeSlot(frame, slot, 0n);
+                writeSlot(frame, slot + 1, 0n);
+              },
+              writeOutput: (fd, bytes) => {
+                const output = new TextDecoder().decode(bytes);
+                if (fd === 2) stderr += output;
+                else stdout += output;
+              },
+              exit: (code) => {
+                if (!Number.isInteger(code) || code < -0x8000_0000 || code > 0x7fff_ffff) {
+                  throw new Error(`Volang exit code ${code} is outside the signed 32-bit domain`);
+                }
+                requestedExitCode = code;
+                throw guestExit;
+              },
+              panic: (message) => {
+                if (!instance) throw new Error('Volang panic raised before instantiation');
+                const raise = instance.exports[AOT_RAISE_HOST_PANIC_EXPORT];
+                if (typeof raise !== 'function') {
+                  throw new Error('Volang AOT host-panic export is missing');
+                }
+                const messageReference = allocateString(message);
+                return raise(frame, Number(messageReference)) as number;
+              },
+            };
+            const asyncKey = `${externId}:${frame}:${destination}:${argumentsStart}:${argumentSlots}`;
+            const executeHandler = (handler: AotExternHandler): number => {
+              const replay = asyncExterns.get(asyncKey);
+              if (replay) {
+                if (!replay.settled) return 5;
+                asyncExterns.delete(asyncKey);
+                replay.release();
+                if (replay.error !== undefined) throw replay.error;
+                return replay.status;
+              }
+              for (const [key, property] of Object.entries(Object.getOwnPropertyDescriptors(call))) {
+                const value = property.value;
+                if (typeof value === 'function') {
+                  (call as unknown as Record<string, unknown>)[key] = (...args: unknown[]) => callScope.run(() => Reflect.apply(value, call, args));
+                }
+              }
+              const outcome = handler(call);
+              if (!(outcome instanceof Promise)) return outcome ?? 0;
+              const replayEffects = (1n << 2n) | (1n << 3n) | (1n << 4n);
+              if ((descriptor.effectiveEffects & replayEffects) === 0n) {
+                throw new Error(`Volang extern ${name} returned a Promise without a replay effect`);
+              }
+              let resolveWake: (() => void) | undefined;
+              callScope.retain();
+              const state: AsyncExternState = {
+                release: () => callScope.release(),
+                cancel: () => callScope.cancel(),
+                settled: false,
+                status: 0,
+                wake: new Promise<void>((resolvePromise) => { resolveWake = resolvePromise; }),
+              };
+              asyncExterns.set(asyncKey, state);
+              const waitingFiber = managedMemory.parkHostFiber();
+              void outcome.then(
+                (status) => {
+                  state.status = status ?? 0;
+                  state.settled = true;
+                  waitingFiber();
+                  resolveWake?.();
+                },
+                (error) => {
+                  state.error = error;
+                  state.settled = true;
+                  waitingFiber();
+                  resolveWake?.();
+                },
+              );
+              return 5;
+            };
+            const custom = externProvider(options.externs?.[name]);
+            if (custom) return executeHandler(custom.handler);
+            if (platformHost.supports(descriptor)) {
+              return executeHandler((platformCall) => platformHost.handle(platformCall));
+            }
+            if (fmtScanHost.supports(descriptor)) return fmtScanHost.handle(call) ?? 0;
+            if (regexpHost.supports(descriptor)) return regexpHost.handle(call) ?? 0;
+            if (descriptor.source === 0 || descriptor.source === 1) {
+              if (name === canonicalExternName('runtime/mem', 'ReadStats')) {
+                managedMemory.publicStats().forEach((value, offset) => writeSlot(frame, destination + offset, value));
+                return 0;
+              }
+              if (name === canonicalExternName('runtime/mem', 'GCStep')) {
+                writeSlot(frame, destination, BigInt(managedMemory.requestStep(readSlot(frame, argumentsStart)))); return 0;
+              }
+              if (name === canonicalExternName('runtime/mem', 'GCCollect')) {
+                writeSlot(frame, destination, BigInt(managedMemory.requestCollection())); return 0;
+              }
+            }
+            if ((descriptor.source === 0 || descriptor.source === 1)
+              && name === canonicalExternName('runtime', 'Caller')) {
+              const skip = BigInt.asIntN(64, readSlot(frame, argumentsStart));
+              let callerFrame = frame;
+              let remaining = skip;
+              let location: AotDebugLocation | undefined;
+              let functionId = 0;
+              let pc = 0;
+              while (remaining >= 0n && callerFrame !== 0) {
+                const rawFrame = callerFrame - debugMetadata.frameStateBytes;
+                if (rawFrame < 0
+                  || rawFrame + debugMetadata.frameStateBytes > memory.buffer.byteLength) {
+                  callerFrame = 0;
+                  break;
+                }
+                functionId = view().getUint32(
+                  rawFrame + debugMetadata.frameFunctionIdOffset,
+                  true,
+                );
+                pc = view().getUint32(rawFrame + debugMetadata.frameDebugPcOffset, true);
+                if (remaining === 0n) {
+                  location = debugMetadata.functions[functionId]?.get(pc);
+                  break;
+                }
+                callerFrame = view().getUint32(rawFrame + debugMetadata.frameParentOffset, true);
+                remaining -= 1n;
+              }
+              if (skip < 0n || location === undefined) {
+                writeSlot(frame, destination, 0n);
+                writeSlot(frame, destination + 1, 0n);
+                writeSlot(frame, destination + 2, 0n);
+                writeSlot(frame, destination + 3, 0n);
+              } else {
+                const logicalPc = (BigInt(functionId) + 1n) << 32n | BigInt(pc);
+                writeSlot(frame, destination, logicalPc);
+                writeSlot(frame, destination + 1, allocateString(location.file));
+                writeSlot(frame, destination + 2, BigInt(location.line));
+                writeSlot(frame, destination + 3, 1n);
+              }
+              return 0;
+            }
+            if (isStdlibExtern(descriptor, 'encoding/json', 'marshalAny')) {
+              try {
+                const encoded = structuredJson.marshal(
+                  readSlot(frame, argumentsStart),
+                  readSlot(frame, argumentsStart + 1),
+                );
+                writeSlot(frame, destination, allocateByteSlice(encoded));
+                writeSlot(frame, destination + 1, 0n);
+                writeSlot(frame, destination + 2, 0n);
+              } catch (error) {
+                if (!(error instanceof AotJsonError)) throw error;
+                writeSlot(frame, destination, 0n);
+                writeGuestError(frame, destination + 1, error.message);
+              }
+              return 0;
+            }
+            if (isStdlibExtern(descriptor, 'encoding/json', 'unmarshalAny')) {
+              const encoded = readByteSlice(readSlot(frame, argumentsStart)).slice();
+              activeJsonRoot = { frame, destination };
+              try {
+                structuredJson.unmarshal(
+                  encoded,
+                  readSlot(frame, argumentsStart + 1),
+                  readSlot(frame, argumentsStart + 2),
+                );
+              } catch (error) {
+                if (!(error instanceof AotJsonError)) throw error;
+                writeGuestError(frame, destination, error.message);
+              } finally {
+                activeJsonRoot = undefined;
+              }
+              return 0;
+            }
+            if (isStdlibExtern(descriptor, 'encoding/toml', 'marshalAny')) {
+              try {
+                const encoded = structuredToml.marshal(
+                  readSlot(frame, argumentsStart),
+                  readSlot(frame, argumentsStart + 1),
+                );
+                writeSlot(frame, destination, allocateByteSlice(encoded));
+                writeSlot(frame, destination + 1, 0n);
+                writeSlot(frame, destination + 2, 0n);
+              } catch (error) {
+                if (!(error instanceof AotJsonError)) throw error;
+                writeSlot(frame, destination, 0n);
+                writeGuestError(frame, destination + 1, error.message);
+              }
+              return 0;
+            }
+            if (isStdlibExtern(descriptor, 'encoding/toml', 'unmarshalAny')) {
+              const encoded = readByteSlice(readSlot(frame, argumentsStart)).slice();
+              activeJsonRoot = { frame, destination };
+              try {
+                structuredToml.unmarshal(
+                  encoded,
+                  readSlot(frame, argumentsStart + 1),
+                  readSlot(frame, argumentsStart + 2),
+                );
+              } catch (error) {
+                if (!(error instanceof AotJsonError)) throw error;
+                writeGuestError(frame, destination, error.message);
+              } finally {
+                activeJsonRoot = undefined;
+              }
+              return 0;
+            }
+            if (name === 'vo_print' || name === 'vo_println') {
+              const fields: string[] = [];
+              for (let slot = 0; slot + 1 < argumentSlots; slot += 2) {
+                fields.push(formatInterface(readSlot(frame, argumentsStart + slot), readSlot(frame, argumentsStart + slot + 1)));
+              }
+              stdout += fields.join(' ');
+              if (name === 'vo_println') stdout += '\n';
+              return 0;
+            }
+            if (isStdlibExtern(descriptor, 'fmt', 'nativeReadLine')) {
+              if (stdinOffset >= stdin.byteLength) {
+                writeSlot(frame, destination, allocateStringBytes(new Uint8Array()));
+                platformHost.writeIoError(call, destination + 1, 'EOF');
+                return 0;
+              }
+              const relativeNewline = stdin.subarray(stdinOffset).indexOf(0x0a);
+              const end = relativeNewline < 0 ? stdin.byteLength : stdinOffset + relativeNewline;
+              let contentEnd = end;
+              if (contentEnd > stdinOffset && stdin[contentEnd - 1] === 0x0d) contentEnd -= 1;
+              writeSlot(
+                frame,
+                destination,
+                allocateStringBytes(stdin.subarray(stdinOffset, contentEnd)),
+              );
+              stdinOffset = relativeNewline < 0 ? stdin.byteLength : end + 1;
+              writeSlot(frame, destination + 1, 0n);
+              writeSlot(frame, destination + 2, 0n);
+              return 0;
+            }
+            const formatSlice = (reference: bigint, newline: boolean): string => {
+              if (reference === 0n) return newline ? '\n' : '';
+              const header = Number(reference);
+              const length = Number(view().getBigUint64(header + 8, true));
+              const data = Number(view().getBigUint64(header, true));
+              const stride = Number(view().getBigUint64(header + 24, true));
+              if (stride < 16) throw new Error(`invalid []interface{} stride ${stride}`);
+              let formatted = '';
+              let previousKind: number | undefined;
+              for (let index = 0; index < length; index += 1) {
+                const element = data + index * stride;
+                const slot0 = view().getBigUint64(element, true);
+                const kind = Number(slot0 & 0xffn);
+                if (index > 0 && (newline || (previousKind !== 17 && kind !== 17))) {
+                  formatted += ' ';
+                }
+                formatted += formatInterface(slot0, view().getBigUint64(element + 8, true));
+                previousKind = kind;
+              }
+              return formatted + (newline ? '\n' : '');
+            };
+            if (isStdlibExtern(descriptor, 'fmt', 'nativeWrite')) {
+              const text = readString(readSlot(frame, argumentsStart));
+              stdout += text;
+              return 0;
+            }
+            if (isStdlibExtern(descriptor, 'fmt', 'nativeSprintln')) {
+              writeSlot(frame, destination, allocateString(formatSlice(
+                readSlot(frame, argumentsStart),
+                true,
+              )));
+              return 0;
+            }
+            if (isStdlibExtern(descriptor, 'fmt', 'nativeSprint')) {
+              writeSlot(frame, destination, allocateString(formatSlice(
+                readSlot(frame, argumentsStart),
+                false,
+              )));
+              return 0;
+            }
+            if (isStdlibExtern(descriptor, 'fmt', 'nativeSprintf')) {
+              writeSlot(frame, destination, formatSprintf(
+                readSlot(frame, argumentsStart),
+                readSlot(frame, argumentsStart + 1),
               ));
+              return 0;
             }
-            writeSlot(frame, destination, BigInt(count));
-            return 0;
-          }
-          new Uint8Array(memory.buffer, destinationData, count * destinationStride)
-            .set(new Uint8Array(memory.buffer, sourceData, count * sourceElementBytes));
-          writeSlot(frame, destination, BigInt(count));
-          return 0;
-        }
-        if (name === 'vo_slice_append_slice' || name === 'vo_slice_append_string') {
-          const destinationRef = Number(readSlot(frame, argumentsStart));
-          const sourceRef = Number(readSlot(frame, argumentsStart + 1));
-          const elementMeta = Number(readSlot(frame, argumentsStart + 2) & 0xffff_ffffn);
-          if (sourceRef === 0) {
-            writeSlot(frame, destination, BigInt(destinationRef));
-            return 0;
-          }
-          const sourceIsString = name === 'vo_slice_append_string';
-          const sourceData = Number(view().getBigUint64(
-            sourceRef + (sourceIsString ? 8 : 0), true,
-          ));
-          const sourceLength = Number(view().getBigUint64(
-            sourceRef + (sourceIsString ? 0 : 8), true,
-          ));
-          if (sourceLength === 0) {
-            writeSlot(frame, destination, BigInt(destinationRef));
-            return 0;
-          }
-          const sourceStride = sourceIsString
-            ? 1 : Number(view().getBigUint64(sourceRef + 24, true));
-          const oldData = destinationRef === 0
-            ? 0 : Number(view().getBigUint64(destinationRef, true));
-          const oldLength = destinationRef === 0
-            ? 0 : Number(view().getBigUint64(destinationRef + 8, true));
-          const oldCapacity = destinationRef === 0
-            ? 0 : Number(view().getBigUint64(destinationRef + 16, true));
-          const stride = destinationRef === 0
-            ? sourceStride : Number(view().getBigUint64(destinationRef + 24, true));
-          if (stride !== sourceStride) throw new Error('append source element layouts differ');
-          const newLength = oldLength + sourceLength;
-          if (!Number.isSafeInteger(newLength)) throw new Error('Volang append length overflow');
-          if (newLength <= oldCapacity) {
-            const header = allocateSequence(32, elementMeta);
-            view().setBigUint64(header, BigInt(oldData), true);
-            view().setBigUint64(header + 8, BigInt(newLength), true);
-            view().setBigUint64(header + 16, BigInt(oldCapacity), true);
-            view().setBigUint64(header + 24, BigInt(stride), true);
-            new Uint8Array(memory.buffer, oldData + oldLength * stride, sourceLength * stride)
-              .set(new Uint8Array(memory.buffer, sourceData, sourceLength * stride));
-            writeSlot(frame, destination, BigInt(header));
-            return 0;
-          }
-          const newCapacity = Math.max(4, newLength, oldCapacity * 2);
-          const allocation = allocateSlice(newLength, newCapacity, stride, elementMeta);
-          if (oldLength !== 0) {
-            new Uint8Array(memory.buffer, allocation.data, oldLength * stride)
-              .set(new Uint8Array(memory.buffer, oldData, oldLength * stride));
-          }
-          new Uint8Array(
-            memory.buffer,
-            allocation.data + oldLength * stride,
-            sourceLength * stride,
-          ).set(new Uint8Array(memory.buffer, sourceData, sourceLength * stride));
-          writeSlot(frame, destination, BigInt(allocation.header));
-          return 0;
-        }
-        if (name === 'vo_assert') {
-          if (readSlot(frame, argumentsStart + 1) === 0n) {
-            const fields: string[] = [];
-            for (let slot = 2; slot + 1 < argumentSlots; slot += 2) {
-              fields.push(formatInterface(
-                readSlot(frame, argumentsStart + slot),
-                readSlot(frame, argumentsStart + slot + 1),
+            if (name === 'vo_conv_int_str') {
+              const raw = readSlot(frame, argumentsStart);
+              const codePoint = raw <= 0xffff_ffffn ? Number(raw) : 0xfffd;
+              const valid = codePoint <= 0x10ffff && !(codePoint >= 0xd800 && codePoint <= 0xdfff);
+              writeSlot(frame, destination, allocateString(String.fromCodePoint(valid ? codePoint : 0xfffd)));
+              return 0;
+            }
+            if (name === 'vo_conv_str_bytes') {
+              // allocateSlice may grow WebAssembly memory and detach every guest
+              // view. Copy the source before allocating the destination so a
+              // conversion remains valid at the exact growth boundary.
+              const encoded = readStringBytes(readSlot(frame, argumentsStart)).slice();
+              const { header, data } = allocateSlice(encoded.byteLength, encoded.byteLength, 1, 8);
+              new Uint8Array(memory.buffer, data, encoded.byteLength).set(encoded);
+              writeSlot(frame, destination, BigInt(header));
+              return 0;
+            }
+            if (name === 'vo_conv_bytes_str') {
+              const source = Number(readSlot(frame, argumentsStart));
+              if (source === 0) {
+                writeSlot(frame, destination, 0n);
+                return 0;
+              }
+              const data = Number(view().getBigUint64(source, true));
+              const length = Number(view().getBigUint64(source + 8, true));
+              const stride = Number(view().getBigUint64(source + 24, true));
+              if (stride !== 1) throw new Error(`byte slice has invalid stride ${stride}`);
+              writeSlot(frame, destination, allocateStringBytes(
+                new Uint8Array(memory.buffer, data, length),
               ));
+              return 0;
             }
-            return call.panic(fields.length === 0
-              ? 'assertion failed'
-              : `assertion failed: ${fields.join(' ')}`);
-          }
-          return 0;
-        }
-        if (isStdlibExtern(descriptor, 'os', 'nativeGetArgs')) {
-          writeSlot(frame, destination, allocateStringSlice(args));
-          return 0;
-        }
-        const time = timeOperation(descriptor);
-        if (time !== undefined) {
-          if (time === 'nowUnixNano') {
-            writeSlot(frame, destination, BigInt(Date.now()) * 1_000_000n);
-            return 0;
-          }
-          if (time === 'nowMonoNano') {
-            const milliseconds = typeof performance === 'undefined'
-              ? Date.now() : performance.now();
-            writeSlot(frame, destination, BigInt(Math.trunc(milliseconds * 1_000_000)));
-            return 0;
-          }
-          const unixSecondsSlot = time.startsWith('iana')
-            ? argumentsStart + 1 : argumentsStart;
-          const unixSeconds = BigInt.asIntN(64, readSlot(frame, unixSecondsSlot));
-          if (time === 'localOffsetAt') {
-            const date = dateAtUnixSeconds(unixSeconds);
-            writeSlot(frame, destination, BigInt(date === undefined
-              ? 0 : -date.getTimezoneOffset() * 60));
-            return 0;
-          }
-          if (time === 'localAbbrevAt') {
-            writeSlot(
-              frame,
-              destination,
-              allocateString(timeZoneAbbreviationAt(undefined, unixSeconds)),
-            );
-            return 0;
-          }
-          const requestedZone = readString(readSlot(frame, argumentsStart));
-          const timeZone = canonicalTimeZone(requestedZone);
-          if (time === 'ianaOffsetAt') {
-            writeSlot(
-              frame,
-              destination,
-              BigInt(timeZone === undefined ? 0 : timeZoneOffsetAt(timeZone, unixSeconds)),
-            );
-            return 0;
-          }
-          if (time === 'ianaAbbrevAt') {
-            writeSlot(
-              frame,
-              destination,
-              allocateString(timeZoneAbbreviationAt(timeZone ?? 'UTC', unixSeconds)),
-            );
-            return 0;
-          }
-          if (timeZone === undefined) {
-            writeSlot(frame, destination, 0n);
-            writeGuestError(frame, destination + 1, `time: unknown time zone ${requestedZone}`);
-          } else {
-            writeSlot(frame, destination, allocateString(timeZone));
-            writeSlot(frame, destination + 1, 0n);
-            writeSlot(frame, destination + 2, 0n);
-          }
-          return 0;
-        }
-        if (isStdlibExtern(descriptor, 'time', 'blocking_sleepNano')) {
-          const duration = BigInt.asIntN(64, readSlot(frame, argumentsStart));
-          if (duration <= 0n) return 0;
-          return executeHandler(() => sleepNanoseconds(duration));
-        }
-        const rand = randOperation(descriptor);
-        if (rand !== undefined) {
-          if (rand === 'Read') {
-            const reference = Number(readSlot(frame, argumentsStart));
-            const length = reference === 0
-              ? 0 : Number(view().getBigUint64(reference + 8, true));
-            const stride = reference === 0
-              ? 1 : Number(view().getBigUint64(reference + 24, true));
-            if (stride !== 1) throw new Error(`math/rand.Read byte slice has stride ${stride}`);
-            const data = reference === 0
-              ? 0 : Number(view().getBigUint64(reference, true));
-            const destinationBytes = new Uint8Array(memory.buffer, data, length);
-            for (let index = 0; index < length; index += 1) {
-              if (randomReadPosition === 0) {
-                randomReadValue = nextRandomU64() >> 1n;
-                randomReadPosition = 7;
+            if (name === 'vo_conv_str_runes') {
+              const encoded = readStringBytes(readSlot(frame, argumentsStart));
+              const runes: number[] = [];
+              for (let offset = 0; offset < encoded.byteLength;) {
+                const [rune, width] = decodeUtf8Rune(encoded, offset);
+                runes.push(rune);
+                offset += width;
               }
-              destinationBytes[index] = Number(randomReadValue & 0xffn);
-              randomReadValue >>= 8n;
-              randomReadPosition -= 1;
+              const { header, data } = allocateSlice(runes.length, runes.length, 4, 5);
+              runes.forEach((rune, index) => view().setUint32(data + index * 4, rune, true));
+              writeSlot(frame, destination, BigInt(header));
+              return 0;
             }
-            writeSlot(frame, destination, BigInt(length));
-            writeSlot(frame, destination + 1, 0n);
-            writeSlot(frame, destination + 2, 0n);
-            return 0;
-          }
-          if (rand === 'Intn' || rand === 'Int63n') {
-            const limit = BigInt.asIntN(64, readSlot(frame, argumentsStart));
-            if (limit <= 0n) return call.panic(`rand.${rand}: invalid argument ${limit}`);
-            writeSlot(frame, destination, boundedRandom(limit));
-          } else if (rand === 'Int') {
-            writeSlot(frame, destination, nextRandomU64() >> 1n);
-          } else if (rand === 'Uint64') {
-            writeSlot(frame, destination, nextRandomU64());
-          } else if (rand === 'Uint32') {
-            writeSlot(frame, destination, nextRandomU64() & 0xffff_ffffn);
-          } else if (rand === 'Float64') {
-            writeFloat64(frame, destination, Number(nextRandomU64() >> 11n) / (2 ** 53));
-          } else {
-            const value = Math.fround(Number(nextRandomU64() >> 40n) / (2 ** 24));
-            writeSlot(frame, destination, BigInt(float32Bits(value)));
-          }
-          return 0;
-        }
-        const strconv = strconvOperation(descriptor);
-        if (strconv === 'parseFloat') {
-          let parsed: { value: number; status: number };
-          try {
-            const source = readStringBytes(readSlot(frame, argumentsStart));
-            const text = new TextDecoder('utf-8', { fatal: true }).decode(source);
-            parsed = parseVolangFloat(
-              text,
-              BigInt.asIntN(64, readSlot(frame, argumentsStart + 1)),
-            );
-          } catch {
-            parsed = { value: 0, status: 1 };
-          }
-          writeFloat64(frame, destination, parsed.value);
-          writeSlot(frame, destination + 1, BigInt(parsed.status));
-          return 0;
-        }
-        if (strconv === 'formatFloat') {
-          const encoded = formatVolangFloat(
-            readFloat64(frame, argumentsStart),
-            Number(readSlot(frame, argumentsStart + 1) & 0xffn),
-            BigInt.asIntN(64, readSlot(frame, argumentsStart + 2)),
-            BigInt.asIntN(64, readSlot(frame, argumentsStart + 3)),
-          );
-          writeSlot(frame, destination, allocateStringBytes(encoded));
-          return 0;
-        }
-        const string = stringOperation(descriptor);
-        if (string !== undefined) {
-          const source = readStringBytes(readSlot(frame, argumentsStart)).slice();
-          if (string === 'Index' || string === 'LastIndex' || string === 'Count') {
-            const pattern = readStringBytes(readSlot(frame, argumentsStart + 1)).slice();
-            let result: number;
-            if (string === 'Index') result = findBytes(source, pattern);
-            else if (string === 'LastIndex') result = lastIndexBytes(source, pattern);
-            else if (pattern.byteLength === 0) result = runeCount(source) + 1;
-            else {
-              result = 0;
-              for (let offset = 0; offset <= source.byteLength - pattern.byteLength;) {
-                const found = findBytes(source, pattern, offset);
-                if (found < 0) break;
-                result += 1;
-                offset = found + pattern.byteLength;
+            if (name === 'vo_conv_runes_str') {
+              const source = Number(readSlot(frame, argumentsStart));
+              if (source === 0) {
+                writeSlot(frame, destination, 0n);
+                return 0;
               }
-            }
-            writeSlot(frame, destination, BigInt(result));
-            return 0;
-          }
-          if (string === 'ToLower' || string === 'ToUpper' || string === 'ToTitle') {
-            const mapping = string === 'ToLower'
-              ? SIMPLE_LOWER : (string === 'ToUpper' ? SIMPLE_UPPER : SIMPLE_TITLE);
-            writeSlot(frame, destination, allocateStringBytes(mappedStringBytes(source, mapping)));
-            return 0;
-          }
-          if (string === 'EqualFold') {
-            const right = readStringBytes(readSlot(frame, argumentsStart + 1)).slice();
-            writeSlot(frame, destination, equalFoldBytes(source, right) ? 1n : 0n);
-            return 0;
-          }
-          if (string === 'Fields') {
-            const fields: Uint8Array[] = [];
-            let fieldStart = -1;
-            for (let offset = 0; offset < source.byteLength;) {
-              const [rune, width] = decodeUtf8Rune(source, offset);
-              const space = unicodeRangeValue(WHITE_SPACE, rune, 0) !== 0;
-              if (space && fieldStart >= 0) {
-                fields.push(source.slice(fieldStart, offset));
-                fieldStart = -1;
-              } else if (!space && fieldStart < 0) fieldStart = offset;
-              offset += width;
-            }
-            if (fieldStart >= 0) fields.push(source.slice(fieldStart));
-            writeSlot(frame, destination, allocateStringBytesSlice(fields));
-            return 0;
-          }
-          if (string === 'Replace') {
-            const old = readStringBytes(readSlot(frame, argumentsStart + 1)).slice();
-            const replacement = readStringBytes(readSlot(frame, argumentsStart + 2)).slice();
-            const limit = BigInt.asIntN(64, readSlot(frame, argumentsStart + 3));
-            writeSlot(
-              frame,
-              destination,
-              allocateStringBytes(replaceStringBytes(source, old, replacement, limit)),
-            );
-            return 0;
-          }
-          const separator = readStringBytes(readSlot(frame, argumentsStart + 1)).slice();
-          const keepSeparator = string === 'SplitAfter' || string === 'SplitAfterN';
-          const limit = string === 'SplitN' || string === 'SplitAfterN'
-            ? BigInt.asIntN(64, readSlot(frame, argumentsStart + 2)) : -1n;
-          const parts = splitStringBytes(source, separator, keepSeparator, limit);
-          writeSlot(
-            frame,
-            destination,
-            limit === 0n ? 0n : allocateStringBytesSlice(parts),
-          );
-          return 0;
-        }
-        const bytes = bytesOperation(descriptor);
-        if (bytes !== undefined) {
-          const source = readByteSlice(readSlot(frame, argumentsStart)).slice();
-          if (bytes === 'Index' || bytes === 'LastIndex' || bytes === 'Count') {
-            const pattern = readByteSlice(readSlot(frame, argumentsStart + 1)).slice();
-            let result: number;
-            if (bytes === 'Index') result = findBytes(source, pattern);
-            else if (bytes === 'LastIndex') result = lastIndexBytes(source, pattern);
-            else if (pattern.byteLength === 0) result = runeCount(source) + 1;
-            else {
-              result = 0;
-              for (let offset = 0; offset <= source.byteLength - pattern.byteLength;) {
-                const found = findBytes(source, pattern, offset);
-                if (found < 0) break;
-                result += 1;
-                offset = found + pattern.byteLength;
+              const data = Number(view().getBigUint64(source, true));
+              const length = Number(view().getBigUint64(source + 8, true));
+              const stride = Number(view().getBigUint64(source + 24, true));
+              if (stride !== 4) throw new Error(`rune slice has invalid stride ${stride}`);
+              let value = '';
+              for (let index = 0; index < length; index += 1) {
+                const rune = view().getUint32(data + index * stride, true);
+                const valid = rune <= 0x10ffff && !(rune >= 0xd800 && rune <= 0xdfff);
+                value += String.fromCodePoint(valid ? rune : 0xfffd);
               }
+              writeSlot(frame, destination, allocateString(value));
+              return 0;
             }
-            writeSlot(frame, destination, BigInt(result));
+            if (name === 'vo_copy' || name === 'vo_copy_string') {
+              const destinationRef = Number(readSlot(frame, argumentsStart));
+              const sourceRef = Number(readSlot(frame, argumentsStart + 1));
+              if (destinationRef === 0 || sourceRef === 0) {
+                writeSlot(frame, destination, 0n);
+                return 0;
+              }
+              const destinationLength = Number(view().getBigUint64(destinationRef + 8, true));
+              const destinationStride = Number(view().getBigUint64(destinationRef + 24, true));
+              const sourceStride = Number(view().getBigUint64(sourceRef + 24, true));
+              const sourceIsString = name === 'vo_copy_string';
+              const sourceLength = Number(view().getBigUint64(
+                sourceRef + (sourceIsString ? 0 : 8),
+                true,
+              ));
+              const count = Math.min(destinationLength, sourceLength);
+              const destinationData = Number(view().getBigUint64(destinationRef, true));
+              const sourceData = Number(view().getBigUint64(
+                sourceRef + (sourceIsString ? 8 : 0),
+                true,
+              ));
+              const sourceElementBytes = sourceIsString ? 1 : sourceStride;
+              if (sourceIsString && destinationStride !== 1) {
+                throw new Error('vo_copy_string destination element layout is not byte-sized');
+              }
+              if (!sourceIsString && destinationStride !== sourceStride) {
+                const compactStride = Math.min(destinationStride, sourceStride);
+                const flatStride = Math.max(destinationStride, sourceStride);
+                if (flatStride !== 8 || ![1, 2, 4].includes(compactStride)) {
+                  throw new Error('vo_copy element layouts differ');
+                }
+                // Slices of compact primitive arrays may expose either packed
+                // backing storage or one 64-bit VM slot per element. Stage each
+                // logical value so overlap still follows memmove semantics.
+                const staged = new Uint8Array(count * compactStride);
+                for (let index = 0; index < count; index += 1) {
+                  staged.set(new Uint8Array(
+                    memory.buffer,
+                    sourceData + index * sourceStride,
+                    compactStride,
+                  ), index * compactStride);
+                }
+                for (let index = 0; index < count; index += 1) {
+                  const destinationElement = new Uint8Array(
+                    memory.buffer,
+                    destinationData + index * destinationStride,
+                    compactStride,
+                  );
+                  destinationElement.set(staged.subarray(
+                    index * compactStride,
+                    (index + 1) * compactStride,
+                  ));
+                }
+                writeSlot(frame, destination, BigInt(count));
+                return 0;
+              }
+              new Uint8Array(memory.buffer, destinationData, count * destinationStride)
+                .set(new Uint8Array(memory.buffer, sourceData, count * sourceElementBytes));
+              managedMemory.write(destinationData, count * destinationStride);
+              writeSlot(frame, destination, BigInt(count));
+              return 0;
+            }
+            if (name === 'vo_slice_append_slice' || name === 'vo_slice_append_string') {
+              const destinationRef = Number(readSlot(frame, argumentsStart));
+              const sourceRef = Number(readSlot(frame, argumentsStart + 1));
+              const elementMeta = Number(readSlot(frame, argumentsStart + 2) & 0xffff_ffffn);
+              if (sourceRef === 0) {
+                writeSlot(frame, destination, BigInt(destinationRef));
+                return 0;
+              }
+              const sourceIsString = name === 'vo_slice_append_string';
+              const sourceData = Number(view().getBigUint64(
+                sourceRef + (sourceIsString ? 8 : 0), true,
+              ));
+              const sourceLength = Number(view().getBigUint64(
+                sourceRef + (sourceIsString ? 0 : 8), true,
+              ));
+              if (sourceLength === 0) {
+                writeSlot(frame, destination, BigInt(destinationRef));
+                return 0;
+              }
+              const sourceStride = sourceIsString
+                ? 1 : Number(view().getBigUint64(sourceRef + 24, true));
+              const oldData = destinationRef === 0
+                ? 0 : Number(view().getBigUint64(destinationRef, true));
+              const oldLength = destinationRef === 0
+                ? 0 : Number(view().getBigUint64(destinationRef + 8, true));
+              const oldCapacity = destinationRef === 0
+                ? 0 : Number(view().getBigUint64(destinationRef + 16, true));
+              const stride = destinationRef === 0
+                ? sourceStride : Number(view().getBigUint64(destinationRef + 24, true));
+              if (stride !== sourceStride) throw new Error('append source element layouts differ');
+              const newLength = oldLength + sourceLength;
+              if (!Number.isSafeInteger(newLength)) throw new Error('Volang append length overflow');
+              if (newLength <= oldCapacity) {
+                const header = allocateSequence(32, elementMeta);
+                view().setBigUint64(header, BigInt(oldData), true);
+                view().setBigUint64(header + 8, BigInt(newLength), true);
+                view().setBigUint64(header + 16, BigInt(oldCapacity), true);
+                view().setBigUint64(header + 24, BigInt(stride), true);
+                new Uint8Array(memory.buffer, oldData + oldLength * stride, sourceLength * stride)
+                  .set(new Uint8Array(memory.buffer, sourceData, sourceLength * stride));
+                managedMemory.write(oldData + oldLength * stride, sourceLength * stride);
+                writeSlot(frame, destination, BigInt(header));
+                return 0;
+              }
+              const newCapacity = Math.max(4, newLength, oldCapacity * 2);
+              const allocation = allocateSlice(newLength, newCapacity, stride, elementMeta);
+              if (oldLength !== 0) {
+                new Uint8Array(memory.buffer, allocation.data, oldLength * stride)
+                  .set(new Uint8Array(memory.buffer, oldData, oldLength * stride));
+              }
+              new Uint8Array(
+                memory.buffer,
+                allocation.data + oldLength * stride,
+                sourceLength * stride,
+              ).set(new Uint8Array(memory.buffer, sourceData, sourceLength * stride));
+              writeSlot(frame, destination, BigInt(allocation.header));
+              return 0;
+            }
+            if (name === 'vo_assert') {
+              if (readSlot(frame, argumentsStart + 1) === 0n) {
+                const fields: string[] = [];
+                for (let slot = 2; slot + 1 < argumentSlots; slot += 2) {
+                  fields.push(formatInterface(
+                    readSlot(frame, argumentsStart + slot),
+                    readSlot(frame, argumentsStart + slot + 1),
+                  ));
+                }
+                return call.panic(fields.length === 0
+                  ? 'assertion failed'
+                  : `assertion failed: ${fields.join(' ')}`);
+              }
+              return 0;
+            }
+            if (isStdlibExtern(descriptor, 'os', 'nativeGetArgs')) {
+              writeSlot(frame, destination, allocateStringSlice(args));
+              return 0;
+            }
+            const time = timeOperation(descriptor);
+            if (time !== undefined) {
+              if (time === 'nowUnixNano') {
+                writeSlot(frame, destination, BigInt(Date.now()) * 1_000_000n);
+                return 0;
+              }
+              if (time === 'nowMonoNano') {
+                const milliseconds = typeof performance === 'undefined'
+                  ? Date.now() : performance.now();
+                writeSlot(frame, destination, BigInt(Math.trunc(milliseconds * 1_000_000)));
+                return 0;
+              }
+              const unixSecondsSlot = time.startsWith('iana')
+                ? argumentsStart + 1 : argumentsStart;
+              const unixSeconds = BigInt.asIntN(64, readSlot(frame, unixSecondsSlot));
+              if (time === 'localOffsetAt') {
+                const date = dateAtUnixSeconds(unixSeconds);
+                writeSlot(frame, destination, BigInt(date === undefined
+                  ? 0 : -date.getTimezoneOffset() * 60));
+                return 0;
+              }
+              if (time === 'localAbbrevAt') {
+                writeSlot(
+                  frame,
+                  destination,
+                  allocateString(timeZoneAbbreviationAt(undefined, unixSeconds)),
+                );
+                return 0;
+              }
+              const requestedZone = readString(readSlot(frame, argumentsStart));
+              const timeZone = canonicalTimeZone(requestedZone);
+              if (time === 'ianaOffsetAt') {
+                writeSlot(
+                  frame,
+                  destination,
+                  BigInt(timeZone === undefined ? 0 : timeZoneOffsetAt(timeZone, unixSeconds)),
+                );
+                return 0;
+              }
+              if (time === 'ianaAbbrevAt') {
+                writeSlot(
+                  frame,
+                  destination,
+                  allocateString(timeZoneAbbreviationAt(timeZone ?? 'UTC', unixSeconds)),
+                );
+                return 0;
+              }
+              if (timeZone === undefined) {
+                writeSlot(frame, destination, 0n);
+                writeGuestError(frame, destination + 1, `time: unknown time zone ${requestedZone}`);
+              } else {
+                writeSlot(frame, destination, allocateString(timeZone));
+                writeSlot(frame, destination + 1, 0n);
+                writeSlot(frame, destination + 2, 0n);
+              }
+              return 0;
+            }
+            if (isStdlibExtern(descriptor, 'time', 'blocking_sleepNano')) {
+              const duration = BigInt.asIntN(64, readSlot(frame, argumentsStart));
+              if (duration <= 0n) return 0;
+              return executeHandler(() => sleepNanoseconds(duration));
+            }
+            const rand = randOperation(descriptor);
+            if (rand !== undefined) {
+              if (rand === 'Read') {
+                const reference = Number(readSlot(frame, argumentsStart));
+                const length = reference === 0
+                  ? 0 : Number(view().getBigUint64(reference + 8, true));
+                const stride = reference === 0
+                  ? 1 : Number(view().getBigUint64(reference + 24, true));
+                if (stride !== 1) throw new Error(`math/rand.Read byte slice has stride ${stride}`);
+                const data = reference === 0
+                  ? 0 : Number(view().getBigUint64(reference, true));
+                const destinationBytes = new Uint8Array(memory.buffer, data, length);
+                for (let index = 0; index < length; index += 1) {
+                  if (randomReadPosition === 0) {
+                    randomReadValue = nextRandomU64() >> 1n;
+                    randomReadPosition = 7;
+                  }
+                  destinationBytes[index] = Number(randomReadValue & 0xffn);
+                  randomReadValue >>= 8n;
+                  randomReadPosition -= 1;
+                }
+                writeSlot(frame, destination, BigInt(length));
+                writeSlot(frame, destination + 1, 0n);
+                writeSlot(frame, destination + 2, 0n);
+                return 0;
+              }
+              if (rand === 'Intn' || rand === 'Int63n') {
+                const limit = BigInt.asIntN(64, readSlot(frame, argumentsStart));
+                if (limit <= 0n) return call.panic(`rand.${rand}: invalid argument ${limit}`);
+                writeSlot(frame, destination, boundedRandom(limit));
+              } else if (rand === 'Int') {
+                writeSlot(frame, destination, nextRandomU64() >> 1n);
+              } else if (rand === 'Uint64') {
+                writeSlot(frame, destination, nextRandomU64());
+              } else if (rand === 'Uint32') {
+                writeSlot(frame, destination, nextRandomU64() & 0xffff_ffffn);
+              } else if (rand === 'Float64') {
+                writeFloat64(frame, destination, Number(nextRandomU64() >> 11n) / (2 ** 53));
+              } else {
+                const value = Math.fround(Number(nextRandomU64() >> 40n) / (2 ** 24));
+                writeSlot(frame, destination, BigInt(float32Bits(value)));
+              }
+              return 0;
+            }
+            const strconv = strconvOperation(descriptor);
+            if (strconv === 'parseFloat') {
+              let parsed: { value: number; status: number };
+              try {
+                const source = readStringBytes(readSlot(frame, argumentsStart));
+                const text = new TextDecoder('utf-8', { fatal: true }).decode(source);
+                parsed = parseVolangFloat(
+                  text,
+                  BigInt.asIntN(64, readSlot(frame, argumentsStart + 1)),
+                );
+              } catch {
+                parsed = { value: 0, status: 1 };
+              }
+              writeFloat64(frame, destination, parsed.value);
+              writeSlot(frame, destination + 1, BigInt(parsed.status));
+              return 0;
+            }
+            if (strconv === 'formatFloat') {
+              const encoded = formatVolangFloat(
+                readFloat64(frame, argumentsStart),
+                Number(readSlot(frame, argumentsStart + 1) & 0xffn),
+                BigInt.asIntN(64, readSlot(frame, argumentsStart + 2)),
+                BigInt.asIntN(64, readSlot(frame, argumentsStart + 3)),
+              );
+              writeSlot(frame, destination, allocateStringBytes(encoded));
+              return 0;
+            }
+            const string = stringOperation(descriptor);
+            if (string !== undefined) {
+              const source = readStringBytes(readSlot(frame, argumentsStart)).slice();
+              if (string === 'Index' || string === 'LastIndex' || string === 'Count') {
+                const pattern = readStringBytes(readSlot(frame, argumentsStart + 1)).slice();
+                let result: number;
+                if (string === 'Index') result = findBytes(source, pattern);
+                else if (string === 'LastIndex') result = lastIndexBytes(source, pattern);
+                else if (pattern.byteLength === 0) result = runeCount(source) + 1;
+                else {
+                  result = 0;
+                  for (let offset = 0; offset <= source.byteLength - pattern.byteLength;) {
+                    const found = findBytes(source, pattern, offset);
+                    if (found < 0) break;
+                    result += 1;
+                    offset = found + pattern.byteLength;
+                  }
+                }
+                writeSlot(frame, destination, BigInt(result));
+                return 0;
+              }
+              if (string === 'ToLower' || string === 'ToUpper' || string === 'ToTitle') {
+                const mapping = string === 'ToLower'
+                  ? SIMPLE_LOWER : (string === 'ToUpper' ? SIMPLE_UPPER : SIMPLE_TITLE);
+                writeSlot(frame, destination, allocateStringBytes(mappedStringBytes(source, mapping)));
+                return 0;
+              }
+              if (string === 'EqualFold') {
+                const right = readStringBytes(readSlot(frame, argumentsStart + 1)).slice();
+                writeSlot(frame, destination, equalFoldBytes(source, right) ? 1n : 0n);
+                return 0;
+              }
+              if (string === 'Fields') {
+                const fields: Uint8Array[] = [];
+                let fieldStart = -1;
+                for (let offset = 0; offset < source.byteLength;) {
+                  const [rune, width] = decodeUtf8Rune(source, offset);
+                  const space = unicodeRangeValue(WHITE_SPACE, rune, 0) !== 0;
+                  if (space && fieldStart >= 0) {
+                    fields.push(source.slice(fieldStart, offset));
+                    fieldStart = -1;
+                  } else if (!space && fieldStart < 0) fieldStart = offset;
+                  offset += width;
+                }
+                if (fieldStart >= 0) fields.push(source.slice(fieldStart));
+                writeSlot(frame, destination, allocateStringBytesSlice(fields));
+                return 0;
+              }
+              if (string === 'Replace') {
+                const old = readStringBytes(readSlot(frame, argumentsStart + 1)).slice();
+                const replacement = readStringBytes(readSlot(frame, argumentsStart + 2)).slice();
+                const limit = BigInt.asIntN(64, readSlot(frame, argumentsStart + 3));
+                writeSlot(
+                  frame,
+                  destination,
+                  allocateStringBytes(replaceStringBytes(source, old, replacement, limit)),
+                );
+                return 0;
+              }
+              const separator = readStringBytes(readSlot(frame, argumentsStart + 1)).slice();
+              const keepSeparator = string === 'SplitAfter' || string === 'SplitAfterN';
+              const limit = string === 'SplitN' || string === 'SplitAfterN'
+                ? BigInt.asIntN(64, readSlot(frame, argumentsStart + 2)) : -1n;
+              const parts = splitStringBytes(source, separator, keepSeparator, limit);
+              writeSlot(
+                frame,
+                destination,
+                limit === 0n ? 0n : allocateStringBytesSlice(parts),
+              );
+              return 0;
+            }
+            const bytes = bytesOperation(descriptor);
+            if (bytes !== undefined) {
+              const source = readByteSlice(readSlot(frame, argumentsStart)).slice();
+              if (bytes === 'Index' || bytes === 'LastIndex' || bytes === 'Count') {
+                const pattern = readByteSlice(readSlot(frame, argumentsStart + 1)).slice();
+                let result: number;
+                if (bytes === 'Index') result = findBytes(source, pattern);
+                else if (bytes === 'LastIndex') result = lastIndexBytes(source, pattern);
+                else if (pattern.byteLength === 0) result = runeCount(source) + 1;
+                else {
+                  result = 0;
+                  for (let offset = 0; offset <= source.byteLength - pattern.byteLength;) {
+                    const found = findBytes(source, pattern, offset);
+                    if (found < 0) break;
+                    result += 1;
+                    offset = found + pattern.byteLength;
+                  }
+                }
+                writeSlot(frame, destination, BigInt(result));
+                return 0;
+              }
+              if (bytes === 'ToLower' || bytes === 'ToUpper' || bytes === 'ToTitle') {
+                const mapping = bytes === 'ToLower'
+                  ? SIMPLE_LOWER : (bytes === 'ToUpper' ? SIMPLE_UPPER : SIMPLE_TITLE);
+                writeSlot(frame, destination, allocateByteSlice(mappedStringBytes(source, mapping)));
+                return 0;
+              }
+              if (bytes === 'EqualFold') {
+                const right = readByteSlice(readSlot(frame, argumentsStart + 1)).slice();
+                writeSlot(frame, destination, equalFoldBytes(source, right) ? 1n : 0n);
+                return 0;
+              }
+              const old = readByteSlice(readSlot(frame, argumentsStart + 1)).slice();
+              const replacement = readByteSlice(readSlot(frame, argumentsStart + 2)).slice();
+              const limit = BigInt.asIntN(64, readSlot(frame, argumentsStart + 3));
+              if (source.byteLength === 0 && old.byteLength !== 0) {
+                writeSlot(frame, destination, 0n);
+                return 0;
+              }
+              writeSlot(
+                frame,
+                destination,
+                allocateByteSlice(replaceStringBytes(source, old, replacement, limit)),
+              );
+              return 0;
+            }
+            const unicode = unicodeOperation(descriptor);
+            if (unicode !== undefined) {
+              const rune = Number(BigInt.asIntN(32, readSlot(frame, argumentsStart)));
+              const category = unicodeCategory(rune);
+              let result: number;
+              switch (unicode) {
+                case 'IsLetter': result = category >= 1 && category <= 5 ? 1 : 0; break;
+                case 'IsDigit': result = category === 9 ? 1 : 0; break;
+                case 'IsSpace':
+                  result = validUnicodeScalar(rune)
+                    && unicodeRangeValue(WHITE_SPACE, rune, 0) !== 0 ? 1 : 0;
+                  break;
+                case 'IsUpper': result = category === 1 ? 1 : 0; break;
+                case 'IsLower': result = category === 2 ? 1 : 0; break;
+                case 'IsTitle': result = category === 3 ? 1 : 0; break;
+                case 'IsControl': result = category === 15 ? 1 : 0; break;
+                case 'IsPrint':
+                  result = unicodeIsPrint(rune) ? 1 : 0;
+                  break;
+                case 'IsPunct':
+                  result = (category >= 19 && category <= 23) || category === 28 || category === 29
+                    ? 1 : 0;
+                  break;
+                case 'IsGraphic':
+                  result = (category >= 1 && category <= 12)
+                    || (category >= 19 && category <= 29) ? 1 : 0;
+                  break;
+                case 'IsNumber': result = category >= 9 && category <= 11 ? 1 : 0; break;
+                case 'IsMark': result = category >= 6 && category <= 8 ? 1 : 0; break;
+                case 'IsSymbol': result = category >= 24 && category <= 27 ? 1 : 0; break;
+                case 'ToLower': result = unicodeMap(rune, SIMPLE_LOWER); break;
+                case 'ToUpper': result = unicodeMap(rune, SIMPLE_UPPER); break;
+                case 'ToTitle': result = unicodeMap(rune, SIMPLE_TITLE); break;
+                case 'SimpleFold': result = unicodeMap(rune, SIMPLE_FOLD); break;
+                default: throw new Error(`unknown Unicode operation ${unicode}`);
+              }
+              writeSlot(frame, destination, BigInt(result));
+              return 0;
+            }
+            const bitsOperation = mathBitsOperation(descriptor);
+            if (bitsOperation !== undefined) {
+              const width = bitsOperation === 'nativeUintSize' || !/\d+$/.test(bitsOperation)
+                ? 32
+                : Number(/(8|16|32|64)$/.exec(bitsOperation)?.[1]);
+              if (bitsOperation === 'nativeUintSize') {
+                writeSlot(frame, destination, 32n);
+                return 0;
+              }
+              const mask = (1n << BigInt(width)) - 1n;
+              const operand = (slot: number) => readSlot(frame, argumentsStart + slot) & mask;
+              if (bitsOperation.startsWith('LeadingZeros')) {
+                const value = operand(0);
+                writeSlot(frame, destination, BigInt(value === 0n ? width : width - bitLength(value)));
+              } else if (bitsOperation.startsWith('TrailingZeros')) {
+                let value = operand(0);
+                let count = 0;
+                if (value === 0n) count = width;
+                else while ((value & 1n) === 0n) { value >>= 1n; count += 1; }
+                writeSlot(frame, destination, BigInt(count));
+              } else if (bitsOperation.startsWith('OnesCount')) {
+                const count = operand(0).toString(2).replace(/0/g, '').length;
+                writeSlot(frame, destination, BigInt(count));
+              } else if (bitsOperation.startsWith('Add')) {
+                const sum = operand(0) + operand(1) + (operand(2) & 1n);
+                writeSlot(frame, destination, sum & mask);
+                writeSlot(frame, destination + 1, sum >> BigInt(width));
+              } else if (bitsOperation.startsWith('Sub')) {
+                const difference = operand(0) - operand(1) - (operand(2) & 1n);
+                writeSlot(frame, destination, difference & mask);
+                writeSlot(frame, destination + 1, difference < 0n ? 1n : 0n);
+              } else if (bitsOperation.startsWith('Mul')) {
+                const product = operand(0) * operand(1);
+                writeSlot(frame, destination, (product >> BigInt(width)) & mask);
+                writeSlot(frame, destination + 1, product & mask);
+              } else {
+                const divisor = operand(2);
+                if (divisor === 0n) return call.panic('division by zero');
+                const dividend = (operand(0) << BigInt(width)) | operand(1);
+                writeSlot(frame, destination, (dividend / divisor) & mask);
+                writeSlot(frame, destination + 1, dividend % divisor);
+              }
+              return 0;
+            }
+            const mathUnary = (operation: (value: number) => number) => {
+              writeFloat64(frame, destination, operation(readFloat64(frame, argumentsStart)));
+            };
+            const mathBinary = (operation: (left: number, right: number) => number) => {
+              writeFloat64(frame, destination, operation(
+                readFloat64(frame, argumentsStart),
+                readFloat64(frame, argumentsStart + 1),
+              ));
+            };
+            if (isMathExtern(descriptor, 'Sqrt')) mathUnary(Math.sqrt);
+            else if (isMathExtern(descriptor, 'Floor')) mathUnary(Math.floor);
+            else if (isMathExtern(descriptor, 'Ceil')) mathUnary(Math.ceil);
+            else if (isMathExtern(descriptor, 'Round')) mathUnary((value) => {
+              if (value === 0 || !Number.isFinite(value)) return value;
+              const rounded = value < 0 ? -Math.floor(-value + 0.5) : Math.floor(value + 0.5);
+              return rounded === 0 ? copyFloat64Sign(0, value) : rounded;
+            });
+            else if (isMathExtern(descriptor, 'Trunc')) mathUnary(Math.trunc);
+            else if (isMathExtern(descriptor, 'Cbrt')) mathUnary(Math.cbrt);
+            else if (isMathExtern(descriptor, 'Pow')) mathBinary(Math.pow);
+            else if (isMathExtern(descriptor, 'Hypot')) mathBinary(Math.hypot);
+            else if (isMathExtern(descriptor, 'Exp')) mathUnary(Math.exp);
+            else if (isMathExtern(descriptor, 'Exp2')) mathUnary((value) => 2 ** value);
+            else if (isMathExtern(descriptor, 'Expm1')) mathUnary(Math.expm1);
+            else if (isMathExtern(descriptor, 'Log')) mathUnary(Math.log);
+            else if (isMathExtern(descriptor, 'Log2')) mathUnary(Math.log2);
+            else if (isMathExtern(descriptor, 'Log10')) mathUnary(Math.log10);
+            else if (isMathExtern(descriptor, 'Log1p')) mathUnary(Math.log1p);
+            else if (isMathExtern(descriptor, 'Sin')) mathUnary(Math.sin);
+            else if (isMathExtern(descriptor, 'Cos')) mathUnary(Math.cos);
+            else if (isMathExtern(descriptor, 'Tan')) mathUnary(Math.tan);
+            else if (isMathExtern(descriptor, 'Asin')) mathUnary(Math.asin);
+            else if (isMathExtern(descriptor, 'Acos')) mathUnary(Math.acos);
+            else if (isMathExtern(descriptor, 'Atan')) mathUnary(Math.atan);
+            else if (isMathExtern(descriptor, 'Atan2')) mathBinary(Math.atan2);
+            else if (isMathExtern(descriptor, 'Sinh')) mathUnary(Math.sinh);
+            else if (isMathExtern(descriptor, 'Cosh')) mathUnary(Math.cosh);
+            else if (isMathExtern(descriptor, 'Tanh')) mathUnary(Math.tanh);
+            else if (isMathExtern(descriptor, 'Asinh')) mathUnary(Math.asinh);
+            else if (isMathExtern(descriptor, 'Acosh')) mathUnary(Math.acosh);
+            else if (isMathExtern(descriptor, 'Atanh')) mathUnary(Math.atanh);
+            else if (isMathExtern(descriptor, 'Mod')) mathBinary((left, right) => left % right);
+            else if (isMathExtern(descriptor, 'Modf')) {
+              const value = readFloat64(frame, argumentsStart);
+              const integer = Math.trunc(value);
+              writeFloat64(frame, destination, integer);
+              writeFloat64(frame, destination + 1, copyFloat64Sign(value - integer, value));
+            } else if (isMathExtern(descriptor, 'Frexp')) {
+              const [fraction, exponent] = frexpFloat64(readFloat64(frame, argumentsStart));
+              writeFloat64(frame, destination, fraction);
+              writeSlot(frame, destination + 1, BigInt.asUintN(64, exponent));
+            } else if (isMathExtern(descriptor, 'Ldexp')) {
+              writeFloat64(frame, destination, ldexpFloat64(
+                readFloat64(frame, argumentsStart),
+                BigInt.asIntN(64, readSlot(frame, argumentsStart + 1)),
+              ));
+            } else if (isMathExtern(descriptor, 'FMA')) {
+              writeFloat64(frame, destination, fusedMultiplyAdd(
+                readFloat64(frame, argumentsStart),
+                readFloat64(frame, argumentsStart + 1),
+                readFloat64(frame, argumentsStart + 2),
+              ));
+            } else if (isMathExtern(descriptor, 'Inf')) {
+              writeFloat64(frame, destination, BigInt.asIntN(64, readSlot(frame, argumentsStart)) >= 0n
+                ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY);
+            } else if (isMathExtern(descriptor, 'NaN')) {
+              writeSlot(frame, destination, 0x7ff8_0000_0000_0001n);
+            } else if (isMathExtern(descriptor, 'Float64bits')
+              || isMathExtern(descriptor, 'Float64frombits')) {
+              writeSlot(frame, destination, readSlot(frame, argumentsStart));
+            } else if (isMathExtern(descriptor, 'Float32bits')
+              || isMathExtern(descriptor, 'Float32frombits')) {
+              writeSlot(frame, destination, readSlot(frame, argumentsStart) & 0xffff_ffffn);
+            } else {
+              throw new Error(`vo-web AOT host does not provide Volang extern ${name}`);
+            }
             return 0;
-          }
-          if (bytes === 'ToLower' || bytes === 'ToUpper' || bytes === 'ToTitle') {
-            const mapping = bytes === 'ToLower'
-              ? SIMPLE_LOWER : (bytes === 'ToUpper' ? SIMPLE_UPPER : SIMPLE_TITLE);
-            writeSlot(frame, destination, allocateByteSlice(mappedStringBytes(source, mapping)));
-            return 0;
-          }
-          if (bytes === 'EqualFold') {
-            const right = readByteSlice(readSlot(frame, argumentsStart + 1)).slice();
-            writeSlot(frame, destination, equalFoldBytes(source, right) ? 1n : 0n);
-            return 0;
-          }
-          const old = readByteSlice(readSlot(frame, argumentsStart + 1)).slice();
-          const replacement = readByteSlice(readSlot(frame, argumentsStart + 2)).slice();
-          const limit = BigInt.asIntN(64, readSlot(frame, argumentsStart + 3));
-          if (source.byteLength === 0 && old.byteLength !== 0) {
-            writeSlot(frame, destination, 0n);
-            return 0;
-          }
-          writeSlot(
-            frame,
-            destination,
-            allocateByteSlice(replaceStringBytes(source, old, replacement, limit)),
-          );
-          return 0;
-        }
-        const unicode = unicodeOperation(descriptor);
-        if (unicode !== undefined) {
-          const rune = Number(BigInt.asIntN(32, readSlot(frame, argumentsStart)));
-          const category = unicodeCategory(rune);
-          let result: number;
-          switch (unicode) {
-            case 'IsLetter': result = category >= 1 && category <= 5 ? 1 : 0; break;
-            case 'IsDigit': result = category === 9 ? 1 : 0; break;
-            case 'IsSpace':
-              result = validUnicodeScalar(rune)
-                && unicodeRangeValue(WHITE_SPACE, rune, 0) !== 0 ? 1 : 0;
-              break;
-            case 'IsUpper': result = category === 1 ? 1 : 0; break;
-            case 'IsLower': result = category === 2 ? 1 : 0; break;
-            case 'IsTitle': result = category === 3 ? 1 : 0; break;
-            case 'IsControl': result = category === 15 ? 1 : 0; break;
-            case 'IsPrint':
-              result = unicodeIsPrint(rune) ? 1 : 0;
-              break;
-            case 'IsPunct':
-              result = (category >= 19 && category <= 23) || category === 28 || category === 29
-                ? 1 : 0;
-              break;
-            case 'IsGraphic':
-              result = (category >= 1 && category <= 12)
-                || (category >= 19 && category <= 29) ? 1 : 0;
-              break;
-            case 'IsNumber': result = category >= 9 && category <= 11 ? 1 : 0; break;
-            case 'IsMark': result = category >= 6 && category <= 8 ? 1 : 0; break;
-            case 'IsSymbol': result = category >= 24 && category <= 27 ? 1 : 0; break;
-            case 'ToLower': result = unicodeMap(rune, SIMPLE_LOWER); break;
-            case 'ToUpper': result = unicodeMap(rune, SIMPLE_UPPER); break;
-            case 'ToTitle': result = unicodeMap(rune, SIMPLE_TITLE); break;
-            case 'SimpleFold': result = unicodeMap(rune, SIMPLE_FOLD); break;
-            default: throw new Error(`unknown Unicode operation ${unicode}`);
-          }
-          writeSlot(frame, destination, BigInt(result));
-          return 0;
-        }
-        const bitsOperation = mathBitsOperation(descriptor);
-        if (bitsOperation !== undefined) {
-          const width = bitsOperation === 'nativeUintSize' || !/\d+$/.test(bitsOperation)
-            ? 32
-            : Number(/(8|16|32|64)$/.exec(bitsOperation)?.[1]);
-          if (bitsOperation === 'nativeUintSize') {
-            writeSlot(frame, destination, 32n);
-            return 0;
-          }
-          const mask = (1n << BigInt(width)) - 1n;
-          const operand = (slot: number) => readSlot(frame, argumentsStart + slot) & mask;
-          if (bitsOperation.startsWith('LeadingZeros')) {
-            const value = operand(0);
-            writeSlot(frame, destination, BigInt(value === 0n ? width : width - bitLength(value)));
-          } else if (bitsOperation.startsWith('TrailingZeros')) {
-            let value = operand(0);
-            let count = 0;
-            if (value === 0n) count = width;
-            else while ((value & 1n) === 0n) { value >>= 1n; count += 1; }
-            writeSlot(frame, destination, BigInt(count));
-          } else if (bitsOperation.startsWith('OnesCount')) {
-            const count = operand(0).toString(2).replace(/0/g, '').length;
-            writeSlot(frame, destination, BigInt(count));
-          } else if (bitsOperation.startsWith('Add')) {
-            const sum = operand(0) + operand(1) + (operand(2) & 1n);
-            writeSlot(frame, destination, sum & mask);
-            writeSlot(frame, destination + 1, sum >> BigInt(width));
-          } else if (bitsOperation.startsWith('Sub')) {
-            const difference = operand(0) - operand(1) - (operand(2) & 1n);
-            writeSlot(frame, destination, difference & mask);
-            writeSlot(frame, destination + 1, difference < 0n ? 1n : 0n);
-          } else if (bitsOperation.startsWith('Mul')) {
-            const product = operand(0) * operand(1);
-            writeSlot(frame, destination, (product >> BigInt(width)) & mask);
-            writeSlot(frame, destination + 1, product & mask);
-          } else {
-            const divisor = operand(2);
-            if (divisor === 0n) return call.panic('division by zero');
-            const dividend = (operand(0) << BigInt(width)) | operand(1);
-            writeSlot(frame, destination, (dividend / divisor) & mask);
-            writeSlot(frame, destination + 1, dividend % divisor);
-          }
-          return 0;
-        }
-        const mathUnary = (operation: (value: number) => number) => {
-          writeFloat64(frame, destination, operation(readFloat64(frame, argumentsStart)));
-        };
-        const mathBinary = (operation: (left: number, right: number) => number) => {
-          writeFloat64(frame, destination, operation(
-            readFloat64(frame, argumentsStart),
-            readFloat64(frame, argumentsStart + 1),
-          ));
-        };
-        if (isMathExtern(descriptor, 'Sqrt')) mathUnary(Math.sqrt);
-        else if (isMathExtern(descriptor, 'Floor')) mathUnary(Math.floor);
-        else if (isMathExtern(descriptor, 'Ceil')) mathUnary(Math.ceil);
-        else if (isMathExtern(descriptor, 'Round')) mathUnary((value) => {
-          if (value === 0 || !Number.isFinite(value)) return value;
-          const rounded = value < 0 ? -Math.floor(-value + 0.5) : Math.floor(value + 0.5);
-          return rounded === 0 ? copyFloat64Sign(0, value) : rounded;
+          } finally { callScope.leave(); }
         });
-        else if (isMathExtern(descriptor, 'Trunc')) mathUnary(Math.trunc);
-        else if (isMathExtern(descriptor, 'Cbrt')) mathUnary(Math.cbrt);
-        else if (isMathExtern(descriptor, 'Pow')) mathBinary(Math.pow);
-        else if (isMathExtern(descriptor, 'Hypot')) mathBinary(Math.hypot);
-        else if (isMathExtern(descriptor, 'Exp')) mathUnary(Math.exp);
-        else if (isMathExtern(descriptor, 'Exp2')) mathUnary((value) => 2 ** value);
-        else if (isMathExtern(descriptor, 'Expm1')) mathUnary(Math.expm1);
-        else if (isMathExtern(descriptor, 'Log')) mathUnary(Math.log);
-        else if (isMathExtern(descriptor, 'Log2')) mathUnary(Math.log2);
-        else if (isMathExtern(descriptor, 'Log10')) mathUnary(Math.log10);
-        else if (isMathExtern(descriptor, 'Log1p')) mathUnary(Math.log1p);
-        else if (isMathExtern(descriptor, 'Sin')) mathUnary(Math.sin);
-        else if (isMathExtern(descriptor, 'Cos')) mathUnary(Math.cos);
-        else if (isMathExtern(descriptor, 'Tan')) mathUnary(Math.tan);
-        else if (isMathExtern(descriptor, 'Asin')) mathUnary(Math.asin);
-        else if (isMathExtern(descriptor, 'Acos')) mathUnary(Math.acos);
-        else if (isMathExtern(descriptor, 'Atan')) mathUnary(Math.atan);
-        else if (isMathExtern(descriptor, 'Atan2')) mathBinary(Math.atan2);
-        else if (isMathExtern(descriptor, 'Sinh')) mathUnary(Math.sinh);
-        else if (isMathExtern(descriptor, 'Cosh')) mathUnary(Math.cosh);
-        else if (isMathExtern(descriptor, 'Tanh')) mathUnary(Math.tanh);
-        else if (isMathExtern(descriptor, 'Asinh')) mathUnary(Math.asinh);
-        else if (isMathExtern(descriptor, 'Acosh')) mathUnary(Math.acosh);
-        else if (isMathExtern(descriptor, 'Atanh')) mathUnary(Math.atanh);
-        else if (isMathExtern(descriptor, 'Mod')) mathBinary((left, right) => left % right);
-        else if (isMathExtern(descriptor, 'Modf')) {
-          const value = readFloat64(frame, argumentsStart);
-          const integer = Math.trunc(value);
-          writeFloat64(frame, destination, integer);
-          writeFloat64(frame, destination + 1, copyFloat64Sign(value - integer, value));
-        } else if (isMathExtern(descriptor, 'Frexp')) {
-          const [fraction, exponent] = frexpFloat64(readFloat64(frame, argumentsStart));
-          writeFloat64(frame, destination, fraction);
-          writeSlot(frame, destination + 1, BigInt.asUintN(64, exponent));
-        } else if (isMathExtern(descriptor, 'Ldexp')) {
-          writeFloat64(frame, destination, ldexpFloat64(
-            readFloat64(frame, argumentsStart),
-            BigInt.asIntN(64, readSlot(frame, argumentsStart + 1)),
-          ));
-        } else if (isMathExtern(descriptor, 'FMA')) {
-          writeFloat64(frame, destination, fusedMultiplyAdd(
-            readFloat64(frame, argumentsStart),
-            readFloat64(frame, argumentsStart + 1),
-            readFloat64(frame, argumentsStart + 2),
-          ));
-        } else if (isMathExtern(descriptor, 'Inf')) {
-          writeFloat64(frame, destination, BigInt.asIntN(64, readSlot(frame, argumentsStart)) >= 0n
-            ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY);
-        } else if (isMathExtern(descriptor, 'NaN')) {
-          writeSlot(frame, destination, 0x7ff8_0000_0000_0001n);
-        } else if (isMathExtern(descriptor, 'Float64bits')
-          || isMathExtern(descriptor, 'Float64frombits')) {
-          writeSlot(frame, destination, readSlot(frame, argumentsStart));
-        } else if (isMathExtern(descriptor, 'Float32bits')
-          || isMathExtern(descriptor, 'Float32frombits')) {
-          writeSlot(frame, destination, readSlot(frame, argumentsStart) & 0xffff_ffffn);
-        } else {
-          throw new Error(`vo-web AOT host does not provide Volang extern ${name}`);
-        }
-        return 0;
       },
     },
   };
   instance = await WebAssembly.instantiate(module, imports);
+  managedMemory.attach(instance);
+  options.onMemory?.(managedMemory.controls());
   if (instance.exports[AOT_MEMORY_EXPORT] !== memory) {
     throw new Error('Volang AOT module did not re-export its admitted memory');
   }
@@ -3272,10 +2240,19 @@ export async function runAot(
   }
   const entry = instance.exports[AOT_ENTRY_EXPORT] as (() => number) | undefined;
   if (typeof entry !== 'function') throw new Error('Volang AOT entry export is missing');
-  let exitCode = entry();
-  while (exitCode === 5 && asyncExterns.size !== 0) {
-    await Promise.race([...asyncExterns.values()].map((state) => state.wake));
-    exitCode = entry();
+  let exitCode: number;
+  try {
+    exitCode = await driveAotScheduler(() => managedMemory.step(entry), () =>
+      [...asyncExterns.values()].map((state) => state.wake));
+  } catch (error) {
+    if (error !== guestExit) throw error;
+    exitCode = requestedExitCode!;
+  }
+  for (const pending of asyncExterns.values()) pending.cancel();
+  asyncExterns.clear();
+  let drainQuanta = 0;
+  while (exitCode === 0 && managedMemory.drainStep()) {
+    if (++drainQuanta % 16 === 0) await yieldAotHost();
   }
   const exitedByGuest = requestedExitCode !== undefined;
   if (requestedExitCode !== undefined) exitCode = requestedExitCode;
@@ -3303,7 +2280,7 @@ export async function runAot(
     : (exitedByGuest
       ? { status: 'error', stdout, stderr, exitCode }
       : { status: 'error', stdout, stderr: failure, exitCode });
-  return { instance, manifest, result, exitCode };
+  return { instance, manifest, result, exitCode, memoryStats: managedMemory.stats(), schedulerStats: managedMemory.schedulerStats() };
 }
 
 /**

@@ -1,12 +1,14 @@
 use super::emit_return_if_u64_jit_error;
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData as MemFlags, Value};
+use vo_common_core::debug_info::InstructionSource;
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitRuntimeTrapKind;
 
 use crate::translate::{emit_jit_error_if_zero, emit_runtime_trap_if};
 use crate::translator::{
-    emit_runtime_helper_call, CollectionEmitter, HelperKind, NativeScratchKind,
+    emit_runtime_helper_call, CollectionEmitter, HelperKind, IrBuilder, NativeScratchKind,
+    TrapEmitter,
 };
 use crate::JitError;
 
@@ -25,17 +27,21 @@ pub(in crate::translate) fn immutable_descriptor_flags() -> MemFlags {
 }
 
 fn emit_slice_storage_layout<'a>(
-    e: &mut impl CollectionEmitter<'a>,
+    e: &mut impl IrBuilder<'a>,
     s: Value,
     packed_elem_bytes: usize,
 ) -> (Value, Value) {
-    let mode = e.builder().ins().load(
-        types::I64,
+    let layout = e.builder().ins().load(
+        types::I32,
         immutable_descriptor_flags(),
         s,
-        (vo_runtime::objects::slice::FIELD_STORAGE_MODE * 8) as i32,
+        vo_runtime::objects::slice::LAYOUT_BYTE_OFFSET as i32,
     );
-    let is_flat = e.builder().ins().icmp_imm_u(IntCC::NotEqual, mode, 0);
+    let is_flat = e.builder().ins().icmp_imm_u(
+        IntCC::Equal,
+        layout,
+        i64::from(vo_runtime::objects::slice::LAYOUT_EXTENDED_FLAT),
+    );
     let flat_stride = e.builder().ins().load(
         types::I64,
         immutable_descriptor_flags(),
@@ -60,7 +66,20 @@ pub(in crate::translate) fn emit_slice_bounds_check<'a>(
     s: Value,
     idx: Value,
 ) -> Value {
-    if !e.current_bounds_check_elided() {
+    let elided = e.current_bounds_check_elided();
+    emit_slice_bounds_check_at(e, s, idx, elided, None)
+}
+
+/// Explicit facts and logical source keep inlined access independent of the
+/// physical caller's instruction metadata and bounds proofs.
+pub(crate) fn emit_slice_bounds_check_at<'a>(
+    e: &mut impl TrapEmitter<'a>,
+    s: Value,
+    idx: Value,
+    elided: bool,
+    origin: Option<InstructionSource>,
+) -> Value {
+    if !elided {
         // len = 0 if nil, otherwise load from slice
         let len = emit_nil_guarded_load(e, s, SLICE_FIELD_LEN);
 
@@ -69,12 +88,13 @@ pub(in crate::translate) fn emit_slice_bounds_check<'a>(
             .builder()
             .ins()
             .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-        emit_runtime_trap_if(
+        crate::contract::emit_runtime_trap_if_at(
             e,
             out_of_bounds,
             JitRuntimeTrapKind::IndexOutOfBounds,
             Some(idx),
             Some(len),
+            origin,
         );
     }
 
@@ -84,6 +104,21 @@ pub(in crate::translate) fn emit_slice_bounds_check<'a>(
         s,
         SLICE_FIELD_DATA_PTR,
     )
+}
+
+/// Share packed and extended-flat addressing with small static leaf expansion.
+/// The data pointer must come from a successful bounds check for this access.
+pub(crate) fn emit_slice_storage_address<'a>(
+    e: &mut impl IrBuilder<'a>,
+    s: Value,
+    data_ptr: Value,
+    idx: Value,
+    elem_bytes: usize,
+) -> (Value, Value) {
+    let (is_flat, stride) = emit_slice_storage_layout(e, s, elem_bytes);
+    let off = e.builder().ins().imul(idx, stride);
+    let addr = e.builder().ins().iadd(data_ptr, off);
+    (is_flat, addr)
 }
 
 pub(in crate::translate) fn slice_new<'a>(
@@ -144,11 +179,9 @@ pub(in crate::translate) fn slice_get<'a>(
     if elem_bytes == 0 {
         return Ok(());
     }
-    let (is_flat, stride) = emit_slice_storage_layout(e, s, elem_bytes);
-    let off = e.builder().ins().imul(idx, stride);
+    let (is_flat, addr) = emit_slice_storage_address(e, s, data_ptr, idx, elem_bytes);
 
     if elem_bytes < 8 {
-        let addr = e.builder().ins().iadd(data_ptr, off);
         let flat_block = e.builder().create_block();
         let packed_block = e.builder().create_block();
         let merge_block = e.builder().create_block();
@@ -175,18 +208,15 @@ pub(in crate::translate) fn slice_get<'a>(
         let val = e.builder().block_params(merge_block)[0];
         e.write_var(inst.a, val);
     } else if elem_bytes == 8 {
-        let addr = e.builder().ins().iadd(data_ptr, off);
         let val = load_element(e, addr, elem_bytes, needs_sext);
         e.write_var(inst.a, val);
     } else {
         let elem_slots = elem_bytes.div_ceil(8);
         for i in 0..elem_slots {
-            let slot_off = e.builder().ins().iadd_imm_u(off, (i * 8) as i64);
-            let addr = e.builder().ins().iadd(data_ptr, slot_off);
             let val = e
                 .builder()
                 .ins()
-                .load(types::I64, MemFlags::trusted(), addr, 0);
+                .load(types::I64, MemFlags::trusted(), addr, (i * 8) as i32);
             e.write_var(inst.a + i as u16, val);
         }
     }
@@ -205,12 +235,10 @@ pub(in crate::translate) fn slice_set<'a>(
     if elem_bytes == 0 {
         return Ok(());
     }
-    let (is_flat, stride) = emit_slice_storage_layout(e, s, elem_bytes);
-    let off = e.builder().ins().imul(idx, stride);
+    let (is_flat, addr) = emit_slice_storage_address(e, s, data_ptr, idx, elem_bytes);
 
     if elem_bytes < 8 {
         let val = e.read_var(inst.c);
-        let addr = e.builder().ins().iadd(data_ptr, off);
         let flat_block = e.builder().create_block();
         let packed_block = e.builder().create_block();
         let merge_block = e.builder().create_block();
@@ -232,7 +260,6 @@ pub(in crate::translate) fn slice_set<'a>(
         e.builder().seal_block(merge_block);
     } else if elem_bytes == 8 {
         let val = e.read_var(inst.c);
-        let addr = e.builder().ins().iadd(data_ptr, off);
         if e.elem_layout_needs_write_barrier().unwrap_or(true) {
             let owner = e
                 .builder()
@@ -265,9 +292,9 @@ pub(in crate::translate) fn slice_set<'a>(
         }
         for i in 0..elem_slots {
             let v = e.read_var(inst.c + i as u16);
-            let slot_off = e.builder().ins().iadd_imm_u(off, (i * 8) as i64);
-            let addr = e.builder().ins().iadd(data_ptr, slot_off);
-            e.builder().ins().store(MemFlags::trusted(), v, addr, 0);
+            e.builder()
+                .ins()
+                .store(MemFlags::trusted(), v, addr, (i * 8) as i32);
         }
     }
     Ok(())
@@ -276,7 +303,7 @@ pub(in crate::translate) fn slice_set<'a>(
 /// Load a field from a pointer, returning 0 if pointer is nil.
 /// Pattern: if ptr == 0 { 0 } else { ptr.field }
 pub(in crate::translate) fn emit_nil_guarded_load<'a>(
-    e: &mut impl CollectionEmitter<'a>,
+    e: &mut impl IrBuilder<'a>,
     ptr: Value,
     offset: i32,
 ) -> Value {

@@ -52,7 +52,7 @@
     "test:media-application-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/media-application-aot --media-application-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-media-application-browser.json",
     "test:studio-workbench-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/studio-workbench-aot --studio-workbench-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-studio-workbench-browser.json",
     "test:studio-aot-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/ci/artifacts/site --studio-aot-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-studio-aot-browser.json",
-    "test:aot": "node --test tests/aot.test.mjs tests/vm_contracts.test.mjs",
+    "test:aot": "node --test tests/aot.test.mjs tests/aot_control.test.mjs tests/aot_heap.test.mjs tests/aot_map.test.mjs tests/aot_span_heap.test.mjs tests/aot_trace.test.mjs tests/aot_run_queue.test.mjs tests/host_scheduler.test.mjs tests/aot_memory.test.mjs tests/vm_contracts.test.mjs",
     "build": "npm run build:wasm && npm run build:aot-support && npm run build:js",
     "build:release": "npm run build:wasm:release && npm run build:aot-support && npm run build:js",
     "clean": "rm -rf dist pkg aot-support"

@@ -2404,6 +2404,11 @@ fn validate_optional_table_ref(
 }
 
 fn validate_debug_info_refs(module: &Module) -> Result<(), ModuleVerificationError> {
+    module
+        .debug_info
+        .inline_sources
+        .validate(&module.functions, module.debug_info.files.len())
+        .map_err(|error| module_invariant(error.into()))?;
     if module.debug_info.funcs.len() > module.functions.len() {
         return Err(module_invariant(format!(
             "debug_info has {} function entries but module has {} functions",
@@ -3602,20 +3607,25 @@ fn verify_instruction_contract(
                 "raw source",
             ),
         ),
-        Opcode::AddF | Opcode::SubF | Opcode::MulF | Opcode::DivF => {
-            verify_binary_one_of_slot_contract(
-                ctx,
-                BinarySlotContract::one_of(
-                    FLOAT_STORAGE_SLOTS,
-                    FLOAT_STORAGE_SLOTS,
-                    FLOAT_STORAGE_SLOTS,
-                    scalar_destination_access(opcode),
-                    "float lhs",
-                    "float rhs",
-                ),
-            )
-        }
-        Opcode::NegF => verify_unary_one_of_slot_contract(
+        Opcode::AddF
+        | Opcode::SubF
+        | Opcode::MulF
+        | Opcode::DivF
+        | Opcode::AddF32
+        | Opcode::SubF32
+        | Opcode::MulF32
+        | Opcode::DivF32 => verify_binary_one_of_slot_contract(
+            ctx,
+            BinarySlotContract::one_of(
+                FLOAT_STORAGE_SLOTS,
+                FLOAT_STORAGE_SLOTS,
+                FLOAT_STORAGE_SLOTS,
+                scalar_destination_access(opcode),
+                "float lhs",
+                "float rhs",
+            ),
+        ),
+        Opcode::NegF | Opcode::NegF32 => verify_unary_one_of_slot_contract(
             ctx,
             UnarySlotContract::one_of(
                 FLOAT_STORAGE_SLOTS,
@@ -3624,19 +3634,28 @@ fn verify_instruction_contract(
                 "float source",
             ),
         ),
-        Opcode::EqF | Opcode::NeF | Opcode::LtF | Opcode::LeF | Opcode::GtF | Opcode::GeF => {
-            verify_binary_one_of_slot_contract(
-                ctx,
-                BinarySlotContract::one_of(
-                    &[SlotType::Value],
-                    FLOAT_STORAGE_SLOTS,
-                    FLOAT_STORAGE_SLOTS,
-                    scalar_destination_access(opcode),
-                    "float lhs",
-                    "float rhs",
-                ),
-            )
-        }
+        Opcode::EqF
+        | Opcode::NeF
+        | Opcode::LtF
+        | Opcode::LeF
+        | Opcode::GtF
+        | Opcode::GeF
+        | Opcode::EqF32
+        | Opcode::NeF32
+        | Opcode::LtF32
+        | Opcode::LeF32
+        | Opcode::GtF32
+        | Opcode::GeF32 => verify_binary_one_of_slot_contract(
+            ctx,
+            BinarySlotContract::one_of(
+                &[SlotType::Value],
+                FLOAT_STORAGE_SLOTS,
+                FLOAT_STORAGE_SLOTS,
+                scalar_destination_access(opcode),
+                "float lhs",
+                "float rhs",
+            ),
+        ),
         Opcode::Jump => {
             verify_jump_target_contract(func, pc, opcode, jump_target_i64(pc, inst.imm32()))
         }
@@ -4179,13 +4198,21 @@ impl ConstantFactAnalysis {
             "constant entry facts",
         )?);
         let mut worklist = try_filled_vec(func, 1, 0usize, "constant fact worklist")?;
+        // One reusable output row replaces two per-instruction clones. Read
+        // every operand from the immutable incoming row, including overlap.
+        let mut out = try_filled_vec(
+            func,
+            slots.len(),
+            ConstantFact::Unknown,
+            "constant transfer scratch",
+        )?;
 
         while let Some(pc) = worklist.pop() {
             resources.charge_work(func, slots.len(), "constant fact propagation")?;
-            let Some(mut out) = before[pc].clone() else {
+            let Some(input) = before[pc].as_deref() else {
                 continue;
             };
-            apply_constant_fact_transfer(func, module, pc, &slots, &mut out);
+            apply_constant_fact_transfer(func, module, pc, &slots, input, &mut out);
             for succ in cfg.successors(pc) {
                 if merge_constant_state(func, &mut before[succ], &out)? {
                     worklist.push(succ);
@@ -4251,13 +4278,21 @@ impl IndexCheckAnalysis {
             "index entry facts",
         )?);
         let mut worklist = try_filled_vec(func, 1, 0usize, "index fact worklist")?;
+        // One reusable output row replaces two per-instruction clones. Read
+        // every operand from the immutable incoming row, including overlap.
+        let mut out = try_filled_vec(
+            func,
+            slots.len(),
+            IndexCheckFact::Unknown,
+            "index transfer scratch",
+        )?;
 
         while let Some(pc) = worklist.pop() {
             resources.charge_work(func, slots.len(), "index fact propagation")?;
-            let Some(mut out) = before[pc].clone() else {
+            let Some(input) = before[pc].as_deref() else {
                 continue;
             };
-            apply_index_check_transfer(func, module, constant_facts, pc, &slots, &mut out);
+            apply_index_check_transfer(func, module, constant_facts, pc, &slots, input, &mut out);
             for succ in cfg.successors(pc) {
                 if merge_index_check_state(func, &mut before[succ], &out)? {
                     worklist.push(succ);
@@ -4324,13 +4359,29 @@ impl ContainerLayoutAnalysis {
         before[0] = Some(initial_container_state(func, module, &slots, resources)?);
         let instruction_facts = container_instruction_facts(func, resources)?;
         let mut worklist = try_filled_vec(func, 1, 0usize, "container fact worklist")?;
+        // One reusable output row replaces two per-instruction clones. Read
+        // every operand from the immutable incoming row, including overlap.
+        let mut out = try_filled_vec(
+            func,
+            slots.len(),
+            ContainerLayoutFact::Unknown,
+            "container transfer scratch",
+        )?;
 
         while let Some(pc) = worklist.pop() {
             resources.charge_work(func, slots.len(), "container fact propagation")?;
-            let Some(mut out) = before[pc].clone() else {
+            let Some(input) = before[pc].as_deref() else {
                 continue;
             };
-            apply_container_layout_transfer(func, module, pc, &slots, &instruction_facts, &mut out);
+            apply_container_layout_transfer(
+                func,
+                module,
+                pc,
+                &slots,
+                &instruction_facts,
+                input,
+                &mut out,
+            );
             for succ in cfg.successors(pc) {
                 if merge_container_state(func, &mut before[succ], &out)? {
                     worklist.push(succ);
@@ -4755,10 +4806,11 @@ fn apply_container_layout_transfer(
     pc: usize,
     slots: &[u16],
     instruction_facts: &[Option<ContainerLayoutFact>],
+    input: &[ContainerLayoutFact],
     state: &mut [ContainerLayoutFact],
 ) {
     let inst = func.code[pc];
-    let input = state.to_vec();
+    state.clone_from_slice(input);
     for (idx, slot) in slots.iter().copied().enumerate() {
         if !instruction_writes_slot(Some(module), func, pc, inst, slot) {
             continue;
@@ -4767,7 +4819,7 @@ fn apply_container_layout_transfer(
             inst,
             slot,
             slots,
-            &input,
+            input,
             instruction_facts.get(pc).and_then(Option::as_ref),
         );
     }
@@ -5023,15 +5075,16 @@ fn apply_constant_fact_transfer(
     module: &Module,
     pc: usize,
     slots: &[u16],
+    input: &[ConstantFact],
     state: &mut [ConstantFact],
 ) {
     let inst = func.code[pc];
-    let input = state.to_vec();
+    state.clone_from_slice(input);
     for (idx, slot) in slots.iter().copied().enumerate() {
         if !instruction_writes_slot(Some(module), func, pc, inst, slot) {
             continue;
         }
-        state[idx] = constant_fact_written_to_slot(module, inst, slot, slots, &input);
+        state[idx] = constant_fact_written_to_slot(module, inst, slot, slots, input);
     }
 }
 
@@ -5167,15 +5220,16 @@ fn apply_index_check_transfer(
     constant_facts: &ConstantFactAnalysis,
     pc: usize,
     slots: &[u16],
+    input: &[IndexCheckFact],
     state: &mut [IndexCheckFact],
 ) {
     let inst = func.code[pc];
-    let input = state.to_vec();
+    state.clone_from_slice(input);
     for (idx, slot) in slots.iter().copied().enumerate() {
-        if !index_check_instruction_writes_slot(func, module, pc, inst, slot, slots, &input) {
+        if !index_check_instruction_writes_slot(func, module, pc, inst, slot, slots, input) {
             continue;
         }
-        state[idx] = index_check_fact_written_to_slot(inst, slot, slots, &input);
+        state[idx] = index_check_fact_written_to_slot(inst, slot, slots, input);
     }
 
     if inst.opcode() != Opcode::IndexCheck {
@@ -6254,10 +6308,15 @@ fn scalar_destination_access(opcode: Opcode) -> &'static str {
         Opcode::ModU => "ModU destination",
         Opcode::NegI => "NegI destination",
         Opcode::AddF => "AddF destination",
+        Opcode::AddF32 => "AddF32 destination",
         Opcode::SubF => "SubF destination",
+        Opcode::SubF32 => "SubF32 destination",
         Opcode::MulF => "MulF destination",
+        Opcode::MulF32 => "MulF32 destination",
         Opcode::DivF => "DivF destination",
+        Opcode::DivF32 => "DivF32 destination",
         Opcode::NegF => "NegF destination",
+        Opcode::NegF32 => "NegF32 destination",
         Opcode::EqI => "EqI destination",
         Opcode::NeI => "NeI destination",
         Opcode::LtI => "LtI destination",
@@ -6269,11 +6328,17 @@ fn scalar_destination_access(opcode: Opcode) -> &'static str {
         Opcode::GeI => "GeI destination",
         Opcode::GeU => "GeU destination",
         Opcode::EqF => "EqF destination",
+        Opcode::EqF32 => "EqF32 destination",
         Opcode::NeF => "NeF destination",
+        Opcode::NeF32 => "NeF32 destination",
         Opcode::LtF => "LtF destination",
+        Opcode::LtF32 => "LtF32 destination",
         Opcode::LeF => "LeF destination",
+        Opcode::LeF32 => "LeF32 destination",
         Opcode::GtF => "GtF destination",
+        Opcode::GtF32 => "GtF32 destination",
         Opcode::GeF => "GeF destination",
+        Opcode::GeF32 => "GeF32 destination",
         Opcode::And => "And destination",
         Opcode::Or => "Or destination",
         Opcode::Xor => "Xor destination",

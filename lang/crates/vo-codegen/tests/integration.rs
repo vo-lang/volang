@@ -68,6 +68,34 @@ fn compile_source(source: &str) -> vo_vm::bytecode::Module {
     compile_project(&project).expect("codegen failed")
 }
 
+#[test]
+fn variadic_argument_lowering_retains_an_exact_debug_entry_at_the_call() {
+    let source = "package main\nfunc count(values ...int) int { return len(values) }\nfunc main() { println(count(1, 2, 3)) }\n";
+    let module = compile_source(source);
+    verify_module(&module).unwrap();
+    let (id, function) = module
+        .functions
+        .iter()
+        .enumerate()
+        .find(|(_, function)| function.name == "main")
+        .unwrap();
+    assert!(function
+        .code
+        .iter()
+        .any(|instruction| instruction.opcode() == Opcode::SliceNew));
+    let call_pc = function
+        .code
+        .iter()
+        .position(|instruction| instruction.opcode() == Opcode::Call)
+        .expect("variadic function call");
+    let exact = module.debug_info.funcs[id]
+        .entries
+        .iter()
+        .find(|entry| entry.pc as usize == call_pc)
+        .expect("Caller requires the exact call PC after argument allocation");
+    assert_eq!(exact.line, 3);
+}
+
 /// Execution tests use the same always-linked core package set as the CLI.
 /// Hand-constructing a single-package `Project` is useful for narrow codegen
 /// assertions, but runtime builtins that return `error` require the canonical
@@ -335,23 +363,14 @@ package main
 
 type NamedUint uint64
 
-func main() {
-    var signed int64 = -1
-    var unsigned uint64 = 1
-    var named NamedUint = 2
-    var wide float64
-    var narrow float32
-    var smallSigned int8
-    var smallUnsigned uint32
-    wide = float64(signed)
-    wide = float64(unsigned)
-    narrow = float32(named)
-    smallSigned = int8(wide)
-    smallUnsigned = uint32(wide)
-    unsigned = unsigned << unsigned
-    signed = signed >> signed
-    _, _, _, _ = narrow, smallSigned, smallUnsigned, unsigned
-}
+func signedToWide(value int64) float64 { return float64(value) }
+func unsignedToWide(value uint64) float64 { return float64(value) }
+func namedToNarrow(value NamedUint) float32 { return float32(value) }
+func wideToSigned(value float64) int8 { return int8(value) }
+func wideToUnsigned(value float64) uint32 { return uint32(value) }
+func unsignedShift(value uint64) uint64 { return value << value }
+func signedShift(value int64) int64 { return value >> value }
+func main() {}
 "#,
     );
     verify_module(&module).expect("conversion module verifies");
@@ -433,6 +452,415 @@ fn compile_and_run(source: &str) {
     vm.run().expect("VM execution failed");
 
     println!("✓ VM execution completed");
+}
+
+#[test]
+fn bytecode_cleanup_removes_redundancy_and_preserves_control_flow() {
+    let source = r#"package main
+func repeated(x int) int { return (x + 7) * (x + 7) + (x + 7) }
+func localConst(x int) int { a := 7; b := a + 5; if b == 12 { return x + b }; return 999 }
+func branch(x int) int { if true { return x + 1 } else { return x + 2 } }
+func dead(x int) int { y := x+1; y = x+2; return y }
+func chain(x int) int { a := x; b := a; c := b; return c }
+func mutated(x int) int { a := x+7; x++; b := x+7; return a*100+b }
+func loop(n int) int {
+    s := 0
+    for i := 0; i < n; i++ {
+        if i % 2 == 0 { s += i; continue }
+        s -= i
+        if s < -100 { break }
+    }
+    return s
+}
+func main() {
+    for i := 0; i < 200; i++ {
+        y := i+7
+        if repeated(i) != y*y+y || localConst(i) != i+12 || branch(i) != i+1 || dead(i) != i+2 || chain(i) != i || mutated(i) != (i+7)*100+i+8 { panic("cleanup values") }
+    }
+    if loop(10) != -5 || loop(11) != 5 { panic("cleanup loops") }
+}"#;
+    let module = compile_source(&source);
+    verify_module(&module).expect("optimized control flow and metadata verify");
+    for (name, limit, slots) in [
+        ("repeated", 6, 5),
+        ("localConst", 4, 4),
+        ("branch", 4, 4),
+        ("dead", 4, 4),
+        ("chain", 1, 1),
+    ] {
+        let function = module.functions.iter().find(|f| f.name == name).unwrap();
+        assert!(function.code.len() <= limit, "{name}: {:?}", function.code);
+        assert!(
+            function.local_slots <= slots,
+            "{name}: {} slots",
+            function.local_slots
+        );
+    }
+    compile_and_run(source);
+}
+
+#[test]
+fn compact_frames_preserve_empty_and_wide_windows_select_and_interface_pairs() {
+    let source = r#"package main
+var calls int
+func tick() { calls++ }
+func fNumber(x int) int { f := func(n int) int { return n+1 }; y := f(x); return y+f(x) }
+func wide(a [4]int, value any) (int, any) { return a[0]+a[3], value }
+func empty() { unused := 999; unused = 0; _ = unused; tick() }
+func nilInterface(value any) bool { return value == nil }
+func main() {
+    dead := 700; dead = 0; _ = dead
+    empty()
+    f := func() { tick() }
+    f()
+    total := 0
+    for i := 0; i < 20; i++ { total += fNumber(i) }
+    a := [4]int{3,5,7,11}
+    n, value := wide(a, 13)
+    if n != 14 || value.(int) != 13 || calls != 2 || total != 420 { panic("call windows") }
+    if !nilInterface(nil) || nilInterface(1) { panic("interface pair") }
+    q := make(chan int, 1)
+    q <- 29
+    result := 0
+    select { case v := <-q: result = v; default: panic("recv selection") }
+    select { case q <- result+2: ; default: panic("send selection") }
+    if <-q != 31 { panic("select descriptors") }
+    index := calls
+    a[index] = 17
+    if a[index] != 17 || a[0] != 3 || a[3] != 11 { panic("inline array range") }
+}"#;
+    let module = compile_source(source);
+    verify_module(&module).unwrap();
+    let empty = module.functions.iter().find(|f| f.name == "empty").unwrap();
+    assert_eq!(
+        empty.local_slots, 0,
+        "empty call windows do not retain dead storage"
+    );
+    compile_and_run(source);
+}
+
+#[test]
+fn bytecode_cleanup_preserves_aliases_unwind_and_numeric_boundaries() {
+    compile_and_run(
+        r#"package main
+func arithmetic() uint64 {
+    x := uint64(18446744073709551615)
+    y := x + 1
+    z := int8(127)
+    z++
+    if y != 0 || z != -128 { panic("wrapping") }
+    signed := int64(-9223372036854775808)
+    if -signed != signed || uint32(x) != 4294967295 || int16(x) != -1 { panic("truncation") }
+    return x
+}
+func recoverReturn() (out int) {
+    defer func() { if recover() != nil { out += 7 } }()
+    out = 35
+    panic("recover")
+}
+func arrays(index int) int {
+    a := [4]int{10, 20, 30, 40}
+    b := a
+    a[index] = 99
+    b[(index+1)%4] = a[index]
+    return b[index] + b[(index+1)%4]
+}
+func floats(x float64, y float64) float64 { a := x+y; b := x+y; x = y; return a+b+x }
+func main() {
+    if arithmetic() != 18446744073709551615 || recoverReturn() != 42 { panic("numeric/unwind") }
+    for i := 0; i < 4; i++ { if arrays(i) != (i+1)*10+99 { panic("frame alias") } }
+    if floats(1.25, 2.5) != 10 { panic("float CSE") }
+    zero := 0.0
+    negative := -zero
+    if 1.0/negative >= 0.0 { panic("negative zero") }
+    nan := zero/zero
+    if nan == nan { panic("NaN") }
+}"#,
+    );
+}
+
+#[test]
+fn conditions_preserve_truth_tables_short_circuiting_and_effect_order() {
+    compile_and_run(
+        r#"package main
+var trace int
+func mark(id int, value bool) bool { trace = trace*10+id; return value }
+func main() {
+    for mask := 0; mask < 16; mask++ {
+        a := mask&1 != 0; b := mask&2 != 0; c := mask&4 != 0; d := mask&8 != 0
+        expectedTrace := 1
+        expected := false
+        if a { expectedTrace = 12; if b { expected = true } }
+        if !expected {
+            expectedTrace = expectedTrace*10+3
+            if !c { expectedTrace = expectedTrace*10+4; expected = d }
+        }
+        trace = 0
+        result := false
+        if (mark(1,a) && mark(2,b)) || (!mark(3,c) && mark(4,d)) { result = true }
+        if result != expected || trace != expectedTrace { panic("condition evaluation order") }
+        trace = 0
+        switch {
+        case !((mark(1,a) && mark(2,b)) || (!mark(3,c) && mark(4,d))): result = false
+        default: result = true
+        }
+        if result != expected || trace != expectedTrace { panic("tagless condition") }
+    }
+    trace = 0
+    i := 0
+    for mark(5,i<3) && mark(6,i<2) { i++ }
+    if i != 2 || trace != 565656 { panic("loop condition") }
+    type Box struct { value int }
+    var p *Box
+    if !(p == nil) || (p != nil && p.value == 0) { panic("nil condition") }
+}"#,
+    );
+}
+
+#[test]
+fn constant_integer_switches_have_bounded_frames_and_preserve_case_order_rules() {
+    let body = (0..32)
+        .map(|i| format!("case {i}: return {}\n", i * i + 3))
+        .collect::<String>();
+    let types = (0..32)
+        .map(|i| format!("type N{i} int\n"))
+        .collect::<String>();
+    let type_body = (0..32)
+        .map(|i| format!("case N{i}: return {i}\n"))
+        .collect::<String>();
+    let source = format!(
+        r#"package main
+{types}
+func dense(x int) int {{ switch x {{ {body} default: return -1 }} }}
+func typeCase(x any) int {{ switch x.(type) {{ {type_body} default: return -1 }} }}
+func unsigned(x uint64) int {{ switch x {{
+case 0: return 0
+case 7: return 1
+case 31: return 2
+case 100000: return 3
+case 2147483647: return 4
+case 2147483648: return 5
+case 4000000000: return 6
+case 9223372036854775807: return 7
+default: return -1
+}} }}
+var order int
+func dynamic(x int) int {{ order = order*10+x; return x }}
+func fall(x int) int {{ result := 0; switch x {{
+case 0, 1: result += 1; fallthrough
+case 2: result += 2
+case 3, 4: result = 3
+case 5, 6: result = 4
+case 7: result = 5
+case 8: result = 6
+}}; return result }}
+func main() {{
+    for i := -2; i < 40; i++ {{
+        expected := -1
+        if i >= 0 && i < 32 {{ expected = i*i+3 }}
+        if dense(i) != expected {{ panic("integer decision") }}
+    }}
+    if unsigned(2147483648) != 5 || unsigned(18446744073709551615) != -1 || unsigned(9223372036854775807) != 7 {{ panic("unsigned decision") }}
+    if fall(0) != 3 || fall(2) != 2 || fall(7) != 5 {{ panic("fallthrough") }}
+    if typeCase(N31(0)) != 31 || typeCase(N0(7)) != 0 || typeCase(0) != -1 {{ panic("type decision") }}
+    switch 2 {{ case dynamic(1): panic("first"); default: panic("default"); case dynamic(2): }}
+    if order != 12 {{ panic("dynamic case order") }}
+}}"#
+    );
+    let module = compile_source(&source);
+    verify_module(&module).unwrap();
+    for name in ["dense", "typeCase"] {
+        let function = module.functions.iter().find(|f| f.name == name).unwrap();
+        assert!(
+            function.local_slots <= 8,
+            "{name}: {} slots",
+            function.local_slots
+        );
+    }
+    let unsigned = module
+        .functions
+        .iter()
+        .find(|f| f.name == "unsigned")
+        .unwrap();
+    assert!(unsigned.code.iter().any(|i| i.opcode() == Opcode::LtU));
+    compile_and_run(&source);
+}
+
+#[test]
+fn invariant_lengths_use_compact_loops_without_freezing_mutable_descriptors() {
+    let source = r#"package main
+func sum(a []int) int { s := 0; for i := 0; i < len(a); i++ { a[i] += 1; s += a[i] }; return s }
+func resized(a []int) int { s := 0; for i := 0; i < len(a); i++ { if i == 0 { a = a[:2] }; s += a[i] }; return s }
+func captured(a []int) int { f := func() { a = a[:1] }; s := 0; for i := 0; i < len(a); i++ { f(); s += a[i] }; return s }
+func replacedString(a string) int { s := 0; for i := 0; i < len(a); i++ { a = "x"; s++ }; return s }
+func stableString(a string) int { s := 0; for i := 0; i < len(a); i++ { s++ }; return s }
+func ranged(a []int) int {
+    chunks := [][]int{[]int{7}}
+    n := 0
+    for i := 0; i < len(a); i++ { for _, a = range chunks { break }; n++ }
+    return n
+}
+func shadowed(a []int) int {
+    calls := 0
+    len := func(x []int) int { calls++; if calls > 2 { return 0 }; return 20 }
+    n := 0
+    for i := 0; i < len(a); i++ { n++ }
+    return n*10+calls
+}
+func main() {
+    if sum([]int{1,2,3}) != 9 || resized([]int{1,2,3,4}) != 3 || captured([]int{5,6,7}) != 5 { panic("slice length") }
+    if stableString("abcd") != 4 || replacedString("abcd") != 1 { panic("string length") }
+    if ranged([]int{1,2,3}) != 1 || shadowed(nil) != 23 { panic("length mutation identity") }
+}"#;
+    let module = compile_source(&source);
+    verify_module(&module).unwrap();
+    for (name, expected) in [
+        ("sum", 1),
+        ("stableString", 1),
+        ("resized", 0),
+        ("captured", 0),
+        ("replacedString", 0),
+        ("shadowed", 0),
+    ] {
+        let function = module.functions.iter().find(|f| f.name == name).unwrap();
+        assert_eq!(
+            function
+                .code
+                .iter()
+                .filter(|i| i.opcode() == Opcode::ForLoop)
+                .count(),
+            expected,
+            "{name}"
+        );
+    }
+    compile_and_run(source);
+}
+
+#[test]
+fn integer_constants_use_the_complete_immediate_domain() {
+    for value in [
+        i64::MIN,
+        -2147483649,
+        -2147483648,
+        -100000,
+        32768,
+        100000,
+        2147483647,
+        2147483648,
+        i64::MAX,
+    ] {
+        let source = format!("package main\nfunc value() int {{ return {value} }}\nfunc main() {{ if value() != {value} {{ panic(\"integer encoding\") }} }}");
+        let module = compile_source(&source);
+        verify_module(&module).unwrap();
+        let function = module.functions.iter().find(|f| f.name == "value").unwrap();
+        let load = function
+            .code
+            .iter()
+            .find(|i| matches!(i.opcode(), Opcode::LoadInt | Opcode::LoadConst))
+            .unwrap();
+        if let Ok(immediate) = i32::try_from(value) {
+            assert_eq!(load.opcode(), Opcode::LoadInt, "{value}");
+            assert_eq!(load.imm32(), immediate, "{value}");
+        } else {
+            assert_eq!(load.opcode(), Opcode::LoadConst, "{value}");
+        }
+        compile_and_run(&source);
+    }
+    compile_and_run("package main\nfunc value() uint64 { return 18446744073709551615 }\nfunc main() { if value() + 1 != 0 { panic(\"unsigned bits\") } }");
+}
+
+#[test]
+fn simple_map_reads_own_the_key_without_duplicate_snapshots() {
+    let module = compile_source(
+        "package main\nfunc lookup(m map[int]int, k int) int { return m[k] }\nfunc main() {}",
+    );
+    verify_module(&module).unwrap();
+    let function = module
+        .functions
+        .iter()
+        .find(|f| f.name == "lookup")
+        .unwrap();
+    assert_eq!(
+        function
+            .code
+            .iter()
+            .filter(|i| i.opcode() == Opcode::Copy)
+            .count(),
+        1
+    );
+    compile_and_run(
+        r#"package main
+func main() {
+    m := map[int]int{1: 42}
+    key := func() int { m = map[int]int{1: 99}; return 1 }
+    if m[key()] != 42 { panic("map operand changed before lookup") }
+    wide := map[[2]int]int{[2]int{3, 4}: 56}
+    if wide[[2]int{3, 4}] != 56 { panic("wide key") }
+    boxed := map[any]int{3: 7}
+    if boxed[3] != 7 { panic("converted key") }
+}"#,
+    );
+}
+
+#[test]
+fn single_level_array_read_has_one_bounds_check() {
+    let module = compile_source(
+        "package main\nfunc at(a [4]int, i int) int { return a[i] }\nfunc main() {}",
+    );
+    verify_module(&module).unwrap();
+    let function = module.functions.iter().find(|f| f.name == "at").unwrap();
+    assert_eq!(
+        function
+            .code
+            .iter()
+            .filter(|i| i.opcode() == Opcode::IndexCheck)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn sequential_mixed_temporaries_and_lexical_scopes_have_bounded_frames() {
+    let measure = |count: usize| {
+        let calls = "takeInt(42); takeString(\"x\");".repeat(count);
+        let blocks = "{ y := x + 1; sum += y };".repeat(count);
+        let source = format!("package main\nfunc takeInt(x int) {{}}\nfunc takeString(x string) {{}}\nfunc mixed() {{ {calls} }}\nfunc scoped(x int) int {{ sum := 0; {blocks} return sum }}\nfunc main() {{ mixed(); if scoped(3) != {} {{ panic(\"scope reuse\") }} }}", count * 4);
+        let module = compile_source(&source);
+        verify_module(&module).unwrap();
+        compile_and_run(&source);
+        ["mixed", "scoped"].map(|name| {
+            module
+                .functions
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .local_slots
+        })
+    };
+    assert_eq!(measure(4), measure(64));
+}
+
+#[test]
+fn lexical_slot_reuse_preserves_escaping_values_and_control_flow() {
+    compile_and_run(
+        r#"package main
+func escaped() (out int) {
+    var f func() int
+    { x := 41; f = func() int { return x } }
+    { x := "after"; if x != "after" { panic("shadow") } }
+    defer func() { out += f() }()
+    sum := 0
+loop:
+    for sum < 3 {
+        { var a [2]int; a[1] = sum; sum = a[1] + 1 }
+        if sum == 2 { continue loop }
+        if sum == 3 { break loop }
+    }
+    return sum
+}
+func main() { if escaped() != 44 { panic("scope lifetime") } }
+"#,
+    );
 }
 
 #[test]
@@ -627,7 +1055,10 @@ fn package_var_group_commits_only_after_every_rhs_call() {
     let source = r#"
 package main
 
+var calls int
+
 func firstValue() int {
+    calls++
     return 41
 }
 
@@ -742,13 +1173,16 @@ fn blank_package_target_is_converted_and_discarded_without_global_storage() {
     let source = r#"
 package main
 
+var calls int
+
 func pair() (int, int) {
+    calls++
     return 41, 42
 }
 
 var kept, _ = pair()
 
-func main() {}
+func main() { assert(kept == 41 && calls == 1) }
 "#;
 
     let module = compile_source(source);
@@ -769,6 +1203,7 @@ func main() {}
     assert!(init.code.iter().any(|instruction| {
         instruction.opcode() == Opcode::Call && instruction.static_call_func_id() == pair_id
     }));
+    compile_and_run(source);
 }
 
 #[test]
@@ -776,7 +1211,10 @@ fn blank_rhs_panic_call_precedes_every_non_blank_group_commit() {
     let source = r#"
 package main
 
+var calls int
+
 func firstValue() int {
+    calls++
     return 41
 }
 
@@ -838,13 +1276,14 @@ fn imported_package_blank_target_executes_without_global_storage() {
             "package main\n",
             "import \"github.com/acme/dep\"\n",
             "var observed = dep.Kept\n",
-            "func main() {}\n",
+            "func main() { assert(observed == 41 && dep.Calls == 3) }\n",
         ),
         "github.com/acme/dep",
         concat!(
             "package dep\n",
-            "func pair() (int, int) { return 41, 42 }\n",
-            "func sideEffect() int { return 43 }\n",
+            "var Calls int\n",
+            "func pair() (int, int) { Calls++; return 41, 42 }\n",
+            "func sideEffect() int { Calls += 2; return 43 }\n",
             "var Kept, _ = pair()\n",
             "var _ = sideEffect()\n",
         ),
@@ -878,6 +1317,9 @@ fn imported_package_blank_target_executes_without_global_storage() {
     assert!(init.code.iter().any(|instruction| {
         instruction.opcode() == Opcode::Call && instruction.static_call_func_id() == side_effect_id
     }));
+    let mut vm = Vm::new();
+    vm.load(module).unwrap();
+    vm.run().unwrap();
 }
 
 #[test]
@@ -2255,7 +2697,8 @@ fn computed_call_result_stays_in_its_natural_abi_slot() {
         r#"
 package main
 
-func plusOne(x int) int { return x + 1 }
+var delta = 1
+func plusOne(x int) int { return x + delta }
 
 func main() int {
     return plusOne(40) + 1
@@ -2793,8 +3236,10 @@ fn entry_call_to_returning_main_uses_exact_static_call_shape() {
     let source = r#"
 package main
 
+var result = 1
+
 func main() int {
-    return 1
+    return result
 }
 "#;
 
@@ -5167,4 +5612,368 @@ fn malformed_no_value_calls_stop_before_codegen() {
         .err()
         .expect("no-value callee must be rejected by analysis");
     assert!(matches!(error, AnalysisError::Check(..)));
+}
+
+#[test]
+fn float32_operations_keep_their_width_without_widening_temporaries() {
+    let module = compile_source(
+        r#"package main
+func chain(a, b, c float32) float32 { return (a + b) * c / a }
+func compare(a, b [2]float32) bool { return a == b }
+func choose(a, b float32) bool { switch a { case b: return true }; return false }
+func compound(x, y float32) float32 {
+    x += y; x *= y; x /= y; x -= y; x++; x--; return -x
+}
+func main() {}
+"#,
+    );
+    verify_module(&module).expect("direct f32 instructions preserve verified scalar layouts");
+    for name in ["chain", "compare", "choose", "compound"] {
+        let function = module
+            .functions
+            .iter()
+            .find(|f| f.name == name || f.name.ends_with(&format!(".{name}")))
+            .unwrap();
+        assert!(
+            function
+                .code
+                .iter()
+                .all(|i| !matches!(i.opcode(), Opcode::ConvF32F64 | Opcode::ConvF64F32)),
+            "{name}"
+        );
+        assert!(
+            function
+                .code
+                .iter()
+                .any(|i| matches!(i.opcode(), Opcode::AddF32 | Opcode::EqF32)),
+            "{name}"
+        );
+    }
+    let chain = module
+        .functions
+        .iter()
+        .find(|f| f.name == "chain" || f.name.ends_with(".chain"))
+        .unwrap();
+    assert_eq!(
+        chain
+            .code
+            .iter()
+            .filter(|i| matches!(i.opcode(), Opcode::AddF32 | Opcode::MulF32 | Opcode::DivF32))
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn trapping_instructions_keep_lexical_sources_after_optimization_and_serialization() {
+    let source = r#"package main
+
+type Node struct { value int }
+func read(p *Node) int {
+    return p.value
+}
+func divide(a int, b int) int {
+    return a / b
+}
+func index(a []int, i int) int {
+    return a[i]
+}
+func closure(p *Node) func() int {
+    return func() int {
+        return p.value
+    }
+}
+func nested(p *Node, values []int, i int) int {
+    return divide(
+        read(p),
+        values[i])
+}
+func main() {}
+"#;
+    let original = compile_source(source);
+    let bytes = original.serialize().unwrap();
+    let module = vo_common_core::bytecode::Module::deserialize(&bytes).unwrap();
+    verify_module(&module).unwrap();
+    let expectations = [
+        (Opcode::PtrGet, "p.value"),
+        (Opcode::DivI, "a / b"),
+        (Opcode::SliceGet, "a[i]"),
+    ];
+    for (name, (opcode, expression)) in ["read", "divide", "index"].into_iter().zip(expectations) {
+        let (function_id, function) = module
+            .functions
+            .iter()
+            .enumerate()
+            .find(|(_, function)| {
+                function.name == name || function.name.ends_with(&format!(".{name}"))
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        let pc = function
+            .code
+            .iter()
+            .position(|instruction| instruction.opcode() == opcode)
+            .unwrap();
+        let location = module
+            .debug_info
+            .lookup(function_id as u32, pc as u32)
+            .unwrap();
+        let line = source.lines().nth(location.line as usize - 1).unwrap();
+        assert!(line.contains(expression), "{name}: {location:?}: {line}");
+    }
+    let nested = module
+        .functions
+        .iter()
+        .position(|function| function.name == "nested" || function.name.ends_with(".nested"))
+        .unwrap();
+    let expected = [
+        (Opcode::Call, "read(p)"),
+        (Opcode::SliceGet, "values[i]"),
+        (Opcode::Call, "divide("),
+    ];
+    let actual: Vec<_> = module.functions[nested]
+        .code
+        .iter()
+        .enumerate()
+        .filter(|(_, instruction)| matches!(instruction.opcode(), Opcode::Call | Opcode::SliceGet))
+        .map(|(pc, instruction)| {
+            let loc = module.debug_info.lookup(nested as u32, pc as u32).unwrap();
+            (
+                instruction.opcode(),
+                source.lines().nth(loc.line as usize - 1).unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(actual.len(), expected.len());
+    for ((opcode, line), (expected_opcode, expression)) in actual.into_iter().zip(expected) {
+        assert_eq!(opcode, expected_opcode);
+        assert!(line.contains(expression), "{expression} must own {line}");
+    }
+    let closure = module
+        .functions
+        .iter()
+        .enumerate()
+        .find(|(_, function)| function.is_closure)
+        .unwrap();
+    let pc = closure
+        .1
+        .code
+        .iter()
+        .position(|instruction| instruction.opcode() == Opcode::PtrGet)
+        .unwrap();
+    let loc = module
+        .debug_info
+        .lookup(closure.0 as u32, pc as u32)
+        .unwrap();
+    assert_eq!(
+        loc.line,
+        source
+            .lines()
+            .position(|line| line == "        return p.value")
+            .unwrap() as u32
+            + 1,
+        "closure instructions must belong to their own function"
+    );
+}
+
+#[test]
+fn total_scalar_composition_preserves_overlap_multiple_results_and_branches() {
+    let source = r#"package main
+func swapAdd(a int, b int) (int, int) { return b + 1, a - 1 }
+func named(x int) (a int, b int) { a = x; return }
+func empty() {}
+func main() {
+    x, y := 9, 20
+    sum := 0
+    for i := 0; i < 30; i++ {
+        if i % 2 == 0 { x, y = swapAdd(x, y) } else { x, y = swapAdd(y, x) }
+        a, b := named(i)
+        assert(a == i && b == 0)
+        empty()
+        sum += x + y
+    }
+    assert(sum == 870)
+}"#;
+    let module = compile_source_with_core(source);
+    verify_module(&module).unwrap();
+    let main = module
+        .functions
+        .iter()
+        .find(|f| f.name == "main" || f.name.ends_with(".main"))
+        .unwrap();
+    assert!(main.code.iter().all(|i| i.opcode() != Opcode::Call));
+    let mut vm = Vm::new();
+    vm.load(module).unwrap();
+    vm.run().unwrap();
+}
+
+#[test]
+fn total_scalar_composition_crosses_reverse_ordered_wrappers() {
+    let source = r#"package main
+func f7(x int) int { return f6(x) + 1 }
+func f6(x int) int { return f5(x) + 1 }
+func f5(x int) int { return f4(x) + 1 }
+func f4(x int) int { return f3(x) + 1 }
+func f3(x int) int { return f2(x) + 1 }
+func f2(x int) int { return f1(x) + 1 }
+func f1(x int) int { return f0(x) + 1 }
+func f0(x int) int { return x * 3 }
+func main() { for i := 0; i < 1000; i++ { assert(f7(i) == i * 3 + 7) } }
+"#;
+    let module = compile_source_with_core(source);
+    verify_module(&module).unwrap();
+    let main = module
+        .functions
+        .iter()
+        .find(|f| f.name == "main" || f.name.ends_with(".main"))
+        .unwrap();
+    assert!(main.code.iter().all(|i| i.opcode() != Opcode::Call));
+    let mut vm = Vm::new();
+    vm.load(module).unwrap();
+    vm.run().unwrap();
+}
+
+#[test]
+fn total_scalar_composition_preserves_narrow_wrapping_and_argument_snapshots() {
+    let source = r#"package main
+func narrow(x int8, y uint8, flag bool) (int8, uint8, bool) {
+    x++
+    y++
+    return x, y, !flag
+}
+func mix8(a, b, c, d, e, f, g, h int) (int, int) {
+    return a + b + c + d + e + f + g + h, h - a
+}
+func main() {
+    for i := 0; i < 256; i++ {
+        original := int8(i)
+        a, b, c := narrow(original, uint8(i), i % 2 == 0)
+        assert(original == int8(i))
+        assert(a == int8(i + 1) && b == uint8(i + 1) && c == (i % 2 != 0))
+        sum, delta := mix8(i, 1, 2, 3, 4, 5, 6, i + 7)
+        assert(sum == 2 * i + 28 && delta == 7)
+    }
+}
+"#;
+    let module = compile_source_with_core(source);
+    verify_module(&module).unwrap();
+    let main = module
+        .functions
+        .iter()
+        .find(|f| f.name == "main" || f.name.ends_with(".main"))
+        .unwrap();
+    assert!(main.code.iter().all(|i| i.opcode() != Opcode::Call));
+    let mut vm = Vm::new();
+    vm.load(module).unwrap();
+    vm.run().unwrap();
+}
+
+#[test]
+fn nonescaping_array_initializers_have_no_canonical_allocation() {
+    let module = compile_source(
+        r#"package main
+func values(x int, index int) int {
+    a := [4]int{x, x+1, x+2, x+3}
+    b := a
+    var c = [8]int{3: x, 7: x+7}
+    b[0] += 10
+    return a[index & 3] + b[0] + c[index & 7]
+}
+func escaped(x int) []int { a := [4]int{x}; return a[:] }
+func main() {}"#,
+    );
+    verify_module(&module).unwrap();
+    let local = module
+        .functions
+        .iter()
+        .find(|f| f.name == "values")
+        .unwrap();
+    assert!(!local.code.iter().any(|i| i.opcode() == Opcode::ArrayNew));
+    assert!(local.code.iter().any(|i| i.opcode() == Opcode::SlotGet));
+    let escaped = module
+        .functions
+        .iter()
+        .find(|f| f.name == "escaped")
+        .unwrap();
+    assert!(escaped.code.iter().any(|i| i.opcode() == Opcode::ArrayNew));
+}
+
+#[test]
+fn nonescaping_array_snapshots_preserve_shadowing_and_sibling_rhs_mutation() {
+    compile_and_run(
+        r#"package main
+var shared [3]int
+func change() int { shared[0] = 99; return 7 }
+func main() {
+    shared = [3]int{1, 2, 3}
+    a, mark := shared, change()
+    var b, next = shared, change()
+    if a[0] != 1 || mark != 7 || next != 7 || b[0] != 99 { panic("snapshot") }
+    { a, b := a, b; a[0] = 12; b[0] = 13; if a[0] != 12 || b[0] != 13 { panic("shadow") } }
+    if a[0] != 1 || b[0] != 99 || shared[0] != 99 { panic("value identity") }
+    x := [2][3]uint8{{1,2,3},{4,5,6}}
+    y := x; y[0][0] = 9
+    if x[0][0] != 1 || y[0][0] != 9 || y[1][2] != 6 { panic("nested") }
+}"#,
+    );
+}
+
+#[test]
+fn flat_array_arguments_copy_directly_once_and_keep_literal_admission() {
+    let module = compile_source(
+        r#"package main
+func read(a [4]int, i int) int { return a[i] }
+func forward(a [4]int, i int) int { return read(a, i) }
+func literal(x int) int { return read([4]int{x, x+1, x+2, x+3}, x & 3) }
+func main() {}"#,
+    );
+    verify_module(&module).unwrap();
+    let forward = module
+        .functions
+        .iter()
+        .find(|f| f.name == "forward")
+        .unwrap();
+    assert_eq!(
+        forward
+            .code
+            .iter()
+            .filter(|i| i.opcode() == Opcode::CopyN && i.c == 4)
+            .count(),
+        1
+    );
+    assert_eq!(
+        forward
+            .code
+            .iter()
+            .filter(|i| i.opcode() == Opcode::Call)
+            .count(),
+        1
+    );
+    let literal = module
+        .functions
+        .iter()
+        .find(|f| f.name == "literal")
+        .unwrap();
+    assert!(literal.code.iter().any(|i| i.opcode() == Opcode::ArrayNew));
+}
+
+#[test]
+fn flat_array_arguments_preserve_value_snapshots_and_nested_narrow_values() {
+    compile_and_run(
+        r#"package main
+var shared [4]int
+func change() int { shared[0] = 99; return 0 }
+func read(a [4]int, i int) int { a[1] = 77; return a[i] }
+func forward(a [4]int, i int) int { return read(a, i) }
+func narrow(a [2][2]uint8, i int) uint8 { a[1][0] = 200; return a[i][1] }
+func main() {
+    shared = [4]int{1,2,3,4}
+    if read(shared, change()) != 1 || shared[0] != 99 || shared[1] != 2 { panic("argument snapshot") }
+    for i := 0; i < 300; i++ {
+        a := [4]int{i,i+1,i+2,i+3}
+        if forward(a, 0) != i || a[1] != i+1 { panic("array value") }
+        b := [2][2]uint8{{uint8(i),uint8(i+1)},{3,4}}
+        if narrow(b, i & 1) != b[i & 1][1] || b[1][0] != 3 { panic("narrow nested value") }
+    }
+}"#,
+    );
 }

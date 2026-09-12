@@ -6,6 +6,25 @@
 //! explicitly unsafe.
 #![allow(dead_code, unused_imports)]
 
+/// Exercise the same native ABI fixtures with the compiler enabled and with
+/// only precompiled dispatch available. Compilation-specific tests opt into JIT.
+#[cfg(feature = "native")]
+impl crate::vm::Vm {
+    pub(crate) fn try_native_for_test(
+        config: crate::vm::JitConfig,
+    ) -> Result<Self, crate::vm::VmConstructionError> {
+        #[cfg(feature = "jit")]
+        {
+            crate::vm::Vm::try_with_jit_config(config)
+        }
+        #[cfg(not(feature = "jit"))]
+        {
+            let _ = config;
+            crate::vm::Vm::try_for_aot()
+        }
+    }
+}
+
 pub(crate) fn endpoint_waiter(
     island_id: u32,
     fiber_key: u64,

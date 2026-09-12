@@ -11,7 +11,7 @@ use crate::JitError;
 use super::super::prepared::{emit_prepared_call, PreparedCallParams};
 use super::super::{
     emit_call_depth_enter, emit_call_depth_leave, emit_effect_aware_jit_call,
-    emit_non_ok_slow_path, emit_stack_capacity_check, import_jit_func_sig, load_native_arg_lanes,
+    emit_non_ok_slow_path, emit_stack_capacity_check, import_jit_func_sig,
     restore_caller_execution_context, JitCallGcMode, JitCallOperands, NonOkSlowPathParams,
     JIT_RESULT_OK,
 };
@@ -25,6 +25,7 @@ pub(super) struct IcHitParams {
     pub(super) ic_func_id: Value,
     pub(super) ic_may_gc: Value,
     pub(super) ic_frame_elided: Value,
+    pub(super) ic_arg_offset: Value,
     pub(super) ret_ptr: Value,
     pub(super) caller_bp: Value,
     pub(super) old_fiber_sp: Value,
@@ -55,6 +56,7 @@ pub(super) struct DynamicIcHitFields {
     pub(super) func_id: Value,
     pub(super) may_gc: Value,
     pub(super) frame_elided: Value,
+    pub(super) arg_offset: Value,
 }
 
 /// Emit the shared IC hit fast path: reserve the canonical fiber shadow window,
@@ -79,21 +81,55 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
 
     emitter.builder().switch_to_block(capacity_ok_block);
     emitter.builder().seal_block(capacity_ok_block);
-    let stack_ptr = emitter.load_context_field(types::I64, JitContextField::StackPtr);
     let frame_bp = emitter.builder().ins().uextend(types::I64, new_bp);
-    let bp_offset = emitter.builder().ins().imul_imm_u(frame_bp, 8);
-    let callee_args_ptr = emitter.builder().ins().iadd(stack_ptr, bp_offset);
-    emitter
+    let has_receiver = emitter
         .builder()
         .ins()
-        .store(MemFlags::trusted(), p.receiver, callee_args_ptr, 0);
-    for (i, val) in user_arg_vals.iter().enumerate() {
+        .icmp_imm_u(IntCC::NotEqual, p.ic_arg_offset, 0);
+    // Ordinary native entry initializes leading alias-backed slots from its
+    // register lanes before guest safepoints. The cold tier-up path publishes
+    // those lanes too. As with static calls, only the wide tail needs a caller
+    // store. Zero/one hidden slots share this ABI after IC shape validation.
+    if let Some(boundary) = user_arg_vals.get(crate::NATIVE_ARG_LANES - 1) {
+        let stack_ptr = emitter.load_context_field(types::I64, JitContextField::StackPtr);
+        let bp_offset = emitter.builder().ins().imul_imm_u(frame_bp, 8);
+        let callee_args_ptr = emitter.builder().ins().iadd(stack_ptr, bp_offset);
+        let receiver_block = emitter.builder().create_block();
+        let arguments_block = emitter.builder().create_block();
+        emitter
+            .builder()
+            .ins()
+            .brif(has_receiver, receiver_block, &[], arguments_block, &[]);
+        emitter.builder().switch_to_block(receiver_block);
+        emitter.builder().seal_block(receiver_block);
+        // The hidden receiver shifts exactly one leading user word out of the
+        // last native lane. A captureless target has no corresponding tail.
         emitter.builder().ins().store(
             MemFlags::trusted(),
-            *val,
+            *boundary,
             callee_args_ptr,
-            ((i + 1) * 8) as i32,
+            (crate::NATIVE_ARG_LANES * 8) as i32,
         );
+        emitter.builder().ins().jump(arguments_block, &[]);
+        emitter.builder().switch_to_block(arguments_block);
+        emitter.builder().seal_block(arguments_block);
+        if user_arg_vals.len() > crate::NATIVE_ARG_LANES {
+            let offset = emitter.builder().ins().uextend(types::I64, p.ic_arg_offset);
+            let offset = emitter.builder().ins().imul_imm_u(offset, 8);
+            let user_args_ptr = emitter.builder().ins().iadd(callee_args_ptr, offset);
+            for (index, value) in user_arg_vals
+                .iter()
+                .enumerate()
+                .skip(crate::NATIVE_ARG_LANES)
+            {
+                emitter.builder().ins().store(
+                    MemFlags::trusted(),
+                    *value,
+                    user_args_ptr,
+                    (index * 8) as i32,
+                );
+            }
+        }
     }
     let caller_func_id = emitter.call_caller_func_id();
 
@@ -135,7 +171,18 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
     let needs_restore = emitter.builder().block_params(jit_call_block)[0];
 
     let jit_func_sig = import_jit_func_sig(emitter);
-    let arg_lanes = load_native_arg_lanes(emitter, callee_args_ptr, p.arg_slots + 1);
+    // The same canonical layout feeds register lanes and the shadow tail.
+    // Unused lanes are zero, including zero-slot captureless functions.
+    let zero = emitter.builder().ins().iconst(types::I64, 0);
+    let arg_lanes = std::array::from_fn(|lane| {
+        let plain = user_arg_vals.get(lane).copied().unwrap_or(zero);
+        let hidden = if lane == 0 {
+            p.receiver
+        } else {
+            user_arg_vals.get(lane - 1).copied().unwrap_or(zero)
+        };
+        emitter.builder().ins().select(has_receiver, hidden, plain)
+    });
     let jit_result = emit_effect_aware_jit_call(
         emitter,
         jit_func_sig,
@@ -398,10 +445,18 @@ pub(super) fn load_hit_fields<'a, E: IrEmitter<'a>>(
         DynCallICEntry::OFFSET_JIT_FRAME_ELIDED,
     );
     let frame_elided = emitter.builder().ins().uextend(types::I32, frame_elided);
+    let arg_offset = emitter.builder().ins().load(
+        types::I16,
+        MemFlags::trusted(),
+        ic_entry,
+        DynCallICEntry::OFFSET_ARG_OFFSET,
+    );
+    let arg_offset = emitter.builder().ins().uextend(types::I32, arg_offset);
     DynamicIcHitFields {
         local_slots,
         func_id,
         may_gc,
         frame_elided,
+        arg_offset,
     }
 }

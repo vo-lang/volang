@@ -1,0 +1,10 @@
+package main
+func chain(x, a, b, c float32) float32 {
+    for i := 0; i < 2000000; i++ { x = (x + a) * b + c }
+    return x
+}
+func main() {
+    value := chain(0.125, 0.25, 0.5, 0.75)
+    assert(value == 1.75)
+    println(int(value * 1024))
+}

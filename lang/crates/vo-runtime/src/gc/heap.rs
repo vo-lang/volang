@@ -2,8 +2,8 @@
 //!
 //! Managed object addresses stay stable for their complete lifetime. Small
 //! objects are cells in single-size-class blocks. Large objects occupy a
-//! contiguous block run. System allocation only occurs while heap growth is
-//! allowed.
+//! contiguous block run. New managed pages are acquired only while heap growth
+//! is allowed; block metadata belongs to the host allocation domain.
 
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, vec::Vec};
@@ -11,6 +11,7 @@ use alloc::{boxed::Box, vec::Vec};
 use std::{boxed::Box, vec::Vec};
 
 use core::alloc::Layout;
+use core::ptr::NonNull;
 
 #[cfg(not(feature = "std"))]
 use alloc::alloc as heap_alloc;
@@ -101,21 +102,49 @@ impl SmallBlock {
             .try_reserve_exact(word_count)
             .map_err(|_| HeapError::SystemAllocationFailed)?;
         remembered.resize(word_count, 0);
-        Ok(Self {
-            class_index: class_index as u8,
+        Ok(Self::with_storage(
+            class_index as u8,
+            allocated.into_boxed_slice(),
+            logical_sizes.into_boxed_slice(),
+            remembered.into_boxed_slice(),
+        ))
+    }
+
+    fn with_storage(
+        class_index: u8,
+        allocated: Box<[u64]>,
+        logical_sizes: Box<[u16]>,
+        remembered: Box<[u64]>,
+    ) -> Self {
+        Self {
+            class_index,
             bump_cells: 0,
             free_head: FREE_CELL_NONE,
             live_cells: 0,
-            allocated: allocated.into_boxed_slice(),
-            logical_sizes: logical_sizes.into_boxed_slice(),
-            remembered: remembered.into_boxed_slice(),
+            allocated,
+            logical_sizes,
+            remembered,
             remembered_cells: 0,
             logical_bytes: 0,
             old_cells: 0,
             finalizable_cells: 0,
             runtime_backing_bytes: 0,
             marked_cycle: 0,
-        })
+        }
+    }
+
+    fn reset(&mut self) {
+        self.allocated.fill(0);
+        self.remembered.fill(0);
+        // Only allocated cells expose a logical extent. Every ordinary and
+        // native-lane allocation publishes a fresh size before it is visible.
+        // Stale sizes in unallocated cells therefore need no clearing.
+        *self = Self::with_storage(
+            self.class_index,
+            core::mem::take(&mut self.allocated),
+            core::mem::take(&mut self.logical_sizes),
+            core::mem::take(&mut self.remembered),
+        );
     }
 
     #[inline]
@@ -217,16 +246,39 @@ impl Drop for HeapSegment {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Allocation {
-    pub raw: *mut u8,
+    raw: NonNull<u8>,
     pub capacity: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct LocatedAllocation {
-    pub raw: *mut u8,
+    raw: NonNull<u8>,
     pub capacity: usize,
     pub logical_bytes: usize,
 }
+
+// Successful allocations and range lookups always identify live segment
+// storage. Carry that fact in the type so Result/Option reuse the null niche
+// instead of adding a separate tag and a larger stack return buffer.
+impl Allocation {
+    #[inline]
+    pub fn as_ptr(self) -> *mut u8 {
+        self.raw.as_ptr()
+    }
+}
+
+impl LocatedAllocation {
+    #[inline]
+    pub fn as_ptr(self) -> *mut u8 {
+        self.raw.as_ptr()
+    }
+}
+
+const _: () = assert!(
+    core::mem::size_of::<Result<Allocation, HeapError>>() == 2 * core::mem::size_of::<usize>()
+);
+const _: () =
+    assert!(core::mem::size_of::<Option<LocatedAllocation>>() == 3 * core::mem::size_of::<usize>());
 
 /// Runtime-owned pointers for a single-mutator bump lane. The lane covers
 /// fresh cells in one allocation-bitmap word; collection invalidates every
@@ -260,13 +312,37 @@ pub struct BulkReclaim {
 pub struct HeapObjectCursor {
     segment_index: usize,
     block_index: usize,
-    cell_index: usize,
+    // A block has at most HEAP_BLOCK_SIZE / MIN_CELL_SIZE (4096) cells.
+    cell_index: u16,
+    block_has_object: bool,
     segment_end: usize,
+}
+
+// Keep the bounded cell index and first-object flag in the original word so
+// adding traversal state does not move generated-code-visible Gc fields.
+const _: () =
+    assert!(core::mem::size_of::<HeapObjectCursor>() == 4 * core::mem::size_of::<usize>());
+const _: () = assert!(HEAP_BLOCK_SIZE / MIN_CELL_SIZE <= u16::MAX as usize);
+
+#[derive(Debug, Clone, Copy)]
+struct BlockLocation {
+    segment: usize,
+    block: usize,
+}
+
+/// A heap walk's allocation and already resolved block. Consume it in the same
+/// collector step, before any mutator can free or reuse the allocation. No heap
+/// metadata pointer is retained across a yield or metadata-vector growth.
+#[derive(Debug, Clone, Copy)]
+pub struct WalkedAllocation {
+    pub allocation: LocatedAllocation,
+    first_in_block: bool,
+    location: BlockLocation,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum HeapWalkStep {
-    Object(LocatedAllocation),
+    Object(WalkedAllocation),
     Metadata,
     Done,
 }
@@ -281,6 +357,9 @@ pub struct SpanHeap {
     active_small: [Option<(usize, usize)>; CLASS_COUNT],
     partial_small: [Vec<(usize, usize)>; CLASS_COUNT],
     partial_index_complete: [bool; CLASS_COUNT],
+    /// At most one detached metadata allocation per class. No managed block
+    /// or object is retained; reuse clears bitmaps outside collector steps.
+    spare_small: [Option<Box<SmallBlock>>; CLASS_COUNT],
     hard_limit_bytes: Option<usize>,
     growth_allowed: bool,
     allocation_allowed: bool,
@@ -303,6 +382,7 @@ impl SpanHeap {
             active_small: [None; CLASS_COUNT],
             partial_small: core::array::from_fn(|_| Vec::new()),
             partial_index_complete: [true; CLASS_COUNT],
+            spare_small: core::array::from_fn(|_| None),
             hard_limit_bytes,
             growth_allowed: true,
             allocation_allowed: true,
@@ -377,12 +457,20 @@ impl SpanHeap {
         Ok(self.committed_bytes)
     }
 
-    pub fn allocate(&mut self, size: usize) -> Result<Allocation, HeapError> {
+    /// Allocate and publish block-local size, finalizer and mark accounting.
+    /// The selected block is already known here; callers need no second lookup.
+    /// `cycle_id` is the collector's monotonically advancing cycle generation.
+    pub fn allocate(
+        &mut self,
+        size: usize,
+        finalizable: bool,
+        cycle_id: u64,
+    ) -> Result<Allocation, HeapError> {
         if !self.allocation_allowed {
             return Err(HeapError::AllocationForbidden);
         }
         if let Some((class_index, class_size)) = allocation_class(size) {
-            self.allocate_small(class_index, class_size, size)
+            self.allocate_small(class_index, class_size, size, finalizable, cycle_id)
         } else {
             self.allocate_large(size)
         }
@@ -418,18 +506,12 @@ impl SpanHeap {
         let (segment_index, block_index) = if let Some(existing) = existing {
             existing
         } else {
-            let block = try_box(SmallBlock::try_new(class_index)?)?;
-            let (segment_index, block_index) = self.acquire_free_run(1)?;
-            self.free_blocks -= 1;
-            self.segments[segment_index].free_blocks -= 1;
-            self.segments[segment_index].blocks[block_index] = BlockState::Small(block);
-            self.active_small[class_index] = Some((segment_index, block_index));
-            (segment_index, block_index)
+            self.create_small_block(class_index)?
         };
 
         let block_base = self.segments[segment_index].base + block_index * HEAP_BLOCK_SIZE;
         let block = match &mut self.segments[segment_index].blocks[block_index] {
-            BlockState::Small(block) => block,
+            BlockState::Small(block) => block.as_mut(),
             _ => unreachable!("bump lane must reference a small block"),
         };
         let start = usize::from(block.bump_cells);
@@ -473,6 +555,7 @@ impl SpanHeap {
         let block_base = self.segments[segment_index].base + block_index * HEAP_BLOCK_SIZE;
         let class_index = match &mut self.segments[segment_index].blocks[block_index] {
             BlockState::Small(block) => {
+                let block = block.as_mut();
                 let class_size = block.class_size();
                 let start = (cursor as usize).saturating_sub(block_base) / class_size;
                 let end = (limit as usize).saturating_sub(block_base) / class_size;
@@ -511,6 +594,8 @@ impl SpanHeap {
         class_index: usize,
         class_size: usize,
         logical_bytes: usize,
+        finalizable: bool,
+        cycle_id: u64,
     ) -> Result<Allocation, HeapError> {
         let (segment_index, block_index) =
             if let Some((segment_index, block_index)) = self.active_small[class_index] {
@@ -531,7 +616,7 @@ impl SpanHeap {
         let segment_base = self.segments[segment_index].base;
         let block_base = segment_base + block_index * HEAP_BLOCK_SIZE;
         let block = match &mut self.segments[segment_index].blocks[block_index] {
-            BlockState::Small(block) => block,
+            BlockState::Small(block) => block.as_mut(),
             _ => unreachable!("active small block must retain its size class"),
         };
 
@@ -551,17 +636,33 @@ impl SpanHeap {
         block.set_allocated(cell, true);
         block.logical_sizes[cell] = logical_bytes as u16;
         block.live_cells += 1;
+        // Allocations are live in the current cycle. While paused, this is the
+        // completed cycle's ID; the next cycle advances it before tracing.
+        block.marked_cycle = cycle_id;
+        block.logical_bytes = block.logical_bytes.saturating_add(logical_bytes);
+        block.finalizable_cells = block
+            .finalizable_cells
+            .saturating_add(u16::from(finalizable));
         if !block.has_capacity() {
             self.active_small[class_index] = None;
         }
 
         let raw = (block_base + cell * class_size) as *mut u8;
+        // Statically sized clearing keeps the common small cells inline;
+        // larger classes retain the target's bulk clearing implementation.
         unsafe {
-            raw.write_bytes(0, class_size);
+            match class_size {
+                16 => raw.cast::<[u8; 16]>().write([0; 16]),
+                32 => raw.cast::<[u8; 32]>().write([0; 32]),
+                64 => raw.cast::<[u8; 64]>().write([0; 64]),
+                128 => raw.cast::<[u8; 128]>().write([0; 128]),
+                _ => raw.write_bytes(0, class_size),
+            }
         }
         self.allocated_span_bytes += class_size;
         Ok(Allocation {
-            raw,
+            // The cell belongs to a live, non-null heap segment.
+            raw: unsafe { NonNull::new_unchecked(raw) },
             capacity: class_size,
         })
     }
@@ -598,8 +699,24 @@ impl SpanHeap {
             self.partial_index_complete[class_index] = true;
         }
 
-        let block = try_box(SmallBlock::try_new(class_index)?)?;
-        let (segment_index, block_index) = self.acquire_free_run(1)?;
+        self.create_small_block(class_index)
+    }
+
+    fn create_small_block(&mut self, class_index: usize) -> Result<(usize, usize), HeapError> {
+        let block = match self.spare_small[class_index].take() {
+            Some(mut block) => {
+                block.reset();
+                block
+            }
+            None => try_box(SmallBlock::try_new(class_index)?)?,
+        };
+        let (segment_index, block_index) = match self.acquire_free_run(1) {
+            Ok(location) => location,
+            Err(error) => {
+                self.spare_small[class_index] = Some(block);
+                return Err(error);
+            }
+        };
         self.free_blocks -= 1;
         self.segments[segment_index].free_blocks -= 1;
         self.segments[segment_index].blocks[block_index] = BlockState::Small(block);
@@ -607,6 +724,10 @@ impl SpanHeap {
         Ok((segment_index, block_index))
     }
 
+    // Large spans perform run acquisition and span bookkeeping. Keep those
+    // paths out of the small-cell allocator's register and instruction budget.
+    #[cold]
+    #[inline(never)]
     fn allocate_large(&mut self, size: usize) -> Result<Allocation, HeapError> {
         let blocks = size.div_ceil(HEAP_BLOCK_SIZE).max(1);
         let (segment_index, head) = self.acquire_free_run(blocks)?;
@@ -630,7 +751,10 @@ impl SpanHeap {
             raw.write_bytes(0, size);
         }
         self.allocated_span_bytes += capacity;
-        Ok(Allocation { raw, capacity })
+        Ok(Allocation {
+            raw: unsafe { NonNull::new_unchecked(raw) },
+            capacity,
+        })
     }
 
     fn acquire_free_run(&mut self, blocks: usize) -> Result<(usize, usize), HeapError> {
@@ -757,6 +881,7 @@ impl SpanHeap {
             cursor.segment_index += 1;
             cursor.block_index = 0;
             cursor.cell_index = 0;
+            cursor.block_has_object = false;
             return HeapWalkStep::Metadata;
         }
 
@@ -767,12 +892,14 @@ impl SpanHeap {
             if candidates == 0 {
                 cursor.block_index = ((word_index + 1) * 64).min(segment.blocks.len());
                 cursor.cell_index = 0;
+                cursor.block_has_object = false;
                 return HeapWalkStep::Metadata;
             }
             let block_index = word_index * 64 + candidates.trailing_zeros() as usize;
             if block_index != cursor.block_index {
                 cursor.block_index = block_index;
                 cursor.cell_index = 0;
+                cursor.block_has_object = false;
                 return HeapWalkStep::Metadata;
             }
         }
@@ -783,6 +910,7 @@ impl SpanHeap {
             BlockState::Free | BlockState::LargeTail { .. } => {
                 cursor.block_index += 1;
                 cursor.cell_index = 0;
+                cursor.block_has_object = false;
                 HeapWalkStep::Metadata
             }
             BlockState::LargeHead {
@@ -794,42 +922,65 @@ impl SpanHeap {
             } => {
                 cursor.block_index += *blocks as usize;
                 cursor.cell_index = 0;
+                cursor.block_has_object = false;
                 if *pending_reclaim || (remembered_only && !*remembered) {
                     HeapWalkStep::Metadata
                 } else {
-                    HeapWalkStep::Object(LocatedAllocation {
-                        raw: block_base as *mut u8,
-                        capacity: *blocks as usize * HEAP_BLOCK_SIZE,
-                        logical_bytes: *logical_bytes,
+                    HeapWalkStep::Object(WalkedAllocation {
+                        first_in_block: true,
+                        location: BlockLocation {
+                            segment: cursor.segment_index,
+                            block: block_index,
+                        },
+                        allocation: LocatedAllocation {
+                            raw: unsafe { NonNull::new_unchecked(block_base as *mut u8) },
+                            capacity: *blocks as usize * HEAP_BLOCK_SIZE,
+                            logical_bytes: *logical_bytes,
+                        },
                     })
                 }
             }
             BlockState::Small(block) => {
                 let cell_count = block.cell_count();
-                if cursor.cell_index >= cell_count {
+                let cell_index = usize::from(cursor.cell_index);
+                if cell_index >= cell_count {
                     cursor.block_index += 1;
                     cursor.cell_index = 0;
+                    cursor.block_has_object = false;
                     return HeapWalkStep::Metadata;
                 }
 
-                let word_index = cursor.cell_index / 64;
-                let bit_offset = cursor.cell_index % 64;
+                let word_index = cell_index / 64;
+                let bit_offset = cell_index % 64;
                 let mut candidates = block.allocated[word_index];
                 if remembered_only {
                     candidates &= block.remembered[word_index];
                 }
                 candidates &= u64::MAX << bit_offset;
                 if candidates == 0 {
-                    cursor.cell_index = ((word_index + 1) * 64).min(cell_count);
+                    cursor.cell_index = ((word_index + 1) * 64).min(cell_count) as u16;
                     return HeapWalkStep::Metadata;
                 }
 
                 let cell = word_index * 64 + candidates.trailing_zeros() as usize;
-                cursor.cell_index = cell + 1;
-                HeapWalkStep::Object(LocatedAllocation {
-                    raw: (block_base + cell * block.class_size()) as *mut u8,
-                    capacity: block.class_size(),
-                    logical_bytes: usize::from(block.logical_sizes[cell]),
+                cursor.cell_index = (cell + 1) as u16;
+                let first_in_block = !cursor.block_has_object;
+                cursor.block_has_object = true;
+                HeapWalkStep::Object(WalkedAllocation {
+                    first_in_block,
+                    location: BlockLocation {
+                        segment: cursor.segment_index,
+                        block: block_index,
+                    },
+                    allocation: LocatedAllocation {
+                        raw: unsafe {
+                            NonNull::new_unchecked(
+                                (block_base + cell * block.class_size()) as *mut u8,
+                            )
+                        },
+                        capacity: block.class_size(),
+                        logical_bytes: usize::from(block.logical_sizes[cell]),
+                    },
                 })
             }
         }
@@ -840,27 +991,34 @@ impl SpanHeap {
         self.remembered_objects
     }
 
-    pub fn record_small_allocation(
-        &mut self,
-        raw: *mut u8,
-        logical_bytes: usize,
-        finalizable: bool,
-    ) -> Result<(), HeapError> {
-        let (segment_index, block_index) = self
-            .locate_block(raw as usize)
+    fn walked_location(&self, walked: WalkedAllocation) -> Result<BlockLocation, HeapError> {
+        let location = walked.location;
+        let segment = self
+            .segments
+            .get(location.segment)
             .ok_or(HeapError::InvalidPointer)?;
-        match &mut self.segments[segment_index].blocks[block_index] {
-            BlockState::Small(block) => {
-                block.logical_bytes = block.logical_bytes.saturating_add(logical_bytes);
-                block.finalizable_cells = block
-                    .finalizable_cells
-                    .saturating_add(u16::from(finalizable));
-                Ok(())
-            }
-            _ => Ok(()),
+        if location.block >= segment.blocks.len() {
+            return Err(HeapError::InvalidPointer);
         }
+        let base = segment.base + location.block * HEAP_BLOCK_SIZE;
+        if (walked.allocation.as_ptr() as usize).wrapping_sub(base) >= HEAP_BLOCK_SIZE {
+            return Err(HeapError::InvalidPointer);
+        }
+        Ok(location)
     }
 
+    pub fn promote_walked(&mut self, walked: WalkedAllocation) -> Result<(), HeapError> {
+        let location = self.walked_location(walked)?;
+        self.remember_at(walked.allocation.as_ptr(), location)?;
+        if let BlockState::Small(block) =
+            &mut self.segments[location.segment].blocks[location.block]
+        {
+            block.old_cells = block.old_cells.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub fn record_promoted(&mut self, raw: *mut u8) {
         if let Some((segment_index, block_index)) = self.locate_block(raw as usize) {
             if let BlockState::Small(block) = &mut self.segments[segment_index].blocks[block_index]
@@ -889,23 +1047,41 @@ impl SpanHeap {
         }
     }
 
-    /// Reclaim a whole young block when the mark phase proved that it has no
-    /// survivor and its objects have no native finalizer. The caller invokes
-    /// this only while sweeping the first object in the block.
+    /// A completely unmarked young block with no finalizers can be released
+    /// from its first allocated cell, including when physical cell zero is free.
     #[cfg(any(test, not(feature = "gc-debug")))]
+    pub fn try_reclaim_walked_young_block(
+        &mut self,
+        walked: WalkedAllocation,
+        cycle_id: u64,
+    ) -> Option<BulkReclaim> {
+        if !walked.first_in_block {
+            return None;
+        }
+        let location = self.walked_location(walked).ok()?;
+        self.try_reclaim_young_block_at(location, cycle_id)
+    }
+
+    #[cfg(test)]
     pub fn try_reclaim_unmarked_young_block(
         &mut self,
         raw: *mut u8,
         cycle_id: u64,
     ) -> Option<BulkReclaim> {
-        if raw as usize & (HEAP_BLOCK_SIZE - 1) != 0 {
-            return None;
-        }
-        let (segment_index, block_index) = self.locate_block(raw as usize)?;
-        let block_base = self.segments[segment_index].base + block_index * HEAP_BLOCK_SIZE;
-        if raw as usize != block_base {
-            return None;
-        }
+        let (segment, block) = self.locate_block(raw as usize)?;
+        self.try_reclaim_young_block_at(BlockLocation { segment, block }, cycle_id)
+    }
+
+    #[cfg(any(test, not(feature = "gc-debug")))]
+    fn try_reclaim_young_block_at(
+        &mut self,
+        location: BlockLocation,
+        cycle_id: u64,
+    ) -> Option<BulkReclaim> {
+        let BlockLocation {
+            segment: segment_index,
+            block: block_index,
+        } = location;
         let block = match &self.segments[segment_index].blocks[block_index] {
             BlockState::Small(block)
                 if block.old_cells == 0
@@ -928,16 +1104,31 @@ impl SpanHeap {
         self.allocated_span_bytes = self
             .allocated_span_bytes
             .saturating_sub(reclaimed.object_count.saturating_mul(block.class_size()));
-        self.segments[segment_index].blocks[block_index] = BlockState::Free;
+        self.release_small_block(segment_index, block_index);
+        Some(reclaimed)
+    }
+
+    /// Called only after all resident objects have been individually freed or
+    /// admitted to whole-block reclamation. Detached bitmaps are inaccessible
+    /// to the collector and will be reset only when the metadata is reused.
+    fn release_small_block(&mut self, segment_index: usize, block_index: usize) {
+        let state = core::mem::replace(
+            &mut self.segments[segment_index].blocks[block_index],
+            BlockState::Free,
+        );
+        let BlockState::Small(block) = state else {
+            unreachable!("small block release requires small metadata");
+        };
+        let class_index = usize::from(block.class_index);
         self.set_remembered_block(segment_index, block_index, false);
         self.free_blocks += 1;
         self.segments[segment_index].free_blocks += 1;
-        for active in &mut self.active_small {
-            if *active == Some((segment_index, block_index)) {
-                *active = None;
-            }
+        if self.active_small[class_index] == Some((segment_index, block_index)) {
+            self.active_small[class_index] = None;
         }
-        Some(reclaimed)
+        if self.spare_small[class_index].is_none() {
+            self.spare_small[class_index] = Some(block);
+        }
     }
 
     #[inline]
@@ -955,14 +1146,23 @@ impl SpanHeap {
     /// Record an old parent in heap-local metadata. Returns true on the first
     /// transition so callers can update telemetry without another lookup.
     pub fn remember(&mut self, raw: *mut u8) -> Result<bool, HeapError> {
-        let address = raw as usize;
-        let (segment_index, block_index) = self
-            .locate_block(address)
+        let (segment, block) = self
+            .locate_block(raw as usize)
             .ok_or(HeapError::InvalidPointer)?;
+        self.remember_at(raw, BlockLocation { segment, block })
+    }
+
+    fn remember_at(&mut self, raw: *mut u8, location: BlockLocation) -> Result<bool, HeapError> {
+        let address = raw as usize;
+        let BlockLocation {
+            segment: segment_index,
+            block: block_index,
+        } = location;
         let segment_base = self.segments[segment_index].base;
         let block_base = segment_base + block_index * HEAP_BLOCK_SIZE;
         let changed = match &mut self.segments[segment_index].blocks[block_index] {
             BlockState::Small(block) => {
+                let block = block.as_mut();
                 let class_size = block.class_size();
                 let offset = address
                     .checked_sub(block_base)
@@ -1013,6 +1213,7 @@ impl SpanHeap {
         let (changed, block_still_remembered) =
             match &mut self.segments[segment_index].blocks[block_index] {
                 BlockState::Small(block) => {
+                    let block = block.as_mut();
                     let class_size = block.class_size();
                     let offset = address
                         .checked_sub(block_base)
@@ -1092,7 +1293,7 @@ impl SpanHeap {
                 let raw = block_base + cell * class_size;
                 (address >= raw + header_size && address < raw + class_size).then_some(
                     LocatedAllocation {
-                        raw: raw as *mut u8,
+                        raw: unsafe { NonNull::new_unchecked(raw as *mut u8) },
                         capacity: class_size,
                         logical_bytes: usize::from(block.logical_sizes[cell]),
                     },
@@ -1110,7 +1311,7 @@ impl SpanHeap {
                 let capacity = *blocks as usize * HEAP_BLOCK_SIZE;
                 (address >= block_base + header_size && address < block_base + capacity).then_some(
                     LocatedAllocation {
-                        raw: block_base as *mut u8,
+                        raw: unsafe { NonNull::new_unchecked(block_base as *mut u8) },
                         capacity,
                         logical_bytes: *logical_bytes,
                     },
@@ -1134,7 +1335,7 @@ impl SpanHeap {
                 let capacity = *blocks as usize * HEAP_BLOCK_SIZE;
                 (address >= head_base + header_size && address < head_base + capacity).then_some(
                     LocatedAllocation {
-                        raw: head_base as *mut u8,
+                        raw: unsafe { NonNull::new_unchecked(head_base as *mut u8) },
                         capacity,
                         logical_bytes: *logical_bytes,
                     },
@@ -1237,9 +1438,13 @@ impl SpanHeap {
 
     #[cfg(test)]
     pub fn free(&mut self, raw: *mut u8) -> Result<(), HeapError> {
-        self.free_inner(raw, None)
+        let (segment, block) = self
+            .locate_block(raw as usize)
+            .ok_or(HeapError::InvalidPointer)?;
+        self.free_at(raw, BlockLocation { segment, block }, None)
     }
 
+    #[cfg(test)]
     pub fn free_recorded(
         &mut self,
         raw: *mut u8,
@@ -1248,27 +1453,54 @@ impl SpanHeap {
         finalizable: bool,
         runtime_backing: bool,
     ) -> Result<(), HeapError> {
-        self.free_inner(
+        let (segment, block) = self
+            .locate_block(raw as usize)
+            .ok_or(HeapError::InvalidPointer)?;
+        self.free_at(
             raw,
+            BlockLocation { segment, block },
             Some((logical_bytes, was_old, finalizable, runtime_backing)),
         )
     }
 
-    fn free_inner(
+    pub fn free_walked(
+        &mut self,
+        walked: WalkedAllocation,
+        was_old: bool,
+        finalizable: bool,
+        runtime_backing: bool,
+    ) -> Result<(), HeapError> {
+        let location = self.walked_location(walked)?;
+        self.free_at(
+            walked.allocation.as_ptr(),
+            location,
+            Some((
+                walked.allocation.logical_bytes,
+                was_old,
+                finalizable,
+                runtime_backing,
+            )),
+        )
+    }
+
+    fn free_at(
         &mut self,
         raw: *mut u8,
+        location: BlockLocation,
         accounting: Option<(usize, bool, bool, bool)>,
     ) -> Result<(), HeapError> {
         let address = raw as usize;
-        let (segment_index, block_index) = self
-            .locate_block(address)
-            .ok_or(HeapError::InvalidPointer)?;
+        let BlockLocation {
+            segment: segment_index,
+            block: block_index,
+        } = location;
         let segment_base = self.segments[segment_index].base;
         let block_base = segment_base + block_index * HEAP_BLOCK_SIZE;
 
         let mut clear_remembered_summary = false;
         let result = match &mut self.segments[segment_index].blocks[block_index] {
             BlockState::Small(block) => {
+                let block = block.as_mut();
                 let class_index = usize::from(block.class_index);
                 let class_size = block.class_size();
                 let was_full = !block.has_capacity();
@@ -1282,18 +1514,18 @@ impl SpanHeap {
                 if cell >= block.cell_count() || !block.is_allocated(cell) {
                     return Err(HeapError::InvalidPointer);
                 }
-                if let Some((logical_bytes, was_old, finalizable, runtime_backing)) = accounting {
-                    block.logical_bytes = block.logical_bytes.saturating_sub(logical_bytes);
-                    if was_old {
-                        block.old_cells = block.old_cells.saturating_sub(1);
-                    }
-                    if finalizable {
-                        block.finalizable_cells = block.finalizable_cells.saturating_sub(1);
-                    }
-                    if runtime_backing {
-                        block.runtime_backing_bytes =
-                            block.runtime_backing_bytes.saturating_sub(logical_bytes);
-                    }
+                let (logical_bytes, was_old, finalizable, runtime_backing) = accounting
+                    .unwrap_or((usize::from(block.logical_sizes[cell]), false, false, false));
+                block.logical_bytes = block.logical_bytes.saturating_sub(logical_bytes);
+                if was_old {
+                    block.old_cells = block.old_cells.saturating_sub(1);
+                }
+                if finalizable {
+                    block.finalizable_cells = block.finalizable_cells.saturating_sub(1);
+                }
+                if runtime_backing {
+                    block.runtime_backing_bytes =
+                        block.runtime_backing_bytes.saturating_sub(logical_bytes);
                 }
                 if block.is_remembered(cell) {
                     block.set_remembered(cell, false);
@@ -1310,13 +1542,8 @@ impl SpanHeap {
                 block.free_head = cell as u16;
                 self.allocated_span_bytes -= class_size;
                 if block.live_cells == 0 {
-                    self.segments[segment_index].blocks[block_index] = BlockState::Free;
-                    clear_remembered_summary = true;
-                    self.free_blocks += 1;
-                    self.segments[segment_index].free_blocks += 1;
-                    if self.active_small[class_index] == Some((segment_index, block_index)) {
-                        self.active_small[class_index] = None;
-                    }
+                    self.release_small_block(segment_index, block_index);
+                    clear_remembered_summary = false;
                 } else if self.active_small[class_index].is_none() {
                     self.active_small[class_index] = Some((segment_index, block_index));
                 } else if was_full {
@@ -1376,7 +1603,6 @@ impl SpanHeap {
             }
 
             let head = self.reclaim_block_cursor;
-            work += 1;
             let pending = matches!(
                 self.segments[segment_index].blocks[head],
                 BlockState::LargeHead {
@@ -1385,10 +1611,14 @@ impl SpanHeap {
                 }
             );
             if !pending {
+                work += 1;
                 self.reclaim_block_cursor += 1;
                 continue;
             }
 
+            // Charge each released block once. Charging the head inspection
+            // first would consume every one-unit call without advancing the
+            // persistent tail cursor.
             let (blocks, mut reclaim_next) = match self.segments[segment_index].blocks[head] {
                 BlockState::LargeHead {
                     blocks,
@@ -1404,7 +1634,8 @@ impl SpanHeap {
                 reclaim_next += 1;
                 work += 1;
             }
-            if reclaim_next == blocks {
+            if reclaim_next == blocks && work < max_blocks {
+                work += 1;
                 self.segments[segment_index].blocks[head] = BlockState::Free;
                 self.free_blocks += 1;
                 self.segments[segment_index].free_blocks += 1;
@@ -1464,13 +1695,317 @@ mod tests {
         heap.reserve(HEAP_BLOCK_SIZE).unwrap();
         heap.set_growth_allowed(false);
 
-        let first = heap.allocate(24).unwrap();
-        let second = heap.allocate(24).unwrap();
-        assert_ne!(first.raw, second.raw);
-        heap.free(first.raw).unwrap();
-        let reused = heap.allocate(24).unwrap();
-        assert_eq!(reused.raw, first.raw);
+        let first = heap.allocate(24, false, 0).unwrap();
+        let second = heap.allocate(24, false, 0).unwrap();
+        assert_ne!(first.as_ptr(), second.as_ptr());
+        heap.free(first.as_ptr()).unwrap();
+        let reused = heap.allocate(24, false, 0).unwrap();
+        assert_eq!(reused.as_ptr(), first.as_ptr());
         assert_eq!(reused.capacity, 32);
+    }
+
+    fn detached_metadata_identity(block: &SmallBlock) -> [usize; 4] {
+        [
+            block as *const SmallBlock as usize,
+            block.allocated.as_ptr() as usize,
+            block.logical_sizes.as_ptr() as usize,
+            block.remembered.as_ptr() as usize,
+        ]
+    }
+
+    fn small_metadata(heap: &SpanHeap, raw: *mut u8) -> &SmallBlock {
+        let (segment, block) = heap.locate_block(raw as usize).unwrap();
+        let BlockState::Small(metadata) = &heap.segments[segment].blocks[block] else {
+            panic!("expected small metadata");
+        };
+        metadata
+    }
+
+    #[test]
+    fn detached_metadata_reuses_every_class_without_retaining_objects() {
+        for class in 0..CLASS_COUNT {
+            for bulk in [false, true] {
+                let size = 1usize << (MIN_CLASS_SHIFT + class);
+                let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
+                let first = heap.allocate(size - 1, false, 4).unwrap();
+                let second = heap.allocate(size - 1, false, 4).unwrap();
+                let identity = detached_metadata_identity(small_metadata(&heap, first.as_ptr()));
+                unsafe {
+                    first.as_ptr().write_bytes(0xa5, size);
+                    second.as_ptr().write_bytes(0x6d, size);
+                }
+                if bulk {
+                    let reclaimed = heap
+                        .try_reclaim_unmarked_young_block(first.as_ptr(), 5)
+                        .unwrap();
+                    assert_eq!(reclaimed.object_count, 2);
+                    assert_eq!(reclaimed.logical_bytes, 2 * (size - 1));
+                } else {
+                    heap.free(first.as_ptr()).unwrap();
+                    heap.free(second.as_ptr()).unwrap();
+                }
+                assert_eq!(heap.stats().free_blocks, 1);
+                assert_eq!(heap.stats().allocated_span_bytes, 0);
+                assert!(heap.locate(first.as_ptr() as usize, 0).is_none());
+                assert!(heap.locate(second.as_ptr() as usize, 0).is_none());
+                assert_eq!(
+                    detached_metadata_identity(heap.spare_small[class].as_ref().unwrap()),
+                    identity
+                );
+                heap.set_growth_allowed(false);
+                let reused = heap.allocate(size - 3, false, 9).unwrap();
+                assert_eq!(reused.as_ptr(), first.as_ptr());
+                assert_eq!(
+                    detached_metadata_identity(small_metadata(&heap, reused.as_ptr())),
+                    identity
+                );
+                assert!(heap.spare_small[class].is_none());
+                assert!(heap.locate(second.as_ptr() as usize, 0).is_none());
+                assert_eq!(
+                    heap.locate(reused.as_ptr() as usize, 0)
+                        .unwrap()
+                        .logical_bytes,
+                    size - 3
+                );
+                assert!(heap
+                    .canonicalize_and_record_marked(reused.as_ptr() as usize + size - 2, 0, 9)
+                    .is_none());
+                assert!(
+                    unsafe { core::slice::from_raw_parts(reused.as_ptr(), size) }
+                        .iter()
+                        .all(|b| *b == 0)
+                );
+                let reclaimed = heap
+                    .try_reclaim_unmarked_young_block(reused.as_ptr(), 10)
+                    .unwrap();
+                assert_eq!(reclaimed.object_count, 1);
+                assert_eq!(reclaimed.logical_bytes, size - 3);
+            }
+        }
+    }
+
+    #[test]
+    fn detached_metadata_retention_is_one_allocation_per_class() {
+        let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE * 2));
+        heap.reserve(HEAP_BLOCK_SIZE * 2).unwrap();
+        heap.set_growth_allowed(false);
+        for class in 0..CLASS_COUNT {
+            let size = 1usize << (MIN_CLASS_SHIFT + class);
+            let cells = HEAP_BLOCK_SIZE / size;
+            let allocations: Vec<_> = (0..=cells)
+                .map(|_| heap.allocate(size, false, 0).unwrap())
+                .collect();
+            let identity =
+                detached_metadata_identity(small_metadata(&heap, allocations[0].as_ptr()));
+            heap.try_reclaim_unmarked_young_block(allocations[0].as_ptr(), 1)
+                .unwrap();
+            heap.try_reclaim_unmarked_young_block(allocations[cells].as_ptr(), 1)
+                .unwrap();
+            assert_eq!(
+                heap.spare_small.iter().filter(|b| b.is_some()).count(),
+                class + 1
+            );
+            assert_eq!(
+                detached_metadata_identity(heap.spare_small[class].as_ref().unwrap()),
+                identity
+            );
+            assert_eq!(heap.stats().free_blocks, 2);
+            assert_eq!(heap.stats().allocated_span_bytes, 0);
+        }
+        let retained = core::mem::size_of_val(&heap.spare_small)
+            + heap
+                .spare_small
+                .iter()
+                .flatten()
+                .map(|b| {
+                    core::mem::size_of::<SmallBlock>()
+                        + core::mem::size_of_val(b.allocated.as_ref())
+                        + core::mem::size_of_val(b.logical_sizes.as_ref())
+                        + core::mem::size_of_val(b.remembered.as_ref())
+                })
+                .sum::<usize>();
+        // Includes each metadata box, all three buffers and the fixed cache;
+        // allocator overhead is deliberately outside this requested-byte bound.
+        assert!(
+            retained <= 20 * 1024,
+            "retained requested bytes: {retained}"
+        );
+    }
+
+    #[test]
+    fn detached_metadata_does_not_pin_large_span_capacity_or_cross_islands() {
+        let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE * 3));
+        heap.reserve(HEAP_BLOCK_SIZE * 3).unwrap();
+        heap.set_growth_allowed(false);
+        let first = heap.allocate(24, false, 0).unwrap();
+        let identity = detached_metadata_identity(small_metadata(&heap, first.as_ptr()));
+        heap.free(first.as_ptr()).unwrap();
+        let large = heap.allocate(HEAP_BLOCK_SIZE + 1, false, 0).unwrap();
+        assert_eq!(large.as_ptr(), first.as_ptr());
+        let reused = heap.allocate(25, false, 0).unwrap();
+        assert_ne!(reused.as_ptr(), first.as_ptr());
+        assert_eq!(
+            detached_metadata_identity(small_metadata(&heap, reused.as_ptr())),
+            identity
+        );
+        let foreign = SpanHeap::new(None);
+        assert!(foreign.spare_small.iter().all(Option::is_none));
+        assert!(foreign.locate(reused.as_ptr() as usize, 0).is_none());
+        heap.free(large.as_ptr()).unwrap();
+        assert_eq!(heap.reclaim_step(1), (1, false));
+        let mut completed = false;
+        for _ in 0..4 {
+            let (work, done) = heap.reclaim_step(1);
+            assert!(work <= 1);
+            if done {
+                completed = true;
+                break;
+            }
+        }
+        assert!(
+            completed,
+            "large reclaim must complete within its bounded scan"
+        );
+        assert_eq!(heap.stats().pending_reclaim_bytes, 0);
+        assert_eq!(heap.stats().free_blocks, 2);
+        assert!(heap.locate(reused.as_ptr() as usize, 0).is_some());
+        assert_eq!(heap.stats().allocated_span_bytes, 32);
+    }
+
+    #[test]
+    fn failed_small_block_admission_keeps_detached_metadata_available() {
+        let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
+        let first = heap.allocate(24, false, 0).unwrap();
+        let identity = detached_metadata_identity(small_metadata(&heap, first.as_ptr()));
+        heap.free(first.as_ptr()).unwrap();
+        let large = heap.allocate(HEAP_BLOCK_SIZE, false, 0).unwrap();
+        for (growth, expected) in [
+            (false, HeapError::GrowthDisabled),
+            (true, HeapError::HardLimitExceeded),
+        ] {
+            heap.set_growth_allowed(growth);
+            assert_eq!(heap.allocate(24, false, 0).unwrap_err(), expected);
+            assert_eq!(
+                detached_metadata_identity(heap.spare_small[1].as_ref().unwrap()),
+                identity
+            );
+            assert_eq!(heap.stats().allocated_span_bytes, HEAP_BLOCK_SIZE);
+        }
+        heap.free(large.as_ptr()).unwrap();
+        while !heap.reclaim_step(1).1 {}
+        heap.set_allocation_allowed(false);
+        assert_eq!(
+            heap.allocate(24, false, 0).unwrap_err(),
+            HeapError::AllocationForbidden
+        );
+        assert_eq!(
+            heap.reserve_bump_lane(24, 4).unwrap_err(),
+            HeapError::AllocationForbidden
+        );
+        assert_eq!(
+            detached_metadata_identity(heap.spare_small[1].as_ref().unwrap()),
+            identity
+        );
+        heap.set_allocation_allowed(true);
+        let reused = heap.allocate(24, false, 0).unwrap();
+        assert_eq!(
+            detached_metadata_identity(small_metadata(&heap, reused.as_ptr())),
+            identity
+        );
+    }
+
+    #[test]
+    fn detached_metadata_clears_old_finalizer_remembered_and_backing_state() {
+        let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
+        let first = heap.allocate(24, true, 77).unwrap();
+        heap.record_promoted(first.as_ptr());
+        heap.record_runtime_backing(first.as_ptr(), 24);
+        assert!(heap.remember(first.as_ptr()).unwrap());
+        heap.free_recorded(first.as_ptr(), 24, true, true, true)
+            .unwrap();
+        assert_eq!(heap.remembered_object_count(), 0);
+        let reused = heap.allocate(25, false, 78).unwrap();
+        assert!(!heap.is_remembered(reused.as_ptr()));
+        let block = small_metadata(&heap, reused.as_ptr());
+        assert_eq!(block.old_cells, 0);
+        assert_eq!(block.finalizable_cells, 0);
+        assert_eq!(block.remembered_cells, 0);
+        assert_eq!(block.runtime_backing_bytes, 0);
+        assert_eq!(block.marked_cycle, 78);
+        let reclaimed = heap
+            .try_reclaim_unmarked_young_block(reused.as_ptr(), 79)
+            .unwrap();
+        assert_eq!(reclaimed.object_count, 1);
+        assert_eq!(reclaimed.logical_bytes, 25);
+        assert_eq!(reclaimed.runtime_backing_bytes, 0);
+    }
+
+    #[test]
+    fn native_lane_reuses_detached_metadata_and_publishes_fresh_extents() {
+        let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
+        let first = heap.allocate(31, false, 0).unwrap();
+        let identity = detached_metadata_identity(small_metadata(&heap, first.as_ptr()));
+        heap.try_reclaim_unmarked_young_block(first.as_ptr(), 1)
+            .unwrap();
+        let lane = heap.reserve_bump_lane(17, 4).unwrap().unwrap();
+        assert_eq!(
+            detached_metadata_identity(small_metadata(&heap, lane.cursor)),
+            identity
+        );
+        assert!(heap.locate(lane.cursor as usize, 0).is_none());
+        assert!(
+            unsafe { core::slice::from_raw_parts(lane.cursor, 4 * lane.class_size) }
+                .iter()
+                .all(|b| *b == 0)
+        );
+        unsafe {
+            *lane.logical_size_cursor = 17;
+            *lane.bitmap_word |= 1;
+            *lane.live_cells += 1;
+            *lane.logical_bytes += 17;
+        }
+        heap.allocated_span_bytes += lane.class_size;
+        heap.release_bump_lane(unsafe { lane.cursor.add(lane.class_size) }, lane.limit);
+        assert_eq!(
+            heap.locate(lane.cursor as usize, 0).unwrap().logical_bytes,
+            17
+        );
+        assert!(heap
+            .canonicalize_and_record_marked(lane.cursor as usize + 18, 0, 2)
+            .is_none());
+        let reclaimed = heap
+            .try_reclaim_unmarked_young_block(lane.cursor, 3)
+            .unwrap();
+        assert_eq!(reclaimed.object_count, 1);
+        assert_eq!(reclaimed.logical_bytes, 17);
+    }
+
+    #[test]
+    fn reused_small_cells_clear_padding_without_touching_neighbor() {
+        for class_shift in MIN_CLASS_SHIFT..=MAX_CLASS_SHIFT {
+            let class_size = 1usize << class_shift;
+            let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
+            let first = heap.allocate(class_size - 3, false, 0).unwrap();
+            let neighbor = heap.allocate(class_size - 3, false, 0).unwrap();
+            assert_eq!(first.capacity, class_size);
+            unsafe {
+                first.as_ptr().write_bytes(0xa5, class_size);
+                neighbor.as_ptr().write_bytes(0x6d, class_size);
+            }
+            heap.free(first.as_ptr()).unwrap();
+            let reused = heap.allocate(class_size - 3, false, 0).unwrap();
+            assert_eq!(reused.as_ptr(), first.as_ptr());
+            assert!(
+                unsafe { core::slice::from_raw_parts(reused.as_ptr(), class_size) }
+                    .iter()
+                    .all(|byte| *byte == 0)
+            );
+            assert!(
+                unsafe { core::slice::from_raw_parts(neighbor.as_ptr(), class_size) }
+                    .iter()
+                    .all(|byte| *byte == 0x6d)
+            );
+        }
     }
 
     #[test]
@@ -1480,22 +2015,27 @@ mod tests {
         heap.set_growth_allowed(false);
         let cells_per_block = HEAP_BLOCK_SIZE / 1024;
         let allocations: Vec<_> = (0..cells_per_block * 2)
-            .map(|_| heap.allocate(1024).expect("fill two small blocks"))
+            .map(|_| {
+                heap.allocate(1024, false, 0)
+                    .expect("fill two small blocks")
+            })
             .collect();
 
-        heap.free(allocations[0].raw).unwrap();
-        heap.free(allocations[cells_per_block].raw).unwrap();
+        heap.free(allocations[0].as_ptr()).unwrap();
+        heap.free(allocations[cells_per_block].as_ptr()).unwrap();
         assert_eq!(heap.partial_small[6].len(), 1);
 
         assert_eq!(
-            heap.allocate(1024).expect("reuse active block").raw,
-            allocations[0].raw
+            heap.allocate(1024, false, 0)
+                .expect("reuse active block")
+                .as_ptr(),
+            allocations[0].as_ptr()
         );
         assert_eq!(
-            heap.allocate(1024)
+            heap.allocate(1024, false, 0)
                 .expect("reuse indexed partial block")
-                .raw,
-            allocations[cells_per_block].raw
+                .as_ptr(),
+            allocations[cells_per_block].as_ptr()
         );
         assert!(heap.partial_small[6].is_empty());
     }
@@ -1507,20 +2047,26 @@ mod tests {
         heap.set_growth_allowed(false);
         let cells_per_block = HEAP_BLOCK_SIZE / 1024;
         let allocations: Vec<_> = (0..cells_per_block * 2)
-            .map(|_| heap.allocate(1024).expect("fill two small blocks"))
+            .map(|_| {
+                heap.allocate(1024, false, 0)
+                    .expect("fill two small blocks")
+            })
             .collect();
 
-        heap.free(allocations[0].raw).unwrap();
-        heap.free(allocations[cells_per_block].raw).unwrap();
+        heap.free(allocations[0].as_ptr()).unwrap();
+        heap.free(allocations[cells_per_block].as_ptr()).unwrap();
         heap.partial_small[6].clear();
         heap.partial_index_complete[6] = false;
 
-        assert_eq!(heap.allocate(1024).unwrap().raw, allocations[0].raw);
         assert_eq!(
-            heap.allocate(1024)
+            heap.allocate(1024, false, 0).unwrap().as_ptr(),
+            allocations[0].as_ptr()
+        );
+        assert_eq!(
+            heap.allocate(1024, false, 0)
                 .expect("slow fallback must recover an unindexed partial block")
-                .raw,
-            allocations[cells_per_block].raw
+                .as_ptr(),
+            allocations[cells_per_block].as_ptr()
         );
         assert!(!heap.partial_index_complete[6]);
     }
@@ -1529,7 +2075,10 @@ mod tests {
     fn no_growth_and_hard_limit_fail_closed() {
         let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
         heap.set_growth_allowed(false);
-        assert!(matches!(heap.allocate(8), Err(HeapError::GrowthDisabled)));
+        assert!(matches!(
+            heap.allocate(8, false, 0),
+            Err(HeapError::GrowthDisabled)
+        ));
 
         heap.set_growth_allowed(true);
         heap.reserve(HEAP_BLOCK_SIZE).unwrap();
@@ -1551,16 +2100,22 @@ mod tests {
         heap.set_growth_allowed(false);
 
         for _ in 0..heap.max_min_cell_allocations() {
-            assert_eq!(heap.allocate(8).expect("minimum cell").capacity, 16);
+            assert_eq!(
+                heap.allocate(8, false, 0).expect("minimum cell").capacity,
+                16
+            );
         }
-        assert!(matches!(heap.allocate(8), Err(HeapError::GrowthDisabled)));
+        assert!(matches!(
+            heap.allocate(8, false, 0),
+            Err(HeapError::GrowthDisabled)
+        ));
     }
 
     #[test]
     fn large_reclaim_is_block_bounded() {
         let mut heap = SpanHeap::new(None);
-        let allocation = heap.allocate(HEAP_BLOCK_SIZE * 3).unwrap();
-        heap.free(allocation.raw).unwrap();
+        let allocation = heap.allocate(HEAP_BLOCK_SIZE * 3, false, 0).unwrap();
+        heap.free(allocation.as_ptr()).unwrap();
         assert_eq!(heap.stats().pending_reclaim_bytes, HEAP_BLOCK_SIZE * 3);
 
         let (first_work, first_done) = heap.reclaim_step(1);
@@ -1575,15 +2130,15 @@ mod tests {
     #[test]
     fn locate_canonicalizes_small_and_large_interiors() {
         let mut heap = SpanHeap::new(None);
-        let small = heap.allocate(64).unwrap();
-        let small_located = heap.locate(small.raw as usize + 24, 8).unwrap();
-        assert_eq!(small_located.raw, small.raw);
+        let small = heap.allocate(64, false, 0).unwrap();
+        let small_located = heap.locate(small.as_ptr() as usize + 24, 8).unwrap();
+        assert_eq!(small_located.as_ptr(), small.as_ptr());
 
-        let large = heap.allocate(HEAP_BLOCK_SIZE + 64).unwrap();
+        let large = heap.allocate(HEAP_BLOCK_SIZE + 64, false, 0).unwrap();
         let large_located = heap
-            .locate(large.raw as usize + HEAP_BLOCK_SIZE + 16, 8)
+            .locate(large.as_ptr() as usize + HEAP_BLOCK_SIZE + 16, 8)
             .unwrap();
-        assert_eq!(large_located.raw, large.raw);
+        assert_eq!(large_located.as_ptr(), large.as_ptr());
     }
 
     #[test]
@@ -1593,7 +2148,7 @@ mod tests {
             heap.reserve(HEAP_BLOCK_SIZE).unwrap();
         }
         let allocations: Vec<_> = (0..16)
-            .map(|_| heap.allocate(HEAP_BLOCK_SIZE).unwrap())
+            .map(|_| heap.allocate(HEAP_BLOCK_SIZE, false, 0).unwrap())
             .collect();
 
         assert!(heap
@@ -1602,9 +2157,9 @@ mod tests {
             .all(|pair| { heap.segments[pair[0]].base < heap.segments[pair[1]].base }));
         for allocation in allocations {
             let located = heap
-                .locate(allocation.raw as usize + HEAP_BLOCK_SIZE - 1, 8)
+                .locate(allocation.as_ptr() as usize + HEAP_BLOCK_SIZE - 1, 8)
                 .expect("interior address must resolve through segment index");
-            assert_eq!(located.raw, allocation.raw);
+            assert_eq!(located.as_ptr(), allocation.as_ptr());
         }
     }
 
@@ -1634,8 +2189,10 @@ mod tests {
             assert_eq!(heap.locate(object as usize, 8).unwrap().logical_bytes, 24);
         }
 
-        let allocation = heap.allocate(24).expect("released lane tail is reusable");
-        assert_eq!(allocation.raw, unused);
+        let allocation = heap
+            .allocate(24, false, 0)
+            .expect("released lane tail is reusable");
+        assert_eq!(allocation.as_ptr(), unused);
         assert_eq!(heap.stats().allocated_span_bytes, 4 * lane.class_size);
     }
 
@@ -1644,55 +2201,163 @@ mod tests {
         let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
         heap.reserve(HEAP_BLOCK_SIZE).unwrap();
         heap.set_growth_allowed(false);
-        let first = heap.allocate(24).unwrap();
-        let second = heap.allocate(24).unwrap();
-        heap.record_small_allocation(first.raw, 24, false).unwrap();
-        heap.record_small_allocation(second.raw, 24, false).unwrap();
+        let first = heap.allocate(24, false, 0).unwrap();
+        let second = heap.allocate(24, false, 0).unwrap();
 
         let mut cursor = heap.object_cursor();
         let mut seen = Vec::new();
         loop {
             match heap.walk_allocated_step(&mut cursor) {
-                HeapWalkStep::Object(allocation) => seen.push(allocation.raw),
+                HeapWalkStep::Object(walked) => seen.push(walked.allocation.as_ptr()),
                 HeapWalkStep::Metadata => {}
                 HeapWalkStep::Done => break,
             }
         }
-        assert_eq!(seen, vec![first.raw, second.raw]);
+        assert_eq!(seen, vec![first.as_ptr(), second.as_ptr()]);
 
         let reclaimed = heap
-            .try_reclaim_unmarked_young_block(first.raw, 1)
+            .try_reclaim_unmarked_young_block(first.as_ptr(), 1)
             .expect("unmarked plain young block can be reclaimed atomically");
         assert_eq!(reclaimed.object_count, 2);
         assert_eq!(reclaimed.logical_bytes, 48);
-        assert!(heap.locate(first.raw as usize + 8, 8).is_none());
+        assert!(heap.locate(first.as_ptr() as usize + 8, 8).is_none());
+    }
+
+    #[test]
+    fn allocation_accounting_survives_partial_free_and_cell_reuse() {
+        let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
+        let first = heap.allocate(24, false, 0).unwrap();
+        let second = heap.allocate(24, false, 0).unwrap();
+        heap.free_recorded(first.as_ptr(), 24, false, false, false)
+            .unwrap();
+        let replacement = heap.allocate(31, true, 0).unwrap();
+        assert_eq!(replacement.as_ptr(), first.as_ptr());
+        assert_eq!(
+            heap.try_reclaim_unmarked_young_block(first.as_ptr(), 1),
+            None
+        );
+        heap.free_recorded(replacement.as_ptr(), 31, false, true, false)
+            .unwrap();
+        let replacement = heap.allocate(25, false, 0).unwrap();
+        assert_eq!(replacement.as_ptr(), first.as_ptr());
+        let reclaimed = heap
+            .try_reclaim_unmarked_young_block(first.as_ptr(), 1)
+            .unwrap();
+        assert_eq!(reclaimed.object_count, 2);
+        assert_eq!(reclaimed.logical_bytes, 25 + 24);
+        assert!(heap.locate(second.as_ptr() as usize + 8, 8).is_none());
+    }
+
+    #[test]
+    fn allocation_protects_current_cycle_and_expires_for_next_cycle() {
+        let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
+        let first = heap.allocate(24, false, 0).unwrap();
+        let current = heap.allocate(24, false, 7).unwrap();
+        assert_eq!(
+            heap.try_reclaim_unmarked_young_block(first.as_ptr(), 7),
+            None
+        );
+        assert!(heap.locate(current.as_ptr() as usize + 8, 8).is_some());
+        let reclaimed = heap
+            .try_reclaim_unmarked_young_block(first.as_ptr(), 8)
+            .unwrap();
+        assert_eq!(reclaimed.object_count, 2);
+        assert_eq!(reclaimed.logical_bytes, 48);
+    }
+
+    fn next_walked(heap: &SpanHeap, cursor: &mut HeapObjectCursor) -> WalkedAllocation {
+        loop {
+            match heap.walk_allocated_step(cursor) {
+                HeapWalkStep::Object(walked) => return walked,
+                HeapWalkStep::Metadata => {}
+                HeapWalkStep::Done => panic!("expected another allocation"),
+            }
+        }
+    }
+
+    #[test]
+    fn bulk_reclaim_handles_empty_bitmap_words_before_first_live_cell() {
+        let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
+        let objects: Vec<_> = (0..130)
+            .map(|_| heap.allocate(24, false, 0).unwrap())
+            .collect();
+        for allocation in &objects[..129] {
+            heap.free(allocation.as_ptr()).unwrap();
+        }
+        let mut cursor = heap.object_cursor();
+        let walked = next_walked(&heap, &mut cursor);
+        assert_eq!(walked.allocation.as_ptr(), objects[129].as_ptr());
+        assert!(walked.first_in_block);
+        let reclaimed = heap.try_reclaim_walked_young_block(walked, 1).unwrap();
+        assert_eq!(reclaimed.object_count, 1);
+        assert_eq!(reclaimed.logical_bytes, 24);
+        assert_eq!(heap.stats().allocated_span_bytes, 0);
+        assert!(heap.locate(objects[129].as_ptr() as usize + 8, 8).is_none());
+    }
+
+    #[test]
+    fn walked_location_rejects_foreign_heap_and_preserves_promotion_cards() {
+        let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
+        let first = heap.allocate(24, false, 0).unwrap();
+        let second = heap.allocate(24, false, 0).unwrap();
+        let mut cursor = heap.object_cursor();
+        let walked = next_walked(&heap, &mut cursor);
+        let mut foreign = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
+        foreign.allocate(24, false, 0).unwrap();
+        assert_eq!(
+            foreign.free_walked(walked, false, false, false),
+            Err(HeapError::InvalidPointer)
+        );
+        assert_eq!(
+            foreign.promote_walked(walked),
+            Err(HeapError::InvalidPointer)
+        );
+        assert!(foreign.try_reclaim_walked_young_block(walked, 1).is_none());
+        assert_eq!(foreign.stats().allocated_span_bytes, 32);
+
+        heap.promote_walked(walked).unwrap();
+        assert!(heap.is_remembered(first.as_ptr()));
+        assert_eq!(heap.remembered_object_count(), 1);
+        assert!(heap.try_reclaim_walked_young_block(walked, 1).is_none());
+        heap.free_walked(walked, true, false, false).unwrap();
+        assert_eq!(heap.remembered_object_count(), 0);
+        assert_eq!(
+            heap.free_walked(walked, true, false, false),
+            Err(HeapError::InvalidPointer)
+        );
+        let walked_second = next_walked(&heap, &mut cursor);
+        assert_eq!(walked_second.allocation.as_ptr(), second.as_ptr());
+        assert!(!walked_second.first_in_block);
+        heap.free_walked(walked_second, false, false, false)
+            .unwrap();
+        assert_eq!(heap.stats().allocated_span_bytes, 0);
     }
 
     #[test]
     fn remembered_walk_uses_block_summary_and_clears_it_precisely() {
         let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE * 2));
-        let first = heap.allocate(24).unwrap();
-        let second = heap.allocate(24).unwrap();
-        assert!(heap.remember(first.raw).unwrap());
-        assert!(heap.remember(second.raw).unwrap());
+        let first = heap.allocate(24, false, 0).unwrap();
+        let second = heap.allocate(24, false, 0).unwrap();
+        assert!(heap.remember(first.as_ptr()).unwrap());
+        assert!(heap.remember(second.as_ptr()).unwrap());
 
         let collect = |heap: &SpanHeap| {
             let mut cursor = heap.object_cursor();
             let mut seen = Vec::new();
             loop {
                 match heap.walk_remembered_step(&mut cursor) {
-                    HeapWalkStep::Object(allocation) => seen.push(allocation.raw),
+                    HeapWalkStep::Object(walked) => seen.push(walked.allocation.as_ptr()),
                     HeapWalkStep::Metadata => {}
                     HeapWalkStep::Done => break,
                 }
             }
             seen
         };
-        assert_eq!(collect(&heap), vec![first.raw, second.raw]);
+        assert_eq!(collect(&heap), vec![first.as_ptr(), second.as_ptr()]);
 
-        assert!(heap.forget_remembered(first.raw).unwrap());
-        assert_eq!(collect(&heap), vec![second.raw]);
-        assert!(heap.forget_remembered(second.raw).unwrap());
+        assert!(heap.forget_remembered(first.as_ptr()).unwrap());
+        assert_eq!(collect(&heap), vec![second.as_ptr()]);
+        assert!(heap.forget_remembered(second.as_ptr()).unwrap());
         assert!(collect(&heap).is_empty());
     }
 
@@ -1701,20 +2366,38 @@ mod tests {
         for guard in ["marked", "old", "finalizable"] {
             let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
             heap.reserve(HEAP_BLOCK_SIZE).unwrap();
-            let allocation = heap.allocate(24).unwrap();
-            heap.record_small_allocation(allocation.raw, 24, guard == "finalizable")
-                .unwrap();
+            let allocation = heap.allocate(24, guard == "finalizable", 0).unwrap();
             if guard == "marked" {
-                heap.record_marked(allocation.raw, 7);
+                heap.record_marked(allocation.as_ptr(), 7);
             }
             if guard == "old" {
-                heap.record_promoted(allocation.raw);
+                heap.record_promoted(allocation.as_ptr());
             }
             assert_eq!(
-                heap.try_reclaim_unmarked_young_block(allocation.raw, 7),
+                heap.try_reclaim_unmarked_young_block(allocation.as_ptr(), 7),
                 None,
                 "{guard} block must use the per-object sweep path"
             );
         }
+    }
+    #[test]
+    fn one_unit_large_reclaim_makes_progress_without_releasing_live_neighbors() {
+        let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE * 4));
+        heap.reserve(HEAP_BLOCK_SIZE * 4).unwrap();
+        let large = heap.allocate(HEAP_BLOCK_SIZE * 3, false, 0).unwrap();
+        let live = heap.allocate(24, false, 0).unwrap();
+        heap.free(large.as_ptr()).unwrap();
+        assert_eq!(heap.reclaim_step(0), (0, false));
+        for step in 0..3 {
+            let (work, done) = heap.reclaim_step(1);
+            assert_eq!(work, 1);
+            assert_eq!(heap.stats().free_blocks, step + 1);
+            assert_eq!(done, step == 2);
+            assert!(heap.locate(live.as_ptr() as usize, 0).is_some());
+            assert!(heap.locate(large.as_ptr() as usize, 0).is_none());
+        }
+        assert_eq!(heap.stats().pending_reclaim_bytes, 0);
+        assert_eq!(heap.stats().allocated_span_bytes, 32);
+        assert_eq!(heap.reclaim_step(1), (0, true));
     }
 }

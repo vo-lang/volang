@@ -1,0 +1,15 @@
+package main
+
+func scalar0(x int) int {
+    return (x * 1664525 + 1013904223) & 65535
+}
+
+func main() {
+    sum := 0
+    for i := 0; i < 2000000; i++ {
+        sum += scalar0(i & 1023)
+    }
+    // Expected value sums the 1024-input period plus the final remainder.
+    assert(sum == 65584918080)
+    println(sum)
+}

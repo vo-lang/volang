@@ -13,6 +13,10 @@ use vo_common_core::SlotType;
 use vo_syntax::ast::ExprId;
 use vo_syntax::ast::Ident;
 
+mod layouts;
+use layouts::CodegenLayouts;
+pub(crate) use layouts::SlotLayout;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum QueueFlavor {
     Chan,
@@ -28,7 +32,7 @@ pub struct TypeInfoWrapper<'a> {
     /// The type_info for the package being compiled.
     pkg: PackageKey,
     type_info: &'a vo_analysis::check::TypeInfo,
-    layout_facts: Rc<type_layout::TypeLayoutFacts>,
+    layout_facts: Rc<CodegenLayouts>,
 }
 
 impl<'a> TypeInfoWrapper<'a> {
@@ -41,7 +45,7 @@ impl<'a> TypeInfoWrapper<'a> {
             project,
             pkg: project.main().key,
             type_info: &project.main().type_info,
-            layout_facts: Rc::new(layout_facts),
+            layout_facts: Rc::new(CodegenLayouts::new(layout_facts)),
         }
     }
 
@@ -50,7 +54,7 @@ impl<'a> TypeInfoWrapper<'a> {
         project: &'a Project,
         pkg: PackageKey,
         type_info: &'a vo_analysis::check::TypeInfo,
-        layout_facts: Rc<type_layout::TypeLayoutFacts>,
+        layout_facts: Rc<CodegenLayouts>,
     ) -> Self {
         Self {
             project,
@@ -60,7 +64,7 @@ impl<'a> TypeInfoWrapper<'a> {
         }
     }
 
-    pub(crate) fn shared_layout_facts(&self) -> Rc<type_layout::TypeLayoutFacts> {
+    pub(crate) fn shared_layout_facts(&self) -> Rc<CodegenLayouts> {
         Rc::clone(&self.layout_facts)
     }
 
@@ -684,8 +688,19 @@ impl<'a> TypeInfoWrapper<'a> {
     }
 
     pub fn try_type_slot_types(&self, type_key: TypeKey) -> Result<Vec<SlotType>, String> {
-        type_layout::try_type_slot_types_with_facts(type_key, self.tc_objs(), &self.layout_facts)
-            .map_err(|error| error.to_string())
+        self.try_slot_layout(type_key).map(|layout| match layout {
+            SlotLayout::Owned(types) => types,
+            _ => layout.to_vec(),
+        })
+    }
+
+    pub(crate) fn slot_layout(&self, type_key: TypeKey) -> SlotLayout {
+        self.try_slot_layout(type_key)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub(crate) fn try_slot_layout(&self, type_key: TypeKey) -> Result<SlotLayout, String> {
+        self.layout_facts.slots(type_key, self.tc_objs())
     }
 
     /// Get ValueKind for each slot in a composite type (struct/array).

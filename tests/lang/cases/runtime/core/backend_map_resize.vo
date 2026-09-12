@@ -1,0 +1,93 @@
+package main
+
+func iteratorSource() map[int]int {
+	m := make(map[int]int)
+	for i := 0; i < 20; i++ {
+		m[i] = i + 1
+	}
+	return m
+}
+
+func integerKeyBoundaries() {
+	wide := make(map[uint64]int)
+	negative := make(map[int64]int)
+	for i := 0; i < 2048; i++ {
+		wide[uint64(i) << 48 | 1] = i + 1
+		negative[-int64(i + 1) << 32] = i + 1
+	}
+	assert(len(wide) == 2048 && len(negative) == 2048)
+	for i := 0; i < 2048; i++ {
+		assert(wide[uint64(i) << 48 | 1] == i + 1)
+		assert(negative[-int64(i + 1) << 32] == i + 1)
+		if i & 1 == 0 {
+			delete(wide, uint64(i) << 48 | 1)
+			delete(negative, -int64(i + 1) << 32)
+		}
+	}
+	for i := 0; i < 2048; i++ {
+		_, unsignedOK := wide[uint64(i) << 48 | 1]
+		_, signedOK := negative[-int64(i + 1) << 32]
+		assert(unsignedOK == (i & 1 == 1) && signedOK == unsignedOK)
+	}
+	for i := 0; i < 2048; i += 2 {
+		wide[uint64(i) << 48 | 1] = -i - 1
+		negative[-int64(i + 1) << 32] = -i - 1
+	}
+	for i := 0; i < 2048; i++ {
+		expected := i + 1
+		if i & 1 == 0 { expected = -expected }
+		assert(wide[uint64(i) << 48 | 1] == expected)
+		assert(negative[-int64(i + 1) << 32] == expected)
+	}
+	assert(len(wide) == 2048 && len(negative) == 2048)
+	narrow := make(map[int8]int)
+	for i := -128; i < 128; i++ { narrow[int8(i)] = i + 129 }
+	for i := -128; i < 128; i++ { assert(narrow[int8(i)] == i + 129) }
+	for i := -128; i < 128; i++ { delete(narrow, int8(i)) }
+	assert(len(narrow) == 0)
+}
+
+func main() {
+	integerKeyBoundaries()
+	sum, count := 0, 0
+	for _, value := range iteratorSource() {
+		garbage := make([]byte, 9000000)
+		garbage[0] = 1
+		sum += value
+		count += int(garbage[0])
+	}
+	assert(sum == 210 && count == 20)
+	for seed := 0; seed < 40; seed++ {
+		m := make(map[int]int)
+		for i := 0; i < 12; i++ {
+			m[i * 47 + seed] = i
+		}
+		seen := make(map[int]int)
+		count := 0
+		for k, v := range m {
+			assert(v == m[k])
+			seen[k]++
+			count++
+			if count == 5 {
+				for i := 12; i < 1000; i++ {
+					m[i * 47 + seed] = i
+				}
+				for i := 0; i < 12; i++ {
+					m[i * 47 + seed] += 1000
+				}
+			}
+		}
+		for i := 0; i < 12; i++ {
+			assert(seen[i * 47 + seed] == 1)
+		}
+		for _, visits := range seen {
+			assert(visits == 1)
+		}
+	}
+	m := make(map[int]int)
+	for i := 0; i < 10000; i++ {
+		m[i] = i
+		delete(m, i)
+	}
+	assert(len(m) == 0)
+}

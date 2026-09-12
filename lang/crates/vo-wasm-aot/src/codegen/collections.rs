@@ -307,7 +307,7 @@ pub(super) fn emit_nonpanicking_interface_equal(
 
 pub(super) fn emit_errors_assign_to(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     destination: u16,
     arguments: u16,
 ) -> Result<(), WasmAotError> {
@@ -1012,6 +1012,18 @@ pub(super) fn clone_remote_port_payload(
         .instruction(&W::I64Ne)
         .instruction(&W::I32And)
         .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::I32Const(MEMORY_SCOPE))
+        .instruction(&W::LocalGet(ALLOC_LOCAL))
+        .instruction(&W::I32Load(MemArg {
+            offset: QUEUE_HOME_ISLAND_OFFSET,
+            align: 2,
+            memory_index: 0,
+        }))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::Call(0))
+        .instruction(&W::Drop)
         .instruction(&W::Call(CLONE_BEGIN_FUNCTION_INDEX))
         .instruction(&W::LocalSet(LENGTH_LOCAL));
     emit_clone_memory_layout(
@@ -1021,6 +1033,8 @@ pub(super) fn clone_remote_port_payload(
         LENGTH_LOCAL,
         elem_slot_types,
     );
+    emit_memory_call(body, MEMORY_SCOPE, &[]);
+    body.instruction(&W::Drop);
     body.instruction(&W::GlobalGet(globals.clone_failed))
         .instruction(&W::If(BlockType::Empty));
     return_status(body, STATUS_OUT_OF_MEMORY);
@@ -1122,8 +1136,31 @@ pub(super) fn deliver_to_pending_queue_receiver(
             align: 3,
             memory_index: 0,
         }));
+    body.instruction(&W::LocalGet(ALLOC_LOCAL))
+        .instruction(&W::I32Load(MemArg {
+            offset: QUEUE_PENDING_RECV_FIBER_OFFSET,
+            align: 2,
+            memory_index: 0,
+        }))
+        .instruction(&W::LocalSet(FRAME_LIMIT_LOCAL));
+    emit_memory_call(body, MEMORY_FIBER_WAKE, &[W::LocalGet(FRAME_LIMIT_LOCAL)]);
+    body.instruction(&W::Drop);
     clear_pending_queue_receiver(body);
     mark_scheduler_progress(body, globals);
+}
+
+pub(super) fn notify_queue(body: &mut Function, mask: i32) {
+    emit_memory_call(
+        body,
+        MEMORY_QUEUE_NOTIFY,
+        &[W::LocalGet(ALLOC_LOCAL), W::I32Const(mask)],
+    );
+    body.instruction(&W::Drop);
+}
+
+fn wait_on_queue(body: &mut Function, queue: W<'_>, direction: i32) {
+    emit_memory_call(body, MEMORY_QUEUE_WAIT, &[queue, W::I32Const(direction)]);
+    body.instruction(&W::Drop);
 }
 
 pub(super) fn compile_queue_send(
@@ -1138,11 +1175,11 @@ pub(super) fn compile_queue_send(
     load_slot(body, instruction.a);
     body.instruction(&W::I64Eqz)
         .instruction(&W::If(BlockType::Empty));
+    wait_on_queue(body, W::I32Const(0), 0);
     return_suspended(body, current_block);
     body.instruction(&W::End);
-    load_slot(body, instruction.a);
-    body.instruction(&W::I32WrapI64)
-        .instruction(&W::LocalTee(ALLOC_LOCAL))
+    load_queue_pointer(body, instruction.a);
+    body.instruction(&W::LocalTee(ALLOC_LOCAL))
         .instruction(&W::I64Load(MemArg {
             offset: QUEUE_CLOSED_OFFSET,
             align: 3,
@@ -1229,6 +1266,8 @@ pub(super) fn compile_queue_send(
             memory_index: 0,
         }));
     body.instruction(&W::End);
+    notify_queue(body, 2);
+    wait_on_queue(body, W::LocalGet(ALLOC_LOCAL), 0);
     return_suspended(body, current_block);
     body.instruction(&W::End)
         .instruction(&W::Else)
@@ -1256,6 +1295,7 @@ pub(super) fn compile_queue_send(
         }))
         .instruction(&W::I64GeU)
         .instruction(&W::If(BlockType::Empty));
+    wait_on_queue(body, W::LocalGet(ALLOC_LOCAL), 0);
     return_suspended(body, current_block);
     body.instruction(&W::End)
         .instruction(&W::LocalGet(ALLOC_LOCAL))
@@ -1321,6 +1361,7 @@ pub(super) fn compile_queue_send(
             memory_index: 0,
         }))
         .instruction(&W::End);
+    notify_queue(body, 3);
     mark_scheduler_progress(body, globals);
 }
 
@@ -1348,11 +1389,11 @@ pub(super) fn compile_queue_recv(
     load_slot(body, instruction.b);
     body.instruction(&W::I64Eqz)
         .instruction(&W::If(BlockType::Empty));
+    wait_on_queue(body, W::I32Const(0), 1);
     return_suspended(body, current_block);
     body.instruction(&W::End);
-    load_slot(body, instruction.b);
-    body.instruction(&W::I32WrapI64)
-        .instruction(&W::LocalSet(ALLOC_LOCAL))
+    load_queue_pointer(body, instruction.b);
+    body.instruction(&W::LocalSet(ALLOC_LOCAL))
         .instruction(&W::LocalGet(ALLOC_LOCAL))
         .instruction(&W::I64Load(MemArg {
             offset: QUEUE_CAPACITY_OFFSET,
@@ -1410,6 +1451,9 @@ pub(super) fn compile_queue_recv(
             align: 3,
             memory_index: 0,
         }));
+    emit_memory_call(body, MEMORY_FIBER_WAKE, &[W::LocalGet(SEQUENCE_LOCAL)]);
+    body.instruction(&W::Drop);
+    notify_queue(body, 3);
     if instruction.recv_has_ok() {
         store_const(body, instruction.a + elem_slots, 1);
     }
@@ -1469,6 +1513,8 @@ pub(super) fn compile_queue_recv(
         memory_index: 0,
     }));
     body.instruction(&W::End);
+    notify_queue(body, 1);
+    wait_on_queue(body, W::LocalGet(ALLOC_LOCAL), 1);
     return_suspended(body, current_block);
     body.instruction(&W::End)
         .instruction(&W::End)
@@ -1490,6 +1536,7 @@ pub(super) fn compile_queue_recv(
         }))
         .instruction(&W::I64Eqz)
         .instruction(&W::If(BlockType::Empty));
+    wait_on_queue(body, W::LocalGet(ALLOC_LOCAL), 1);
     return_suspended(body, current_block);
     body.instruction(&W::End)
         .instruction(&W::I32Const(0))
@@ -1558,6 +1605,7 @@ pub(super) fn compile_queue_recv(
             align: 3,
             memory_index: 0,
         }));
+    notify_queue(body, 3);
     if instruction.recv_has_ok() {
         store_const(body, instruction.a + elem_slots, 1);
     }
@@ -1591,9 +1639,8 @@ pub(super) fn clear_select_send_registration(
         body.instruction(&W::I64Eqz)
             .instruction(&W::I32Eqz)
             .instruction(&W::If(BlockType::Empty));
-        load_slot(body, queue);
-        body.instruction(&W::I32WrapI64)
-            .instruction(&W::LocalSet(ALLOC_LOCAL))
+        load_queue_pointer(body, queue);
+        body.instruction(&W::LocalSet(ALLOC_LOCAL))
             .instruction(&W::LocalGet(ALLOC_LOCAL))
             .instruction(&W::I64Load(MemArg {
                 offset: QUEUE_CAPACITY_OFFSET,
@@ -1644,9 +1691,8 @@ pub(super) fn clear_select_recv_registration(
         body.instruction(&W::I64Eqz)
             .instruction(&W::I32Eqz)
             .instruction(&W::If(BlockType::Empty));
-        load_slot(body, queue);
-        body.instruction(&W::I32WrapI64)
-            .instruction(&W::LocalSet(ALLOC_LOCAL))
+        load_queue_pointer(body, queue);
+        body.instruction(&W::LocalSet(ALLOC_LOCAL))
             .instruction(&W::LocalGet(ALLOC_LOCAL))
             .instruction(&W::I64Load(MemArg {
                 offset: QUEUE_PENDING_RECV_FIBER_OFFSET,
@@ -1689,9 +1735,8 @@ pub(super) fn register_select_send_candidate(
         .instruction(&W::I32Eqz)
         .instruction(&W::I32And)
         .instruction(&W::If(BlockType::Empty));
-    load_slot(body, queue);
-    body.instruction(&W::I32WrapI64)
-        .instruction(&W::LocalSet(ALLOC_LOCAL))
+    load_queue_pointer(body, queue);
+    body.instruction(&W::LocalSet(ALLOC_LOCAL))
         .instruction(&W::LocalGet(ALLOC_LOCAL))
         .instruction(&W::I64Load(MemArg {
             offset: QUEUE_CAPACITY_OFFSET,
@@ -1814,9 +1859,8 @@ pub(super) fn register_select_recv_candidate(
         .instruction(&W::I32Eqz)
         .instruction(&W::I32And)
         .instruction(&W::If(BlockType::Empty));
-    load_slot(body, queue);
-    body.instruction(&W::I32WrapI64)
-        .instruction(&W::LocalSet(ALLOC_LOCAL))
+    load_queue_pointer(body, queue);
+    body.instruction(&W::LocalSet(ALLOC_LOCAL))
         .instruction(&W::LocalGet(ALLOC_LOCAL))
         .instruction(&W::I64Load(MemArg {
             offset: QUEUE_CAPACITY_OFFSET,
@@ -1910,6 +1954,37 @@ pub(super) fn register_select_recv(
     }
 }
 
+/// Draw uniformly below HIGH_LOCAL, using LENGTH_LOCAL as scratch. Rejection
+/// removes modulo bias; the nonzero xorshift state belongs to the execution image.
+fn select_random_below(body: &mut Function, globals: RuntimeGlobals) {
+    body.instruction(&W::Loop(BlockType::Empty));
+    for (shift, left) in [(13, true), (17, false), (5, true)] {
+        body.instruction(&W::GlobalGet(globals.select_random))
+            .instruction(&W::GlobalGet(globals.select_random))
+            .instruction(&W::I32Const(shift))
+            .instruction(&if left { W::I32Shl } else { W::I32ShrU })
+            .instruction(&W::I32Xor)
+            .instruction(&W::GlobalSet(globals.select_random));
+    }
+    // xorshift32 covers 1..=u32::MAX. Subtract one and reject the incomplete
+    // last interval so all residues receive exactly the same number of samples.
+    body.instruction(&W::GlobalGet(globals.select_random))
+        .instruction(&W::I32Const(1))
+        .instruction(&W::I32Sub)
+        .instruction(&W::LocalTee(LENGTH_LOCAL))
+        .instruction(&W::I32Const(-1))
+        .instruction(&W::I32Const(-1))
+        .instruction(&W::LocalGet(HIGH_LOCAL))
+        .instruction(&W::I32RemU)
+        .instruction(&W::I32Sub)
+        .instruction(&W::I32GeU)
+        .instruction(&W::BrIf(0))
+        .instruction(&W::End)
+        .instruction(&W::LocalGet(LENGTH_LOCAL))
+        .instruction(&W::LocalGet(HIGH_LOCAL))
+        .instruction(&W::I32RemU);
+}
+
 pub(super) fn compile_select_exec(
     body: &mut Function,
     function: &FunctionDef,
@@ -1947,6 +2022,8 @@ pub(super) fn compile_select_exec(
             store_const(body, instruction.a, -1);
         } else {
             // An empty select has no operation that can become ready.
+            emit_memory_call(body, MEMORY_FIBER_PARK, &[]);
+            body.instruction(&W::Drop);
             return_suspended(body, current_block);
         }
         return Ok(());
@@ -1982,140 +2059,132 @@ pub(super) fn compile_select_exec(
         .instruction(&W::End);
     clear_select_send_registration(body, cases, globals);
     clear_select_recv_registration(body, cases, globals);
-    body.instruction(&W::LocalGet(FRAME_LOCAL))
-        .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
-        .instruction(&W::I32Sub)
-        .instruction(&W::I32Load(MemArg {
-            offset: FRAME_SELECT_ROTATION_OFFSET,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::I32Const(cases.len() as i32))
-        .instruction(&W::I32RemU)
+    // Reservoir sampling visits every ready case exactly once. Frame-local
+    // rotation cannot provide uniform selection when a call creates a new frame.
+    body.instruction(&W::I32Const(0))
         .instruction(&W::LocalSet(HIGH_LOCAL));
-    for after_rotation in [true, false] {
-        for (index, case) in cases.iter().enumerate() {
-            let queue = match *case {
-                SelectCaseLayout::Send { queue, .. } | SelectCaseLayout::Recv { queue, .. } => {
-                    queue
-                }
-            };
-            body.instruction(&W::LocalGet(STATUS_LOCAL))
-                .instruction(&W::I32Const(-1))
-                .instruction(&W::I32Eq)
-                .instruction(&W::I32Const(index as i32))
-                .instruction(&W::LocalGet(HIGH_LOCAL))
-                .instruction(&if after_rotation { W::I32GeU } else { W::I32LtU })
-                .instruction(&W::I32And)
-                .instruction(&W::If(BlockType::Empty));
-            load_slot(body, queue);
-            body.instruction(&W::I64Eqz)
-                .instruction(&W::I32Eqz)
-                .instruction(&W::If(BlockType::Empty));
-            load_slot(body, queue);
-            body.instruction(&W::I32WrapI64)
-                .instruction(&W::LocalSet(ALLOC_LOCAL));
-            match *case {
-                SelectCaseLayout::Recv { .. } => {
-                    body.instruction(&W::LocalGet(ALLOC_LOCAL))
-                        .instruction(&W::I64Load(MemArg {
-                            offset: QUEUE_CAPACITY_OFFSET,
-                            align: 3,
-                            memory_index: 0,
-                        }))
-                        .instruction(&W::I64Eqz)
-                        .instruction(&W::If(BlockType::Result(ValType::I32)))
-                        .instruction(&W::LocalGet(ALLOC_LOCAL))
-                        .instruction(&W::I64Load(MemArg {
-                            offset: QUEUE_PENDING_SEND_FIBER_OFFSET,
-                            align: 3,
-                            memory_index: 0,
-                        }))
-                        .instruction(&W::I64Eqz)
-                        .instruction(&W::I32Eqz)
-                        .instruction(&W::LocalGet(ALLOC_LOCAL))
-                        .instruction(&W::I64Load(MemArg {
-                            offset: QUEUE_CLOSED_OFFSET,
-                            align: 3,
-                            memory_index: 0,
-                        }))
-                        .instruction(&W::I64Eqz)
-                        .instruction(&W::I32Eqz)
-                        .instruction(&W::I32Or)
-                        .instruction(&W::Else)
-                        .instruction(&W::LocalGet(ALLOC_LOCAL))
-                        .instruction(&W::I64Load(MemArg {
-                            offset: QUEUE_LENGTH_OFFSET,
-                            align: 3,
-                            memory_index: 0,
-                        }))
-                        .instruction(&W::I64Eqz)
-                        .instruction(&W::I32Eqz)
-                        .instruction(&W::LocalGet(ALLOC_LOCAL))
-                        .instruction(&W::I64Load(MemArg {
-                            offset: QUEUE_CLOSED_OFFSET,
-                            align: 3,
-                            memory_index: 0,
-                        }))
-                        .instruction(&W::I64Eqz)
-                        .instruction(&W::I32Eqz)
-                        .instruction(&W::I32Or)
-                        .instruction(&W::End);
-                }
-                SelectCaseLayout::Send { .. } => {
-                    // A send on a closed queue is immediately selectable and
-                    // commits the normal closed-queue panic. Buffered space is
-                    // otherwise the immediate readiness condition. Rendezvous
-                    // readiness is supplied by the waiter path below.
-                    body.instruction(&W::LocalGet(ALLOC_LOCAL))
-                        .instruction(&W::I64Load(MemArg {
-                            offset: QUEUE_CLOSED_OFFSET,
-                            align: 3,
-                            memory_index: 0,
-                        }))
-                        .instruction(&W::I64Eqz)
-                        .instruction(&W::I32Eqz)
-                        .instruction(&W::LocalGet(ALLOC_LOCAL))
-                        .instruction(&W::I64Load(MemArg {
-                            offset: QUEUE_CAPACITY_OFFSET,
-                            align: 3,
-                            memory_index: 0,
-                        }))
-                        .instruction(&W::I64Eqz)
-                        .instruction(&W::I32Eqz)
-                        .instruction(&W::LocalGet(ALLOC_LOCAL))
-                        .instruction(&W::I64Load(MemArg {
-                            offset: QUEUE_LENGTH_OFFSET,
-                            align: 3,
-                            memory_index: 0,
-                        }))
-                        .instruction(&W::LocalGet(ALLOC_LOCAL))
-                        .instruction(&W::I64Load(MemArg {
-                            offset: QUEUE_CAPACITY_OFFSET,
-                            align: 3,
-                            memory_index: 0,
-                        }))
-                        .instruction(&W::I64LtU)
-                        .instruction(&W::I32And)
-                        .instruction(&W::I32Or)
-                        .instruction(&W::LocalGet(ALLOC_LOCAL))
-                        .instruction(&W::I64Load(MemArg {
-                            offset: QUEUE_CAPACITY_OFFSET,
-                            align: 3,
-                            memory_index: 0,
-                        }))
-                        .instruction(&W::I64Eqz);
-                    pending_queue_receiver_is_ready(body);
-                    body.instruction(&W::I32And).instruction(&W::I32Or);
-                }
+    for (index, case) in cases.iter().enumerate() {
+        let queue = match *case {
+            SelectCaseLayout::Send { queue, .. } | SelectCaseLayout::Recv { queue, .. } => queue,
+        };
+        // A previously acknowledged rendezvous has already committed.
+        body.instruction(&W::LocalGet(LOW_LOCAL))
+            .instruction(&W::I32Eqz)
+            .instruction(&W::If(BlockType::Empty));
+        load_slot(body, queue);
+        body.instruction(&W::I64Eqz)
+            .instruction(&W::I32Eqz)
+            .instruction(&W::If(BlockType::Empty));
+        load_queue_pointer(body, queue);
+        body.instruction(&W::LocalSet(ALLOC_LOCAL));
+        match *case {
+            SelectCaseLayout::Recv { .. } => {
+                body.instruction(&W::LocalGet(ALLOC_LOCAL))
+                    .instruction(&W::I64Load(MemArg {
+                        offset: QUEUE_CAPACITY_OFFSET,
+                        align: 3,
+                        memory_index: 0,
+                    }))
+                    .instruction(&W::I64Eqz)
+                    .instruction(&W::If(BlockType::Result(ValType::I32)))
+                    .instruction(&W::LocalGet(ALLOC_LOCAL))
+                    .instruction(&W::I64Load(MemArg {
+                        offset: QUEUE_PENDING_SEND_FIBER_OFFSET,
+                        align: 3,
+                        memory_index: 0,
+                    }))
+                    .instruction(&W::I64Eqz)
+                    .instruction(&W::I32Eqz)
+                    .instruction(&W::LocalGet(ALLOC_LOCAL))
+                    .instruction(&W::I64Load(MemArg {
+                        offset: QUEUE_CLOSED_OFFSET,
+                        align: 3,
+                        memory_index: 0,
+                    }))
+                    .instruction(&W::I64Eqz)
+                    .instruction(&W::I32Eqz)
+                    .instruction(&W::I32Or)
+                    .instruction(&W::Else)
+                    .instruction(&W::LocalGet(ALLOC_LOCAL))
+                    .instruction(&W::I64Load(MemArg {
+                        offset: QUEUE_LENGTH_OFFSET,
+                        align: 3,
+                        memory_index: 0,
+                    }))
+                    .instruction(&W::I64Eqz)
+                    .instruction(&W::I32Eqz)
+                    .instruction(&W::LocalGet(ALLOC_LOCAL))
+                    .instruction(&W::I64Load(MemArg {
+                        offset: QUEUE_CLOSED_OFFSET,
+                        align: 3,
+                        memory_index: 0,
+                    }))
+                    .instruction(&W::I64Eqz)
+                    .instruction(&W::I32Eqz)
+                    .instruction(&W::I32Or)
+                    .instruction(&W::End);
             }
-            body.instruction(&W::If(BlockType::Empty))
-                .instruction(&W::I32Const(index as i32))
-                .instruction(&W::LocalSet(STATUS_LOCAL))
-                .instruction(&W::End)
-                .instruction(&W::End)
-                .instruction(&W::End);
+            SelectCaseLayout::Send { .. } => {
+                // A send on a closed queue is immediately selectable and
+                // commits the normal closed-queue panic. Buffered space is
+                // otherwise the immediate readiness condition. Rendezvous
+                // readiness is supplied by the waiter path below.
+                body.instruction(&W::LocalGet(ALLOC_LOCAL))
+                    .instruction(&W::I64Load(MemArg {
+                        offset: QUEUE_CLOSED_OFFSET,
+                        align: 3,
+                        memory_index: 0,
+                    }))
+                    .instruction(&W::I64Eqz)
+                    .instruction(&W::I32Eqz)
+                    .instruction(&W::LocalGet(ALLOC_LOCAL))
+                    .instruction(&W::I64Load(MemArg {
+                        offset: QUEUE_CAPACITY_OFFSET,
+                        align: 3,
+                        memory_index: 0,
+                    }))
+                    .instruction(&W::I64Eqz)
+                    .instruction(&W::I32Eqz)
+                    .instruction(&W::LocalGet(ALLOC_LOCAL))
+                    .instruction(&W::I64Load(MemArg {
+                        offset: QUEUE_LENGTH_OFFSET,
+                        align: 3,
+                        memory_index: 0,
+                    }))
+                    .instruction(&W::LocalGet(ALLOC_LOCAL))
+                    .instruction(&W::I64Load(MemArg {
+                        offset: QUEUE_CAPACITY_OFFSET,
+                        align: 3,
+                        memory_index: 0,
+                    }))
+                    .instruction(&W::I64LtU)
+                    .instruction(&W::I32And)
+                    .instruction(&W::I32Or)
+                    .instruction(&W::LocalGet(ALLOC_LOCAL))
+                    .instruction(&W::I64Load(MemArg {
+                        offset: QUEUE_CAPACITY_OFFSET,
+                        align: 3,
+                        memory_index: 0,
+                    }))
+                    .instruction(&W::I64Eqz);
+                pending_queue_receiver_is_ready(body);
+                body.instruction(&W::I32And).instruction(&W::I32Or);
+            }
         }
+        body.instruction(&W::If(BlockType::Empty))
+            .instruction(&W::LocalGet(HIGH_LOCAL))
+            .instruction(&W::I32Const(1))
+            .instruction(&W::I32Add)
+            .instruction(&W::LocalSet(HIGH_LOCAL));
+        select_random_below(body, globals);
+        body.instruction(&W::I32Eqz)
+            .instruction(&W::If(BlockType::Empty))
+            .instruction(&W::I32Const(index as i32))
+            .instruction(&W::LocalSet(STATUS_LOCAL))
+            .instruction(&W::End)
+            .instruction(&W::End)
+            .instruction(&W::End)
+            .instruction(&W::End);
     }
 
     body.instruction(&W::LocalGet(STATUS_LOCAL))
@@ -2127,6 +2196,28 @@ pub(super) fn compile_select_exec(
     } else {
         register_select_send(body, cases, globals);
         register_select_recv(body, cases, globals);
+        emit_memory_call(body, MEMORY_FIBER_PARK, &[]);
+        body.instruction(&W::Drop);
+        for notify in [false, true] {
+            for case in cases {
+                let (queue, direction) = match *case {
+                    SelectCaseLayout::Send { queue, .. } => (queue, 0),
+                    SelectCaseLayout::Recv { queue, .. } => (queue, 1),
+                };
+                load_slot(body, queue);
+                body.instruction(&W::I64Eqz)
+                    .instruction(&W::I32Eqz)
+                    .instruction(&W::If(BlockType::Empty));
+                load_queue_pointer(body, queue);
+                body.instruction(&W::LocalSet(ALLOC_LOCAL));
+                if notify {
+                    notify_queue(body, 1 << (1 - direction));
+                } else {
+                    wait_on_queue(body, W::LocalGet(ALLOC_LOCAL), direction);
+                }
+                body.instruction(&W::End);
+            }
+        }
         return_suspended(body, current_block);
     }
     body.instruction(&W::End);
@@ -2231,13 +2322,28 @@ pub(super) fn compile_spawn_fiber(
         .ok_or_else(|| {
             WasmAotError::InvalidModule("goroutine frame size overflows wasm32".into())
         })?;
+    if let Some(slot) = island_state_slot {
+        body.instruction(&W::Block(BlockType::Empty));
+        body.instruction(&W::I32Const(MEMORY_SCOPE));
+        load_slot(body, slot);
+        body.instruction(&W::I32WrapI64)
+            .instruction(&W::I32Const(0))
+            .instruction(&W::I32Const(0))
+            .instruction(&W::I32Const(0))
+            .instruction(&W::Call(0))
+            .instruction(&W::Drop);
+    }
     body.instruction(&W::I32Const(frame_bytes as i32))
         .instruction(&W::I32Const(FRAME_ALLOC_ZEROED))
         .instruction(&W::Call(FRAME_ALLOC_FUNCTION_INDEX))
         .instruction(&W::LocalTee(SEQUENCE_LOCAL))
         .instruction(&W::I32Eqz)
         .instruction(&W::If(BlockType::Empty));
-    return_status(body, STATUS_OUT_OF_MEMORY);
+    if island_state_slot.is_some() {
+        body.instruction(&W::Br(1));
+    } else {
+        return_status(body, STATUS_OUT_OF_MEMORY);
+    }
     body.instruction(&W::End)
         .instruction(&W::LocalGet(SEQUENCE_LOCAL))
         .instruction(&W::I32Const(target as i32))
@@ -2245,7 +2351,9 @@ pub(super) fn compile_spawn_fiber(
             offset: FRAME_FUNCTION_ID_OFFSET,
             align: 2,
             memory_index: 0,
-        }))
+        }));
+    emit_memory_call(body, MEMORY_FRAME_REGISTER, &[W::LocalGet(SEQUENCE_LOCAL)]);
+    body.instruction(&W::Drop)
         .instruction(&W::LocalGet(SEQUENCE_LOCAL))
         .instruction(&W::I32Const(frame_bytes as i32))
         .instruction(&W::I32Store(MemArg {
@@ -2330,13 +2438,17 @@ pub(super) fn compile_spawn_fiber(
         body.instruction(&W::LocalGet(SEQUENCE_LOCAL))
             .instruction(&W::Call(FRAME_FREE_FUNCTION_INDEX))
             .instruction(&W::Drop);
-        return_status(body, STATUS_OUT_OF_MEMORY);
+        if island_state_slot.is_some() {
+            body.instruction(&W::Br(1));
+        } else {
+            return_status(body, STATUS_OUT_OF_MEMORY);
+        }
         body.instruction(&W::End);
     }
     body.instruction(&W::I32Const(
         (FRAME_STATE_BYTES + FIBER_RECORD_BYTES) as i32,
     ))
-    .instruction(&W::I32Const(FRAME_ALLOC_ZEROED))
+    .instruction(&W::I32Const(FRAME_ALLOC_FIBER))
     .instruction(&W::Call(FRAME_ALLOC_FUNCTION_INDEX))
     .instruction(&W::LocalTee(LENGTH_LOCAL))
     .instruction(&W::I32Eqz)
@@ -2344,7 +2456,11 @@ pub(super) fn compile_spawn_fiber(
     body.instruction(&W::LocalGet(SEQUENCE_LOCAL))
         .instruction(&W::Call(FRAME_FREE_FUNCTION_INDEX))
         .instruction(&W::Drop);
-    return_status(body, STATUS_OUT_OF_MEMORY);
+    if island_state_slot.is_some() {
+        body.instruction(&W::Br(1));
+    } else {
+        return_status(body, STATUS_OUT_OF_MEMORY);
+    }
     body.instruction(&W::End)
         .instruction(&W::LocalGet(LENGTH_LOCAL))
         .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
@@ -2410,6 +2526,11 @@ pub(super) fn compile_spawn_fiber(
         memory_index: 0,
     }));
     publish_spawned_fiber(body, globals);
+    if island_state_slot.is_some() {
+        body.instruction(&W::End);
+        emit_memory_call(body, MEMORY_SCOPE, &[]);
+        body.instruction(&W::Drop);
+    }
     Ok(())
 }
 
@@ -2423,7 +2544,7 @@ pub(super) fn compile_spawn_trapped_fiber(
     body.instruction(&W::I32Const(
         (FRAME_STATE_BYTES + FIBER_RECORD_BYTES) as i32,
     ))
-    .instruction(&W::I32Const(FRAME_ALLOC_ZEROED))
+    .instruction(&W::I32Const(FRAME_ALLOC_FIBER))
     .instruction(&W::Call(FRAME_ALLOC_FUNCTION_INDEX))
     .instruction(&W::LocalTee(LENGTH_LOCAL))
     .instruction(&W::I32Eqz)
@@ -2448,6 +2569,18 @@ pub(super) fn compile_spawn_trapped_fiber(
                 memory_index: 0,
             }));
     }
+    body.instruction(&W::LocalGet(LENGTH_LOCAL))
+        .instruction(&W::GlobalGet(globals.current_fiber))
+        .instruction(&W::I64Load(MemArg {
+            offset: FIBER_ISLAND_STATE_OFFSET,
+            align: 3,
+            memory_index: 0,
+        }))
+        .instruction(&W::I64Store(MemArg {
+            offset: FIBER_ISLAND_STATE_OFFSET,
+            align: 3,
+            memory_index: 0,
+        }));
     publish_spawned_fiber(body, globals);
 }
 
@@ -2469,13 +2602,15 @@ fn publish_spawned_fiber(body: &mut Function, globals: RuntimeGlobals) {
         .instruction(&W::End)
         .instruction(&W::LocalGet(LENGTH_LOCAL))
         .instruction(&W::GlobalSet(globals.fiber_tail));
+    emit_memory_call(body, MEMORY_FIBER_READY, &[W::LocalGet(LENGTH_LOCAL)]);
+    body.instruction(&W::Drop);
     mark_scheduler_progress(body, globals);
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_defer_push_instruction(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     function: &FunctionDef,
     function_id: u32,
     pc: usize,
@@ -2945,157 +3080,38 @@ pub(super) fn emit_materialized_call_arguments(
     Ok(())
 }
 
-/// Reserve a materialized child frame from the current fiber's explicit stack.
-///
-/// The scheduler may park a materialized frame indefinitely, so its storage
-/// must survive suspension. A per-fiber chunk stack provides that durability
-/// while retaining constant-time LIFO allocation for ordinary and recursive
-/// calls. Opening a new chunk is uncommon and continues to use the traced frame
-/// allocator so the GC can discover the whole active frame chain.
-pub(super) fn compile_materialized_stack_frame_alloc(globals: RuntimeGlobals) -> Function {
-    const FRAME_BYTES: u32 = 0;
-    const REQUIRED_CHUNK_BYTES: u32 = 1;
-    const BASE_CHUNK_BYTES: u32 = 2;
-    const OVERFLOW_CHUNK_BYTES: u32 = 3;
-    const PREVIOUS_CHUNK: u32 = 4;
-    const PREVIOUS_TOP: u32 = 5;
-    const PREVIOUS_LIMIT: u32 = 6;
-    const CURRENT_CHUNK: u32 = 7;
-    const FRAME_HEADER: u32 = 8;
-    const FRAME_TOP: u32 = 9;
-    const CHUNK_LIMIT: u32 = 10;
-
-    let mut body = Function::new([(10, ValType::I32)]);
-    body.instruction(&W::LocalGet(FRAME_BYTES))
-        .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
-        .instruction(&W::I32Add)
-        .instruction(&W::LocalTee(REQUIRED_CHUNK_BYTES))
-        .instruction(&W::LocalGet(FRAME_BYTES))
-        .instruction(&W::I32LtU)
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::I32Const(0))
-        .instruction(&W::Return)
-        .instruction(&W::End);
-    for (minimum, destination) in [
-        (SHADOW_STACK_BASE_CHUNK_BYTES, BASE_CHUNK_BYTES),
-        (SHADOW_STACK_CHUNK_BYTES, OVERFLOW_CHUNK_BYTES),
-    ] {
-        body.instruction(&W::LocalGet(REQUIRED_CHUNK_BYTES))
-            .instruction(&W::I32Const(minimum as i32))
-            .instruction(&W::I32GtU)
-            .instruction(&W::If(BlockType::Result(ValType::I32)))
-            .instruction(&W::LocalGet(REQUIRED_CHUNK_BYTES))
-            .instruction(&W::Else)
-            .instruction(&W::I32Const(minimum as i32))
-            .instruction(&W::End)
-            .instruction(&W::LocalSet(destination));
-    }
-    for (local, offset) in [
-        (PREVIOUS_CHUNK, FIBER_SHADOW_CHUNK_OFFSET),
-        (PREVIOUS_TOP, FIBER_SHADOW_TOP_OFFSET),
-        (PREVIOUS_LIMIT, FIBER_SHADOW_LIMIT_OFFSET),
-    ] {
-        body.instruction(&W::GlobalGet(globals.current_fiber))
-            .instruction(&W::I32Load(MemArg {
-                offset,
-                align: 2,
-                memory_index: 0,
-            }))
-            .instruction(&W::LocalSet(local));
-    }
-    body.instruction(&W::LocalGet(PREVIOUS_CHUNK))
-        .instruction(&W::LocalSet(CURRENT_CHUNK))
-        .instruction(&W::LocalGet(PREVIOUS_TOP))
-        .instruction(&W::LocalSet(FRAME_HEADER))
-        .instruction(&W::LocalGet(PREVIOUS_LIMIT))
-        .instruction(&W::LocalSet(CHUNK_LIMIT))
-        .instruction(&W::LocalGet(CURRENT_CHUNK))
+/// Allocate a durable frame in an Island-owned span cell. Registering its
+/// function identity publishes an independently traceable root; destruction
+/// retires that root before the cell becomes reusable.
+pub(super) fn compile_materialized_stack_frame_alloc(_globals: RuntimeGlobals) -> Function {
+    let mut body = Function::new([(1, ValType::I32)]);
+    emit_memory_call(
+        &mut body,
+        MEMORY_FRAME_NEW,
+        &[W::LocalGet(0), W::LocalGet(1)],
+    );
+    body.instruction(&W::LocalTee(2))
         .instruction(&W::I32Eqz)
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::LocalGet(BASE_CHUNK_BYTES))
-        .instruction(&W::I32Const(FRAME_ALLOC_UNINITIALIZED))
-        .instruction(&W::Call(FRAME_ALLOC_FUNCTION_INDEX))
-        .instruction(&W::LocalTee(CURRENT_CHUNK))
-        .instruction(&W::I32Eqz)
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::I32Const(0))
-        .instruction(&W::Return)
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(CURRENT_CHUNK))
-        .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
+        .instruction(&W::If(BlockType::Empty));
+    return_status(&mut body, 0);
+    body.instruction(&W::End)
+        .instruction(&W::LocalGet(2))
+        .instruction(&W::LocalGet(2))
+        .instruction(&W::LocalGet(0))
         .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(FRAME_HEADER))
-        .instruction(&W::LocalGet(CURRENT_CHUNK))
-        .instruction(&W::LocalGet(BASE_CHUNK_BYTES))
-        .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(CHUNK_LIMIT))
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(FRAME_HEADER))
-        .instruction(&W::LocalGet(FRAME_BYTES))
-        .instruction(&W::I32Add)
-        .instruction(&W::LocalTee(FRAME_TOP))
-        .instruction(&W::LocalGet(FRAME_HEADER))
-        .instruction(&W::I32LtU)
-        .instruction(&W::LocalGet(FRAME_TOP))
-        .instruction(&W::LocalGet(CHUNK_LIMIT))
-        .instruction(&W::I32GtU)
-        .instruction(&W::I32Or)
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::LocalGet(OVERFLOW_CHUNK_BYTES))
-        .instruction(&W::I32Const(FRAME_ALLOC_UNINITIALIZED))
-        .instruction(&W::Call(FRAME_ALLOC_FUNCTION_INDEX))
-        .instruction(&W::LocalTee(CURRENT_CHUNK))
-        .instruction(&W::I32Eqz)
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::I32Const(0))
-        .instruction(&W::Return)
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(CURRENT_CHUNK))
-        .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
-        .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(FRAME_HEADER))
-        .instruction(&W::LocalGet(CURRENT_CHUNK))
-        .instruction(&W::LocalGet(OVERFLOW_CHUNK_BYTES))
-        .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(CHUNK_LIMIT))
-        .instruction(&W::LocalGet(FRAME_HEADER))
-        .instruction(&W::LocalGet(FRAME_BYTES))
-        .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(FRAME_TOP))
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(FRAME_HEADER))
-        .instruction(&W::I32Const(0))
-        .instruction(&W::LocalGet(FRAME_BYTES))
-        .instruction(&W::MemoryFill(0));
-    for (offset, local) in [
-        (FRAME_PREVIOUS_STACK_CHUNK_OFFSET, PREVIOUS_CHUNK),
-        (FRAME_PREVIOUS_STACK_TOP_OFFSET, PREVIOUS_TOP),
-        (FRAME_PREVIOUS_STACK_LIMIT_OFFSET, PREVIOUS_LIMIT),
-        (FRAME_STACK_CHUNK_OFFSET, CURRENT_CHUNK),
-        (FRAME_LIMIT_OFFSET, FRAME_TOP),
-    ] {
-        body.instruction(&W::LocalGet(FRAME_HEADER))
-            .instruction(&W::LocalGet(local))
-            .instruction(&W::I32Store(MemArg {
-                offset,
-                align: 2,
-                memory_index: 0,
-            }));
-    }
-    for (offset, local) in [
-        (FIBER_SHADOW_CHUNK_OFFSET, CURRENT_CHUNK),
-        (FIBER_SHADOW_TOP_OFFSET, FRAME_TOP),
-        (FIBER_SHADOW_LIMIT_OFFSET, CHUNK_LIMIT),
-    ] {
-        body.instruction(&W::GlobalGet(globals.current_fiber))
-            .instruction(&W::LocalGet(local))
-            .instruction(&W::I32Store(MemArg {
-                offset,
-                align: 2,
-                memory_index: 0,
-            }));
-    }
-    body.instruction(&W::LocalGet(FRAME_HEADER))
+        .instruction(&W::I32Store(MemArg {
+            offset: FRAME_LIMIT_OFFSET,
+            align: 2,
+            memory_index: 0,
+        }))
+        .instruction(&W::LocalGet(2))
+        .instruction(&W::LocalGet(0))
+        .instruction(&W::I32Store(MemArg {
+            offset: FRAME_ALLOCATION_SIZE_OFFSET,
+            align: 2,
+            memory_index: 0,
+        }))
+        .instruction(&W::LocalGet(2))
         .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
         .instruction(&W::I32Add)
         .instruction(&W::End);

@@ -1,7 +1,6 @@
 //! Binary operation compilation.
 
 use vo_common_core::instruction::{Opcode, SHIFT_FLAG_RHS_UNSIGNED};
-use vo_common_core::SlotType;
 use vo_syntax::ast::{BinaryOp, Expr, ExprKind};
 
 use crate::context::CodegenContext;
@@ -37,7 +36,7 @@ pub fn compile_binary(
     }
 
     let mut evaluated_left = compile_expr(cursor, ctx, func, info)?;
-    let mut evaluated_left_layout = info.type_slot_types(info.expr_type(cursor.id));
+    let mut evaluated_left_layout = info.slot_layout(info.expr_type(cursor.id));
     // `compile_expr(cursor)` may return an existing local/global location.  It
     // becomes an owned accumulator only after the first folded node has written
     // into storage allocated by this expression.
@@ -46,7 +45,7 @@ pub fn compile_binary(
     for (index, (node, binary)) in chain.into_iter().rev().enumerate() {
         let is_root = index + 1 == chain_len;
         let node_type = info.expr_type(node.id);
-        let node_layout = info.type_slot_types(node_type);
+        let node_layout = info.slot_layout(node_type);
         let node_dst = if is_root {
             dst
         } else if owns_evaluated_left && evaluated_left_layout == node_layout {
@@ -195,51 +194,100 @@ fn compile_binary_with_evaluated_left(
     let is_string = info.is_string(operand_type);
     let is_unsigned = info.is_unsigned(operand_type);
 
-    // float32 arithmetic: convert f32 bits -> f64, operate, convert back
-    let (actual_left, actual_right) = if is_float32 {
-        let tmp_left = func.alloc_slots(&[SlotType::Value]);
-        let tmp_right = func.alloc_slots(&[SlotType::Value]);
-        func.emit_op(Opcode::ConvF32F64, tmp_left, left_reg, 0);
-        func.emit_op(Opcode::ConvF32F64, tmp_right, right_reg, 0);
-        (tmp_left, tmp_right)
-    } else {
-        (left_reg, right_reg)
-    };
-
     let opcode = match (&bin.op, is_float, is_string, is_unsigned) {
         (BinaryOp::Add, false, false, _) => Opcode::AddI,
-        (BinaryOp::Add, true, false, _) => Opcode::AddF,
+        (BinaryOp::Add, true, false, _) => {
+            if is_float32 {
+                Opcode::AddF32
+            } else {
+                Opcode::AddF
+            }
+        }
         (BinaryOp::Add, _, true, _) => Opcode::StrConcat,
         (BinaryOp::Sub, false, _, _) => Opcode::SubI,
-        (BinaryOp::Sub, true, _, _) => Opcode::SubF,
+        (BinaryOp::Sub, true, _, _) => {
+            if is_float32 {
+                Opcode::SubF32
+            } else {
+                Opcode::SubF
+            }
+        }
         (BinaryOp::Mul, false, _, _) => Opcode::MulI,
-        (BinaryOp::Mul, true, _, _) => Opcode::MulF,
+        (BinaryOp::Mul, true, _, _) => {
+            if is_float32 {
+                Opcode::MulF32
+            } else {
+                Opcode::MulF
+            }
+        }
         (BinaryOp::Div, false, _, false) => Opcode::DivI,
         (BinaryOp::Div, false, _, true) => Opcode::DivU,
-        (BinaryOp::Div, true, _, _) => Opcode::DivF,
+        (BinaryOp::Div, true, _, _) => {
+            if is_float32 {
+                Opcode::DivF32
+            } else {
+                Opcode::DivF
+            }
+        }
         (BinaryOp::Rem, false, _, false) => Opcode::ModI,
         (BinaryOp::Rem, false, _, true) => Opcode::ModU,
         (BinaryOp::Eq, false, false, _) => Opcode::EqI,
-        (BinaryOp::Eq, true, false, _) => Opcode::EqF,
+        (BinaryOp::Eq, true, false, _) => {
+            if is_float32 {
+                Opcode::EqF32
+            } else {
+                Opcode::EqF
+            }
+        }
         (BinaryOp::Eq, _, true, _) => Opcode::StrEq,
         (BinaryOp::NotEq, false, false, _) => Opcode::NeI,
-        (BinaryOp::NotEq, true, false, _) => Opcode::NeF,
+        (BinaryOp::NotEq, true, false, _) => {
+            if is_float32 {
+                Opcode::NeF32
+            } else {
+                Opcode::NeF
+            }
+        }
         (BinaryOp::NotEq, _, true, _) => Opcode::StrNe,
         (BinaryOp::Lt, false, false, false) => Opcode::LtI,
         (BinaryOp::Lt, false, false, true) => Opcode::LtU,
-        (BinaryOp::Lt, true, false, _) => Opcode::LtF,
+        (BinaryOp::Lt, true, false, _) => {
+            if is_float32 {
+                Opcode::LtF32
+            } else {
+                Opcode::LtF
+            }
+        }
         (BinaryOp::Lt, _, true, _) => Opcode::StrLt,
         (BinaryOp::LtEq, false, false, false) => Opcode::LeI,
         (BinaryOp::LtEq, false, false, true) => Opcode::LeU,
-        (BinaryOp::LtEq, true, false, _) => Opcode::LeF,
+        (BinaryOp::LtEq, true, false, _) => {
+            if is_float32 {
+                Opcode::LeF32
+            } else {
+                Opcode::LeF
+            }
+        }
         (BinaryOp::LtEq, _, true, _) => Opcode::StrLe,
         (BinaryOp::Gt, false, false, false) => Opcode::GtI,
         (BinaryOp::Gt, false, false, true) => Opcode::GtU,
-        (BinaryOp::Gt, true, false, _) => Opcode::GtF,
+        (BinaryOp::Gt, true, false, _) => {
+            if is_float32 {
+                Opcode::GtF32
+            } else {
+                Opcode::GtF
+            }
+        }
         (BinaryOp::Gt, _, true, _) => Opcode::StrGt,
         (BinaryOp::GtEq, false, false, false) => Opcode::GeI,
         (BinaryOp::GtEq, false, false, true) => Opcode::GeU,
-        (BinaryOp::GtEq, true, false, _) => Opcode::GeF,
+        (BinaryOp::GtEq, true, false, _) => {
+            if is_float32 {
+                Opcode::GeF32
+            } else {
+                Opcode::GeF
+            }
+        }
         (BinaryOp::GtEq, _, true, _) => Opcode::StrGe,
         (BinaryOp::And, _, _, _) => Opcode::And,
         (BinaryOp::Or, _, _, _) => Opcode::Or,
@@ -263,16 +311,7 @@ fn compile_binary_with_evaluated_left(
         } else {
             0
         };
-    func.emit_with_flags(opcode, shift_flags, dst, actual_left, actual_right);
-    // float32 arithmetic result: convert f64 back to f32 bits
-    // (comparison results are bool, don't need conversion)
-    let is_arith = matches!(
-        bin.op,
-        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
-    );
-    if is_float32 && is_arith {
-        func.emit_op(Opcode::ConvF64F32, dst, dst, 0);
-    }
+    func.emit_with_flags(opcode, shift_flags, dst, left_reg, right_reg);
 
     Ok(())
 }

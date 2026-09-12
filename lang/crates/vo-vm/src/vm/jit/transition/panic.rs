@@ -26,6 +26,11 @@ pub(super) fn handle_panic_transition(
                 "JIT frame materialization invariant failed: {err}"
             ));
         }
+        Err(SetupJitPanicError::InvalidSourceOrigin(origin)) => {
+            return JitBridgeTransition::JitError(format!(
+                "JIT returned an invalid inline trap source {origin:#x}"
+            ));
+        }
         Err(SetupJitPanicError::MissingPayload) => {
             return JitBridgeTransition::JitError(
                 "JIT returned Panic without user panic or typed runtime trap payload".to_string(),

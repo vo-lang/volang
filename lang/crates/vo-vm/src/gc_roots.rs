@@ -4,17 +4,17 @@
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 
 use vo_runtime::ffi::SentinelErrorCache;
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 use vo_runtime::gc::MAX_INCREMENTAL_SLICE_BYTES;
 use vo_runtime::gc::{
     GcMode, GcRef, GcRootScanChunk, GcRootScanKind, GcRootState, GcState, MemoryError, MemoryStats,
 };
 use vo_runtime::slot::SLOT_BYTES;
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 use vo_runtime::jit_api::{JitContext, JitNativeFrame};
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 use crate::vm::{JitManager, NativeRootScanCursor, NativeRootScanStats};
 
 use crate::bytecode::LoadedModule;
@@ -24,6 +24,15 @@ use crate::vm::{
     EndpointRegistry, Vm, VmFiberRootScanStage, VmGcCycleReport, VmGcStepReport, VmGcStepStats,
     VmRootScanMode, VmRootScanSnapshot, VmRootScanStage,
 };
+
+/// A root source borrowed only while generated code remains paused in one GC
+/// callback. The completed scan proof expires when that callback returns;
+/// subsequent native execution must construct a fresh source and dirty roots.
+struct PausedNativeRoots<'a> {
+    fiber: &'a Fiber,
+    frame_limit: usize,
+    scanned: bool,
+}
 
 fn new_vm_root_scan_snapshot(
     kind: GcRootScanKind,
@@ -478,7 +487,7 @@ fn scan_fiber_aux_root(
                 return AuxRootScanStep::Consumed(root);
             }
             VmFiberRootScanStage::JitSuspend => {
-                #[cfg(feature = "jit")]
+                #[cfg(feature = "native")]
                 if let Some(crate::fiber::JitExternSuspend::CallClosure {
                     closure_ref, args, ..
                 }) = &fiber.jit_extern_suspend
@@ -580,7 +589,7 @@ fn scan_fiber_aux_root(
                 );
             }
             VmFiberRootScanStage::JitPanic => {
-                #[cfg(feature = "jit")]
+                #[cfg(feature = "native")]
                 if fiber.jit_panic_flag && snapshot.fiber_aux_slot_cursor == 0 {
                     if !budget_available {
                         return AuxRootScanStep::BudgetExhausted;
@@ -929,7 +938,7 @@ where
 }
 
 impl Vm {
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     #[inline]
     fn assert_no_pending_runtime_transitions_for_gc(&self) {
         assert!(
@@ -938,7 +947,7 @@ impl Vm {
         );
     }
 
-    #[cfg(not(feature = "jit"))]
+    #[cfg(not(feature = "native"))]
     #[inline]
     fn assert_no_pending_runtime_transitions_for_gc(&self) {}
 
@@ -1070,6 +1079,13 @@ impl Vm {
         self.state.gc.memory_stats()
     }
 
+    /// Bounded host metadata retained for optional literal reuse. This storage
+    /// is separate from managed-heap and provider-reported memory statistics.
+    #[inline]
+    pub fn literal_cache_metadata_bytes(&self) -> usize {
+        self.state.gc.literal_cache_metadata_bytes()
+    }
+
     #[inline]
     pub fn gc_set_mode(&mut self, mode: GcMode) -> Result<(), MemoryError> {
         self.state.gc.gc_set_mode(mode)
@@ -1171,7 +1187,7 @@ impl Vm {
     /// completed before native execution resumes. If the total budget expires,
     /// return false so generated code publishes VM frames and leaves native
     /// execution; machine-frame cursors never escape this callback.
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub(crate) unsafe fn gc_step_while_native(
         &mut self,
         active_fiber: &Fiber,
@@ -1203,6 +1219,11 @@ impl Vm {
         let manager_ptr = manager as *const JitManager;
         let active_frame_limit = active_fiber.frames.len().saturating_sub(1);
         self.state.mark_gc_all_roots_dirty();
+        let mut native_roots = PausedNativeRoots {
+            fiber: active_fiber,
+            frame_limit: active_frame_limit,
+            scanned: false,
+        };
 
         let mut cursor_kind = None;
         let mut cursor = NativeRootScanCursor::new(native_frame, ctx);
@@ -1215,7 +1236,7 @@ impl Vm {
                 None,
                 Some(MAX_INCREMENTAL_SLICE_BYTES.saturating_sub(native_work_bytes) / SLOT_BYTES),
                 true,
-                Some((active_fiber, active_frame_limit)),
+                Some(&mut native_roots),
                 |gc, kind, limit| {
                     if cursor_kind != Some(kind) {
                         cursor_kind = Some(kind);
@@ -1369,7 +1390,7 @@ impl Vm {
         mutated_fiber: Option<FiberId>,
         work_unit_limit: Option<usize>,
         explicit: bool,
-        active_fiber: Option<(&Fiber, usize)>,
+        mut native_roots: Option<&mut PausedNativeRoots<'_>>,
         mut scan_extra_roots: F,
     ) -> Result<(), String>
     where
@@ -1407,7 +1428,14 @@ impl Vm {
         let dirty_epoch = self.state.gc_dirty_epoch;
         let dirty_fiber_count = self.state.gc_dirty_fibers.len();
         let dirty_fibers_ptr = &self.state.gc_dirty_fibers as *const Vec<u32>;
-        let root_state = if active_fiber.is_none()
+        let active_fiber = native_roots
+            .as_ref()
+            .map(|roots| (roots.fiber, roots.frame_limit));
+        // Native roots cannot change between steps of this paused callback.
+        // Require a complete pass in this callback before skipping sweep rescue;
+        // pending scans and all dirty-domain checks retain their usual behavior.
+        let native_roots_stable = native_roots.as_ref().is_none_or(|roots| roots.scanned);
+        let root_state = if native_roots_stable
             && gc_state_before == GcState::Sweep
             && !dirty_all
             && dirty_fiber_count == 0
@@ -1562,6 +1590,15 @@ impl Vm {
             }
         }
 
+        if (full_roots_scanned || dirty_roots_scanned)
+            && !self.state.gc.root_scan_pending()
+            && self.state.gc_root_scan.is_none()
+        {
+            if let Some(roots) = native_roots.as_mut() {
+                roots.scanned = true;
+            }
+        }
+
         if self.state.gc_verify_after_step && active_fiber.is_none() {
             if let Err(err) = self.verify_precise_gc_after_step(loaded_module, None) {
                 panic!("GC verification failed: {err}");
@@ -1708,6 +1745,152 @@ impl Vm {
 mod tests {
     use super::*;
     use crate::fiber::{DeferArgLayout, UnwindingMode, UnwindingState};
+
+    fn native_sweep_fixture(mode: GcMode) -> (Vm, GcRef, GcRef, GcRef) {
+        use vo_runtime::bytecode::{GlobalDef, Module, StructMeta};
+        use vo_runtime::{SlotType, ValueKind, ValueMeta};
+
+        let mut module = Module::new("paused-native-roots".into());
+        module.struct_metas.push(StructMeta {
+            slot_types: Vec::new(),
+            fields: Vec::new(),
+            field_index: Default::default(),
+        });
+        module.globals.push(GlobalDef {
+            name: "roots".into(),
+            slots: 2048,
+            value_kind: ValueKind::Struct as u8,
+            meta_id: 0,
+            slot_types: vec![SlotType::GcRef; 2048],
+        });
+        let mut vm = Vm::new();
+        // This fixture scans roots without executing a guest function.
+        vm.module = Some(crate::vm::test_loaded_module(module));
+        vm.state.gc.gc_set_mode(mode).unwrap();
+        let meta = ValueMeta::new(0, ValueKind::Struct);
+        let global = vm.state.gc.alloc(meta, 0);
+        let native = vm.state.gc.alloc(meta, 0);
+        // Leave several sweep chunks between the first objects and late_root.
+        for _ in 0..4096 {
+            vm.state.gc.alloc(meta, 0);
+        }
+        let late_root = vm.state.gc.alloc(meta, 0);
+        vm.state.globals = vec![global as u64; 2048];
+        vm.state.mark_gc_all_roots_dirty();
+        vm.state.gc.gc_request_major();
+        (vm, global, native, late_root)
+    }
+
+    fn step_paused_native_roots(
+        vm: &mut Vm,
+        source: &mut PausedNativeRoots<'_>,
+        root: GcRef,
+    ) -> usize {
+        let mut visits = 0;
+        vm.gc_step_with_root_source(None, Some(32), true, Some(source), |gc, _, limit| {
+            assert!(limit >= SLOT_BYTES);
+            visits += 1;
+            gc.try_mark_gray(root).unwrap();
+            GcRootScanChunk::complete(SLOT_BYTES)
+        })
+        .unwrap();
+        assert!(vm.last_gc_step_stats().gc.total_work_bytes <= 32 * SLOT_BYTES);
+        visits
+    }
+
+    fn advance_native_roots_to_sweep(vm: &mut Vm, source: &mut PausedNativeRoots<'_>, root: GcRef) {
+        step_paused_native_roots(vm, source, root);
+        assert!(vm.state.gc_root_scan.is_some());
+        assert!(!source.scanned, "a partial pass cannot prove stable roots");
+        for _ in 0..20_000 {
+            if vm.state.gc.state() == GcState::Sweep {
+                assert!(source.scanned);
+                assert!(!vm.state.gc_roots_dirty_all);
+                return;
+            }
+            step_paused_native_roots(vm, source, root);
+        }
+        panic!("bounded root and object work must reach sweep");
+    }
+
+    #[test]
+    fn paused_native_sweep_reuses_a_complete_root_pass_in_both_gc_modes() {
+        for mode in [GcMode::Generational, GcMode::Incremental] {
+            let (mut vm, global, native, _) = native_sweep_fixture(mode);
+            let fiber = Fiber::new(0);
+            let mut source = PausedNativeRoots {
+                fiber: &fiber,
+                frame_limit: 0,
+                scanned: false,
+            };
+            advance_native_roots_to_sweep(&mut vm, &mut source, native);
+            let visits = step_paused_native_roots(&mut vm, &mut source, native);
+            assert_eq!(visits, 0, "stable sweep need not revisit native roots");
+            assert!(vm.last_gc_step_stats().stable_roots_skipped);
+            for root in [global, native] {
+                assert_eq!(vm.state.gc.canonicalize_ref(root), Some(root));
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_native_pause_rescues_roots_changed_between_callbacks() {
+        for mode in [GcMode::Generational, GcMode::Incremental] {
+            let (mut vm, global, native, late_root) = native_sweep_fixture(mode);
+            let fiber = Fiber::new(0);
+            {
+                let mut source = PausedNativeRoots {
+                    fiber: &fiber,
+                    frame_limit: 0,
+                    scanned: false,
+                };
+                advance_native_roots_to_sweep(&mut vm, &mut source, native);
+                step_paused_native_roots(&mut vm, &mut source, native);
+                assert!(vm.last_gc_step_stats().stable_roots_skipped);
+            }
+            assert_eq!(vm.state.gc.canonicalize_ref(late_root), Some(late_root));
+            assert!(vm.state.gc.is_collectible_white(late_root));
+            // Guest execution changes its shadow root. Each callback starts a
+            // fresh proof and dirties VM domains before it can collect again.
+            vm.state.mark_gc_all_roots_dirty();
+            let mut source = PausedNativeRoots {
+                fiber: &fiber,
+                frame_limit: 0,
+                scanned: false,
+            };
+            assert!(step_paused_native_roots(&mut vm, &mut source, late_root) > 0);
+            assert!(!source.scanned);
+            assert!(!vm.last_gc_step_stats().stable_roots_skipped);
+            for step in 0..20_000 {
+                if vm.state.gc.state() == GcState::Pause {
+                    break;
+                }
+                assert!(step < 19_999, "rescued graph must converge to pause");
+                step_paused_native_roots(&mut vm, &mut source, late_root);
+            }
+            assert!(source.scanned);
+            for root in [global, late_root] {
+                assert_eq!(vm.state.gc.canonicalize_ref(root), Some(root));
+            }
+            // A proof also cannot retain an old shadow root across GC cycles.
+            vm.state.gc.gc_request_major();
+            vm.state.mark_gc_all_roots_dirty();
+            let mut source = PausedNativeRoots {
+                fiber: &fiber,
+                frame_limit: 0,
+                scanned: false,
+            };
+            for step in 0..20_000 {
+                step_paused_native_roots(&mut vm, &mut source, late_root);
+                if vm.state.gc.state() == GcState::Pause {
+                    break;
+                }
+                assert!(step < 19_999, "next cycle must converge to pause");
+            }
+            assert_eq!(vm.state.gc.canonicalize_ref(native), None);
+            assert_eq!(vm.state.gc.canonicalize_ref(late_root), Some(late_root));
+        }
+    }
 
     fn pending_defer(frame_depth: usize, func_id: u32) -> DeferEntry {
         DeferEntry {

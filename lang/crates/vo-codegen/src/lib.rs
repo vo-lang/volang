@@ -10,6 +10,7 @@ mod error;
 mod expr;
 mod func;
 mod lvalue;
+mod optimize;
 mod stmt;
 mod type_info;
 mod type_interner;
@@ -117,72 +118,74 @@ pub fn compile_project_with_adapters(
     externalized_locals: &[ExternalizedLocalSpec],
     scoped_calls: &[ScopedCallSpec],
 ) -> Result<(Module, CodegenReport), CodegenError> {
-    if let Some(declared) = project
-        .main_pkg()
-        .name()
-        .as_deref()
-        .filter(|name| *name != "main")
-    {
-        return Err(CodegenError::InvalidEntry(format!(
-            "package must be named `main`, found `{declared}`"
-        )));
-    }
-    let layout_facts = validate_project_type_layouts(project)?;
-    let info = TypeInfoWrapper::for_main_package(project, layout_facts);
-    let pkg_name = project.main_pkg().name().as_deref().unwrap_or("main");
-    let mut ctx = CodegenContext::new(pkg_name);
-    ctx.install_externalized_locals(externalized_locals)?;
-    ctx.install_scoped_calls(scoped_calls)?;
+    vo_common::compiler_phase!(Codegen, {
+        if let Some(declared) = project
+            .main_pkg()
+            .name()
+            .as_deref()
+            .filter(|name| *name != "main")
+        {
+            return Err(CodegenError::InvalidEntry(format!(
+                "package must be named `main`, found `{declared}`"
+            )));
+        }
+        let layout_facts = validate_project_type_layouts(project)?;
+        let info = TypeInfoWrapper::for_main_package(project, layout_facts);
+        let pkg_name = project.main_pkg().name().as_deref().unwrap_or("main");
+        let mut ctx = CodegenContext::new(pkg_name);
+        ctx.install_externalized_locals(externalized_locals)?;
+        ctx.install_scoped_calls(scoped_calls)?;
 
-    // 1. Register types (StructMeta, InterfaceMeta)
-    register_types(project, &mut ctx, &info)?;
-    ctx.check_layout_errors().map_err(CodegenError::Internal)?;
+        // 1. Register types (StructMeta, InterfaceMeta)
+        register_types(project, &mut ctx, &info)?;
+        ctx.check_layout_errors().map_err(CodegenError::Internal)?;
 
-    // 2. Collect declarations (functions, globals, externs)
-    collect_declarations(project, &mut ctx, &info)?;
-    ctx.check_layout_errors().map_err(CodegenError::Internal)?;
+        // 2. Collect declarations (functions, globals, externs)
+        collect_declarations(project, &mut ctx, &info)?;
+        ctx.check_layout_errors().map_err(CodegenError::Internal)?;
 
-    // 3. Compile functions
-    compile_functions(project, &mut ctx, &info)?;
-    ctx.check_layout_errors().map_err(CodegenError::Internal)?;
+        // 3. Compile functions
+        compile_functions(project, &mut ctx, &info)?;
+        ctx.check_layout_errors().map_err(CodegenError::Internal)?;
 
-    // 4. Compile adapter-requested expression entrypoints.
-    compile_expression_evaluators(evaluator_specs, project, &mut ctx, &info)?;
-    ctx.check_layout_errors().map_err(CodegenError::Internal)?;
+        // 4. Compile adapter-requested expression entrypoints.
+        compile_expression_evaluators(evaluator_specs, project, &mut ctx, &info)?;
+        ctx.check_layout_errors().map_err(CodegenError::Internal)?;
 
-    // 5. Generate __init__ and __entry__
-    compile_init_and_entry(project, &mut ctx, &info)?;
-    ctx.check_layout_errors().map_err(CodegenError::Internal)?;
+        // 5. Generate __init__ and __entry__
+        compile_init_and_entry(project, &mut ctx, &info)?;
+        ctx.check_layout_errors().map_err(CodegenError::Internal)?;
 
-    // 6. Collect promoted methods from embedded interfaces
-    // This must happen after compile_functions (direct methods registered)
-    // and before finalize_itabs (itabs need complete method set)
-    collect_promoted_methods(project, &mut ctx, &info);
+        // 6. Collect promoted methods from embedded interfaces
+        // This must happen after compile_functions (direct methods registered)
+        // and before finalize_itabs (itabs need complete method set)
+        collect_promoted_methods(project, &mut ctx, &info);
 
-    // 7. Build all pending itabs (from functions + __init__)
-    ctx.finalize_itabs(&info.project.tc_objs, &info.project.interner);
+        // 7. Build all pending itabs (from functions + __init__)
+        ctx.finalize_itabs(&info.project.tc_objs, &info.project.interner);
 
-    // 8. Build runtime_types after all codegen (all types have been assigned rttid)
-    build_runtime_types(project, &mut ctx, &info);
-    ctx.check_layout_errors().map_err(CodegenError::Internal)?;
+        // 8. Build runtime_types after all codegen (all types have been assigned rttid)
+        build_runtime_types(project, &mut ctx, &info);
+        ctx.check_layout_errors().map_err(CodegenError::Internal)?;
 
-    // 9. Reconcile generated transfer metadata against the final runtime type table.
-    ctx.finalize_transfer_metadata()
-        .map_err(CodegenError::Internal)?;
+        // 9. Reconcile generated transfer metadata against the final runtime type table.
+        ctx.finalize_transfer_metadata()
+            .map_err(CodegenError::Internal)?;
 
-    // 10. Fill WellKnownTypes for fast error creation
-    ctx.fill_well_known_types()
-        .map_err(CodegenError::Internal)?;
+        // 10. Fill WellKnownTypes for fast error creation
+        ctx.fill_well_known_types()
+            .map_err(CodegenError::Internal)?;
 
-    // 11. Finalize debug info (sort entries by PC)
-    ctx.finalize_debug_info().map_err(CodegenError::Internal)?;
+        // 11. Finalize debug info (sort entries by PC)
+        ctx.finalize_debug_info().map_err(CodegenError::Internal)?;
 
-    // 12. Final check: all IDs within 24-bit limit
-    ctx.check_id_limits().map_err(CodegenError::Internal)?;
+        // 12. Final check: all IDs within 24-bit limit
+        ctx.check_id_limits().map_err(CodegenError::Internal)?;
 
-    let report = ctx.report();
-    let module = ctx.finish().map_err(CodegenError::Internal)?;
-    Ok((module, report))
+        let report = ctx.report();
+        let module = ctx.finish().map_err(CodegenError::Internal)?;
+        Ok((module, report))
+    })
 }
 
 fn compile_expression_evaluators(
@@ -283,7 +286,6 @@ fn compile_package_expression_evaluators(
         let name = format!("__adapter_eval_{package_index}_{}", spec.expression.0);
         let placeholder = FuncBuilder::new(&name).build();
         let function_id = ctx.add_function(placeholder);
-        ctx.set_current_func_id(function_id);
 
         let mut builder = FuncBuilder::new(&name);
         let mut escaped_externalized_params = Vec::new();
@@ -1547,7 +1549,6 @@ fn compile_func_decl_at(
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    ctx.set_current_func_id(func_id);
     let (func_def, debug_locs) = compile_func_body(func_decl, ctx, info)?;
     ctx.replace_function(func_id, func_def);
     ctx.record_function_debug_locs(func_id, &debug_locs, &info.project.source_map);
@@ -1863,8 +1864,7 @@ pub(crate) fn compile_array_expr_to_slots(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    crate::array_value::prepare_expr(expr, array_type, ctx, func, info)?
-        .emit_to_flat(dst, array_type, ctx, func, info)
+    crate::array_value::emit_expr_to_flat(expr, dst, array_type, ctx, func, info)
 }
 
 /// Allocate the stable typed object owned by a package-level struct variable.

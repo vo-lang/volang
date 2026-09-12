@@ -1,0 +1,25 @@
+package main
+
+func choose(a, b chan int) int {
+	select {
+		case <-a:
+			return 1
+		case <-b:
+			return 2
+	}
+}
+
+func main() {
+	a, b := make(chan int), make(chan int)
+	close(a)
+	close(b)
+	first, second := 0, 0
+	for i := 0; i < 2000; i++ {
+		if choose(a, b) == 1 {
+			first++
+		} else {
+			second++
+		}
+	}
+	assert(first > 0 && second > 0)
+}

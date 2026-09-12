@@ -77,6 +77,7 @@ export interface AotStructuredJsonOperations {
   readonly metadata: AotRuntimeMetadata;
   memory(): WebAssembly.Memory;
   view(): DataView;
+  writeBarrier(address: number, bytes: number): void;
   allocateTyped(bytes: number, descriptor: number): number;
   allocateSequence(bytes: number, elementMeta: number): number;
   allocateStringBytes(bytes: Uint8Array): bigint;
@@ -928,6 +929,7 @@ export class AotStructuredJsonHost {
     this.writeStruct(staged, pointed, parsed);
     new Uint8Array(this.operations.memory().buffer, target, pointed.storageBytes)
       .set(new Uint8Array(this.operations.memory().buffer, staged, pointed.storageBytes));
+    this.operations.writeBarrier(target, pointed.storageBytes);
     this.operations.clearReturnRoot();
   }
 
@@ -1354,20 +1356,24 @@ export class AotStructuredJsonHost {
     const stride = SLOT_BYTES + keyBytes + valueBytes;
     let capacity = 8;
     while (entryCount * 4 > capacity * 3) capacity *= 2;
-    const bytes = 64 + capacity * stride;
+    const bytes = 16 + capacity * stride;
     if (!Number.isSafeInteger(bytes) || bytes > 0xffff_ffff) {
       jsonError('JSON map allocation exceeds the wasm32 contract');
     }
-    const map = this.operations.allocateTyped(bytes, type.mapDescriptor);
+    const map = this.operations.allocateTyped(72, type.mapDescriptor);
+    const backing = this.operations.allocateTyped(bytes, type.mapEntriesDescriptor);
     const memory = this.operations.view();
     memory.setBigUint64(map, 0n, true);
     memory.setBigUint64(map + 8, BigInt(capacity), true);
     memory.setBigUint64(map + 16, BigInt(keyBytes), true);
     memory.setBigUint64(map + 24, BigInt(valueBytes), true);
-    memory.setBigUint64(map + 32, BigInt(map + 64), true);
+    memory.setBigUint64(map + 32, BigInt(backing + 16), true);
     memory.setBigUint64(map + 40, BigInt(key.canonicalMeta), true);
     memory.setBigUint64(map + 48, BigInt(key.raw), true);
     memory.setBigUint64(map + 56, BigInt(type.mapEntriesDescriptor), true);
+    memory.setBigUint64(map + 64, 0n, true);
+    memory.setBigUint64(backing, 0n, true);
+    memory.setBigUint64(backing + 8, BigInt(capacity), true);
     return map;
   }
 
@@ -1388,6 +1394,7 @@ export class AotStructuredJsonHost {
         this.operations.view().setBigUint64(bucket + SLOT_BYTES, keyReference, true);
         const length = this.operations.view().getBigUint64(map, true);
         this.operations.view().setBigUint64(map, length + 1n, true);
+        this.operations.view().setBigUint64(map + 64, length + 1n, true);
       }
       this.writeTyped(bucket + SLOT_BYTES + keyBytes, valueType, value);
     }

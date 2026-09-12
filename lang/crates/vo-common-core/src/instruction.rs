@@ -448,17 +448,31 @@ pub enum Opcode {
     /// flags: bit0 = unsigned (0=signed), bit1 = decrement (0=increment)
     ForLoop,
 
+    // Direct IEEE-754 binary32 operations. Slots carry the low 32 bits;
+    // arithmetic results clear the upper half and comparisons produce bool.
+    AddF32,
+    SubF32,
+    MulF32,
+    DivF32,
+    NegF32,
+    EqF32,
+    NeF32,
+    LtF32,
+    LeF32,
+    GtF32,
+    GeF32,
+
     // Sentinel for invalid/unknown opcodes
     Invalid = 255,
 }
 
 impl Opcode {
-    const MAX_VALID: u8 = Self::ForLoop as u8;
+    const MAX_VALID: u8 = Self::GeF32 as u8;
     /// Number of valid opcodes, excluding the `Invalid` sentinel.
     pub const COUNT: usize = Self::MAX_VALID as usize + 1;
 
     #[inline]
-    pub fn from_u8(v: u8) -> Self {
+    pub const fn from_u8(v: u8) -> Self {
         if v <= Self::MAX_VALID {
             // SAFETY: Opcode is #[repr(u8)] and v is within valid range
             unsafe { core::mem::transmute::<u8, Opcode>(v) }

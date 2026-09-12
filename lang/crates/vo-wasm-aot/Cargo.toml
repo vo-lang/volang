@@ -13,5 +13,5 @@ publish = false
 sha2 = "0.10"
 vo-common-core.workspace = true
 vo-target.workspace = true
-wasm-encoder = "=0.244.0"
+wasm-encoder = { version = "=0.244.0", features = ["wasmparser"] }
 wasmparser = "=0.244.0"

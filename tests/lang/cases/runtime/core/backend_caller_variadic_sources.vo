@@ -1,0 +1,53 @@
+package main
+
+import "runtime"
+
+func validateCaller(expected, count int) {
+    pc, file, line, ok := runtime.Caller(2)
+    if !ok || pc == 0 || file == "" || line != expected || count != 3 {
+        panic("caller source anchor lost")
+    }
+}
+
+func inspectStatic(expected int, values ...int) {
+    validateCaller(expected, len(values))
+}
+
+type Inspector interface {
+    Inspect(int, ...int)
+}
+type FirstInspector struct{}
+type SecondInspector struct{}
+
+func (p *FirstInspector) Inspect(expected int, values ...int) {
+    validateCaller(expected, len(values))
+}
+func (p *SecondInspector) Inspect(expected int, values ...int) {
+    validateCaller(expected, len(values))
+}
+
+func selectInspector(first bool) Inspector {
+    if first {
+        return &FirstInspector{}
+    }
+    return &SecondInspector{}
+}
+
+func main() {
+    salt := 7
+    inspectClosure := func(expected int, values ...int) {
+        if salt != 7 {
+            panic("closure capture lost")
+        }
+        validateCaller(expected, len(values))
+    }
+    direct := &FirstInspector{}
+    for i := 0; i < 1000; i++ {
+        inspectStatic(46, 1, 2, 3)
+        inspectClosure(47, 1, 2, 3)
+        direct.Inspect(48, 1, 2, 3)
+        selected := selectInspector(i & 1 == 0)
+        selected.Inspect(50, 1, 2, 3)
+    }
+    println("caller source positions ok")
+}

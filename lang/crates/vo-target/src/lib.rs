@@ -19,6 +19,17 @@ pub enum TargetFamily {
     WebAssembly,
 }
 
+/// Observable memory guarantees of generated AOT artifacts. Wasm VM uses
+/// vo-runtime and retains IslandSpanHeap independently of the AOT target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum RuntimeMemoryContract {
+    /// Independent Island SpanHeaps, sticky errors and work-bounded collection.
+    IslandSpanHeap = 1,
+    /// Legacy Core Wasm ABI 6 contract, retained for format identification.
+    InstanceTracing = 2,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostSurface {
     Native,
@@ -234,6 +245,10 @@ impl TargetSpec {
     #[inline]
     pub const fn wasm_features(&self) -> WasmFeatureSet {
         self.wasm_features
+    }
+
+    pub const fn runtime_memory_contract(&self) -> RuntimeMemoryContract {
+        RuntimeMemoryContract::IslandSpanHeap
     }
 
     pub const fn supports_artifact(&self, kind: ArtifactKind) -> bool {

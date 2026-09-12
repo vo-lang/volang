@@ -883,8 +883,8 @@ fn assert_jit_runtime_trap_matches_vm(
     assert_eq!(vm_kind, expected_kind);
     assert_eq!(jit_kind, expected_kind);
     assert_eq!(
-        jit_loc.map(|loc| (loc.func_id, loc.pc)),
-        vm_loc.map(|loc| (loc.func_id, loc.pc))
+        jit_loc.map(|loc| (loc.func_id(), loc.pc())),
+        vm_loc.map(|loc| (loc.func_id(), loc.pc()))
     );
     assert!(
         jit_loc.is_some(),
@@ -914,8 +914,8 @@ fn assert_jit_user_panic_matches_vm(source: &str, expected_message: &str) {
     assert_eq!(vm_msg.as_deref(), Some(expected_message));
     assert_eq!(jit_msg, vm_msg);
     assert_eq!(
-        jit_loc.map(|loc| (loc.func_id, loc.pc)),
-        vm_loc.map(|loc| (loc.func_id, loc.pc))
+        jit_loc.map(|loc| (loc.func_id(), loc.pc())),
+        vm_loc.map(|loc| (loc.func_id(), loc.pc()))
     );
     assert!(
         jit_loc.is_some(),
@@ -1573,4 +1573,102 @@ func main() {
         "{msg}"
     );
     assert!(msg.contains("target"), "{msg}");
+}
+
+#[path = "run_tests/inline_sources.rs"]
+mod inline_sources;
+
+#[path = "run_tests/inline_entries.rs"]
+mod inline_entries;
+
+#[path = "run_tests/sequence_inline.rs"]
+mod sequence_inline;
+
+#[path = "run_tests/total_scalar_inline.rs"]
+mod total_scalar_inline;
+
+#[path = "run_tests/literal_reuse.rs"]
+mod literal_reuse;
+
+#[path = "run_tests/local_arrays.rs"]
+mod local_arrays;
+
+#[test]
+fn flag_parsing_preserves_embedding_argument_contract() {
+    let compiled = crate::compile_string(
+        r#"package main
+import "flag"
+import "os"
+func main() {
+    message := flag.String("message", "unset", "test value")
+    flag.Parse()
+    assert(flag.Parsed())
+    if len(os.Args) == 0 {
+        assert(flag.CommandLine.Name() == "")
+        assert(message.Value == "unset")
+    } else {
+        assert(os.Args[0] == "embed")
+        assert(flag.CommandLine.Name() == "embed")
+        assert(message.Value == "first")
+        assert(flag.NArg() == 1 && flag.Arg(0) == "")
+    }
+}
+"#,
+    )
+    .unwrap();
+    for jit in [false, true] {
+        for args in [
+            Vec::new(),
+            vec![b"embed".to_vec(), b"--message=first".to_vec(), Vec::new()],
+        ] {
+            let mut vm = if jit {
+                Vm::try_with_jit_config(vo_vm::JitConfig {
+                    call_threshold: 1,
+                    loop_threshold: 1,
+                    ..vo_vm::JitConfig::default()
+                })
+                .unwrap()
+            } else {
+                Vm::new()
+            };
+            vm.set_program_args_bytes(args);
+            vm.load_verified(compiled.module.clone()).unwrap();
+            assert!(vm.run().is_ok());
+            if jit {
+                assert!(vm.jit_execution_stats().executed_jit_code());
+            }
+        }
+    }
+}
+
+#[cfg(feature = "execution-profile")]
+#[test]
+fn execution_work_counters_are_owned_by_one_vm_and_reset_explicitly() {
+    let compiled = crate::compile_string(
+        r#"package main
+func main() {
+    ch := make(chan int, 1)
+    total := 0
+    for i := 0; i < 100; i++ { ch <- i; total += <-ch }
+    assert(total == 4950)
+}
+"#,
+    )
+    .unwrap();
+    let mut vm = Vm::new();
+    let other = Vm::new();
+    vm.load(compiled.module.module().clone()).unwrap();
+    assert_eq!(vm.execution_profile().instruction_count(), 0);
+    vm.run().unwrap();
+    let profile = vm.execution_profile();
+    assert!(profile.instruction_count() > profile.allocation_checks);
+    assert!(profile.allocation_checks > 0);
+    assert!(profile.queue_continues >= 200);
+    assert!(profile.execution_slices > 0 && profile.completed_fibers > 0);
+    assert_eq!(other.execution_profile().instruction_count(), 0);
+    vm.reset_execution_profile();
+    assert_eq!(
+        vm.execution_profile(),
+        &vo_vm::vm::ExecutionProfile::default()
+    );
 }

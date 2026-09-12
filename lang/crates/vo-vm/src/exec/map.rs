@@ -49,7 +49,9 @@ impl MapScratch {
             self.slots.try_reserve_exact(total - self.slots.len())?;
         }
         self.slots.resize_reserved(total, 0);
-        self.slots[..total].fill(0);
+        // MapSet fills both regions; MapGet fills its key and the runtime
+        // writes the complete value or zeros it on a miss. Reused slots need
+        // no preliminary clearing. New slots remain initialized by resize.
         Ok(self.slots[..total].split_at_mut(key_slots))
     }
 
@@ -533,6 +535,22 @@ mod tests {
             scratch_ptr,
             "steady-state map reads must retain the scratch allocation"
         );
+
+        // A miss following a hit must discard the old scratch value, including
+        // when the output aliases the new key input.
+        stack[2] = 404;
+        assert!(exec_map_get_with_layout_using_scratch(
+            stack.as_mut_ptr(),
+            0,
+            &inst,
+            &gc,
+            None,
+            (&[SlotType::Value], &[SlotType::Value], false),
+            &mut scratch,
+        )
+        .expect("missing map key"));
+        assert_eq!(stack[2], 0);
+        assert_eq!(scratch.slots.as_ptr(), scratch_ptr);
     }
 
     #[test]
@@ -700,7 +718,9 @@ mod tests {
             _pad: [0; 3],
             init_generation: 0,
             current_index: 0,
-            _reserved: [0; 4],
+            backing_ref: 0,
+            capacity: 0,
+            _reserved: [0; 2],
             map_ref: non_map as u64,
         };
         unsafe {

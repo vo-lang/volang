@@ -1,0 +1,55 @@
+package main
+
+type Holder struct {
+	left int
+	data [8]byte
+	right int
+}
+
+type Zero struct {}
+
+var globalData = [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+
+func check() int {
+	base := make([]byte, 4, 8)
+	copy(base, []byte{1, 2, 3, 4})
+	middle := base[1:3:5]
+	view := middle[1:2]
+	var boxed any = view
+	restored, ok := boxed.([]byte)
+	assert(ok && len(restored) == 1 && cap(restored) == 3)
+	grown := append(restored, 9)
+	assert(len(view) == 1 && len(grown) == 2 && cap(grown) == 3)
+	assert(base[3] == 9 && grown[0] == 3)
+	grown = append(grown, 10, 11)
+	grown[0] = 99
+	assert(base[2] == 3 && len(grown) == 4)
+
+	holder := Holder{left: 77, right: 88}
+	flat := holder.data[1:4:6]
+	copy(flat, []byte{12, 13, 14})
+	var boxedFlat any = flat[1:2]
+	restoredFlat := boxedFlat.([]byte)
+	restoredFlat = append(restoredFlat, 15)
+	assert(holder.data[2] == 13 && holder.data[3] == 15)
+	assert(holder.left == 77 && holder.right == 88)
+
+	globalView := globalData[2:4:6]
+	globalView[0] = 21
+	assert(globalData[2] == 21 && cap(globalView) == 4)
+	zeros := make([]Zero, 4, 8)
+	zeroView := zeros[1:3:4]
+	assert(len(zeroView) == 2 && cap(zeroView) == 3)
+	zeroView = append(zeroView, Zero{})
+	assert(len(zeroView) == 3 && len(zeros) == 4)
+	return int(base[2]) + int(holder.data[3]) + int(globalView[0])
+}
+
+func main() {
+	total := 0
+	for i := 0; i < 500; i++ {
+		total += check()
+	}
+	assert(total == 19500)
+	println("slice views ok")
+}

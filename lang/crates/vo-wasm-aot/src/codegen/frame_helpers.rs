@@ -289,16 +289,6 @@ pub(super) fn return_status(body: &mut Function, status: i32) {
         .instruction(&W::Return);
 }
 
-pub(super) fn return_direct_stack_overflow_panic(body: &mut Function, message_ref: u32) {
-    // The direct frame has not executed yet, so the owning durable caller is
-    // the correct unwind anchor and already holds the call-site resume point.
-    body.instruction(&W::I64Const((17u64 << 8 | 17) as i64))
-        .instruction(&W::I64Const(i64::from(message_ref)))
-        .instruction(&W::LocalGet(DIRECT_OWNER_FRAME_LOCAL))
-        .instruction(&W::Call(RAISE_PANIC_FUNCTION_INDEX))
-        .instruction(&W::Return);
-}
-
 pub(super) fn emit_fuel_poll(
     body: &mut Function,
     fuel_global: u32,
@@ -412,7 +402,7 @@ pub(super) fn return_explicit_panic(body: &mut Function, source: u16, resume_blo
 }
 
 pub(super) fn instruction_may_suspend(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     function: &FunctionDef,
     pc: usize,
     instruction: &vo_common_core::instruction::Instruction,
@@ -433,7 +423,7 @@ pub(super) fn instruction_may_suspend(
 
 pub(super) fn reload_scalar_writes(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     function: &FunctionDef,
     pc: usize,
     instruction: &vo_common_core::instruction::Instruction,

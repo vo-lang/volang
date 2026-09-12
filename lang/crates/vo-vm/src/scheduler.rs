@@ -758,11 +758,15 @@ impl Scheduler {
     }
 
     /// Kill current fiber and return (trap_kind, panic_msg, error_location).
-    /// error_location is (func_id, pc) captured at panic initiation (before frame unwind).
+    /// Diagnostic anchors are captured at panic initiation, before frame unwind.
     /// * -> Dead.
     pub(crate) fn kill_current(
         &mut self,
-    ) -> (Option<RuntimeTrapKind>, Option<String>, Option<(u32, u32)>) {
+    ) -> (
+        Option<RuntimeTrapKind>,
+        Option<String>,
+        Option<vo_common_core::debug_info::DiagnosticSource>,
+    ) {
         if let Some(id) = self.current.take() {
             let fiber = &mut self.fibers[id.0 as usize];
             assert_ne!(
@@ -771,10 +775,11 @@ impl Scheduler {
             );
             let trap_kind = fiber.panic_trap_kind.take();
             let msg = fiber.panic_message();
-            let loc = fiber
-                .panic_source_loc
-                .take()
-                .or_else(|| fiber.current_frame().map(|f| (f.func_id, f.pc as u32)));
+            let loc = fiber.panic_source_loc.take().or_else(|| {
+                fiber.current_frame().and_then(|f| {
+                    vo_common_core::debug_info::DiagnosticSource::new(f.func_id, f.pc as u32)
+                })
+            });
             fiber.retire_auxiliary_state();
             let oversized = fiber.has_oversized_storage();
             fiber.state = FiberState::Dead;
@@ -818,7 +823,7 @@ impl Scheduler {
     /// Whether another runnable fiber is waiting for the current execution
     /// lease. Stale queue entries are ignored so they cannot force a needless
     /// native side exit.
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub(crate) fn has_runnable_waiter(&self) -> bool {
         self.ready_queue.iter().any(|id| {
             self.fibers.get(id.0 as usize).is_some_and(|fiber| {

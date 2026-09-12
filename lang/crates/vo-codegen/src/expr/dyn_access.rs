@@ -553,10 +553,6 @@ pub fn compile_dyn_access(
     // Check if base is (any, error) tuple - need short-circuit
     let is_tuple_any_error = info.is_tuple_any_error(base_type);
 
-    // Record debug info
-    let pc = func.current_pc() as u32;
-    ctx.record_debug_loc(pc, expr.span, &info.project.source_map);
-
     if is_tuple_any_error {
         // Short-circuit: if error slot is not nil, propagate error
         // base_reg+2, base_reg+3 = error (interface[2])

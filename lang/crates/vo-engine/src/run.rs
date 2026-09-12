@@ -23,6 +23,7 @@ fn jit_config_error(message: String) -> RunError {
     RunError::Runtime(RuntimeError {
         message,
         location: None,
+        inline_frames: Vec::new(),
         kind: RuntimeErrorKind::Other,
     })
 }
@@ -127,6 +128,9 @@ pub fn render_run_observation_json(
 pub struct RuntimeError {
     pub message: String,
     pub location: Option<SourceLoc>,
+    /// Leaf-to-caller source frames when optimization removed physical frames.
+    /// Owned independently of the module; empty for an ordinary physical frame.
+    pub inline_frames: Vec<vo_common_core::debug_info::ResolvedSourceFrame>,
     pub kind: RuntimeErrorKind,
 }
 
@@ -147,7 +151,7 @@ impl RuntimeError {
     fn from_vm_error(e: &VmError, module: &Module) -> Self {
         let lookup = |loc: &Option<vo_vm::vm::ErrorLocation>| {
             loc.as_ref()
-                .and_then(|l| module.debug_info.lookup(l.func_id, l.pc))
+                .and_then(|l| module.debug_info.lookup(l.func_id(), l.pc()))
         };
 
         let (message, location, kind) = match e {
@@ -186,8 +190,27 @@ impl RuntimeError {
         RuntimeError {
             message,
             location,
+            inline_frames: e
+                .source_location()
+                .map(|location| location.resolve_inline_frames(module))
+                .unwrap_or_default(),
             kind,
         }
+    }
+}
+
+impl fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(loc) = &self.location {
+            write!(f, "{}:{}: {}", loc.file, loc.line, self.message)?;
+        } else {
+            f.write_str(&self.message)?;
+        }
+        for (index, frame) in self.inline_frames.iter().enumerate() {
+            let relation = if index == 0 { "at" } else { "inlined in" };
+            write!(f, "\n  {relation} {frame}")?;
+        }
+        Ok(())
     }
 }
 
@@ -204,13 +227,7 @@ impl fmt::Display for RunError {
         match self {
             RunError::Compile(e) => write!(f, "{}", e),
             RunError::Exited(code) => write!(f, "program exited with status {code}"),
-            RunError::Runtime(e) => {
-                if let Some(loc) = &e.location {
-                    write!(f, "{}:{}: {}", loc.file, loc.line, e.message)
-                } else {
-                    write!(f, "{}", e.message)
-                }
-            }
+            RunError::Runtime(e) => write!(f, "{e}"),
         }
     }
 }
@@ -325,17 +342,20 @@ fn require_terminal_outcome(vm: &Vm, outcome: SchedulingOutcome) -> Result<(), R
                 "execution suspended with pending island work; continue it through a VM session"
                     .to_string(),
             location: None,
+            inline_frames: Vec::new(),
             kind: RuntimeErrorKind::Other,
         })),
         SchedulingOutcome::SuspendedForHostEvents => Err(RunError::Runtime(RuntimeError {
             message: "execution suspended for host events; continue it through an async VM session"
                 .to_string(),
             location: None,
+            inline_frames: Vec::new(),
             kind: RuntimeErrorKind::Other,
         })),
         SchedulingOutcome::Panicked => Err(RunError::Runtime(RuntimeError {
             message: "VM reported a panic outcome without a structured runtime error".to_string(),
             location: None,
+            inline_frames: Vec::new(),
             kind: RuntimeErrorKind::Other,
         })),
     }
@@ -352,6 +372,7 @@ fn vm_err_to_run_err(vm: &Vm, e: &VmError) -> RunError {
         .unwrap_or_else(|| RuntimeError {
             message: format!("{:?}", e),
             location: None,
+            inline_frames: Vec::new(),
             kind: RuntimeErrorKind::Other,
         });
     RunError::Runtime(runtime_err)
@@ -369,6 +390,7 @@ pub fn new_vm_for_mode(
             RunError::Runtime(RuntimeError {
                 message: format!("VM initialization failed: {err}"),
                 location: None,
+                inline_frames: Vec::new(),
                 kind: RuntimeErrorKind::Other,
             })
         })?,
@@ -391,6 +413,7 @@ pub fn new_vm_for_mode(
                 RunError::Runtime(RuntimeError {
                     message: format!("JIT initialization failed: {err}"),
                     location: None,
+                    inline_frames: Vec::new(),
                     kind: RuntimeErrorKind::Other,
                 })
             })?
@@ -404,6 +427,7 @@ pub fn new_vm_for_mode(
                 message: "JIT mode requested but vo-engine was built without the jit feature"
                     .to_string(),
                 location: None,
+                inline_frames: Vec::new(),
                 kind: RuntimeErrorKind::Other,
             }));
         }
@@ -411,6 +435,7 @@ pub fn new_vm_for_mode(
             RunError::Runtime(RuntimeError {
                 message: format!("VM initialization failed: {err}"),
                 location: None,
+                inline_frames: Vec::new(),
                 kind: RuntimeErrorKind::Other,
             })
         })?
@@ -428,6 +453,7 @@ pub fn load_extensions(specs: &[NativeExtensionSpec]) -> Result<Option<Extension
         RunError::Runtime(RuntimeError {
             message: format!("failed to load extensions: {}", e),
             location: None,
+            inline_frames: Vec::new(),
             kind: RuntimeErrorKind::Other,
         })
     })?;
@@ -574,6 +600,7 @@ impl crate::Engine {
             RunError::Runtime(RuntimeError {
                 message,
                 location: None,
+                inline_frames: Vec::new(),
                 kind: RuntimeErrorKind::Other,
             })
         })?;

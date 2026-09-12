@@ -8,7 +8,7 @@ use vo_syntax::ast::Expr;
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
 use crate::func::{ElemLayoutSpec, FuncBuilder};
-use crate::type_info::{encode_i32, TypeInfoWrapper};
+use crate::type_info::TypeInfoWrapper;
 
 // =============================================================================
 // Constant Values
@@ -46,12 +46,8 @@ pub fn compile_const_value(
                 if info.is_float32(target_type) {
                     func.emit_op(Opcode::ConvF64F32, dst, dst, 0);
                 }
-            } else if *i >= i16::MIN as i64 && *i <= i16::MAX as i64 {
-                let (b, c) = encode_i32(*i as i32);
-                func.emit_op(Opcode::LoadInt, dst, b, c);
             } else {
-                let idx = ctx.const_int(*i);
-                func.emit_op(Opcode::LoadConst, dst, idx, 0);
+                func.emit_int(dst, *i, ctx);
             }
         }
         Value::IntBig(big) => {
@@ -74,8 +70,7 @@ pub fn compile_const_value(
                     big.try_into()
                         .expect("type checker should ensure value fits i64")
                 };
-                let idx = ctx.const_int(val);
-                func.emit_op(Opcode::LoadConst, dst, idx, 0);
+                func.emit_int(dst, val, ctx);
             }
         }
         Value::Float(f) => {
@@ -230,13 +225,7 @@ fn emit_int_value(
 ) -> Result<(), CodegenError> {
     let signed = i64::try_from(value)
         .map_err(|_| CodegenError::Internal(format!("{access} exceeds i64::MAX")))?;
-    if let Ok(value32) = i32::try_from(signed) {
-        let (b, c) = encode_i32(value32);
-        func.emit_op(Opcode::LoadInt, dst, b, c);
-    } else {
-        let idx = ctx.const_int(signed);
-        func.emit_op(Opcode::LoadConst, dst, idx, 0);
-    }
+    func.emit_int(dst, signed, ctx);
     Ok(())
 }
 

@@ -47,6 +47,17 @@ fn begin_test_sweep(gc: &mut Gc) {
     gc.sweep_complete = false;
 }
 
+fn assert_scalar_sweep_callbacks(finalized: &[GcRef], object: GcRef) {
+    // gc-debug retains per-object lifetime hooks. Normal builds can reclaim
+    // an entirely dead scalar block without calling a native finalizer.
+    let expected = if cfg!(feature = "gc-debug") {
+        core::slice::from_ref(&object)
+    } else {
+        &[]
+    };
+    assert_eq!(finalized, expected);
+}
+
 #[test]
 fn bounded_step_never_exceeds_requested_work_units() {
     let mut gc = Gc::new();
@@ -730,6 +741,7 @@ fn explicit_max_objects_keeps_its_earlier_admission_limit() {
 }
 
 #[test]
+#[cfg(not(feature = "gc-debug"))]
 fn runtime_allocation_returns_unconsumed_value_slot_region_admission() {
     let mut gc = Gc::with_memory_config(VmMemoryConfig {
         initial_reserve_bytes: heap::HEAP_BLOCK_SIZE,
@@ -762,6 +774,7 @@ fn runtime_allocation_returns_unconsumed_value_slot_region_admission() {
 }
 
 #[test]
+#[cfg(not(feature = "gc-debug"))]
 fn value_slot_allocations_consume_one_shared_admitted_region() {
     let mut gc = Gc::with_memory_config(VmMemoryConfig {
         initial_reserve_bytes: heap::HEAP_BLOCK_SIZE,
@@ -836,6 +849,93 @@ fn value_slot_region_bitmap_cursor_is_relative_to_its_heap_block() {
 }
 
 #[test]
+#[cfg(not(feature = "gc-debug"))]
+fn equal_size_regions_publish_each_objects_exact_type() {
+    let mut gc = Gc::new();
+    let metas = [
+        ValueMeta::new(0, ValueKind::Int),
+        ValueMeta::new(0, ValueKind::Uint),
+    ];
+    for index in 0..256 {
+        let meta = metas[index % 2];
+        let object = gc.try_alloc_value_slots_in_region(meta, 1).unwrap();
+        assert_eq!(unsafe { Gc::header(object) }.value_meta(), meta);
+        assert_eq!(gc.canonicalize_ref(object), Some(object));
+        assert_ne!(gc.active_value_slot_allocation_region, u8::MAX);
+        assert_eq!(gc.object_count(), index + 1);
+    }
+    let object = gc.try_alloc_value_slots_in_region(metas[1], 1).unwrap();
+    assert_eq!(gc.canonicalize_ref(object), Some(object));
+    assert_ne!(gc.active_value_slot_allocation_region, u8::MAX);
+    gc.close_value_slot_allocation_region_for_boundary();
+    let stats = gc.memory_stats();
+    assert_eq!(stats.object_count, 257);
+    assert_eq!(
+        stats.allocation_bytes_total,
+        257 * (GcHeader::SIZE + SLOT_BYTES) as u64
+    );
+}
+
+#[test]
+#[cfg(not(feature = "gc-debug"))]
+fn mixed_size_regions_back_off_without_losing_single_size_throughput() {
+    let mut gc = Gc::new();
+    let meta = ValueMeta::new(0, ValueKind::Int);
+    let mut preparations = 0;
+    let mut speculative_cells = 0;
+    let mut expected_bytes = 0;
+    for index in 0..1024 {
+        let slots = 1 + (index % 2) as u16;
+        let object = gc.try_alloc_value_slots_in_region(meta, slots).unwrap();
+        assert_eq!(gc.canonicalize_ref(object), Some(object));
+        preparations += usize::from(gc.active_value_slot_allocation_region != u8::MAX);
+        speculative_cells += usize::from(gc.value_slot_region_admitted);
+        expected_bytes += GcHeader::SIZE + usize::from(slots) * SLOT_BYTES;
+    }
+    assert!(
+        preparations < 32,
+        "excessive speculative batches: {preparations}"
+    );
+    assert!(
+        speculative_cells < 256,
+        "excessive speculative header initialization: {speculative_cells}"
+    );
+    for _ in 0..256 {
+        gc.try_alloc_value_slots_in_region(meta, 1).unwrap();
+        expected_bytes += GcHeader::SIZE + SLOT_BYTES;
+    }
+    assert_ne!(gc.active_value_slot_allocation_region, u8::MAX);
+    assert_eq!(gc.value_slot_region_backoff, 0);
+    gc.close_value_slot_allocation_region_for_boundary();
+    assert_eq!(gc.object_count(), 1280);
+    assert_eq!(
+        gc.memory_stats().allocation_bytes_total,
+        expected_bytes as u64
+    );
+}
+
+#[test]
+fn runtime_boundaries_do_not_classify_a_stable_size_as_churn() {
+    let mut gc = Gc::new();
+    let meta = ValueMeta::new(0, ValueKind::Int);
+    for _ in 0..32 {
+        for _ in 0..8 {
+            gc.try_alloc_value_slots_in_region(meta, 1).unwrap();
+        }
+        // A GC poll, statistics read, or other runtime boundary returns
+        // the remainder of a region even when every allocation has one size.
+        gc.close_value_slot_allocation_region_for_boundary();
+        assert_eq!(gc.value_slot_region_backoff, 0);
+        assert_eq!(gc.value_slot_region_cooldown, 0);
+    }
+    assert_eq!(gc.object_count(), 256);
+    assert_eq!(
+        gc.memory_stats().allocation_bytes_total,
+        256 * (GcHeader::SIZE + SLOT_BYTES) as u64
+    );
+}
+
+#[test]
 fn one_off_value_slot_allocation_does_not_open_a_region() {
     let mut gc = Gc::new();
     let object = gc
@@ -847,6 +947,7 @@ fn one_off_value_slot_allocation_does_not_open_a_region() {
 }
 
 #[test]
+#[cfg(not(feature = "gc-debug"))]
 fn enabling_stress_closes_and_disables_value_slot_regions() {
     let mut gc = Gc::new();
     let meta = ValueMeta::new(0, ValueKind::Struct);
@@ -866,6 +967,7 @@ fn enabling_stress_closes_and_disables_value_slot_regions() {
 }
 
 #[test]
+#[cfg(not(feature = "gc-debug"))]
 fn value_slot_region_admission_is_exact_at_close_and_respects_object_limit() {
     let mut gc = Gc::with_memory_config(VmMemoryConfig {
         initial_reserve_bytes: heap::HEAP_BLOCK_SIZE,
@@ -898,6 +1000,7 @@ fn value_slot_region_admission_is_exact_at_close_and_respects_object_limit() {
 }
 
 #[test]
+#[cfg(not(feature = "gc-debug"))]
 fn value_slot_region_switch_refunds_the_previous_size_class() {
     let mut gc = Gc::with_memory_config(VmMemoryConfig {
         initial_reserve_bytes: 2 * heap::HEAP_BLOCK_SIZE,
@@ -913,12 +1016,21 @@ fn value_slot_region_switch_refunds_the_previous_size_class() {
     assert_eq!(gc.object_count(), 0);
     let second_size = GcHeader::SIZE + 2 * SLOT_BYTES;
     gc.prepare_value_slot_allocation_region(second_size, meta, 2);
+    assert_eq!(gc.active_value_slot_allocation_region, u8::MAX);
+    assert_eq!(
+        gc.live_object_count, 0,
+        "switch refunds admission before backing off"
+    );
+    assert_eq!(gc.memory_stats().allocated_span_bytes, 0);
+    for _ in 0..8 {
+        gc.prepare_value_slot_allocation_region(second_size, meta, 2);
+    }
 
     let second_class = heap::allocation_class(second_size).expect("small class").0;
     assert_eq!(gc.active_value_slot_allocation_region, second_class as u8);
     assert_eq!(
-        gc.live_object_count, 8,
-        "the old admission must be refunded"
+        gc.live_object_count, 4,
+        "the old admission must be refunded before the bounded retry probe"
     );
     assert_eq!(gc.object_count(), 0);
     assert!(gc.value_slot_allocation_regions[0].cursor.is_null());
@@ -928,12 +1040,91 @@ fn value_slot_region_switch_refunds_the_previous_size_class() {
 }
 
 #[test]
+#[cfg(feature = "gc-debug")]
+fn debug_value_slot_allocation_preserves_individual_lifetime_hooks() {
+    struct DebugSession;
+    impl Drop for DebugSession {
+        fn drop(&mut self) {
+            crate::gc_debug::disable();
+            crate::gc_debug::reset();
+        }
+    }
+    crate::gc_debug::reset();
+    crate::gc_debug::enable();
+    let _session = DebugSession;
+    let mut gc = Gc::with_memory_config(VmMemoryConfig {
+        initial_reserve_bytes: heap::HEAP_BLOCK_SIZE,
+        growth_allowed: false,
+        max_objects: Some(4),
+        ..VmMemoryConfig::default()
+    })
+    .expect("bounded debug collector");
+
+    for index in 0..4 {
+        let kind = if index % 2 == 0 {
+            ValueKind::Int
+        } else {
+            ValueKind::Uint
+        };
+        let meta = ValueMeta::new(0, kind);
+        let object = gc.try_alloc_value_slots_in_region(meta, 1).unwrap();
+        assert_eq!(gc.canonicalize_ref(object), Some(object));
+        assert_eq!(test_header(object).value_meta(), meta);
+        assert!(test_header(object).is_value_slots_object());
+        assert_eq!(unsafe { Gc::read_slot(object, 0) }, 0);
+        assert_eq!(gc.active_value_slot_allocation_region, u8::MAX);
+        assert_eq!(gc.object_count(), index + 1);
+    }
+    assert_eq!(
+        gc.memory_stats().allocation_bytes_total,
+        4 * (GcHeader::SIZE + SLOT_BYTES) as u64
+    );
+    assert_eq!(crate::gc_debug::stats().total_allocs, 4);
+    assert_eq!(
+        gc.try_alloc_value_slots_in_region(ValueMeta::new(0, ValueKind::Int), 1),
+        Err(MemoryError::MetadataExhausted)
+    );
+    let mut callbacks = 0;
+    for _ in 0..32 {
+        gc_step(&mut gc, |_| {}, |_, _| {}, |_| callbacks += 1);
+        if gc.state() == GcState::Pause {
+            break;
+        }
+    }
+    assert_eq!(gc.state(), GcState::Pause);
+    assert_eq!(gc.object_count(), 0);
+    assert_eq!(gc.total_bytes(), 0);
+    assert_eq!(callbacks, 4);
+    assert_eq!(crate::gc_debug::stats().total_frees, 4);
+    assert_eq!(crate::gc_debug::stats().violations_found, 0);
+}
+
+#[test]
 fn test_canonicalize_ref_base_uses_base_index() {
     let mut gc = Gc::new();
     let meta = ValueMeta::new(1, ValueKind::Struct);
     let obj = gc.alloc(meta, 2);
 
     assert_eq!(gc.canonicalize_ref(obj), Some(obj));
+}
+
+#[test]
+fn dead_white_query_handles_nil_invalid_and_interior_references() {
+    let mut gc = Gc::new();
+    assert!(!gc.is_dead_white(core::ptr::null_mut()));
+    assert!(!gc.is_dead_white(0x1000usize as GcRef));
+
+    let object = gc.alloc(ValueMeta::new(0, ValueKind::Int), 2);
+    let interior = unsafe { object.add(1) };
+    assert!(!gc.is_dead_white(object));
+    assert!(!gc.is_dead_white(interior));
+    let dead_white = gc.other_white();
+    test_header_mut(object).marked = dead_white;
+    assert!(gc.is_dead_white(object));
+    assert!(gc.is_dead_white(interior));
+
+    let foreign_gc = Gc::new();
+    assert!(!foreign_gc.is_dead_white(object));
 }
 
 #[test]
@@ -1120,10 +1311,7 @@ fn test_sweep_removes_dead_object_from_live_index() {
     }
 
     assert!(work > 0);
-    assert!(
-        finalized.is_empty(),
-        "plain block needs no native finalizer"
-    );
+    assert_scalar_sweep_callbacks(&finalized, obj);
     assert_eq!(gc.state(), GcState::Pause);
     assert_eq!(gc.object_count(), 0);
     assert_eq!(gc.canonicalize_ref(obj), None);
@@ -1145,38 +1333,108 @@ fn test_zero_slot_struct_sweeps_as_header_only_object() {
         }
     }
 
-    assert!(
-        finalized.is_empty(),
-        "plain block needs no native finalizer"
-    );
+    assert_scalar_sweep_callbacks(&finalized, obj);
     assert_eq!(gc.total_bytes(), 0);
     assert_eq!(gc.object_count(), 0);
 }
 
 #[test]
 fn bulk_sweep_preserves_native_finalizer_callbacks() {
+    use crate::objects::queue_state::{QueueData, QueueKind};
+
+    for kind in [QueueKind::Chan, QueueKind::Port] {
+        let mut gc = Gc::new();
+        let scalar = ValueMeta::new(0, ValueKind::Uint64);
+        let queue = crate::objects::queue::create(
+            &mut gc,
+            kind,
+            scalar,
+            crate::ValueRttid::new(0, ValueKind::Uint64),
+            1,
+            0,
+        );
+        let mut finalized = Vec::new();
+
+        for _ in 0..32 {
+            gc_step(
+                &mut gc,
+                |_| {},
+                |gc, obj| test_scan_object(gc, obj, &[], &empty_closure_scan_layout),
+                |dead| {
+                    assert_eq!(dead, queue);
+                    assert_ne!(unsafe { QueueData::as_ref(dead) }.state, 0);
+                    unsafe { crate::gc_types::finalize_object(dead) };
+                    assert_eq!(unsafe { QueueData::as_ref(dead) }.state, 0);
+                    finalized.push(dead);
+                },
+            );
+            if gc.state() == GcState::Pause && gc.object_count() == 0 {
+                break;
+            }
+        }
+
+        assert_eq!(finalized, vec![queue]);
+        assert_eq!(gc.object_count(), 0);
+    }
+}
+
+#[test]
+fn managed_maps_reclaim_without_native_finalizers_under_one_unit_steps() {
     let mut gc = Gc::new();
     let scalar = ValueMeta::new(0, ValueKind::Uint64);
-    let map = crate::objects::map::create(&mut gc, scalar, scalar, 1, 1, 0);
+    let maps: Vec<_> = (0..128)
+        .map(|_| crate::objects::map::create(&mut gc, scalar, scalar, 1, 1, 0))
+        .collect();
     let mut finalized = Vec::new();
-
-    for _ in 0..32 {
-        gc_step(
-            &mut gc,
-            |_| {},
-            |gc, obj| test_scan_object(gc, obj, &[], &empty_closure_scan_layout),
-            |dead| {
-                finalized.push(dead);
-                unsafe { crate::gc_types::finalize_object(dead) };
-            },
-        );
-        if gc.state() == GcState::Pause && gc.object_count() == 0 {
+    gc.gc_request_cycle();
+    for _ in 0..1024 {
+        let work = unsafe {
+            gc.step_with_scanners_budget(
+                GcRootState::MayHaveChanged,
+                1,
+                |_, _, _| GcRootScanChunk::complete(0),
+                |_, _, _, _| GcObjectScanChunk::complete(0),
+                |dead| {
+                    crate::gc_types::finalize_object(dead);
+                    finalized.push(dead);
+                },
+            )
+        };
+        assert!(work <= SLOT_BYTES);
+        if gc.state() == GcState::Pause {
             break;
         }
     }
-
-    assert_eq!(finalized, vec![map]);
+    assert_eq!(gc.state(), GcState::Pause);
     assert_eq!(gc.object_count(), 0);
+    assert_eq!(gc.total_bytes(), 0);
+    for map in &maps {
+        assert_eq!(gc.canonicalize_ref(*map), None);
+    }
+    if cfg!(feature = "gc-debug") {
+        assert_eq!(finalized, maps);
+    } else {
+        assert!(finalized.is_empty());
+    }
+}
+
+#[test]
+fn native_finalizer_predicate_distinguishes_objects_and_value_boxes() {
+    for kind in [ValueKind::Channel, ValueKind::Port] {
+        let meta = ValueMeta::new(0, kind);
+        let mut header =
+            GcHeader::new_with_white(meta, crate::objects::queue_state::DATA_SLOTS, WHITE0_BIT);
+        assert!(header.requires_native_finalizer());
+        header.set_value_slots_object();
+        assert!(!header.requires_native_finalizer());
+        assert!(!GcHeader::new_with_white(meta, 1, WHITE0_BIT).requires_native_finalizer());
+    }
+    assert!(!GcHeader::new_with_white(
+        ValueMeta::new(0, ValueKind::Map),
+        crate::objects::map::DATA_SLOTS,
+        WHITE0_BIT,
+    )
+    .requires_native_finalizer());
 }
 
 #[test]
@@ -1349,12 +1607,23 @@ fn test_active_gc_cycle_keeps_stepping_without_new_debt() {
 
     assert!(!gc.should_step());
 
-    gc.state = GcState::Propagate;
-    gc.debt = 0;
+    // Start through the public collector boundary, with no allocation debt.
+    // Synthetic state writes would bypass the shared poll publication rule.
+    let work = gc_step(&mut gc, |_| {}, |_, _| {}, |_| {});
+    assert_eq!(work, 0);
+    assert_eq!(gc.state(), GcState::Atomic);
+    assert!(gc.debt() <= 0);
     assert!(gc.should_step());
 
-    gc.state = GcState::Sweep;
+    let work = gc_step(&mut gc, |_| {}, |_, _| {}, |_| {});
+    assert_eq!(work, 0);
+    assert_eq!(gc.state(), GcState::Sweep);
+    assert!(gc.debt() <= 0);
     assert!(gc.should_step());
+
+    gc_step(&mut gc, |_| {}, |_, _| {}, |_| {});
+    assert_eq!(gc.state(), GcState::Pause);
+    assert!(!gc.should_step());
 }
 
 #[test]
@@ -1428,7 +1697,7 @@ fn test_step_stats_record_mark_work() {
 fn test_step_stats_record_sweep_frees() {
     let mut gc = Gc::new();
     let meta = ValueMeta::new(1, ValueKind::Struct);
-    let _dead = gc.alloc(meta, 0);
+    let dead = gc.alloc(meta, 0);
     let mut finalized = Vec::new();
 
     gc_step(&mut gc, |_| {}, |_, _| {}, |_| {});
@@ -1438,10 +1707,7 @@ fn test_step_stats_record_sweep_frees() {
     let work = gc_step(&mut gc, |_| {}, |_, _| {}, |obj| finalized.push(obj));
     let stats = gc.last_step_stats();
 
-    assert!(
-        finalized.is_empty(),
-        "plain block needs no native finalizer"
-    );
+    assert_scalar_sweep_callbacks(&finalized, dead);
     assert_eq!(stats.phase_before, GcState::Sweep);
     assert_eq!(stats.phase_after, GcState::Pause);
     assert!(stats.cycle_finished);
@@ -1667,6 +1933,39 @@ fn test_sweep_allocated_clone_scans_copied_old_child() {
     assert_eq!(gc.canonicalize_ref(clone), Some(clone));
     assert_eq!(gc.canonicalize_ref(child), Some(child));
     assert_eq!(gc.canonicalize_ref(child_array), Some(child_array));
+}
+
+#[test]
+fn test_fresh_slice_descriptor_rescues_owner_during_sweep() {
+    use crate::objects::{array, slice};
+
+    let mut gc = Gc::new();
+    let source = slice::create(&mut gc, ValueMeta::new(0, ValueKind::Int), SLOT_BYTES, 1, 2);
+    let owner = unsafe { slice::owner_ref(source) };
+    unsafe { array::data_ptr_bytes(owner).cast::<u64>().write(37) };
+    gc.current_white ^= WHITE_BITS;
+    begin_test_sweep(&mut gc);
+    gc.sweep_budget = usize::MAX;
+
+    let copied = unsafe { slice::try_with_new_len(&mut gc, source, 2) }.unwrap();
+    assert!(test_header(copied).is_gray());
+    let mut finalized = Vec::new();
+    gc_step(
+        &mut gc,
+        |gc| gc.mark_gray(copied),
+        |gc, obj| test_scan_object(gc, obj, &[], &empty_closure_scan_layout),
+        |dead| finalized.push(dead),
+    );
+
+    assert_eq!(gc.state(), GcState::Pause);
+    assert!(!finalized.contains(&owner));
+    assert!(!finalized.contains(&copied));
+    assert_eq!(gc.canonicalize_ref(owner), Some(owner));
+    assert_eq!(gc.canonicalize_ref(copied), Some(copied));
+    assert_eq!(
+        unsafe { array::data_ptr_bytes(owner).cast::<u64>().read() },
+        37
+    );
 }
 
 #[test]
@@ -1918,4 +2217,155 @@ fn jit_gc_poll_fields_match_should_step_policy() {
     assert_poll(&gc);
     gc.set_stress_every_step(true);
     assert_poll(&gc);
+}
+
+#[test]
+fn one_unit_collection_finishes_reclaiming_large_garbage_in_both_modes() {
+    for mode in [GcMode::Generational, GcMode::Incremental] {
+        let mut gc = Gc::with_memory_config(VmMemoryConfig {
+            automatic_gc: false,
+            gc_mode: mode,
+            initial_reserve_bytes: 4 * heap::HEAP_BLOCK_SIZE,
+            hard_limit_bytes: Some(4 * heap::HEAP_BLOCK_SIZE),
+            ..VmMemoryConfig::default()
+        })
+        .unwrap();
+        let root = gc
+            .try_alloc(ValueMeta::new(0, ValueKind::Int64), 1)
+            .unwrap();
+        unsafe {
+            root.write(123);
+        }
+        // Three blocks including the header, leaving the live scalar in its
+        // independent small block. No references or native finalizers occur.
+        let dead = gc
+            .try_alloc_value_slots(ValueMeta::new(0, ValueKind::Int64), 24_575)
+            .unwrap();
+        let allocated_before = gc.memory_stats().allocation_bytes_total;
+        gc.gc_request_cycle();
+        let mut completed = false;
+        for _ in 0..1024 {
+            let work = unsafe {
+                gc.step_with_scanners_budget(
+                    GcRootState::StableSinceLastScan,
+                    1,
+                    |gc, _, limit| {
+                        assert!(limit >= SLOT_BYTES);
+                        gc.mark_gray(root);
+                        GcRootScanChunk::complete(SLOT_BYTES)
+                    },
+                    |_, _, _, _| GcObjectScanChunk::complete(0),
+                    |_| {},
+                )
+            };
+            assert!(work <= SLOT_BYTES);
+            if gc.state() == GcState::Pause && gc.memory_stats().cycle_id != 0 {
+                completed = true;
+                break;
+            }
+        }
+        assert!(
+            completed,
+            "one-unit collection must make progress: {:?}",
+            gc.memory_stats()
+        );
+        assert_eq!(unsafe { root.read() }, 123);
+        assert_eq!(gc.canonicalize_ref(root), Some(root));
+        assert!(gc.canonicalize_ref(dead).is_none());
+        let stats = gc.memory_stats();
+        assert_eq!(stats.object_count, 1);
+        assert_eq!(stats.pending_reclaim_bytes, 0);
+        assert_eq!(stats.allocation_bytes_total, allocated_before);
+    }
+}
+
+#[test]
+fn extension_proxy_rejects_owner_queries_before_reading_local_state() {
+    unsafe extern "C" fn alloc(
+        _: *mut core::ffi::c_void,
+        _: u32,
+        _: u8,
+        _: u16,
+        _: usize,
+    ) -> GcRef {
+        core::ptr::null_mut()
+    }
+    unsafe extern "C" fn canonicalize(_: *mut core::ffi::c_void, object: GcRef) -> GcRef {
+        object
+    }
+    unsafe extern "C" fn mark(_: *mut core::ffi::c_void, _: GcRef) {}
+    unsafe extern "C" fn barrier(_: *mut core::ffi::c_void, _: GcRef, _: GcRef) {}
+    let mut proxy = Gc::with_owner_dispatch(GcOwnerDispatch {
+        state: core::ptr::null_mut(),
+        alloc,
+        canonicalize,
+        mark_gray: mark,
+        mark_allocated_for_scan: mark,
+        write_barrier: barrier,
+    });
+    // A facade's empty local fields must never look like a usable collector.
+    // Exercise hot reads, telemetry and mutations through the public methods.
+    let operations: &[(&str, fn(&mut Gc))] = &[
+        ("should_step", |gc| {
+            let _ = gc.should_step();
+        }),
+        ("last_memory_error", |gc| {
+            let _ = gc.last_memory_error();
+        }),
+        ("state", |gc| {
+            let _ = gc.state();
+        }),
+        ("memory_stats", |gc| {
+            let _ = gc.memory_stats();
+        }),
+        ("gc_request_major", |gc| gc.gc_request_major()),
+    ];
+    for &(name, operation) in operations {
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            operation(&mut proxy);
+        }))
+        .expect_err("a facade must reject direct collector access");
+        let message = failure.downcast_ref::<String>().expect("formatted panic");
+        assert!(
+            message.contains(&format!("collector API `{name}`")),
+            "{message}"
+        );
+        assert!(message.contains("allocator-neutral ExternCallContext helper"));
+    }
+}
+
+#[test]
+fn explicit_gc_step_publishes_poll_state_before_root_callbacks() {
+    let mut gc = Gc::new();
+    assert!(!gc.should_step());
+    let mut root_callbacks = 0;
+    let work = unsafe {
+        gc.step_with_scanners_budget(
+            GcRootState::StableSinceLastScan,
+            1,
+            |gc, _, limit| {
+                assert_eq!(limit, SLOT_BYTES);
+                root_callbacks += 1;
+                assert!(
+                    gc.should_step(),
+                    "an explicitly started cycle needs progress"
+                );
+                let raw = core::ptr::from_ref(gc)
+                    .cast::<u8>()
+                    .add(JitGcPollField::Required.offset() as usize)
+                    .read();
+                assert_ne!(
+                    raw, 0,
+                    "native poll flag must be published before callbacks"
+                );
+                GcRootScanChunk::pending(SLOT_BYTES)
+            },
+            |_, _, _, _| GcObjectScanChunk::complete(0),
+            |_| {},
+        )
+    };
+    assert_eq!(root_callbacks, 1);
+    assert_eq!(work, SLOT_BYTES);
+    assert_eq!(gc.state(), GcState::Propagate);
+    assert!(gc.should_step());
 }

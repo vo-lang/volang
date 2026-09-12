@@ -188,37 +188,41 @@ pub(crate) fn initialize_native_stack_budget<'a>(emitter: &mut impl IrEmitter<'a
     emitter.builder().seal_block(ready);
 }
 
-fn native_chain_exhausted<'a>(
-    emitter: &mut impl IrEmitter<'a>,
-    depth: Value,
-    limit: Value,
-) -> Value {
+fn emit_native_chain_guard<'a, E: IrEmitter<'a>>(emitter: &mut E, trampoline: Block) -> Value {
+    let depth = emitter.load_context_field(types::I32, JitContextField::CallDepth);
+    let limit = emitter.load_context_field(types::I32, JitContextField::CallDepthLimit);
     let too_deep = emitter
         .builder()
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, depth, limit);
+    let check_stack = emitter.builder().create_block();
+    emitter
+        .builder()
+        .ins()
+        .brif(too_deep, trampoline, &[], check_stack, &[]);
+    emitter.builder().switch_to_block(check_stack);
+    emitter.builder().seal_block(check_stack);
+
+    // Keep both failures on cold edges. Combining these comparisons into an
+    // integer boolean adds flag-to-register dependencies to every native call.
     let floor = emitter.load_context_field(types::I64, JitContextField::NativeStackFloor);
     let sp = emitter.builder().ins().get_stack_pointer(types::I64);
     let too_large = emitter
         .builder()
         .ins()
         .icmp(IntCC::UnsignedLessThan, sp, floor);
-    emitter.builder().ins().bor(too_deep, too_large)
-}
-
-pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(emitter: &mut E, trampoline: Block) -> Value {
-    let depth = emitter.load_context_field(types::I32, JitContextField::CallDepth);
-    let limit = emitter.load_context_field(types::I32, JitContextField::CallDepthLimit);
-    let overflow = native_chain_exhausted(emitter, depth, limit);
-
     let ok_block = emitter.builder().create_block();
     emitter
         .builder()
         .ins()
-        .brif(overflow, trampoline, &[], ok_block, &[]);
-
+        .brif(too_large, trampoline, &[], ok_block, &[]);
     emitter.builder().switch_to_block(ok_block);
     emitter.builder().seal_block(ok_block);
+    depth
+}
+
+pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(emitter: &mut E, trampoline: Block) -> Value {
+    let depth = emit_native_chain_guard(emitter, trampoline);
     emit_call_depth_increment(emitter, depth)
 }
 
@@ -367,31 +371,9 @@ pub(super) fn emit_effect_aware_direct_jit_call<'a, E: IrEmitter<'a>>(
     }
 }
 
-/// Load raw argument words from a validated frame window. Callers guarantee
-/// that `available_slots` words are addressable; unused lanes are zero-filled.
+/// Load raw argument words from a verified frame window. Each load is guarded
+/// by its target width; unused lanes are zero and cannot read beyond the frame.
 pub(super) fn load_native_arg_lanes<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-    frame_ptr: Value,
-    available_slots: usize,
-) -> [Value; crate::NATIVE_ARG_LANES] {
-    std::array::from_fn(|lane| {
-        if lane < available_slots {
-            emitter.builder().ins().load(
-                types::I64,
-                cranelift_codegen::ir::MemFlagsData::trusted(),
-                frame_ptr,
-                (lane * 8) as i32,
-            )
-        } else {
-            emitter.builder().ins().iconst(types::I64, 0)
-        }
-    })
-}
-
-/// Dynamic counterpart used by prepared calls. Each load is control-dependent
-/// on the verified target frame width, so a narrow frame never incurs a
-/// speculative out-of-bounds read.
-pub(super) fn load_native_arg_lanes_dynamic<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     frame_ptr: Value,
     available_slots: Value,

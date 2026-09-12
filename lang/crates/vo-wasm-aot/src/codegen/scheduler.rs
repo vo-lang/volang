@@ -371,7 +371,7 @@ pub(super) fn compile_synchronous_materialized_run(
 }
 
 pub(super) fn compile_run_defer(
-    _module: &VoModule,
+    _module: &ModuleAnalysis<'_>,
     _dispatch_index: u32,
     globals: RuntimeGlobals,
     nil_function_panic_ref: u32,
@@ -609,7 +609,9 @@ pub(super) fn compile_run_defer(
             offset: FRAME_FUNCTION_ID_OFFSET,
             align: 2,
             memory_index: 0,
-        }))
+        }));
+    emit_memory_call(&mut body, MEMORY_FRAME_REGISTER, &[W::LocalGet(CHILD_RAW)]);
+    body.instruction(&W::Drop)
         .instruction(&W::LocalGet(CHILD_RAW))
         .instruction(&W::LocalGet(0))
         .instruction(&W::I32Store(MemArg {
@@ -998,7 +1000,7 @@ pub(super) fn compile_run_defer(
 }
 
 pub(super) fn compile_scheduler_start(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     entry_function_id: u32,
     dispatch_index: u32,
     globals: RuntimeGlobals,
@@ -1047,6 +1049,8 @@ pub(super) fn compile_scheduler_start(
     }
 
     let mut body = Function::new([(11, ValType::I32)]);
+    body.instruction(&W::I32Const(0))
+        .instruction(&W::GlobalSet(globals.host_yield_requested));
     body.instruction(&W::GlobalGet(globals.scheduler_initialized))
         .instruction(&W::I32Eqz)
         .instruction(&W::If(BlockType::Empty))
@@ -1065,7 +1069,9 @@ pub(super) fn compile_scheduler_start(
             offset: FRAME_FUNCTION_ID_OFFSET,
             align: 2,
             memory_index: 0,
-        }))
+        }));
+    emit_memory_call(&mut body, MEMORY_FRAME_REGISTER, &[W::LocalGet(RAW_FRAME)]);
+    body.instruction(&W::Drop)
         .instruction(&W::LocalGet(RAW_FRAME))
         .instruction(&W::I32Const(entry_bytes as i32))
         .instruction(&W::I32Store(MemArg {
@@ -1076,11 +1082,17 @@ pub(super) fn compile_scheduler_start(
         .instruction(&W::LocalGet(RAW_FRAME))
         .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
         .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(FRAME))
-        .instruction(&W::I32Const(island_state_bytes as i32));
-    select_allocation_descriptor(&mut body, island_state_descriptor, globals);
-    body.instruction(&W::Call(1))
-        .instruction(&W::LocalTee(ISLAND_STATE))
+        .instruction(&W::LocalSet(FRAME));
+    emit_memory_call(
+        &mut body,
+        MEMORY_ISLAND_NEW,
+        &[
+            W::I32Const(island_state_bytes as i32),
+            W::I32Const(island_state_descriptor as i32),
+            W::I32Const(1),
+        ],
+    );
+    body.instruction(&W::LocalTee(ISLAND_STATE))
         .instruction(&W::I32Eqz)
         .instruction(&W::If(BlockType::Empty));
     return_status(&mut body, STATUS_OUT_OF_MEMORY);
@@ -1092,7 +1104,7 @@ pub(super) fn compile_scheduler_start(
         .instruction(&W::I32Const(
             (FRAME_STATE_BYTES + FIBER_RECORD_BYTES) as i32,
         ))
-        .instruction(&W::I32Const(FRAME_ALLOC_ZEROED))
+        .instruction(&W::I32Const(FRAME_ALLOC_FIBER))
         .instruction(&W::Call(FRAME_ALLOC_FUNCTION_INDEX))
         .instruction(&W::LocalTee(RECORD))
         .instruction(&W::I32Eqz)
@@ -1166,7 +1178,9 @@ pub(super) fn compile_scheduler_start(
     body.instruction(&W::LocalGet(RECORD))
         .instruction(&W::GlobalSet(globals.fiber_head))
         .instruction(&W::LocalGet(RECORD))
-        .instruction(&W::GlobalSet(globals.fiber_tail))
+        .instruction(&W::GlobalSet(globals.fiber_tail));
+    emit_memory_call(&mut body, MEMORY_FIBER_READY, &[W::LocalGet(RECORD)]);
+    body.instruction(&W::Drop)
         .instruction(&W::I32Const(1))
         .instruction(&W::GlobalSet(globals.scheduler_initialized))
         .instruction(&W::End)
@@ -1177,8 +1191,15 @@ pub(super) fn compile_scheduler_start(
         .instruction(&W::GlobalSet(globals.scheduler_progress))
         .instruction(&W::I32Const(0))
         .instruction(&W::GlobalSet(globals.host_wait_pending))
-        .instruction(&W::GlobalGet(globals.fiber_head))
-        .instruction(&W::LocalSet(CURRENT_FIBER))
+        .instruction(&W::GlobalGet(globals.gc_debt))
+        .instruction(&W::I32Const(GC_DEBT_TRIGGER_BYTES))
+        .instruction(&W::I32GeU)
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::Call(GC_COLLECT_FUNCTION_INDEX))
+        .instruction(&W::Drop)
+        .instruction(&W::End);
+    emit_memory_call(&mut body, MEMORY_SCHEDULE, &[]);
+    body.instruction(&W::LocalSet(CURRENT_FIBER))
         .instruction(&W::I32Const(0))
         .instruction(&W::LocalSet(PREVIOUS_FIBER))
         .instruction(&W::I32Const(0))
@@ -1187,7 +1208,27 @@ pub(super) fn compile_scheduler_start(
         .instruction(&W::Loop(BlockType::Empty))
         .instruction(&W::LocalGet(CURRENT_FIBER))
         .instruction(&W::I32Eqz)
-        .instruction(&W::BrIf(1))
+        .instruction(&W::LocalGet(CURRENT_FIBER))
+        .instruction(&W::I32Const(-2))
+        .instruction(&W::I32GeU)
+        .instruction(&W::I32Or)
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::LocalGet(CURRENT_FIBER))
+        .instruction(&W::I32Const(-1))
+        .instruction(&W::I32Eq)
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::I32Const(STATUS_YIELD))
+        .instruction(&W::Return)
+        .instruction(&W::End)
+        .instruction(&W::LocalGet(CURRENT_FIBER))
+        .instruction(&W::I32Const(-2))
+        .instruction(&W::I32Eq)
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::I32Const(STATUS_WOULD_BLOCK))
+        .instruction(&W::Return)
+        .instruction(&W::End)
+        .instruction(&W::Br(2))
+        .instruction(&W::End)
         .instruction(&W::LocalGet(CURRENT_FIBER))
         .instruction(&W::I64Load(MemArg {
             offset: FIBER_STATE_OFFSET,
@@ -1221,6 +1262,26 @@ pub(super) fn compile_scheduler_start(
             memory_index: 0,
         }))
         .instruction(&W::GlobalSet(globals.frame_limit))
+        .instruction(&W::LocalGet(CALL_STEPS))
+        .instruction(&W::I32Eqz)
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::I32Const(SCHEDULER_BLOCK_QUANTUM))
+        .instruction(&W::GlobalSet(globals.execution_quantum))
+        .instruction(&W::End)
+        .instruction(&W::GlobalGet(globals.memory_failed))
+        .instruction(&W::If(BlockType::Result(ValType::I32)))
+        .instruction(&W::I32Const(MEMORY_ISLAND_STATUS))
+        .instruction(&W::I32Const(-1))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::Call(0))
+        .instruction(&W::Else)
+        .instruction(&W::I32Const(0))
+        .instruction(&W::End)
+        .instruction(&W::If(BlockType::Result(ValType::I32)))
+        .instruction(&W::I32Const(STATUS_OUT_OF_MEMORY))
+        .instruction(&W::Else)
         .instruction(&W::LocalGet(CURRENT_FIBER))
         .instruction(&W::I32Load(MemArg {
             offset: FIBER_FUNCTION_OFFSET,
@@ -1229,7 +1290,29 @@ pub(super) fn compile_scheduler_start(
         }))
         .instruction(&W::LocalGet(FRAME))
         .instruction(&W::Call(dispatch_index))
+        .instruction(&W::End)
         .instruction(&W::LocalSet(STATUS))
+        .instruction(&W::GlobalGet(globals.memory_failed))
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::I32Const(MEMORY_ISLAND_STATUS))
+        .instruction(&W::LocalGet(STATUS))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::Call(0))
+        .instruction(&W::LocalSet(STATUS))
+        .instruction(&W::End)
+        .instruction(&W::LocalGet(STATUS))
+        .instruction(&W::I32Const(STATUS_YIELD))
+        .instruction(&W::I32Eq)
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::I32Const(1))
+        .instruction(&W::GlobalSet(globals.host_yield_requested))
+        .instruction(&W::I32Const(1))
+        .instruction(&W::GlobalSet(globals.scheduler_progress))
+        .instruction(&W::I32Const(STATUS_WOULD_BLOCK))
+        .instruction(&W::LocalSet(STATUS))
+        .instruction(&W::End)
         .instruction(&W::GlobalGet(globals.gc_debt))
         .instruction(&W::I32Const(GC_DEBT_TRIGGER_BYTES))
         .instruction(&W::I32GeU)
@@ -1363,7 +1446,13 @@ pub(super) fn compile_scheduler_start(
             align: 2,
             memory_index: 0,
         }))
-        .instruction(&W::LocalSet(NEXT_FIBER))
+        .instruction(&W::LocalSet(NEXT_FIBER));
+    emit_memory_call(
+        &mut body,
+        MEMORY_FIBER_PREVIOUS,
+        &[W::LocalGet(CURRENT_FIBER)],
+    );
+    body.instruction(&W::LocalSet(PREVIOUS_FIBER))
         .instruction(&W::LocalGet(PREVIOUS_FIBER))
         .instruction(&W::If(BlockType::Empty))
         .instruction(&W::LocalGet(PREVIOUS_FIBER))
@@ -1411,8 +1500,10 @@ pub(super) fn compile_scheduler_start(
         .instruction(&W::I32Sub)
         .instruction(&W::Call(FRAME_FREE_FUNCTION_INDEX))
         .instruction(&W::Drop)
-        .instruction(&W::LocalGet(NEXT_FIBER))
-        .instruction(&W::LocalSet(CURRENT_FIBER))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::LocalSet(CALL_STEPS));
+    emit_memory_call(&mut body, MEMORY_SCHEDULE, &[]);
+    body.instruction(&W::LocalSet(CURRENT_FIBER))
         .instruction(&W::Br(2))
         .instruction(&W::Else)
         .instruction(&W::LocalGet(STATUS))
@@ -1431,20 +1522,31 @@ pub(super) fn compile_scheduler_start(
         .instruction(&W::End)
         .instruction(&W::End)
         .instruction(&W::End)
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(CURRENT_FIBER))
-        .instruction(&W::LocalSet(PREVIOUS_FIBER))
-        .instruction(&W::LocalGet(CURRENT_FIBER))
-        .instruction(&W::I32Load(MemArg {
-            offset: FIBER_NEXT_OFFSET,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::LocalSet(CURRENT_FIBER))
+        .instruction(&W::End);
+    // A quantum returns the current fiber to the tail only when no wait owns
+    // it. Preserve that position across an actual host yield.
+    body.instruction(&W::GlobalGet(globals.host_yield_requested))
+        .instruction(&W::If(BlockType::Empty));
+    emit_memory_call(
+        &mut body,
+        MEMORY_SCHEDULE,
+        &[W::LocalGet(CURRENT_FIBER), W::I32Const(1)],
+    );
+    body.instruction(&W::Drop)
+        .instruction(&W::I32Const(STATUS_YIELD))
+        .instruction(&W::Return)
+        .instruction(&W::End);
+    emit_memory_call(&mut body, MEMORY_SCHEDULE, &[W::LocalGet(CURRENT_FIBER)]);
+    body.instruction(&W::LocalSet(CURRENT_FIBER))
         .instruction(&W::I32Const(0))
         .instruction(&W::LocalSet(CALL_STEPS))
         .instruction(&W::Br(0))
         .instruction(&W::End)
+        .instruction(&W::End)
+        .instruction(&W::GlobalGet(globals.host_yield_requested))
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::I32Const(STATUS_YIELD))
+        .instruction(&W::Return)
         .instruction(&W::End)
         .instruction(&W::GlobalGet(globals.scheduler_progress))
         .instruction(&W::I32Eqz)

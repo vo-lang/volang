@@ -4,13 +4,16 @@
 mod collections;
 mod conversions;
 mod dispatch;
+mod float32;
 mod forloop;
 mod memory;
 mod runtime_ops;
 mod scalar;
 mod traps;
 
+pub(crate) use collections::{emit_slice_bounds_check_at, emit_slice_storage_address};
 pub use dispatch::translate_inst;
+pub(crate) use float32::emit_float32_bits;
 pub use forloop::emit_forloop_step;
 pub(crate) use memory::{fresh_ptr_get, fresh_ptr_set};
 pub(crate) use runtime_ops::materialize_scalar_replaced_ptr_new;

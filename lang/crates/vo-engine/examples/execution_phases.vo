@@ -1,0 +1,77 @@
+package main
+
+func first(x int) int { return x * 3 + 1 }
+func second(x int) int { return x * 3 + 3 }
+var operations = []func(int) int{first, second}
+
+func Arithmetic() {
+    total := 0
+    for i := 0; i < 4096; i++ { total += i }
+    assert(total == 8386560)
+    println("EXEC_OK")
+}
+
+func Calls() {
+    total := 0
+    for i := 0; i < 4096; i++ { total += operations[i & 1](i & 31) }
+    assert(total == 198656)
+    println("EXEC_OK")
+}
+
+func Maps() {
+    m := make(map[any]int)
+    for i := 0; i < 512; i++ { m[i] = i + 1 }
+    total := 0
+    for i := 0; i < 4096; i++ { total += m[i & 511] }
+    assert(total == 1050624)
+    println("EXEC_OK")
+}
+
+func Buffered() {
+    ch := make(chan int, 1)
+    total := 0
+    for i := 0; i < 1024; i++ { ch <- i; total += <-ch }
+    assert(total == 523776)
+    println("EXEC_OK")
+}
+
+func Rendezvous() {
+    ch := make(chan int)
+    done := make(chan bool)
+    go func() {
+        for i := 0; i < 512; i++ { ch <- i }
+        done <- true
+    }()
+    total := 0
+    for i := 0; i < 512; i++ { total += <-ch }
+    <-done
+    assert(total == 130816)
+    println("EXEC_OK")
+}
+
+func Select() {
+    a, b := make(chan int, 1), make(chan int, 1)
+    a <- 1
+    b <- 1
+    total := 0
+    for i := 0; i < 1024; i++ {
+        select {
+        case x := <-a: total += x; a <- 1
+        case x := <-b: total += x; b <- 1
+        }
+    }
+    assert(total == 1024)
+    println("EXEC_OK")
+}
+
+func finish(id int, done chan int) { done <- id }
+func Tasks() {
+    done := make(chan int, 32)
+    for i := 0; i < 32; i++ { go finish(i, done) }
+    total := 0
+    for i := 0; i < 32; i++ { total += <-done }
+    assert(total == 496)
+    println("EXEC_OK")
+}
+
+func main() {}

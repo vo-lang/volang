@@ -585,6 +585,12 @@ const fn extension_abi_fingerprint() -> u64 {
         core::mem::offset_of!(crate::objects::array::ArrayHeader, elem_meta) as u64,
         core::mem::offset_of!(crate::objects::array::ArrayHeader, elem_bytes) as u64,
         crate::objects::array::HEADER_SLOTS as u64,
+        core::mem::size_of::<crate::objects::string::StringData>() as u64,
+        core::mem::align_of::<crate::objects::string::StringData>() as u64,
+        core::mem::offset_of!(crate::objects::string::StringData, owner) as u64,
+        core::mem::offset_of!(crate::objects::string::StringData, data_ptr) as u64,
+        core::mem::offset_of!(crate::objects::string::StringData, len) as u64,
+        crate::objects::string::DATA_SLOTS as u64,
         core::mem::size_of::<crate::objects::slice::SliceData>() as u64,
         core::mem::align_of::<crate::objects::slice::SliceData>() as u64,
         core::mem::offset_of!(crate::objects::slice::SliceData, owner) as u64,
@@ -593,10 +599,10 @@ const fn extension_abi_fingerprint() -> u64 {
         core::mem::offset_of!(crate::objects::slice::SliceData, cap) as u64,
         core::mem::offset_of!(crate::objects::slice::SliceData, elem_meta) as u64,
         core::mem::offset_of!(crate::objects::slice::SliceData, elem_bytes) as u64,
-        core::mem::offset_of!(crate::objects::slice::SliceData, backing_ptr) as u64,
-        core::mem::offset_of!(crate::objects::slice::SliceData, backing_len) as u64,
+        core::mem::offset_of!(crate::objects::slice::ExtendedSliceData, backing_ptr) as u64,
+        core::mem::offset_of!(crate::objects::slice::ExtendedSliceData, backing_len) as u64,
         core::mem::offset_of!(crate::objects::slice::SliceData, storage_stride) as u64,
-        core::mem::offset_of!(crate::objects::slice::SliceData, storage_mode) as u64,
+        core::mem::offset_of!(crate::objects::slice::SliceData, layout) as u64,
         crate::objects::slice::DATA_SLOTS as u64,
         crate::objects::slice::FIELD_OWNER as u64,
         crate::objects::slice::FIELD_ARRAY as u64,
@@ -608,7 +614,14 @@ const fn extension_abi_fingerprint() -> u64 {
         crate::objects::slice::FIELD_BACKING_PTR as u64,
         crate::objects::slice::FIELD_BACKING_LEN as u64,
         crate::objects::slice::FIELD_STORAGE_STRIDE as u64,
-        crate::objects::slice::FIELD_STORAGE_MODE as u64,
+        crate::objects::slice::LAYOUT_BYTE_OFFSET as u64,
+        core::mem::size_of::<crate::objects::slice::ExtendedSliceData>() as u64,
+        core::mem::align_of::<crate::objects::slice::ExtendedSliceData>() as u64,
+        core::mem::offset_of!(crate::objects::slice::ExtendedSliceData, view) as u64,
+        crate::objects::slice::EXTENDED_DATA_SLOTS as u64,
+        crate::objects::slice::LAYOUT_CANONICAL_ARRAY as u64,
+        crate::objects::slice::LAYOUT_EXTENDED_PACKED as u64,
+        crate::objects::slice::LAYOUT_EXTENDED_FLAT as u64,
         crate::objects::slice::STORAGE_MODE_PACKED,
         crate::objects::slice::STORAGE_MODE_FLAT_SLOTS,
         core::mem::size_of::<crate::objects::closure::ClosureHeader>() as u64,
@@ -673,6 +686,8 @@ const fn extension_abi_fingerprint() -> u64 {
         ExternEffects::UNKNOWN_CONTROL.bits(),
     ];
     hash = hash_abi_words(hash, &words);
+    hash = hash_abi_words(hash, crate::objects::map::ABI_LAYOUT_WORDS);
+    hash = hash_abi_words(hash, crate::objects::map::BACKING_ABI_LAYOUT_WORDS);
     #[cfg(feature = "std")]
     {
         hash = hash_abi_words(hash, &extern_entry_layout_words());
@@ -683,9 +698,9 @@ const fn extension_abi_fingerprint() -> u64 {
 
 /// ABI fingerprint for native extensions.
 ///
-/// The table version catches intentional ABI epochs; this fingerprint catches
-/// accidental layout drift inside the epoch before an extension can interpret
-/// the host `ExternCallContext` with stale struct layouts.
+/// The table version catches intentional ABI epochs. The fingerprint covers
+/// layouts and shared representation algorithms, including Map key hashing,
+/// before an extension can access host-owned runtime state.
 pub const EXTENSION_ABI_FINGERPRINT: u64 = extension_abi_fingerprint();
 
 const EXT_ABI_STATUS_OK: u32 = 0;
@@ -4906,8 +4921,22 @@ mod native_abi_v10 {
         match value_meta.value_kind() {
             ValueKind::String | ValueKind::Slice => {
                 validate_native_zero_meta(value_meta)?;
-                let expected = usize::from(crate::objects::slice::DATA_SLOTS);
-                if total_slots != expected {
+                let expected = usize::from(if value_meta.value_kind() == ValueKind::String {
+                    crate::objects::string::DATA_SLOTS
+                } else {
+                    crate::objects::slice::DATA_SLOTS
+                });
+                let extended_slice = value_meta.value_kind() == ValueKind::Slice
+                    && total_slots == usize::from(crate::objects::slice::EXTENDED_DATA_SLOTS);
+                if total_slots != expected && !extended_slice {
+                    let expected = if value_meta.value_kind() == ValueKind::Slice {
+                        format!(
+                            "{expected} or {}",
+                            crate::objects::slice::EXTENDED_DATA_SLOTS
+                        )
+                    } else {
+                        expected.to_string()
+                    };
                     return Err(format!(
                         "native ABI {:?} allocation width {total_slots} does not match descriptor width {expected}",
                         value_meta.value_kind()

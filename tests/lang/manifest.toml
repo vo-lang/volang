@@ -3,6 +3,74 @@ suite = "lang"
 root = "tests/lang"
 
 [[case]]
+id = "backend-literal-reuse"
+kind = "file"
+path = "cases/runtime/core/backend_literal_reuse.vo"
+matrix = "backend-contract-gc"
+tags = ["runtime", "regression", "backend-contract", "gc", "string"]
+owner = "runtime"
+reason = "Literal reuse preserves immutable bytes, mutable conversion independence, interface equality and live closure/view roots across collection"
+expect = "pass"
+
+[[case]]
+id = "backend-scalar-composition"
+kind = "file"
+path = "cases/runtime/core/backend_scalar_composition.vo"
+matrix = "backend-contract-gc"
+tags = ["runtime", "codegen", "regression", "backend-contract", "gc", "numeric"]
+owner = "codegen"
+reason = "Bounded scalar call composition preserves narrow values, argument snapshots, multiple results, live roots and recovery in every backend"
+expect = "pass"
+
+[[case]]
+id = "backend-caller-variadic-sources"
+kind = "file"
+path = "cases/runtime/core/backend_caller_variadic_sources.vo"
+matrix = "backend-contract-gc"
+tags = ["runtime", "codegen", "regression", "backend-contract", "debug", "closure"]
+owner = "codegen"
+reason = "Source-run compression preserves exact Caller PCs after variadic argument allocation for static, closure, method and interface calls"
+expect = "pass"
+
+[[case]]
+id = "backend-slice-views"
+kind = "file"
+path = "cases/runtime/core/backend_slice_views.vo"
+matrix = "backend-contract-gc"
+tags = ["runtime", "regression", "backend-contract", "gc", "slice"]
+owner = "runtime"
+reason = "Nested packed, inline and global views preserve aliases, capacity, interface assertions and zero-width geometry"
+expect = "pass"
+
+[[case]]
+id = "backend-string-views"
+kind = "file"
+path = "cases/runtime/core/backend_string_views.vo"
+matrix = "backend-contract-gc"
+tags = ["runtime", "regression", "backend-contract", "gc", "string", "slice"]
+owner = "runtime"
+reason = "Nested immutable views retain their byte owner; copy and spread append preserve packed/flat byte storage"
+expect = "pass"
+
+[[case]]
+id = "backend-codegen-control"
+kind = "file"
+path = "cases/runtime/core/backend_codegen_control.vo"
+matrix = "backend-contract-gc"
+tags = ["runtime", "codegen", "jit", "regression", "gc", "switch", "loop"]
+owner = "codegen"
+expect = "pass"
+
+[[case]]
+id = "backend-codegen-storage"
+kind = "file"
+path = "cases/runtime/core/backend_codegen_storage.vo"
+matrix = "backend-contract-gc"
+tags = ["runtime", "codegen", "jit", "regression", "gc", "array", "map", "closure"]
+owner = "codegen"
+expect = "pass"
+
+[[case]]
 id = "scalar-storage-semantics"
 kind = "file"
 path = "cases/runtime/numeric/scalar_storage_semantics.vo"
@@ -4816,10 +4884,11 @@ expect = "pass"
 id = "island-transfer-source-isolation"
 kind = "file"
 path = "cases/runtime/scheduler/island_transfer_source_isolation.vo"
-matrix = "compile"
+matrix = "backend-contract"
 tags = ["runtime", "scheduler", "island", "pointer", "port", "regression"]
 owner = "runtime"
-reason = "Core Wasm AOT owns the executable source-isolation regression gate; the ordinary runner cannot retain a suspended island session"
+skip = ["nostd", "wasm"]
+reason = "Standalone native and Core Wasm execution must wait for Island replies and preserve source ownership; host-routed Island sessions are unavailable in the nostd and Wasm VM runners"
 expect = "pass"
 
 [[case]]
@@ -11892,7 +11961,7 @@ expect = "pass"
 id = "vm-timer-runnable-progress"
 kind = "file"
 path = "cases/runtime/core/vm_timer_runnable_progress.vo"
-matrix = "default-gc"
+matrix = "backend-contract"
 tags = ["runtime", "regression", "vm-review"]
 owner = "runtime"
 reason = "Ready timers are delivered while another fiber remains continuously runnable; time provider unavailable in nostd"
@@ -11948,4 +12017,85 @@ matrix = "jit-optimizer-contract"
 tags = ["jit", "gc", "regression", "optimizer"]
 owner = "jit"
 reason = "PIC preserves receiver identity and hot entries across tier publication, capacity overflow and GC"
+expect = "pass"
+
+[[case]]
+id = "backend-interface-gc"
+kind = "file"
+path = "cases/runtime/core/backend_interface_gc.vo"
+matrix = "backend-contract-gc"
+tags = ["runtime", "regression", "backend-contract", "gc"]
+owner = "runtime"
+reason = "Implicit interface value copying polls managed allocation debt in every backend"
+expect = "pass"
+
+[[case]]
+id = "backend-wide-abi"
+kind = "file"
+path = "cases/runtime/core/backend_wide_abi.vo"
+matrix = "backend-contract"
+tags = ["runtime", "regression", "backend-contract"]
+owner = "runtime"
+reason = "Wide value receivers fall back to the memory ABI"
+expect = "pass"
+
+[[case]]
+id = "backend-select-random"
+kind = "file"
+path = "cases/runtime/core/backend_select_random.vo"
+matrix = "backend-contract"
+tags = ["runtime", "regression", "backend-contract"]
+owner = "runtime"
+reason = "Ready select selection samples across fresh function frames"
+expect = "pass"
+
+[[case]]
+id = "backend-map-resize"
+kind = "file"
+path = "cases/runtime/core/backend_map_resize.vo"
+matrix = "backend-contract"
+tags = ["runtime", "regression", "backend-contract"]
+owner = "runtime"
+reason = "Map iterators retain original entries across rehashes and observe current values"
+expect = "pass"
+
+[[case]]
+id = "float32-direct-semantics"
+kind = "file"
+path = "cases/runtime/numeric/float32_direct_semantics.vo"
+matrix = "backend-contract"
+tags = ["runtime", "numeric", "float", "backend-contract", "regression"]
+owner = "runtime"
+reason = "Direct binary32 rounding, subnormals, signed zero, NaN, comparisons and lvalue updates"
+expect = "pass"
+
+[[case]]
+id = "island-nested-creation-isolation"
+kind = "file"
+path = "cases/runtime/scheduler/island_nested_creation_isolation.vo"
+matrix = "backend-contract"
+tags = ["runtime", "scheduler", "island", "regression", "backend-contract"]
+owner = "runtime"
+skip = ["nostd", "wasm"]
+reason = "Node Wasm VM and vo-embed do not implement host-routed Island scheduling"
+expect = "pass"
+
+[[case]]
+id = "backend-dynamic-hidden-args"
+kind = "file"
+path = "cases/runtime/core/backend_dynamic_hidden_args.vo"
+matrix = "backend-contract"
+tags = ["runtime", "jit", "closure", "regression", "backend-contract"]
+owner = "runtime"
+reason = "Dynamic zero/one hidden argument layouts, register lanes, wide tails and GC-bearing parameters"
+expect = "pass"
+
+[[case]]
+id = "backend-local-arrays"
+kind = "file"
+path = "cases/runtime/core/backend_local_arrays.vo"
+matrix = "backend-contract"
+tags = ["runtime", "codegen", "gc", "regression", "backend-contract"]
+owner = "runtime"
+reason = "Independent flat array initializers, sibling RHS snapshots, precise roots, canonical escape and failure order"
 expect = "pass"

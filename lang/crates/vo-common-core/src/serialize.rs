@@ -41,7 +41,7 @@ use core::fmt;
 use num_enum::TryFromPrimitive;
 
 const MAGIC: &[u8; 3] = b"VOB";
-const VERSION: u32 = 21;
+const VERSION: u32 = 24;
 const MIN_SUPPORTED_VERSION: u32 = VERSION;
 /// Canonical maximum size of an encoded VOB module, for both input and output.
 pub const MAX_VOB_BYTES: usize = 128 * 1024 * 1024;
@@ -91,6 +91,7 @@ pub enum SerializeError {
     TrailingBytes(usize),
     InvalidUtf8,
     InvalidBoolean(u8),
+    InvalidSourceInteger,
     InvalidConstant,
     InvalidInstructionMetadata,
     InvalidSlotType(u8),
@@ -108,6 +109,11 @@ pub enum SerializeError {
     DuplicateInterfaceMethod(String),
     DuplicateNamedMethod(String),
     InvalidFunctionMetadata(String),
+    DebugMetadataLimitExceeded {
+        context: &'static str,
+        len: usize,
+        max: usize,
+    },
     ModuleArtifactLimitExceeded {
         context: &'static str,
         len: usize,
@@ -118,6 +124,7 @@ pub enum SerializeError {
 impl fmt::Display for SerializeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidSourceInteger => f.write_str("invalid compact source integer"),
             Self::LengthOverflow { context, len } => {
                 write!(f, "{context} length {len} exceeds u32::MAX")
             }
@@ -195,6 +202,9 @@ impl fmt::Display for SerializeError {
             Self::InvalidFunctionMetadata(detail) => {
                 write!(f, "invalid function metadata: {detail}")
             }
+            Self::DebugMetadataLimitExceeded { context, len, max } => {
+                write!(f, "{context} count {len} exceeds the {max}-record limit")
+            }
             Self::ModuleArtifactLimitExceeded { context, len, max } => {
                 write!(f, "{context} length {len} exceeds the {max}-byte limit")
             }
@@ -260,12 +270,25 @@ impl ByteWriter {
             });
             return;
         }
-        if self.data.try_reserve_exact(bytes.len()).is_err() {
-            self.fail(SerializeError::AllocationFailed {
-                context,
-                additional: bytes.len(),
-            });
-            return;
+        if new_len > self.data.capacity() {
+            // Scalar fields are emitted individually. Geometric growth keeps
+            // reallocations logarithmic while bounding requested spare storage
+            // by the same output limit checked above.
+            let capacity = new_len
+                .max(self.data.capacity().saturating_mul(2).max(256))
+                .min(self.output_limit);
+            let additional = capacity - self.data.len();
+            if self.data.try_reserve_exact(additional).is_err()
+                // Spare capacity is optional: still allow the exact write if
+                // the allocator cannot satisfy the speculative growth request.
+                && self.data.try_reserve_exact(bytes.len()).is_err()
+            {
+                self.fail(SerializeError::AllocationFailed {
+                    context,
+                    additional: bytes.len(),
+                });
+                return;
+            }
         }
         self.data.extend_from_slice(bytes);
     }
@@ -293,6 +316,23 @@ impl ByteWriter {
 
     fn write_u32(&mut self, v: u32) {
         self.append("VOB scalar", &v.to_le_bytes());
+    }
+
+    /// Canonical unsigned LEB128 for source coordinates; never changes their
+    /// full u32 domain. Append once so one coordinate has one capacity check.
+    fn write_source_u32(&mut self, mut value: u32) {
+        let mut bytes = [0_u8; 5];
+        let mut len = 0;
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            bytes[len] = byte | if value == 0 { 0 } else { 0x80 };
+            len += 1;
+            if value == 0 {
+                break;
+            }
+        }
+        self.append("VOB source coordinate", &bytes[..len]);
     }
 
     fn write_i64(&mut self, v: i64) {
@@ -1106,6 +1146,24 @@ impl<'a> ByteReader<'a> {
         Ok(u32::from_le_bytes(bytes))
     }
 
+    fn read_source_u32(&mut self) -> Result<u32, SerializeError> {
+        let mut value = 0_u32;
+        for index in 0..5 {
+            let byte = self.read_u8()?;
+            if index == 4 && byte > 0x0f {
+                return Err(SerializeError::InvalidSourceInteger);
+            }
+            value |= u32::from(byte & 0x7f) << (index * 7);
+            if byte & 0x80 == 0 {
+                if index != 0 && byte == 0 {
+                    return Err(SerializeError::InvalidSourceInteger);
+                }
+                return Ok(value);
+            }
+        }
+        Err(SerializeError::InvalidSourceInteger)
+    }
+
     fn read_u64(&mut self) -> Result<u64, SerializeError> {
         let bytes: [u8; 8] = self
             .read_exact(8)?
@@ -1207,9 +1265,36 @@ impl<'a> ByteReader<'a> {
 
     fn read_vec<T, F>(&mut self, read_item: F) -> Result<Vec<T>, SerializeError>
     where
-        F: Fn(&mut Self) -> Result<T, SerializeError>,
+        F: FnMut(&mut Self) -> Result<T, SerializeError>,
     {
         let len = self.read_u32()? as usize;
+        self.read_vec_items(len, read_item)
+    }
+
+    fn read_debug_vec<T, F>(
+        &mut self,
+        context: &'static str,
+        max: usize,
+        read_item: F,
+    ) -> Result<Vec<T>, SerializeError>
+    where
+        F: FnMut(&mut Self) -> Result<T, SerializeError>,
+    {
+        let len = self.read_u32()? as usize;
+        if len > max {
+            return Err(SerializeError::DebugMetadataLimitExceeded { context, len, max });
+        }
+        self.read_vec_items(len, read_item)
+    }
+
+    fn read_vec_items<T, F>(
+        &mut self,
+        len: usize,
+        mut read_item: F,
+    ) -> Result<Vec<T>, SerializeError>
+    where
+        F: FnMut(&mut Self) -> Result<T, SerializeError>,
+    {
         // Every vector item in the VOB grammar consumes at least one byte.
         // Bound allocation by the input still available before trusting the
         // unverified count, so a tiny corrupt file cannot request gigabytes.
@@ -1524,15 +1609,16 @@ impl Module {
                     "Module.debug_info.funcs[].entries",
                     &func_info.entries,
                     |w, entry| {
-                        w.write_u32(entry.pc);
-                        w.write_u32(entry.file_id);
-                        w.write_u32(entry.line);
-                        w.write_u32(entry.col);
-                        w.write_u32(entry.len);
+                        w.write_source_u32(entry.pc);
+                        w.write_source_u32(entry.file_id);
+                        w.write_source_u32(entry.line);
+                        w.write_source_u32(entry.col);
+                        w.write_source_u32(entry.len);
                     },
                 );
             },
         );
+        write_inline_sources(&mut w, &self.debug_info.inline_sources);
 
         w.into_bytes()
     }
@@ -1888,11 +1974,11 @@ impl Module {
         let files = r.read_vec(|r| r.read_string())?;
         let funcs = r.read_vec(|r| {
             let entries = r.read_vec(|r| {
-                let pc = r.read_u32()?;
-                let file_id = r.read_u32()?;
-                let line = r.read_u32()?;
-                let col = r.read_u32()?;
-                let len = r.read_u32()?;
+                let pc = r.read_source_u32()?;
+                let file_id = r.read_source_u32()?;
+                let line = r.read_source_u32()?;
+                let col = r.read_source_u32()?;
+                let len = r.read_source_u32()?;
                 Ok(crate::debug_info::DebugLoc {
                     pc,
                     file_id,
@@ -1903,7 +1989,12 @@ impl Module {
             })?;
             Ok(crate::debug_info::FuncDebugInfo { entries })
         })?;
-        let debug_info = crate::debug_info::DebugInfo { files, funcs };
+        let inline_sources = read_inline_sources(&mut r, functions.len())?;
+        let debug_info = crate::debug_info::DebugInfo {
+            files,
+            funcs,
+            inline_sources,
+        };
 
         if r.remaining() != 0 {
             return Err(SerializeError::TrailingBytes(r.remaining()));
@@ -1927,6 +2018,102 @@ impl Module {
             debug_info,
         })
     }
+}
+
+fn write_inline_sources(w: &mut ByteWriter, sources: &crate::debug_info::InlineSources) {
+    use crate::debug_info::MAX_INLINE_SOURCE_RECORDS;
+    let entries = sources
+        .functions
+        .iter()
+        .try_fold(0_usize, |count, function| {
+            count.checked_add(function.entries.len())
+        })
+        .unwrap_or(usize::MAX);
+    for (context, len) in [
+        ("inline source frames", sources.frames.len()),
+        ("inline source functions", sources.functions.len()),
+        ("inline source entries", entries),
+    ] {
+        if len > MAX_INLINE_SOURCE_RECORDS {
+            w.fail(SerializeError::DebugMetadataLimitExceeded {
+                context,
+                len,
+                max: MAX_INLINE_SOURCE_RECORDS,
+            });
+            return;
+        }
+    }
+    w.write_vec("inline source frames", &sources.frames, |w, frame| {
+        w.write_u32(frame.parent);
+        w.write_u32(frame.function_id);
+        w.write_u8(u8::from(frame.span.is_some()));
+        if let Some(span) = frame.span {
+            w.write_u32(span.file_id);
+            w.write_u32(span.line);
+            w.write_u32(span.col);
+            w.write_u32(span.len);
+        }
+    });
+    w.write_vec(
+        "inline source functions",
+        &sources.functions,
+        |w, function| {
+            w.write_u32(function.function_id);
+            w.write_vec("inline source entries", &function.entries, |w, entry| {
+                w.write_u32(entry.pc);
+                w.write_u32(entry.frame);
+            });
+        },
+    );
+}
+
+fn read_inline_sources(
+    r: &mut ByteReader,
+    function_count: usize,
+) -> Result<crate::debug_info::InlineSources, SerializeError> {
+    use crate::debug_info::{
+        InlineFunctionSources, InlineSourceEntry, InlineSourceFrame, InlineSources, SourceSpan,
+        MAX_INLINE_SOURCE_RECORDS,
+    };
+    let frames = r.read_debug_vec("inline source frames", MAX_INLINE_SOURCE_RECORDS, |r| {
+        let parent = r.read_u32()?;
+        let function_id = r.read_u32()?;
+        let span = if read_bool(r)? {
+            Some(SourceSpan {
+                file_id: r.read_u32()?,
+                line: r.read_u32()?,
+                col: r.read_u32()?,
+                len: r.read_u32()?,
+            })
+        } else {
+            None
+        };
+        Ok(InlineSourceFrame {
+            parent,
+            function_id,
+            span,
+        })
+    })?;
+    let mut remaining = MAX_INLINE_SOURCE_RECORDS;
+    let functions = r.read_debug_vec(
+        "inline source functions",
+        function_count.min(MAX_INLINE_SOURCE_RECORDS),
+        |r| {
+            let function_id = r.read_u32()?;
+            let entries = r.read_debug_vec("inline source entries", remaining, |r| {
+                Ok(InlineSourceEntry {
+                    pc: r.read_u32()?,
+                    frame: r.read_u32()?,
+                })
+            })?;
+            remaining -= entries.len();
+            Ok(InlineFunctionSources {
+                function_id,
+                entries,
+            })
+        },
+    )?;
+    Ok(InlineSources { frames, functions })
 }
 
 pub fn validate_vob_input_size(len: usize) -> Result<(), SerializeError> {
@@ -2732,6 +2919,28 @@ mod tests {
     }
 
     #[test]
+    fn byte_writer_scalar_growth_is_logarithmic_bounded_and_byte_exact() {
+        let mut writer = ByteWriter::with_output_limit(40_000);
+        let mut capacity = 0;
+        let mut growths = 0;
+        for value in 0..10_000_u32 {
+            writer.write_u32(value);
+            assert!(writer.error.is_none());
+            assert!(writer.data.capacity() <= 40_000);
+            if writer.data.capacity() != capacity {
+                capacity = writer.data.capacity();
+                growths += 1;
+            }
+        }
+        assert!(growths <= 10, "{growths} reallocations for scalar output");
+        let bytes = writer.into_bytes().unwrap();
+        assert_eq!(bytes.len(), 40_000);
+        for (value, encoded) in bytes.chunks_exact(4).enumerate() {
+            assert_eq!(encoded, (value as u32).to_le_bytes());
+        }
+    }
+
+    #[test]
     fn byte_writer_enforces_its_output_limit_before_extending() {
         let mut writer = ByteWriter::with_output_limit(4);
         writer.append("boundary fixture", &[1, 2, 3, 4]);
@@ -2841,5 +3050,94 @@ mod tests {
             .expect("wide debug location");
         assert_eq!(location.col, 70_000);
         assert_eq!(location.len, 80_000);
+    }
+
+    #[test]
+    fn compact_source_coordinates_are_canonical_and_keep_the_full_u32_domain() {
+        for (value, encoded) in [
+            (0, vec![0]),
+            (127, vec![127]),
+            (128, vec![128, 1]),
+            (16_383, vec![255, 127]),
+            (16_384, vec![128, 128, 1]),
+            (u32::MAX, vec![255, 255, 255, 255, 15]),
+        ] {
+            let mut writer = ByteWriter::new();
+            writer.write_source_u32(value);
+            assert_eq!(writer.into_bytes().unwrap(), encoded);
+            assert_eq!(ByteReader::new(&encoded).read_source_u32().unwrap(), value);
+        }
+        for encoded in [
+            vec![128, 0],
+            vec![129, 0],
+            vec![128, 128, 128, 128, 0],
+            vec![255, 255, 255, 255, 16],
+            vec![128, 128, 128, 128, 128],
+        ] {
+            assert!(matches!(
+                ByteReader::new(&encoded).read_source_u32(),
+                Err(SerializeError::InvalidSourceInteger)
+            ));
+        }
+        for encoded in [vec![], vec![128], vec![128, 128, 128, 128]] {
+            assert!(matches!(
+                ByteReader::new(&encoded).read_source_u32(),
+                Err(SerializeError::UnexpectedEof)
+            ));
+        }
+        let mut module = Module::new("full-source-domain".into());
+        module
+            .debug_info
+            .add_loc(0, u32::MAX, "max.vo", u32::MAX, u32::MAX, u32::MAX);
+        let bytes = module.serialize().unwrap();
+        let decoded = Module::deserialize(&bytes).unwrap();
+        assert_eq!(
+            decoded.debug_info.lookup(0, u32::MAX),
+            module.debug_info.lookup(0, u32::MAX)
+        );
+    }
+
+    #[test]
+    fn inline_debug_record_limits_apply_before_allocating_decoder_vectors() {
+        use crate::debug_info::{
+            InlineFunctionSources, InlineSourceEntry, InlineSources, MAX_INLINE_SOURCE_RECORDS,
+        };
+        let count = (MAX_INLINE_SOURCE_RECORDS as u32 + 1).to_le_bytes();
+        let mut reader = ByteReader::new(&count);
+        let before = reader.allocation_remaining;
+        assert!(matches!(
+            read_inline_sources(&mut reader, 1),
+            Err(SerializeError::DebugMetadataLimitExceeded {
+                context: "inline source frames",
+                ..
+            })
+        ));
+        assert_eq!(reader.allocation_remaining, before);
+
+        let mut sources = InlineSources::default();
+        sources.functions.push(InlineFunctionSources {
+            function_id: 0,
+            entries: vec![InlineSourceEntry { pc: 0, frame: 0 }; MAX_INLINE_SOURCE_RECORDS + 1],
+        });
+        let mut writer = ByteWriter::new();
+        write_inline_sources(&mut writer, &sources);
+        assert!(matches!(
+            writer.into_bytes(),
+            Err(SerializeError::DebugMetadataLimitExceeded {
+                context: "inline source entries",
+                ..
+            })
+        ));
+
+        // One absent source-span flag with an invalid boolean value.
+        let mut malformed = Vec::new();
+        malformed.extend_from_slice(&1_u32.to_le_bytes());
+        malformed.extend_from_slice(&u32::MAX.to_le_bytes());
+        malformed.extend_from_slice(&0_u32.to_le_bytes());
+        malformed.push(2);
+        assert!(matches!(
+            read_inline_sources(&mut ByteReader::new(&malformed), 1),
+            Err(SerializeError::InvalidBoolean(2))
+        ));
     }
 }

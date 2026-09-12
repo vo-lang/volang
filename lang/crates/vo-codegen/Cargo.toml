@@ -9,6 +9,9 @@ repository.workspace = true
 homepage.workspace = true
 publish = false
 
+[features]
+compiler-profile = ["vo-common/compiler-profile", "vo-analysis/compiler-profile"]
+
 [dependencies]
 vo-common = { path = "../vo-common", default-features = false }
 vo-common-core = { path = "../vo-common-core" }

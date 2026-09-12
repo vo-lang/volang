@@ -293,6 +293,7 @@ pub extern "C" fn jit_call_extern(
                 *ctx_ref.panic_flag = true;
                 *ctx_ref.is_user_panic = true;
                 ctx_ref.runtime_trap_kind = JitRuntimeTrapKind::None as u8;
+                ctx_ref.runtime_trap_origin = 0;
                 ctx_ref.runtime_trap_pc = u32::MAX;
                 (*ctx_ref.panic_msg).slot0 = value.slot0;
                 (*ctx_ref.panic_msg).slot1 = value.slot1;
@@ -407,7 +408,7 @@ mod tests {
         effects: ExternEffects,
     ) -> (Box<Vm>, Box<Fiber>, JitContextWrapper) {
         // `JitContext` stores raw pointers into the VM; keep the VM address stable after return.
-        let mut vm = Box::new(Vm::try_with_jit_config(JitConfig::default()).expect("jit vm"));
+        let mut vm = Box::new(Vm::try_native_for_test(JitConfig::default()).expect("jit vm"));
         let registry = std::sync::Arc::make_mut(&mut vm.state.extern_registry);
         registry.register_test_named_with_effects(0, module.externs[0].name.clone(), func, effects);
         registry

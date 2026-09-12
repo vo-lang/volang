@@ -26,7 +26,7 @@ fn vm_jit_queue_close_osr_001_local_endpoint_close_publishes_pending_transition_
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     vm.state.external_island_transport = true;
     vm.state.current_island_id = 3;
     let endpoint_id = 55;
@@ -90,7 +90,7 @@ fn vm_jit_queue_close_invalid_resume_pc_discards_prepared_effects() {
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     vm.state.external_island_transport = true;
     vm.state.current_island_id = 3;
     let chan = queue::create(
@@ -135,7 +135,7 @@ fn vm_jit_queue_close_route_preflight_057_missing_peer_route_preserves_open_queu
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     vm.state.current_island_id = 3;
     let endpoint_id = 57;
     let peer_island = 9;
@@ -185,7 +185,7 @@ fn vm_queue_handle_validation_002_jit_queue_get_rejects_non_queue_gcref() {
             jit_queue_cap as extern "C" fn(*mut JitContext, u64, *mut u64) -> JitResult,
         ),
     ] {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let not_queue = vm.state.gc.alloc(ValueMeta::new(0, ValueKind::String), 0);
         load_context_module(
             &mut vm,
@@ -224,7 +224,7 @@ fn vm_jit_callback_abi_queue_send_rejects_null_non_empty_source_before_queue_cor
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     load_context_module(&mut vm, "jit-callback-abi-queue-send-null");
     let mut fiber = Fiber::new(0);
     let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
@@ -244,7 +244,7 @@ fn vm_jit_callback_abi_queue_send_rejects_width_overflow_before_raw_read() {
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     load_context_module(&mut vm, "jit-callback-abi-queue-send-width");
     let mut fiber = Fiber::new(0);
     let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
@@ -265,7 +265,7 @@ fn vm_jit_callback_abi_queue_recv_rejects_null_destination_before_replay_consump
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     load_context_module(&mut vm, "jit-callback-abi-queue-recv-null");
     let mut fiber = Fiber::new(0);
     fiber.remote_recv_response = Some(RemoteRecvResponse::Data(vec![7]));
@@ -287,7 +287,7 @@ fn vm_jit_callback_abi_queue_recv_rejects_width_overflow_before_raw_write() {
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     load_context_module(&mut vm, "jit-callback-abi-queue-recv-width");
     let mut fiber = Fiber::new(0);
     let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
@@ -314,7 +314,7 @@ fn vm_jit_queue_recv_nil_001_blocks_like_interpreter() {
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     load_context_module(&mut vm, "jit-queue-recv-nil");
     let mut fiber = Fiber::new(0);
     let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
@@ -340,7 +340,7 @@ fn vm_jit_queue_recv_remote_replay_003_rejects_invalid_handle_before_remote_repl
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     let not_queue = vm.state.gc.alloc(
         vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::String),
         0,
@@ -371,7 +371,7 @@ fn vm_jit_queue_send_remote_replay_003_rejects_invalid_callback_before_remote_se
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     load_context_module(&mut vm, "jit-queue-send-invalid-callback-replay");
     let mut fiber = Fiber::new(0);
     fiber.remote_send_closed = true;
@@ -398,7 +398,7 @@ fn vm_jit_queue_send_callback_layout_003_rejects_elem_slot_drift_before_enqueue(
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     let ch = queue::create(
         &mut vm.state.gc,
         QueueKind::Chan,
@@ -428,7 +428,7 @@ fn vm_endpoint_direct_preflight_012_jit_same_island_missing_home_info_preserves_
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     vm.state.current_island_id = 0;
     let ch = queue::create(
         &mut vm.state.gc,
@@ -474,7 +474,7 @@ fn vm_jit_queue_recv_remote_replay_003_rejects_elem_slot_drift_before_replay_con
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     let ch = queue::create(
         &mut vm.state.gc,
         QueueKind::Chan,
@@ -520,7 +520,7 @@ fn vm_jit_queue_recv_remote_replay_058_rejects_bad_payload_without_consuming_res
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     let ch = queue::create(
         &mut vm.state.gc,
         QueueKind::Chan,
@@ -557,7 +557,7 @@ fn vm_endpoint_sender_preflight_012_jit_same_island_recv_missing_home_info_prese
     use vo_runtime::objects::queue_state::{QueueKind, QueueMessage};
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     vm.state.current_island_id = 0;
     let ch = queue::create(
         &mut vm.state.gc,
@@ -610,7 +610,7 @@ fn vm_rt_001_queue_send_commits_wake_before_terminal_jit_error_discard() {
     use vo_runtime::objects::queue_state::{QueueKind, QueueWaiter};
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     let receiver = vm.scheduler.spawn(Fiber::new(0));
     let receiver_key = vm.scheduler.get_fiber(receiver).wake_key_packed();
     vm.scheduler.schedule_next().unwrap();
@@ -740,7 +740,7 @@ fn vm_jit_remote_send_transfer_txn_006_jit_error_commits_after_local_endpoint_pr
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     vm.state.external_island_transport = true;
     vm.state.current_island_id = 4;
     let mut module = Module::new("jit-remote-send-local-port-transfer".to_string());
@@ -822,7 +822,7 @@ fn vm_jit_remote_send_route_preflight_057_missing_home_route_preserves_payload_e
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     vm.state.current_island_id = 4;
     let mut module = Module::new("jit-remote-send-route-preflight-057".to_string());
     module.runtime_types = vec![
@@ -882,7 +882,7 @@ fn vm_rt_001_queue_close_commits_receiver_wake_before_terminal_jit_error_discard
     use vo_runtime::objects::queue_state::{QueueKind, QueueWaiter};
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     let receiver = vm.scheduler.spawn(Fiber::new(0));
     let receiver_key = vm.scheduler.get_fiber(receiver).wake_key_packed();
     vm.scheduler.schedule_next().unwrap();

@@ -13,9 +13,10 @@ use alloc::format;
 #[cfg(not(feature = "std"))]
 use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
-use alloc::vec;
-#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+
+mod sequence;
+use sequence::SequenceSource;
 
 /// Format all interface{} args starting from `start_slot` into a space-separated string.
 /// Each arg is 2 slots: [slot0 = packed_info, slot1 = data]
@@ -83,8 +84,8 @@ unsafe fn builtin_copy_raw(call: &mut ExternCallContext) -> ExternResult {
 
     let dst_len = slice::len(dst);
 
-    // Strings share the slice descriptor ABI and expose Uint8 elements.
-    let src_len = slice::len(src);
+    let src = SequenceSource::new(src);
+    let src_len = src.len();
 
     let copy_len = dst_len.min(src_len);
 
@@ -95,15 +96,8 @@ unsafe fn builtin_copy_raw(call: &mut ExternCallContext) -> ExternResult {
 
     let dst_owner = slice::owner_ref(dst);
     let elem_meta = slice::elem_meta(dst);
-    if elem_meta.value_kind().may_contain_gc_refs() {
-        let elem_slots = slice::logical_elem_slots(src);
-        let mut value = vec![0u64; elem_slots];
-        for index in 0..copy_len {
-            slice::read_logical_slots(src, index, &mut value);
-            call.typed_write_barrier_by_meta(dst_owner, &value, elem_meta);
-        }
-    }
-    slice::copy_logical_elements(dst, src, copy_len);
+    src.barrier_to(call, dst_owner, copy_len, elem_meta);
+    src.copy_to(dst, 0, copy_len);
 
     call.ret_i64(0, copy_len as i64);
     ExternResult::Ok
@@ -116,7 +110,7 @@ fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
 }
 
 /// append(slice, other...) - append all elements from other slice/string
-/// Works for both slice and string sources since they have identical memory layout.
+/// Source access follows each kind's descriptor and logical element layout.
 unsafe fn builtin_slice_append_slice_raw(call: &mut ExternCallContext) -> ExternResult {
     use crate::objects::{array, slice};
 
@@ -130,15 +124,14 @@ unsafe fn builtin_slice_append_slice_raw(call: &mut ExternCallContext) -> Extern
         return ExternResult::Ok;
     }
 
-    // String and slice have identical layout, so we can use slice:: functions for both
-    let src_len = slice::len(src);
+    let source = SequenceSource::new(src);
+    let src_len = source.len();
     if src_len == 0 {
         call.ret_ref(0, dst);
         return ExternResult::Ok;
     }
 
-    let src_elem_meta = slice::elem_meta(src);
-    let src_elem_bytes = slice::elem_bytes(src);
+    let (src_elem_meta, src_elem_bytes) = source.element_layout();
     let (elem_meta, elem_bytes) = if dst.is_null() {
         (src_elem_meta, src_elem_bytes)
     } else {
@@ -169,7 +162,7 @@ unsafe fn builtin_slice_append_slice_raw(call: &mut ExternCallContext) -> Extern
         if result.is_null() {
             return ExternResult::Ok;
         }
-        slice::copy_logical_elements(result, src, src_len);
+        source.copy_to(result, 0, src_len);
         if elem_meta.value_kind().may_contain_gc_refs() {
             call.gc().mark_allocated_for_scan(new_arr);
         }
@@ -179,29 +172,29 @@ unsafe fn builtin_slice_append_slice_raw(call: &mut ExternCallContext) -> Extern
 
     let dst_len = slice::len(dst);
     let dst_cap = slice::cap(dst);
-    let new_len = dst_len + src_len;
+    let Some(new_len) = dst_len.checked_add(src_len) else {
+        call.gc()
+            .record_allocation_failure(crate::gc::MemoryError::AllocationSizeOverflow);
+        return ExternResult::Ok;
+    };
 
     if new_len <= dst_cap {
         // Enough capacity - write to existing backing array, return new slice header
-        if elem_meta.value_kind().may_contain_gc_refs() {
-            let owner = slice::owner_ref(dst);
-            let elem_slots = slice::logical_elem_slots(src);
-            let mut value = vec![0u64; elem_slots];
-            for index in 0..src_len {
-                slice::read_logical_slots(src, index, &mut value);
-                call.typed_write_barrier_by_meta(owner, &value, elem_meta);
-            }
-        }
+        source.barrier_to(call, slice::owner_ref(dst), src_len, elem_meta);
         // Go semantics: append never modifies original slice header
         let new_s = slice::with_new_len(call.gc(), dst, new_len);
         if new_s.is_null() {
             return ExternResult::Ok;
         }
-        slice::copy_logical_elements_at(new_s, dst_len, src, 0, src_len);
+        source.copy_to(new_s, dst_len, src_len);
         call.ret_ref(0, new_s);
     } else {
         // Need to grow - allocate new array
-        let new_cap = (new_len * 2).max(4);
+        let Some(new_cap) = new_len.checked_mul(2).map(|capacity| capacity.max(4)) else {
+            call.gc()
+                .record_allocation_failure(crate::gc::MemoryError::AllocationSizeOverflow);
+            return ExternResult::Ok;
+        };
         let new_arr = array::create(call.gc(), elem_meta, elem_bytes, new_cap);
         if new_arr.is_null() {
             return ExternResult::Ok;
@@ -211,7 +204,7 @@ unsafe fn builtin_slice_append_slice_raw(call: &mut ExternCallContext) -> Extern
             return ExternResult::Ok;
         }
         slice::copy_logical_elements_at(result, 0, dst, 0, dst_len);
-        slice::copy_logical_elements_at(result, dst_len, src, 0, src_len);
+        source.copy_to(result, dst_len, src_len);
         if elem_meta.value_kind().may_contain_gc_refs() {
             call.gc().mark_allocated_for_scan(new_arr);
         }
@@ -427,6 +420,25 @@ mod tests {
         src: crate::gc::GcRef,
         initial_return: u64,
     ) -> u64 {
+        invoke_sequence_builtin(
+            gc,
+            module,
+            dst,
+            src,
+            initial_return,
+            super::builtin_slice_append_slice_raw,
+        )
+    }
+
+    #[cfg(feature = "std")]
+    fn invoke_sequence_builtin(
+        gc: &mut crate::gc::Gc,
+        module: &crate::Module,
+        dst: crate::gc::GcRef,
+        src: crate::gc::GcRef,
+        initial_return: u64,
+        operation: unsafe fn(&mut crate::ffi::ExternCallContext) -> crate::ffi::ExternResult,
+    ) -> u64 {
         use crate::ffi::{
             ExternCallContext, ExternFiberInputs, ExternInvoke, ExternResult, ExternWorld,
             SentinelErrorCache,
@@ -458,12 +470,109 @@ mod tests {
         let mut call =
             ExternCallContext::new(&mut stack, invoke, world, ExternFiberInputs::default());
 
-        assert!(matches!(
-            unsafe { super::builtin_slice_append_slice_raw(&mut call) },
-            ExternResult::Ok
-        ));
+        assert!(matches!(unsafe { operation(&mut call) }, ExternResult::Ok));
         drop(call);
         stack[3]
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn compact_string_sources_copy_and_append_to_packed_and_flat_bytes() {
+        use crate::gc::Gc;
+        use crate::objects::{slice, string};
+        use crate::{ValueKind, ValueMeta};
+
+        for variant in 0..4 {
+            let mut gc = Gc::new();
+            let module = crate::Module::new("string-sequence".to_string());
+            let source = string::create(&mut gc, b"x\x00\xffbcy");
+            let source = unsafe { string::slice_of(&mut gc, source, 1, 5) }.unwrap();
+            let byte_meta = ValueMeta::new(0, ValueKind::Uint8);
+            let dst = match variant {
+                0 => core::ptr::null_mut(),
+                1 => slice::create(&mut gc, byte_meta, 1, 1, 1),
+                2 => slice::create(&mut gc, byte_meta, 1, 1, 8),
+                _ => {
+                    let owner = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 8);
+                    unsafe {
+                        slice::from_inline_array_range_with_cap(
+                            &mut gc,
+                            owner,
+                            owner.cast(),
+                            8,
+                            0,
+                            1,
+                            8,
+                            byte_meta,
+                            1,
+                            8,
+                        )
+                    }
+                }
+            };
+            if !dst.is_null() {
+                unsafe { slice::set(dst, 0, u64::from(b'a'), 1) };
+            }
+            let result =
+                invoke_slice_append_slice(&mut gc, &module, dst, source, 0) as crate::gc::GcRef;
+            let expected: &[u8] = if variant == 0 {
+                b"\x00\xffbc"
+            } else {
+                b"a\x00\xffbc"
+            };
+            assert_eq!(unsafe { slice::byte_vec(result) }, expected);
+            assert_eq!(unsafe { string::to_bytes(source) }, b"\x00\xffbc");
+            assert_eq!(unsafe { slice::len(dst) }, usize::from(variant != 0));
+            if variant >= 2 {
+                assert_eq!(unsafe { slice::owner_ref(result) }, unsafe {
+                    slice::owner_ref(dst)
+                });
+            }
+            let destination = unsafe { slice::with_new_len(&mut gc, result, 2) };
+            let copied = invoke_sequence_builtin(
+                &mut gc,
+                &module,
+                destination,
+                source,
+                u64::MAX,
+                super::builtin_copy_raw,
+            );
+            assert_eq!(copied, 2);
+            assert_eq!(unsafe { slice::byte_vec(destination) }, b"\x00\xff");
+            assert_eq!(unsafe { string::to_bytes(source) }, b"\x00\xffbc");
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn spread_append_checks_length_and_capacity_overflow_before_allocation() {
+        use crate::gc::{Gc, MemoryError};
+        use crate::objects::slice;
+        use crate::{ValueKind, ValueMeta};
+
+        for length in [usize::MAX, usize::MAX / 2] {
+            let mut gc = Gc::new();
+            let module = crate::Module::new("spread-overflow".to_string());
+            // Zero-width elements exercise large logical lengths without large
+            // allocations or copying work. Both descriptors remain valid.
+            let meta = ValueMeta::new(0, ValueKind::Struct);
+            let dst = slice::create(&mut gc, meta, 0, length, length);
+            let src = slice::create(&mut gc, meta, 0, 2, 2);
+            assert!(!dst.is_null() && !src.is_null());
+            let before = gc.memory_stats();
+            let result = invoke_slice_append_slice(&mut gc, &module, dst, src, 0xfeed);
+            assert_eq!(result, 0xfeed);
+            assert_eq!(
+                gc.last_memory_error(),
+                Some(MemoryError::AllocationSizeOverflow)
+            );
+            assert_eq!(gc.memory_stats().object_count, before.object_count);
+            assert_eq!(
+                gc.memory_stats().allocation_failures,
+                before.allocation_failures + 1
+            );
+            assert_eq!(unsafe { slice::len(dst) }, length);
+        }
     }
 
     #[test]

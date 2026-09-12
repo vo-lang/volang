@@ -579,24 +579,31 @@ fn parse_single_file(
     state: &mut ProjectState,
     id_state: parser::IdState,
 ) -> Result<(File, parser::IdState), AnalysisError> {
+    #[cfg(feature = "compiler-profile")]
+    vo_common::compiler_profile::source(content.len());
     let file_name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string_lossy().into_owned());
-    let file_id = state
-        .source_map
-        .try_add_file_with_path(file_name, path.to_path_buf(), content)
-        .map_err(|error| {
-            AnalysisError::Import(format!(
-                "cannot add source file '{}': {error}",
-                path.display()
-            ))
-        })?;
+    let file_id = vo_common::compiler_phase!(
+        SourceMap,
+        state
+            .source_map
+            .try_add_file_with_path(file_name, path.to_path_buf(), content)
+    )
+    .map_err(|error| {
+        AnalysisError::Import(format!(
+            "cannot add source file '{}': {error}",
+            path.display()
+        ))
+    })?;
     let base = state.source_map.file_base(file_id).unwrap_or(0);
     let interner = std::mem::take(&mut state.interner);
 
-    let (file, diags, new_interner, new_id_state) =
-        parser::parse_with_state(content, base, interner, id_state);
+    let (file, diags, new_interner, new_id_state) = vo_common::compiler_phase!(
+        LexParse,
+        parser::parse_with_state(content, base, interner, id_state)
+    );
 
     state.interner = new_interner;
 
@@ -740,9 +747,7 @@ impl<R: Resolver> PackageLoader<'_, R> {
     }
 
     fn load_package(&mut self, path: &str, depth: usize) -> Result<PackageKey, AnalysisError> {
-        let package = self
-            .vfs
-            .resolve(path)
+        let package = vo_common::compiler_phase!(ImportResolution, self.vfs.resolve(path))
             .map_err(|e| AnalysisError::Import(format!("failed to resolve package {path}: {e}")))?
             .ok_or_else(|| AnalysisError::Import(format!("package not found: {path}")))?;
         if package.path() != path {

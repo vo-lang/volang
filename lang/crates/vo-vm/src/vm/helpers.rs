@@ -5,7 +5,7 @@
 use alloc::{string::String, vec};
 
 use vo_runtime::gc::{Gc, GcRef};
-use vo_runtime::objects::{alloc_error, closure, slice};
+use vo_runtime::objects::{alloc_error, closure, slice, string};
 use vo_runtime::slot::{slot_to_ptr, slot_to_usize, Slot};
 use vo_runtime::InterfaceSlot;
 
@@ -16,7 +16,7 @@ use crate::exec;
 use crate::fiber::{Fiber, PendingSpawn};
 use crate::frame_call::{validate_closure_arg_shape, validate_closure_target, ValidClosureTarget};
 
-// String and slice have identical layout - use slice constants for both
+// Slice geometry. Strings have their own compact descriptor below.
 const FIELD_DATA_PTR: usize = slice::FIELD_DATA_PTR;
 const FIELD_LEN: usize = slice::FIELD_LEN;
 const FIELD_CAP: usize = slice::FIELD_CAP;
@@ -59,16 +59,15 @@ pub fn slice_cap(s: GcRef) -> usize {
     slot_to_usize(slot)
 }
 
-// String uses same layout as slice
 #[inline(always)]
 pub fn string_len(s: GcRef) -> usize {
-    let slot = unsafe { *(s as *const Slot).add(FIELD_LEN) };
+    let slot = unsafe { *(s as *const Slot).add(string::FIELD_LEN) };
     slot_to_usize(slot)
 }
 
 #[inline(always)]
 pub fn string_index(s: GcRef, idx: usize) -> u8 {
-    let slot = unsafe { *(s as *const Slot).add(FIELD_DATA_PTR) };
+    let slot = unsafe { *(s as *const Slot).add(string::FIELD_DATA_PTR) };
     let data_ptr: *const u8 = slot_to_ptr(slot);
     unsafe { *data_ptr.add(idx) }
 }
@@ -194,7 +193,7 @@ pub fn runtime_panic_msg_at(
     pc: u32,
     msg: String,
 ) -> ExecResult {
-    fiber.panic_source_loc = Some((func_id, pc));
+    fiber.panic_source_loc = vo_common_core::debug_info::DiagnosticSource::new(func_id, pc);
     runtime_panic_msg_after_source_capture(gc, fiber, stack, module, msg)
 }
 

@@ -170,6 +170,47 @@ impl<'a> CompilerStorage<'a> {
         reload_vars_from_memory(builder, self.vars, self.slot_types, base_ptr);
     }
 
+    pub(crate) fn reload_slots_from_memory(
+        self,
+        builder: &mut FunctionBuilder<'_>,
+        base_ptr: Value,
+        slots: impl IntoIterator<Item = u16>,
+    ) {
+        for slot in slots {
+            let Some(variable) = self.vars.get(slot) else {
+                continue;
+            };
+            let ty = slot_ir_type(self.slot_types, slot);
+            let value = builder
+                .ins()
+                .load(ty, MemFlags::trusted(), base_ptr, slot_offset(slot));
+            builder.def_var(variable, value);
+        }
+    }
+
+    pub(crate) fn initialize_ssa_from_zero(
+        self,
+        builder: &mut FunctionBuilder<'_>,
+        first_slot: usize,
+    ) {
+        let zero_word = builder.ins().iconst(types::I64, 0);
+        let zero_float = builder.ins().f64const(0.0);
+        for (slot, variable) in self
+            .vars
+            .iter()
+            .filter(|(slot, _)| usize::from(*slot) >= first_slot)
+        {
+            builder.def_var(
+                variable,
+                if self.is_float_slot(slot) {
+                    zero_float
+                } else {
+                    zero_word
+                },
+            );
+        }
+    }
+
     /// Materialize the sparse state needed to resume at a basic-block entry.
     ///
     /// Dead slots are left untouched because bytecode liveness proves that

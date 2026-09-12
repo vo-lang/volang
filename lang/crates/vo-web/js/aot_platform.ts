@@ -1,3 +1,4 @@
+import { canonicalExternName } from './aot_abi.js';
 import type {
   AotExternCall,
   AotExternDescriptor,
@@ -102,11 +103,6 @@ const HTTP_OPERATIONS = new Set([
 ]);
 const FILEPATH_OPERATIONS = new Set(['evalSymlinks', 'absPath']);
 
-function canonicalExternName(packageName: string, functionName: string): string {
-  const encoder = new TextEncoder();
-  return `vo1:${encoder.encode(packageName).byteLength}:${packageName}`
-    + `:${encoder.encode(functionName).byteLength}:${functionName}`;
-}
 
 function operationInPackage(
   descriptor: AotExternDescriptor,

@@ -158,10 +158,53 @@ impl FunctionAnalysis {
         exact_base_returns: &[Box<[bool]>],
         retained_limit_bytes: usize,
     ) -> Result<Self, JitError> {
-        let ir = FunctionIr::build_with_limit_and_return_summaries(
+        Self::for_entry_points(
             func_def,
             vo_module,
             exact_base_returns,
+            &[],
+            retained_limit_bytes,
+        )
+    }
+
+    /// Continuation optimization is optional within the remaining artifact
+    /// analysis budget. Invalid inputs still fail compilation; only resource
+    /// exhaustion selects the canonical baseline body.
+    pub(crate) fn try_for_continuations(
+        func_def: &FunctionDef,
+        vo_module: &VoModule,
+        exact_base_returns: &[Box<[bool]>],
+        entry_pcs: &[u32],
+        retained_limit_bytes: usize,
+    ) -> Result<Option<Self>, JitError> {
+        match Self::for_entry_points(
+            func_def,
+            vo_module,
+            exact_base_returns,
+            entry_pcs,
+            retained_limit_bytes,
+        ) {
+            Ok(analysis) => Ok(Some(analysis)),
+            Err(
+                JitError::AnalysisResourceLimitExceeded { .. }
+                | JitError::CompileWorkLimitExceeded { .. },
+            ) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn for_entry_points(
+        func_def: &FunctionDef,
+        vo_module: &VoModule,
+        exact_base_returns: &[Box<[bool]>],
+        entry_pcs: &[u32],
+        retained_limit_bytes: usize,
+    ) -> Result<Self, JitError> {
+        let ir = FunctionIr::build_with_entry_points(
+            func_def,
+            vo_module,
+            exact_base_returns,
+            entry_pcs,
             retained_limit_bytes,
         )?;
         let loops = crate::loop_analysis::try_analyze_loops(func_def)?;

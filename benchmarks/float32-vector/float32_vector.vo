@@ -1,0 +1,13 @@
+package main
+func main() {
+    values := make([]float32, 4096)
+    for i := 0; i < len(values); i++ { values[i] = float32(i) * 0.00390625 }
+    var a, b, c float32 = 0.25, 0.5, 0.75
+    for round := 0; round < 256; round++ {
+        for i := 0; i < len(values); i++ { values[i] = (values[i] + a) * b + c }
+    }
+    var sum float32
+    for _, value := range values { sum += value }
+    assert(sum == 7168)
+    println(int(sum))
+}

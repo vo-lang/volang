@@ -76,7 +76,7 @@ pub fn emit_call_via_vm<'a, E: IrEmitter<'a>>(
 /// Emit a JIT-to-JIT call with runtime check for compiled callee.
 ///
 /// Fast path (JIT-to-JIT):
-/// - Args passed through the capacity-checked fiber shadow window
+/// - Leading argument words use native lanes; wide tails use the checked shadow window
 /// - No push_frame/pop_frame calls
 ///
 /// VM materialization path:
@@ -157,15 +157,14 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
         emitter.store_context_field(new_bp, JitContextField::JitBp);
         emitter.store_context_field(new_sp, JitContextField::FiberSp);
     }
-    let stack_ptr = emitter.load_context_field(types::I64, JitContextField::StackPtr);
     let frame_bp = emitter.builder().ins().uextend(types::I64, new_bp);
-    let bp_offset = emitter.builder().ins().imul_imm_u(frame_bp, 8);
-    let args_ptr = emitter.builder().ins().iadd(stack_ptr, bp_offset);
-    for (i, val) in arg_values.iter().enumerate() {
-        emitter
-            .builder()
-            .ins()
-            .store(MemFlags::trusted(), *val, args_ptr, (i * 8) as i32);
+
+    // Keep the established shadow handoff for frame-elided direct recursion.
+    // Native lanes remain authoritative; preserving this store sequence avoids
+    // the measured regression in recursive call chains.
+    let mirror_arguments = direct_native.is_some() && plan.eligibility.frame_elided;
+    if mirror_arguments {
+        emit_shadow_arguments(emitter, frame_bp, &arg_values, 0);
     }
 
     let merge_block = emitter.builder().create_block();
@@ -225,6 +224,14 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
     let linked_func_ptr = emitter.builder().block_params(jit_call_block)[0];
 
     let old_call_depth = emit_call_depth_enter(emitter, vm_call_block);
+    // Native lanes are the source of truth on ordinary entry. The callee
+    // initializes its alias-backed leading slots before any guest safepoint;
+    // only words beyond the fixed lanes need a caller-side memory handoff.
+    // Publish after linking and the entry guards, so every VM fallback still
+    // reconstructs its arguments from the caller's own canonical window.
+    if !mirror_arguments {
+        emit_shadow_arguments(emitter, frame_bp, &arg_values, crate::NATIVE_ARG_LANES);
+    }
     let gc_mode = if plan.eligibility.may_gc {
         JitCallGcMode::MayGc
     } else {
@@ -347,4 +354,24 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
         emitter.write_var((plan.ret_reg + i) as u16, val);
     }
     Ok(())
+}
+
+fn emit_shadow_arguments<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    frame_bp: cranelift_codegen::ir::Value,
+    arguments: &[cranelift_codegen::ir::Value],
+    first: usize,
+) {
+    if first >= arguments.len() {
+        return;
+    }
+    let stack_ptr = emitter.load_context_field(types::I64, JitContextField::StackPtr);
+    let bp_offset = emitter.builder().ins().imul_imm_u(frame_bp, 8);
+    let args_ptr = emitter.builder().ins().iadd(stack_ptr, bp_offset);
+    for (index, value) in arguments.iter().enumerate().skip(first) {
+        emitter
+            .builder()
+            .ins()
+            .store(MemFlags::trusted(), *value, args_ptr, (index * 8) as i32);
+    }
 }

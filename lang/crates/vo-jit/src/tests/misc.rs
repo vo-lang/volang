@@ -858,8 +858,9 @@ fn optimizing_fresh_shape_construction_preserves_managed_children() {
 
 #[test]
 fn native_allocation_region_publishes_exact_cells_and_fails_at_the_hard_limit() {
-    let mut code = vec![Instruction::new(Opcode::LoadConst, 0, 0, 0)];
+    let mut code = Vec::new();
     for dst in 1..=5 {
+        code.push(Instruction::new(Opcode::LoadConst, 0, (dst - 1) % 2, 0));
         code.push(Instruction::new(Opcode::PtrNew, dst, 0, 0));
     }
     code.push(Instruction::new(Opcode::Return, 5, 1, 0));
@@ -878,7 +879,7 @@ fn native_allocation_region_publishes_exact_cells_and_fails_at_the_hard_limit() 
         1,
     );
     function.ret_slot_types = vec![SlotType::GcRef];
-    for pc in 1..=5 {
+    for pc in (1..10).step_by(2) {
         function.instruction_metadata[pc] = InstructionMetadata::PtrLayout {
             value_layout: vec![SlotType::Value],
         };
@@ -886,6 +887,9 @@ fn native_allocation_region_publishes_exact_cells_and_fails_at_the_hard_limit() 
     let mut module = VoModule::new("jit-allocation-region".into());
     module.constants.push(Constant::Int(
         ValueMeta::new(0, ValueKind::Int64).to_raw() as i64
+    ));
+    module.constants.push(Constant::Int(
+        ValueMeta::new(0, ValueKind::Uint64).to_raw() as i64
     ));
     module.functions.push(function);
     let loaded = Arc::new(
@@ -920,6 +924,19 @@ fn native_allocation_region_publishes_exact_cells_and_fails_at_the_hard_limit() 
     exact_gc.close_value_slot_allocation_region_for_boundary();
     assert_eq!(exact_gc.object_count(), 5);
     assert_eq!(exact_gc.objects().count(), 5);
+    let unsigned_objects = exact_gc
+        .objects()
+        .filter(|&object| {
+            unsafe { vo_runtime::gc::Gc::header(object) }
+                .value_meta()
+                .value_kind()
+                == ValueKind::Uint64
+        })
+        .count();
+    assert_eq!(
+        unsigned_objects, 2,
+        "native consumption must publish each exact type"
+    );
     assert!(exact_gc
         .canonicalize_ref(exact_ret[0] as vo_runtime::gc::GcRef)
         .is_some());
@@ -2019,9 +2036,7 @@ fn optimizing_leaf_inline_charges_expanded_execution_budget() {
             self_entry,
         },
     );
-    let inline = optimization_plan
-        .pure_leaf_inline(0, 1)
-        .expect("inline plan");
+    let inline = optimization_plan.small_inline(0, 1).expect("inline plan");
     compiler
         .compile_inline_probe(target_config, inline)
         .expect("compile inline budget probe");

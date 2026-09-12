@@ -1,3 +1,4 @@
+import { canonicalExternName } from './aot_abi.js';
 import type { AotExternCall, AotExternDescriptor } from './index.js';
 
 const VALUE_KIND_BOOL = 1;
@@ -6,11 +7,6 @@ const VALUE_KIND_FLOAT64 = 13;
 const VALUE_KIND_STRING = 17;
 const OPERATIONS = new Set(['nativeSscan', 'nativeSscanf']);
 
-function canonicalExternName(packageName: string, functionName: string): string {
-  const encoder = new TextEncoder();
-  return `vo1:${encoder.encode(packageName).byteLength}:${packageName}`
-    + `:${encoder.encode(functionName).byteLength}:${functionName}`;
-}
 
 function operation(descriptor: AotExternDescriptor): string | undefined {
   if (descriptor.source !== 1) return undefined;

@@ -20,13 +20,19 @@ use vo_runtime::jit_api::{
 };
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, OnceLock};
+#[cfg(feature = "jit")]
+use std::sync::{Mutex, MutexGuard};
+#[cfg(feature = "jit")]
 use std::time::Instant;
 
 use vo_jit::{
-    JitArtifactMetadata, JitCompileEnv, JitCompiler, JitError, JitFailureKind,
-    JitFrameEntryEligibility, JitFunc, LoopFunc, LoopInfo, NativeRootKind,
+    JitArtifactMetadata, JitCompileEnv, JitError, JitFailureKind, JitFrameEntryEligibility,
+    JitFunc, LoopFunc, LoopInfo, NativeRootKind,
 };
+
+#[cfg(feature = "jit")]
+use vo_jit::JitCompiler;
 
 use super::{JitExecutionStats, JitSideExitReason};
 
@@ -41,6 +47,14 @@ pub struct AotFunctionEntry {
     pub native: vo_jit::NativeJitFunc,
     pub metadata: Arc<JitArtifactMetadata>,
     pub entry_eligibility: JitFrameEntryEligibility,
+    pub continuation: Option<AotContinuationEntry>,
+}
+
+#[derive(Clone)]
+pub struct AotContinuationEntry {
+    pub native: vo_jit::NativeJitFunc,
+    pub pcs: Arc<[u32]>,
+    pub metadata: Arc<JitArtifactMetadata>,
 }
 
 #[inline]
@@ -157,6 +171,10 @@ struct FunctionJitInfo {
     /// Consecutive low-progress boundaries, or the disabled sentinel.
     full_low_progress_exit_streak: u8,
 
+    /// Per-PC feedback follows the immutable AOT continuation table order.
+    /// Blocking segments must not disable later compute-heavy segments.
+    continuation_low_progress: Box<[u8]>,
+
     /// Lock-free metadata handle used while native code is paused in a callback.
     metadata: [Option<Arc<JitArtifactMetadata>>; JitTier::COUNT],
 
@@ -175,6 +193,7 @@ impl FunctionJitInfo {
             loop_states: HashMap::new(),
             compile_error: None,
             full_low_progress_exit_streak: 0,
+            continuation_low_progress: Box::default(),
             metadata: std::array::from_fn(|_| None),
             entry_eligibility: None,
         }
@@ -231,8 +250,10 @@ pub(crate) struct NativeRootScanChunk {
 /// lock. Cranelift allocates newly finalized code in fresh pages and leaves
 /// previously published entry points stable until the compiler is dropped.
 pub(super) struct SharedJitCode {
-    compiler: Mutex<JitCompiler>,
+    #[cfg(feature = "jit")]
+    compiler: Option<Mutex<JitCompiler>>,
     module: OnceLock<Arc<LoadedModule>>,
+    aot: OnceLock<Arc<[AotFunctionEntry]>>,
 }
 
 // SAFETY: every access that mutates the compiler is serialized by `compiler`.
@@ -244,58 +265,117 @@ unsafe impl Sync for SharedJitCode {}
 
 impl SharedJitCode {
     fn new(config: &JitConfig) -> Result<Self, JitError> {
-        Ok(Self {
-            compiler: Mutex::new(JitCompiler::with_all_resource_limits(
-                config.debug_ir,
-                config.code_memory_limit_bytes,
-                config.analysis_memory_limit_bytes,
-                config.metadata_memory_limit_bytes,
-            )?),
+        #[cfg(feature = "jit")]
+        {
+            Ok(Self {
+                compiler: Some(Mutex::new(JitCompiler::with_all_resource_limits(
+                    config.debug_ir,
+                    config.code_memory_limit_bytes,
+                    config.analysis_memory_limit_bytes,
+                    config.metadata_memory_limit_bytes,
+                )?)),
+                module: OnceLock::new(),
+                aot: OnceLock::new(),
+            })
+        }
+        #[cfg(not(feature = "jit"))]
+        {
+            let _ = config;
+            Err(JitError::CompilerUnavailable)
+        }
+    }
+
+    fn for_aot() -> Self {
+        Self {
+            #[cfg(feature = "jit")]
+            compiler: None,
             module: OnceLock::new(),
-        })
+            aot: OnceLock::new(),
+        }
+    }
+
+    fn is_aot(&self) -> bool {
+        #[cfg(feature = "jit")]
+        {
+            self.compiler.is_none()
+        }
+        #[cfg(not(feature = "jit"))]
+        {
+            true
+        }
+    }
+
+    fn retain_aot_module(&self, module: &Arc<LoadedModule>) -> Result<(), JitError> {
+        let retained = self.module.get_or_init(|| Arc::clone(module));
+        if Arc::ptr_eq(retained, module) {
+            Ok(())
+        } else {
+            Err(JitError::ModuleScopeChanged)
+        }
     }
 
     pub(super) fn retain_module(&self, module: &Arc<LoadedModule>) -> Result<(), JitError> {
-        // Serialize the one-time owner publication with compiler binding. This
-        // keeps strict verification failures transactional and prevents a
-        // concurrent best-effort manager from publishing a different image.
-        let _compiler = self.lock()?;
-        if let Some(bound) = self.module.get() {
-            return if Arc::ptr_eq(bound, module) {
-                Ok(())
-            } else {
-                Err(JitError::ModuleScopeChanged)
-            };
-        }
-
-        if self.module.set(module.clone()).is_err()
-            && !self
-                .module
-                .get()
-                .is_some_and(|bound| Arc::ptr_eq(bound, module))
+        #[cfg(feature = "jit")]
         {
-            return Err(JitError::ModuleScopeChanged);
+            if self.is_aot() {
+                return self.retain_aot_module(module);
+            }
+            // Serialize the one-time owner publication with compiler binding. This
+            // keeps strict verification failures transactional and prevents a
+            // concurrent best-effort manager from publishing a different image.
+            let _compiler = self.lock()?;
+            if let Some(bound) = self.module.get() {
+                return if Arc::ptr_eq(bound, module) {
+                    Ok(())
+                } else {
+                    Err(JitError::ModuleScopeChanged)
+                };
+            }
+
+            if self.module.set(module.clone()).is_err()
+                && !self
+                    .module
+                    .get()
+                    .is_some_and(|bound| Arc::ptr_eq(bound, module))
+            {
+                return Err(JitError::ModuleScopeChanged);
+            }
+            Ok(())
         }
-        Ok(())
+        #[cfg(not(feature = "jit"))]
+        {
+            self.retain_aot_module(module)
+        }
     }
 
     fn bind_verified_module(&self, module: &Arc<LoadedModule>) -> Result<(), JitError> {
-        let mut compiler = self.lock()?;
-        if let Some(bound) = self.module.get() {
-            if !Arc::ptr_eq(bound, module) {
-                return Err(JitError::ModuleScopeChanged);
+        #[cfg(feature = "jit")]
+        {
+            if self.is_aot() {
+                return self.retain_aot_module(module);
             }
-            return compiler.bind_loaded_module_scope(Arc::clone(module));
-        }
+            let mut compiler = self.lock()?;
+            if let Some(bound) = self.module.get() {
+                if !Arc::ptr_eq(bound, module) {
+                    return Err(JitError::ModuleScopeChanged);
+                }
+                return compiler.bind_loaded_module_scope(Arc::clone(module));
+            }
 
-        // Bind before publishing the shared owner. The compiler retains its own
-        // Arc, so a failed publication cannot leave a dangling module identity.
-        compiler.bind_loaded_module_scope(Arc::clone(module))?;
-        self.module.set(module.clone()).map_err(|_| {
-            JitError::Internal("shared JIT module owner was published out of order".to_string())
-        })
+            // Bind before publishing the shared owner. The compiler retains its own
+            // Arc, so a failed publication cannot leave a dangling module identity.
+            compiler.bind_loaded_module_scope(Arc::clone(module))?;
+            self.module.set(module.clone()).map_err(|_| {
+                JitError::Internal("shared JIT module owner was published out of order".to_string())
+            })
+        }
+        #[cfg(not(feature = "jit"))]
+        {
+            self.retain_aot_module(module)
+        }
     }
 
+    #[cfg(feature = "jit")]
     fn lock_verified(
         &self,
         verified: VerifiedModule<'_>,
@@ -311,30 +391,65 @@ impl SharedJitCode {
         Ok(compiler)
     }
 
+    #[cfg(feature = "jit")]
     fn lock(&self) -> Result<MutexGuard<'_, JitCompiler>, JitError> {
         self.compiler
+            .as_ref()
+            .ok_or_else(|| {
+                JitError::Internal("runtime compilation is disabled for a static AOT image".into())
+            })?
             .lock()
             .map_err(|_| JitError::Internal("shared JIT compiler lock poisoned".to_string()))
     }
 
     fn code_memory_stats(&self) -> vo_jit::JitCodeMemoryStats {
-        match self.compiler.lock() {
-            Ok(compiler) => compiler.code_memory_stats(),
-            Err(poisoned) => poisoned.into_inner().code_memory_stats(),
+        #[cfg(feature = "jit")]
+        {
+            let Some(compiler) = &self.compiler else {
+                return Default::default();
+            };
+            match compiler.lock() {
+                Ok(compiler) => compiler.code_memory_stats(),
+                Err(poisoned) => poisoned.into_inner().code_memory_stats(),
+            }
+        }
+        #[cfg(not(feature = "jit"))]
+        {
+            Default::default()
         }
     }
 
     fn analysis_memory_stats(&self) -> vo_jit::JitAnalysisMemoryStats {
-        match self.compiler.lock() {
-            Ok(compiler) => compiler.analysis_memory_stats(),
-            Err(poisoned) => poisoned.into_inner().analysis_memory_stats(),
+        #[cfg(feature = "jit")]
+        {
+            let Some(compiler) = &self.compiler else {
+                return Default::default();
+            };
+            match compiler.lock() {
+                Ok(compiler) => compiler.analysis_memory_stats(),
+                Err(poisoned) => poisoned.into_inner().analysis_memory_stats(),
+            }
+        }
+        #[cfg(not(feature = "jit"))]
+        {
+            Default::default()
         }
     }
 
     fn metadata_memory_stats(&self) -> vo_jit::JitMetadataMemoryStats {
-        match self.compiler.lock() {
-            Ok(compiler) => compiler.metadata_memory_stats(),
-            Err(poisoned) => poisoned.into_inner().metadata_memory_stats(),
+        #[cfg(feature = "jit")]
+        {
+            let Some(compiler) = &self.compiler else {
+                return Default::default();
+            };
+            match compiler.lock() {
+                Ok(compiler) => compiler.metadata_memory_stats(),
+                Err(poisoned) => poisoned.into_inner().metadata_memory_stats(),
+            }
+        }
+        #[cfg(not(feature = "jit"))]
+        {
+            Default::default()
         }
     }
 
@@ -343,8 +458,16 @@ impl SharedJitCode {
         verified: VerifiedModule<'_>,
         func_id: u32,
     ) -> Result<Arc<[LoopInfo]>, JitError> {
-        let mut compiler = self.lock_verified(verified)?;
-        compiler.analyzed_loaded_loops(func_id)
+        #[cfg(feature = "jit")]
+        {
+            let mut compiler = self.lock_verified(verified)?;
+            compiler.analyzed_loaded_loops(func_id)
+        }
+        #[cfg(not(feature = "jit"))]
+        {
+            let _ = (verified, func_id);
+            Ok(Arc::from([]))
+        }
     }
 }
 
@@ -390,12 +513,33 @@ impl JitManager {
                 self.funcs.len()
             )));
         }
+        let module =
+            self.shared_code.module.get().cloned().ok_or_else(|| {
+                JitError::Internal("AOT publication requires a loaded module".into())
+            })?;
         for (expected, entry) in entries.iter().enumerate() {
             if entry.func_id as usize != expected {
                 return Err(JitError::Internal(format!(
                     "AOT function table must be dense and ordered; expected {expected}, found {}",
                     entry.func_id
                 )));
+            }
+            if let Some(continuation) = &entry.continuation {
+                let function = &module.functions[expected];
+                if continuation.metadata.code_size == 0
+                    || continuation.pcs.is_empty()
+                    || continuation
+                        .pcs
+                        .iter()
+                        .any(|&pc| pc == 0 || pc as usize >= function.code.len())
+                    || continuation.pcs.windows(2).any(|pair| pair[0] >= pair[1])
+                    || function.has_defer
+                {
+                    return Err(JitError::Internal(format!(
+                        "AOT function {} has invalid static continuation metadata",
+                        entry.func_id
+                    )));
+                }
             }
             if entry.metadata.code_size == 0 {
                 return Err(JitError::Internal(format!(
@@ -405,7 +549,17 @@ impl JitManager {
             }
         }
 
-        for entry in entries {
+        let owner = SharedJitCode::for_aot();
+        owner.retain_aot_module(&module)?;
+        let entries: Arc<[AotFunctionEntry]> = entries.into();
+        let _ = owner.aot.set(Arc::clone(&entries));
+        self.publish_aot_view(&entries);
+        self.shared_code = Arc::new(owner);
+        Ok(())
+    }
+
+    fn publish_aot_view(&mut self, entries: &[AotFunctionEntry]) {
+        for entry in entries.iter() {
             let idx = entry.func_id as usize;
             let generation = self.funcs[idx].generation.saturating_add(1).max(1);
             let dispatch = JitDispatchEntry {
@@ -421,14 +575,69 @@ impl JitManager {
             info.versions = [None, Some(dispatch)];
             info.compile_error = None;
             info.full_low_progress_exit_streak = 0;
-            info.metadata = [None, Some(entry.metadata)];
+            info.metadata = [None, Some(Arc::clone(&entry.metadata))];
+            if let Some(continuation) = &entry.continuation {
+                info.metadata[0] = Some(Arc::clone(&continuation.metadata));
+                info.continuation_low_progress = vec![0; continuation.pcs.len()].into_boxed_slice();
+                // Recovery bodies take a PC in the first argument lane. Keep
+                // them out of ordinary call dispatch, including deopt fallback.
+            }
             info.entry_eligibility = Some(entry.entry_eligibility);
             self.func_table[idx] = dispatch;
             self.profiles[idx].tier_up_state = 3;
         }
-        Ok(())
     }
 
+    pub(super) fn continuation_entry(&self, func_id: u32, pc: usize) -> Option<JitFunc> {
+        let functions = self.shared_code.aot.get()?;
+        let entry = functions.get(func_id as usize)?.continuation.as_ref()?;
+        let pc = u32::try_from(pc).ok()?;
+        let index = entry.pcs.binary_search(&pc).ok()?;
+        (self.funcs.get(func_id as usize)?.continuation_low_progress[index]
+            != DISABLED_LOW_PROGRESS_STREAK)
+            .then_some(entry.native)
+    }
+
+    pub(super) fn record_continuation_outcome(
+        &mut self,
+        func_id: u32,
+        pc: usize,
+        result: JitResult,
+        work_consumed: u64,
+    ) -> Result<bool, JitError> {
+        let index = u32::try_from(pc)
+            .ok()
+            .and_then(|pc| {
+                self.shared_code
+                    .aot
+                    .get()?
+                    .get(func_id as usize)?
+                    .continuation
+                    .as_ref()?
+                    .pcs
+                    .binary_search(&pc)
+                    .ok()
+            })
+            .ok_or_else(|| {
+                JitError::Internal(format!(
+                    "missing AOT recovery entry for function {func_id} at pc {pc}"
+                ))
+            })?;
+        let streak = &mut self.funcs[func_id as usize].continuation_low_progress[index];
+        if *streak == DISABLED_LOW_PROGRESS_STREAK
+            || !update_low_progress_streak(streak, result, work_consumed)
+        {
+            return Ok(false);
+        }
+        *streak = DISABLED_LOW_PROGRESS_STREAK;
+        self.execution_stats.low_progress_continuation_disables = self
+            .execution_stats
+            .low_progress_continuation_disables
+            .saturating_add(1);
+        Ok(true)
+    }
+
+    #[cfg(feature = "jit")]
     fn publish_function_version(
         &mut self,
         func_id: u32,
@@ -464,6 +673,10 @@ impl JitManager {
         Ok(Self::with_shared_code(config, shared_code))
     }
 
+    pub(super) fn for_aot() -> Self {
+        Self::with_shared_code(JitConfig::default(), Arc::new(SharedJitCode::for_aot()))
+    }
+
     pub(super) fn with_shared_code(mut config: JitConfig, shared_code: Arc<SharedJitCode>) -> Self {
         config.code_memory_limit_bytes = shared_code.code_memory_stats().limit_bytes;
         config.analysis_memory_limit_bytes = shared_code.analysis_memory_stats().limit_bytes;
@@ -488,6 +701,9 @@ impl JitManager {
         self.func_table = vec![JitDispatchEntry::unavailable(); func_count];
         self.profiles = vec![JitProfileCounters::default(); func_count];
         self.execution_stats = JitExecutionStats::default();
+        if let Some(entries) = self.shared_code.aot.get().cloned() {
+            self.publish_aot_view(&entries);
+        }
     }
 
     /// Bind and initialize from the common-verifier-owned immutable image.
@@ -537,6 +753,10 @@ impl JitManager {
             .filter(|profile| profile.optimizing_entered != 0)
             .count() as u64;
         stats
+    }
+
+    pub(super) fn function_profile(&self, func_id: u32) -> Option<JitProfileCounters> {
+        self.profiles.get(func_id as usize).copied()
     }
 
     #[inline]
@@ -782,6 +1002,13 @@ impl JitManager {
     }
 
     #[inline]
+    pub(super) fn record_aot_continuation_entry(&mut self) {
+        self.execution_stats.aot_continuation_entries = self
+            .execution_stats
+            .aot_continuation_entries
+            .saturating_add(1);
+    }
+
     pub fn record_function_entry(&mut self) {
         self.execution_stats.function_entries =
             self.execution_stats.function_entries.saturating_add(1);
@@ -938,7 +1165,7 @@ impl JitManager {
         self.funcs.get(func_id as usize)?.entry_eligibility
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "jit"))]
     pub(crate) fn published_tier(&self, func_id: u32) -> Option<JitTier> {
         self.func_table
             .get(func_id as usize)
@@ -946,7 +1173,7 @@ impl JitManager {
             .published_tier()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "jit"))]
     pub(crate) fn dispatch_generation(&self, func_id: u32) -> Option<u64> {
         Some(self.func_table.get(func_id as usize)?.generation)
     }
@@ -1013,6 +1240,9 @@ impl JitManager {
             .funcs
             .get_mut(id)
             .ok_or(JitError::FunctionNotFound(func_id))?;
+        if self.shared_code.is_aot() {
+            return Ok(false);
+        }
         info.call_count = info.call_count.saturating_add(1);
         Ok(
             info.call_count >= self.config.call_threshold
@@ -1032,6 +1262,9 @@ impl JitManager {
             .get_mut(id)
             .ok_or(JitError::FunctionNotFound(func_id))?;
 
+        if self.shared_code.is_aot() {
+            return Ok(false);
+        }
         let state = info.loop_states.entry(loop_begin_pc).or_default();
         state.backedge_count = state.backedge_count.saturating_add(1);
         Ok(state.backedge_count >= self.config.loop_threshold)
@@ -1062,169 +1295,196 @@ impl JitManager {
         verified: VerifiedModule<'_>,
         env: JitCompileEnv<'_>,
     ) -> Result<(), JitError> {
-        let idx = func_id as usize;
-        let current_state = match self.funcs.get(idx) {
-            Some(i) => i.state,
-            None => return Err(JitError::FunctionNotFound(func_id)),
-        };
-
-        // Already compiled
-        if matches!(
-            current_state,
-            CompileState::Baseline | CompileState::Optimizing
-        ) {
-            return Ok(());
-        }
-
-        let compile_result = (|| {
-            let mut compiler = self.shared_code.lock_verified(verified)?;
-            let before = compiler.code_memory_stats().function_bytes;
-            let started = Instant::now();
-            compiler.compile_loaded(func_id, env)?;
-            let compile_time_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            let code_bytes = compiler
-                .code_memory_stats()
-                .function_bytes
-                .saturating_sub(before) as u64;
-            let native = unsafe { compiler.get_native_func_ptr(func_id) }
-                .ok_or_else(|| JitError::Internal("compiled but no native pointer".into()))?;
-            let metadata = compiler.function_metadata_handle(func_id).ok_or_else(|| {
-                JitError::Internal("compiled function has no native metadata".into())
-            })?;
-            let entry_eligibility =
-                compiler
-                    .function_entry_eligibility(func_id)
-                    .ok_or_else(|| {
-                        JitError::Internal("compiled function has no entry eligibility".into())
-                    })?;
-            Ok::<_, JitError>((
-                native,
-                metadata,
-                entry_eligibility,
-                compile_time_ns,
-                code_bytes,
-            ))
-        })();
-        let (native, metadata, entry_eligibility, compile_time_ns, code_bytes) =
-            match compile_result {
-                Ok(compiled) => compiled,
-                Err(e) => {
-                    if let Some(info) = self.funcs.get_mut(idx) {
-                        info.state = CompileState::Failed(e.failure_kind());
-                        info.compile_error = Some(e.to_string());
-                    }
-                    return Err(e);
-                }
+        #[cfg(feature = "jit")]
+        {
+            let idx = func_id as usize;
+            let current_state = match self.funcs.get(idx) {
+                Some(i) => i.state,
+                None => return Err(JitError::FunctionNotFound(func_id)),
             };
 
-        // Update state
-        if let Some(info) = self.funcs.get_mut(idx) {
-            info.state = CompileState::Baseline;
-            info.compile_error = None;
-            info.full_low_progress_exit_streak = 0;
-            info.metadata[JitTier::Baseline.cache_index()] = Some(metadata);
-            info.entry_eligibility = Some(entry_eligibility);
-        }
-        self.execution_stats.function_compilations =
-            self.execution_stats.function_compilations.saturating_add(1);
-        self.execution_stats.compilation_time_ns = self
-            .execution_stats
-            .compilation_time_ns
-            .saturating_add(compile_time_ns);
-        self.execution_stats.compiled_code_bytes = self
-            .execution_stats
-            .compiled_code_bytes
-            .saturating_add(code_bytes);
-        if code_bytes == 0 {
-            self.execution_stats.compilation_cache_hits = self
-                .execution_stats
-                .compilation_cache_hits
-                .saturating_add(1);
-        }
-        self.publish_function_version(func_id, JitTier::Baseline, native as *const u8)?;
+            // Already compiled
+            if matches!(
+                current_state,
+                CompileState::Baseline | CompileState::Optimizing
+            ) {
+                return Ok(());
+            }
 
-        Ok(())
+            let compile_result = (|| {
+                let mut compiler = self.shared_code.lock_verified(verified)?;
+                let before = compiler.code_memory_stats().function_bytes;
+                let started = Instant::now();
+                compiler.compile_loaded(func_id, env)?;
+                let compile_time_ns =
+                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                let code_bytes = compiler
+                    .code_memory_stats()
+                    .function_bytes
+                    .saturating_sub(before) as u64;
+                let native = unsafe { compiler.get_native_func_ptr(func_id) }
+                    .ok_or_else(|| JitError::Internal("compiled but no native pointer".into()))?;
+                let metadata = compiler.function_metadata_handle(func_id).ok_or_else(|| {
+                    JitError::Internal("compiled function has no native metadata".into())
+                })?;
+                let entry_eligibility =
+                    compiler
+                        .function_entry_eligibility(func_id)
+                        .ok_or_else(|| {
+                            JitError::Internal("compiled function has no entry eligibility".into())
+                        })?;
+                Ok::<_, JitError>((
+                    native,
+                    metadata,
+                    entry_eligibility,
+                    compile_time_ns,
+                    code_bytes,
+                ))
+            })();
+            let (native, metadata, entry_eligibility, compile_time_ns, code_bytes) =
+                match compile_result {
+                    Ok(compiled) => compiled,
+                    Err(e) => {
+                        if let Some(info) = self.funcs.get_mut(idx) {
+                            info.state = CompileState::Failed(e.failure_kind());
+                            info.compile_error = Some(e.to_string());
+                        }
+                        return Err(e);
+                    }
+                };
+
+            // Update state
+            if let Some(info) = self.funcs.get_mut(idx) {
+                info.state = CompileState::Baseline;
+                info.compile_error = None;
+                info.full_low_progress_exit_streak = 0;
+                info.metadata[JitTier::Baseline.cache_index()] = Some(metadata);
+                info.entry_eligibility = Some(entry_eligibility);
+            }
+            self.execution_stats.function_compilations =
+                self.execution_stats.function_compilations.saturating_add(1);
+            self.execution_stats.compilation_time_ns = self
+                .execution_stats
+                .compilation_time_ns
+                .saturating_add(compile_time_ns);
+            self.execution_stats.compiled_code_bytes = self
+                .execution_stats
+                .compiled_code_bytes
+                .saturating_add(code_bytes);
+            if code_bytes == 0 {
+                self.execution_stats.compilation_cache_hits = self
+                    .execution_stats
+                    .compilation_cache_hits
+                    .saturating_add(1);
+            }
+            self.publish_function_version(func_id, JitTier::Baseline, native as *const u8)?;
+
+            Ok(())
+        }
+        #[cfg(not(feature = "jit"))]
+        {
+            let _ = (func_id, verified, env);
+            Err(JitError::CompilerUnavailable)
+        }
     }
 
     /// Compile and atomically publish the optimizing tier. A rejected optional
     /// tier leaves the already-published baseline version active.
-    pub fn compile_optimizing(
+    /// Feedback belongs to the current Island; emitted code retains runtime guards.
+    pub(super) fn compile_optimizing_with_feedback(
         &mut self,
         func_id: u32,
         verified: VerifiedModule<'_>,
         env: JitCompileEnv<'_>,
+        feedback: &[vo_runtime::DynCallIC],
     ) -> Result<bool, JitError> {
-        let idx = func_id as usize;
-        let Some(info) = self.funcs.get(idx) else {
-            return Err(JitError::FunctionNotFound(func_id));
-        };
-        if info.state != CompileState::Baseline
-            || info.full_low_progress_exit_streak == DISABLED_LOW_PROGRESS_STREAK
-            || info.optimizing_failure.is_some()
+        #[cfg(feature = "jit")]
         {
-            return Ok(false);
-        }
-
-        let compile_result = (|| {
-            let mut compiler = self.shared_code.lock_verified(verified)?;
-            let before = compiler.code_memory_stats().function_bytes;
-            let started = Instant::now();
-            compiler.compile_loaded_tier(func_id, env, JitTier::Optimizing)?;
-            let compile_time_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            let code_bytes = compiler
-                .code_memory_stats()
-                .function_bytes
-                .saturating_sub(before) as u64;
-            let native =
-                unsafe { compiler.get_native_func_ptr_for_tier(func_id, JitTier::Optimizing) }
-                    .ok_or_else(|| {
-                        JitError::Internal("optimized function has no native entry".into())
-                    })?;
-            let metadata = compiler
-                .function_metadata_handle_for_tier(func_id, JitTier::Optimizing)
-                .ok_or_else(|| JitError::Internal("optimized function has no metadata".into()))?;
-            Ok::<_, JitError>((native, metadata, compile_time_ns, code_bytes))
-        })();
-        let (native, metadata, compile_time_ns, code_bytes) = match compile_result {
-            Ok(compiled) => compiled,
-            Err(error) => {
-                let info = &mut self.funcs[idx];
-                info.optimizing_failure = Some(error.failure_kind());
-                self.profiles[idx].tier_up_state = 3;
-                self.execution_stats.optimizing_failures =
-                    self.execution_stats.optimizing_failures.saturating_add(1);
+            let idx = func_id as usize;
+            let Some(info) = self.funcs.get(idx) else {
+                return Err(JitError::FunctionNotFound(func_id));
+            };
+            if info.state != CompileState::Baseline
+                || info.full_low_progress_exit_streak == DISABLED_LOW_PROGRESS_STREAK
+                || info.optimizing_failure.is_some()
+            {
                 return Ok(false);
             }
-        };
 
-        {
-            let info = &mut self.funcs[idx];
-            info.state = CompileState::Optimizing;
-            info.metadata[JitTier::Optimizing.cache_index()] = Some(metadata);
-        }
-        self.profiles[idx].tier_up_state = 2;
-        self.execution_stats.function_compilations =
-            self.execution_stats.function_compilations.saturating_add(1);
-        self.execution_stats.optimizing_compilations = self
-            .execution_stats
-            .optimizing_compilations
-            .saturating_add(1);
-        self.execution_stats.compilation_time_ns = self
-            .execution_stats
-            .compilation_time_ns
-            .saturating_add(compile_time_ns);
-        self.execution_stats.compiled_code_bytes = self
-            .execution_stats
-            .compiled_code_bytes
-            .saturating_add(code_bytes);
-        if code_bytes == 0 {
-            self.execution_stats.compilation_cache_hits = self
+            let compile_result = (|| {
+                let mut compiler = self.shared_code.lock_verified(verified)?;
+                let before = compiler.code_memory_stats().function_bytes;
+                let started = Instant::now();
+                compiler.compile_loaded_tier_with_feedback(
+                    func_id,
+                    env,
+                    JitTier::Optimizing,
+                    feedback,
+                )?;
+                let compile_time_ns =
+                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                let code_bytes = compiler
+                    .code_memory_stats()
+                    .function_bytes
+                    .saturating_sub(before) as u64;
+                let native =
+                    unsafe { compiler.get_native_func_ptr_for_tier(func_id, JitTier::Optimizing) }
+                        .ok_or_else(|| {
+                            JitError::Internal("optimized function has no native entry".into())
+                        })?;
+                let metadata = compiler
+                    .function_metadata_handle_for_tier(func_id, JitTier::Optimizing)
+                    .ok_or_else(|| {
+                        JitError::Internal("optimized function has no metadata".into())
+                    })?;
+                Ok::<_, JitError>((native, metadata, compile_time_ns, code_bytes))
+            })();
+            let (native, metadata, compile_time_ns, code_bytes) = match compile_result {
+                Ok(compiled) => compiled,
+                Err(error) => {
+                    let info = &mut self.funcs[idx];
+                    info.optimizing_failure = Some(error.failure_kind());
+                    self.profiles[idx].tier_up_state = 3;
+                    self.execution_stats.optimizing_failures =
+                        self.execution_stats.optimizing_failures.saturating_add(1);
+                    return Ok(false);
+                }
+            };
+
+            {
+                let info = &mut self.funcs[idx];
+                info.state = CompileState::Optimizing;
+                info.metadata[JitTier::Optimizing.cache_index()] = Some(metadata);
+            }
+            self.profiles[idx].tier_up_state = 2;
+            self.execution_stats.function_compilations =
+                self.execution_stats.function_compilations.saturating_add(1);
+            self.execution_stats.optimizing_compilations = self
                 .execution_stats
-                .compilation_cache_hits
+                .optimizing_compilations
                 .saturating_add(1);
+            self.execution_stats.compilation_time_ns = self
+                .execution_stats
+                .compilation_time_ns
+                .saturating_add(compile_time_ns);
+            self.execution_stats.compiled_code_bytes = self
+                .execution_stats
+                .compiled_code_bytes
+                .saturating_add(code_bytes);
+            if code_bytes == 0 {
+                self.execution_stats.compilation_cache_hits = self
+                    .execution_stats
+                    .compilation_cache_hits
+                    .saturating_add(1);
+            }
+            self.publish_function_version(func_id, JitTier::Optimizing, native as *const u8)?;
+            Ok(true)
         }
-        self.publish_function_version(func_id, JitTier::Optimizing, native as *const u8)?;
-        Ok(true)
+        #[cfg(not(feature = "jit"))]
+        {
+            let _ = (func_id, verified, env, feedback);
+            Ok(false)
+        }
     }
 
     /// Retire a failed assumption and publish the next valid lower tier.
@@ -1277,7 +1537,7 @@ impl JitManager {
     }
 
     /// Mark function as unsupported.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "jit"))]
     fn mark_unsupported(&mut self, func_id: u32) -> Result<(), JitError> {
         let info = self
             .funcs
@@ -1336,61 +1596,72 @@ impl JitManager {
         env: JitCompileEnv<'_>,
         loop_info: &LoopInfo,
     ) -> Result<LoopFunc, JitError> {
-        if self.funcs.get(func_id as usize).is_none() {
-            return Err(JitError::FunctionNotFound(func_id));
-        }
-        let compile_result = (|| {
-            let mut compiler = self.shared_code.lock_verified(verified)?;
-            let before = compiler.code_memory_stats().loop_bytes;
-            let started = Instant::now();
-            compiler.compile_loaded_loop(func_id, env, loop_info)?;
-            let compile_time_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            let code_bytes = compiler
-                .code_memory_stats()
-                .loop_bytes
-                .saturating_sub(before) as u64;
-            let loop_func = unsafe { compiler.get_loop_func_ptr(func_id, loop_info.begin_pc) }
-                .ok_or_else(|| {
-                    JitError::Internal(format!(
-                        "compiled loop at pc {} but no function pointer was registered",
-                        loop_info.begin_pc
-                    ))
-                })?;
-            let metadata = compiler
-                .loop_metadata_handle(func_id, loop_info.begin_pc)
-                .ok_or_else(|| JitError::Internal("compiled loop has no native metadata".into()))?;
-            Ok::<_, JitError>((loop_func, metadata, compile_time_ns, code_bytes))
-        })();
-        let (loop_func, metadata, compile_time_ns, code_bytes) = match compile_result {
-            Ok(compiled) => compiled,
-            Err(error) => {
-                self.mark_loop_failed(func_id, loop_info.begin_pc, error.failure_kind())?;
-                return Err(error);
+        #[cfg(feature = "jit")]
+        {
+            if self.funcs.get(func_id as usize).is_none() {
+                return Err(JitError::FunctionNotFound(func_id));
             }
-        };
-        let loop_state = self.funcs[func_id as usize]
-            .loop_states
-            .entry(loop_info.begin_pc)
-            .or_default();
-        loop_state.entry = Some(loop_func);
-        loop_state.metadata = Some(metadata);
-        self.execution_stats.loop_compilations =
-            self.execution_stats.loop_compilations.saturating_add(1);
-        self.execution_stats.compilation_time_ns = self
-            .execution_stats
-            .compilation_time_ns
-            .saturating_add(compile_time_ns);
-        self.execution_stats.compiled_code_bytes = self
-            .execution_stats
-            .compiled_code_bytes
-            .saturating_add(code_bytes);
-        if code_bytes == 0 {
-            self.execution_stats.compilation_cache_hits = self
+            let compile_result = (|| {
+                let mut compiler = self.shared_code.lock_verified(verified)?;
+                let before = compiler.code_memory_stats().loop_bytes;
+                let started = Instant::now();
+                compiler.compile_loaded_loop(func_id, env, loop_info)?;
+                let compile_time_ns =
+                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                let code_bytes = compiler
+                    .code_memory_stats()
+                    .loop_bytes
+                    .saturating_sub(before) as u64;
+                let loop_func = unsafe { compiler.get_loop_func_ptr(func_id, loop_info.begin_pc) }
+                    .ok_or_else(|| {
+                        JitError::Internal(format!(
+                            "compiled loop at pc {} but no function pointer was registered",
+                            loop_info.begin_pc
+                        ))
+                    })?;
+                let metadata = compiler
+                    .loop_metadata_handle(func_id, loop_info.begin_pc)
+                    .ok_or_else(|| {
+                        JitError::Internal("compiled loop has no native metadata".into())
+                    })?;
+                Ok::<_, JitError>((loop_func, metadata, compile_time_ns, code_bytes))
+            })();
+            let (loop_func, metadata, compile_time_ns, code_bytes) = match compile_result {
+                Ok(compiled) => compiled,
+                Err(error) => {
+                    self.mark_loop_failed(func_id, loop_info.begin_pc, error.failure_kind())?;
+                    return Err(error);
+                }
+            };
+            let loop_state = self.funcs[func_id as usize]
+                .loop_states
+                .entry(loop_info.begin_pc)
+                .or_default();
+            loop_state.entry = Some(loop_func);
+            loop_state.metadata = Some(metadata);
+            self.execution_stats.loop_compilations =
+                self.execution_stats.loop_compilations.saturating_add(1);
+            self.execution_stats.compilation_time_ns = self
                 .execution_stats
-                .compilation_cache_hits
-                .saturating_add(1);
+                .compilation_time_ns
+                .saturating_add(compile_time_ns);
+            self.execution_stats.compiled_code_bytes = self
+                .execution_stats
+                .compiled_code_bytes
+                .saturating_add(code_bytes);
+            if code_bytes == 0 {
+                self.execution_stats.compilation_cache_hits = self
+                    .execution_stats
+                    .compilation_cache_hits
+                    .saturating_add(1);
+            }
+            Ok(loop_func)
         }
-        Ok(loop_func)
+        #[cfg(not(feature = "jit"))]
+        {
+            let _ = (func_id, verified, env, loop_info);
+            Err(JitError::CompilerUnavailable)
+        }
     }
 
     /// Get an Island-local published loop entry without touching the shared
@@ -1407,12 +1678,15 @@ impl JitManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "jit")]
     use crate::fiber::Fiber;
+    #[cfg(feature = "jit")]
     use crate::vm::{jit::build_jit_context, Vm};
     use vo_runtime::bytecode::InstructionMetadata;
     use vo_runtime::instruction::{Instruction, Opcode};
 
     #[cfg(target_arch = "aarch64")]
+    #[cfg(feature = "jit")]
     extern "C" fn dormant_jit_entry(
         _ctx: *mut vo_runtime::jit_api::JitContext,
         _args: *mut u64,
@@ -1427,6 +1701,7 @@ mod tests {
     }
 
     #[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+    #[cfg(feature = "jit")]
     extern "C" fn dormant_jit_entry(
         _ctx: *mut vo_runtime::jit_api::JitContext,
         _args: *mut u64,
@@ -1442,6 +1717,7 @@ mod tests {
         all(target_arch = "x86_64", target_os = "windows"),
         not(any(target_arch = "aarch64", target_arch = "x86_64"))
     ))]
+    #[cfg(feature = "jit")]
     extern "C" fn dormant_jit_entry(
         _ctx: *mut vo_runtime::jit_api::JitContext,
         _args: *mut u64,
@@ -1451,6 +1727,7 @@ mod tests {
         JitResult::Ok
     }
 
+    #[cfg(feature = "jit")]
     fn manager_with_active_entry() -> JitManager {
         let mut manager = JitManager::new().expect("jit manager");
         manager.init(1);
@@ -1466,6 +1743,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn optimizing_publication_advances_generation_and_deopt_restores_baseline() {
         let func = valid_jit_func("tiered", vec![Instruction::new(Opcode::Return, 0, 0, 0)]);
         let mut module = VoModule::new("jit-tier-state-machine".to_string());
@@ -1492,7 +1770,7 @@ mod tests {
         assert_eq!(manager.published_tier(0), Some(JitTier::Baseline));
 
         assert!(manager
-            .compile_optimizing(0, loaded.verified_module(), env)
+            .compile_optimizing_with_feedback(0, loaded.verified_module(), env, &[])
             .expect("optimizing compile"));
         let optimizing_generation = manager
             .dispatch_generation(0)
@@ -1510,6 +1788,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn baseline_entry_safe_point_publishes_optimizing_code_immediately() {
         let func = valid_jit_func(
             "tier-up-safe-point",
@@ -1591,6 +1870,7 @@ mod tests {
         func
     }
 
+    #[cfg(feature = "jit")]
     fn string_slice_func(name: &str, code: Vec<Instruction>) -> FunctionDef {
         let mut func = valid_jit_func(name, code);
         func.param_count = 3;
@@ -1608,6 +1888,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn manager_records_side_exit_reasons() {
         let mut manager = JitManager::new().expect("jit manager");
         manager.record_side_exit(JitSideExitReason::RegularCall);
@@ -1658,6 +1939,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn repeated_low_progress_boundaries_disable_full_entry() {
         let mut manager = manager_with_active_entry();
 
@@ -1689,6 +1971,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn compiled_caller_observes_later_callee_dispatch_disable() {
         let caller = valid_jit_func(
             "caller",
@@ -1767,6 +2050,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn compiled_caller_lazily_links_a_cold_callee_without_leaving_native_execution() {
         let caller = valid_jit_func(
             "caller",
@@ -1828,6 +2112,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn baseline_inlines_an_immutable_pure_leaf_without_publishing_the_callee() {
         let caller = valid_jit_func(
             "caller",
@@ -1880,6 +2165,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn allocating_jit_helper_collects_from_native_roots_without_a_side_exit() {
         let func = string_slice_func(
             "allocating",
@@ -1937,6 +2223,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn allocating_direct_callee_exposes_complete_native_frame_chain() {
         let caller = string_slice_func(
             "caller",
@@ -2005,6 +2292,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn native_gc_side_exit_bounds_large_vm_root_pass_and_preserves_frames() {
         let caller = string_slice_func(
             "caller",
@@ -2095,6 +2383,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn large_native_root_side_exit_resumes_guest_under_gc_stress() {
         let mut module = VoModule::new("native-gc-side-exit-resume".into());
         module.functions = vec![string_slice_func(
@@ -2152,6 +2441,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn native_recovery_does_not_republish_dead_managed_slots() {
         let mut caller = string_slice_func(
             "caller",
@@ -2222,6 +2512,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn native_interface_pair_keeps_its_conditional_payload_live_during_collection() {
         let mut func = valid_jit_func(
             "interface-root",
@@ -2298,6 +2589,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn loop_feedback_is_isolated_by_function_and_pc() {
         let mut manager = JitManager::new().expect("jit manager");
         manager.init(2);
@@ -2330,6 +2622,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn unsupported_function_stays_on_interpreter_without_side_exit_noise() {
         let func = valid_jit_func("f", vec![Instruction::new(Opcode::Return, 0, 0, 0)]);
         let mut module = VoModule::new("m".to_string());
@@ -2358,6 +2651,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn manager_rejects_out_of_range_func_ids_without_panicking() {
         let func = valid_jit_func("f", vec![Instruction::new(Opcode::Return, 0, 0, 0)]);
         let mut module = VoModule::new("m".to_string());
@@ -2390,6 +2684,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn related_managers_compile_one_shared_function_artifact() {
         let func = valid_jit_func("shared", vec![Instruction::new(Opcode::Return, 0, 0, 0)]);
         let mut module = VoModule::new("shared-jit-family".to_string());
@@ -2457,6 +2752,117 @@ mod tests {
     }
 
     #[test]
+    fn aot_image_is_inherited_without_runtime_compiler_or_hotness() {
+        extern "C" fn native(
+            _: *mut JitContext,
+            _: u64,
+            _: *mut u64,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+        ) -> JitResult {
+            JitResult::Ok
+        }
+        let mut module = VoModule::new("aot-family".into());
+        module.functions.push(valid_jit_func(
+            "main",
+            vec![
+                Instruction::new(Opcode::Jump, 0, 1, 0),
+                Instruction::new(Opcode::Jump, 0, 1, 0),
+                Instruction::new(Opcode::Return, 0, 0, 0),
+            ],
+        ));
+        let loaded = Arc::new(vo_common_core::verifier::verify_loaded_module(module).unwrap());
+        let mut parent = JitManager::for_aot();
+        parent.init_verified(&loaded).unwrap();
+        parent
+            .install_aot_functions(vec![AotFunctionEntry {
+                continuation: Some(AotContinuationEntry {
+                    native,
+                    pcs: Arc::from([1, 2]),
+                    metadata: Arc::new(
+                        JitArtifactMetadata::try_from_parts(1, vec![], vec![], "resume").unwrap(),
+                    ),
+                }),
+                func_id: 0,
+                native,
+                metadata: Arc::new(
+                    JitArtifactMetadata::try_from_parts(1, vec![], vec![], "main").unwrap(),
+                ),
+                entry_eligibility: vo_jit::jit_frame_entry_eligibility(&loaded.functions[0]),
+            }])
+            .unwrap();
+        let mut child = JitManager::with_shared_code(
+            JitConfig {
+                call_threshold: 0,
+                loop_threshold: 0,
+                optimizing_threshold: 0,
+                ..Default::default()
+            },
+            parent.shared_code(),
+        );
+        child.init_verified(&loaded).unwrap();
+        drop(parent);
+        #[cfg(feature = "jit")]
+        assert!(child.shared_code.compiler.is_none());
+        assert!(child.shared_code.is_aot());
+        assert_eq!(child.code_memory_stats().limit_bytes, 0);
+        assert_eq!(
+            child.get_entry(0).unwrap() as usize,
+            native as *const () as usize
+        );
+        assert!(child.funcs[0].metadata[JitTier::Optimizing.cache_index()].is_some());
+        assert!(!child.record_call(0).unwrap());
+        assert!(!child.record_backedge(0, 0).unwrap());
+        assert!(child.funcs[0].loop_states.is_empty());
+        assert_eq!(child.profiles[0].tier_up_state, 3);
+        assert!(child.continuation_entry(0, 1).is_some());
+        assert!(child.continuation_entry(0, 0).is_none());
+        assert!(child.continuation_entry(0, 3).is_none());
+        child.record_deopt(0, JitTier::Optimizing).unwrap();
+        assert!(
+            child.get_entry(0).is_none(),
+            "resume ABI cannot become ordinary call dispatch"
+        );
+        assert!(child.continuation_entry(0, 1).is_some());
+        for exit in 0..LOW_PROGRESS_EXIT_LIMIT {
+            assert_eq!(
+                child
+                    .record_function_outcome(0, JitResult::WaitQueue, 0)
+                    .unwrap(),
+                exit + 1 == LOW_PROGRESS_EXIT_LIMIT,
+            );
+        }
+        assert!(
+            child.continuation_entry(0, 1).is_some(),
+            "ordinary-entry feedback cannot disable a recovery segment"
+        );
+        for exit in 0..LOW_PROGRESS_EXIT_LIMIT {
+            assert_eq!(
+                child
+                    .record_continuation_outcome(0, 1, JitResult::WaitQueue, 0)
+                    .unwrap(),
+                exit + 1 == LOW_PROGRESS_EXIT_LIMIT,
+            );
+        }
+        assert!(
+            child.continuation_entry(0, 1).is_none(),
+            "a repeatedly blocking recovery segment backs off"
+        );
+        assert!(
+            child.continuation_entry(0, 2).is_some(),
+            "other recovery segments remain eligible for native computation"
+        );
+        assert_eq!(
+            child.execution_stats().low_progress_continuation_disables,
+            1
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "jit")]
     fn shared_jit_retains_module_until_last_family_owner_drops() {
         let mut module = VoModule::new("shared-jit-lifetime".to_string());
         module.functions.push(valid_jit_func(
@@ -2503,6 +2909,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn shared_jit_rejects_equal_but_distinct_module_images() {
         let make_module = || {
             let mut module = VoModule::new("shared-jit-identity".to_string());

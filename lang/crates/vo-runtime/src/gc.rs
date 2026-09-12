@@ -2,6 +2,7 @@
 #![allow(clippy::items_after_test_module)]
 
 mod heap;
+mod literal_cache;
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -86,6 +87,7 @@ pub const JIT_GC_BLACK_BIT: u8 = BLACK_BIT;
 pub const JIT_GC_HEAP_BLOCK_SIZE: usize = heap::HEAP_BLOCK_SIZE;
 pub(crate) const VALUE_SLOTS_OBJECT_BIT: u8 = 1 << 0;
 pub(crate) const RUNTIME_BACKING_OBJECT_BIT: u8 = 1 << 1;
+pub(crate) const FORWARDED_BACKING_OBJECT_BIT: u8 = 1 << 2;
 
 // Age values (for generational GC)
 pub const G_YOUNG: u8 = 0;
@@ -548,12 +550,32 @@ impl GcHeader {
         self._reserved |= VALUE_SLOTS_OBJECT_BIT;
     }
 
+    /// Only concrete queue objects own payloads outside the managed heap.
+    /// Bare value boxes describe references, even when their kind is a queue.
+    #[inline]
+    pub(crate) fn requires_native_finalizer(&self) -> bool {
+        self.kind().is_queue()
+            && self.slots == crate::objects::queue_state::DATA_SLOTS
+            && !self.is_value_slots_object()
+    }
+
     #[inline]
     pub fn is_runtime_backing_object(&self) -> bool {
         (self._reserved & RUNTIME_BACKING_OBJECT_BIT) != 0
     }
 
     #[inline]
+    /// Retired map buckets retain their successor through slot zero. Their
+    /// payload entries contain forwarding indices and carry no value roots.
+    pub(crate) fn is_forwarded_backing_object(&self) -> bool {
+        (self._reserved & FORWARDED_BACKING_OBJECT_BIT) != 0
+    }
+
+    pub(crate) fn set_forwarded_backing_object(&mut self) {
+        debug_assert!(self.is_runtime_backing_object());
+        self._reserved |= FORWARDED_BACKING_OBJECT_BIT;
+    }
+
     fn set_runtime_backing_object(&mut self) {
         self._reserved |= RUNTIME_BACKING_OBJECT_BIT;
     }
@@ -597,7 +619,7 @@ struct ValueSlotAllocationRegion {
     bitmap_word: *mut u64,
     live_cells: *mut u16,
     logical_bytes: *mut usize,
-    shape: u64,
+    layout_size: u64,
     class_size: u32,
     logical_size: u32,
 }
@@ -610,7 +632,7 @@ impl Default for ValueSlotAllocationRegion {
             bitmap_word: core::ptr::null_mut(),
             live_cells: core::ptr::null_mut(),
             logical_bytes: core::ptr::null_mut(),
-            shape: 0,
+            layout_size: 0,
             class_size: 0,
             logical_size: 0,
         }
@@ -638,7 +660,7 @@ pub enum ValueSlotAllocationRegionField {
     Cursor,
     Limit,
     BitmapWord,
-    Shape,
+    LayoutSize,
 }
 
 impl ValueSlotAllocationRegionField {
@@ -653,7 +675,7 @@ impl ValueSlotAllocationRegionField {
             Self::Cursor => core::mem::offset_of!(ValueSlotAllocationRegion, cursor),
             Self::Limit => core::mem::offset_of!(ValueSlotAllocationRegion, limit),
             Self::BitmapWord => core::mem::offset_of!(ValueSlotAllocationRegion, bitmap_word),
-            Self::Shape => core::mem::offset_of!(ValueSlotAllocationRegion, shape),
+            Self::LayoutSize => core::mem::offset_of!(ValueSlotAllocationRegion, layout_size),
         };
         i32::try_from(region.checked_add(field)?).ok()
     }
@@ -665,13 +687,17 @@ impl ValueSlotAllocationRegionField {
     }
 
     #[inline]
-    pub const fn shape(size: usize, meta_raw: u32) -> u64 {
-        ((meta_raw as u64) << 32) | size as u64
+    pub const fn layout_size(size: usize) -> u64 {
+        size as u64
     }
 }
 
 /// Garbage collector.
-#[repr(C)]
+// Keep the collector on a stable 16-byte boundary when embedded in host state.
+// Allocation-heavy VM/JIT execution otherwise depends on unrelated host-state
+// placement (including argv storage). This only aligns collector metadata;
+// managed object layout and admission/accounting remain independent.
+#[repr(C, align(16))]
 pub struct Gc {
     /// Present only in the lightweight GC facade constructed inside a native
     /// extension trampoline. Host collectors always keep this as `None`.
@@ -765,8 +791,18 @@ pub struct Gc {
     stress_every_step: bool,
     /// Cached fast-path predicate consumed by generated JIT allocation polls.
     /// Every production mutation of its inputs updates this byte.
-    jit_poll_required: bool,
+    // Shared by interpreter/owner queries and generated native safepoints.
+    // Policy mutations publish this before callbacks or returning to guests.
+    poll_required: bool,
     last_step_stats: GcStepStats,
+    /// Bounded retry delay after a region loses most of its unused admission.
+    /// Successful exhaustion clears the delay; ordinary allocation semantics
+    /// are unchanged while mixed sizes use the general path.
+    value_slot_region_backoff: u8,
+    value_slot_region_cooldown: u8,
+    value_slot_region_admitted: u8,
+    // Tail-only owner metadata; existing generated GC field offsets stay fixed.
+    literal_cache: literal_cache::LiteralCache,
 }
 
 /// Raw fields used by the JIT's allocation safepoint fast poll.
@@ -795,7 +831,7 @@ impl JitGcPollField {
     #[inline]
     pub const fn offset(self) -> i32 {
         match self {
-            Self::Required => core::mem::offset_of!(Gc, jit_poll_required) as i32,
+            Self::Required => core::mem::offset_of!(Gc, poll_required) as i32,
             Self::AutomaticGc => core::mem::offset_of!(Gc, automatic_gc) as i32,
             Self::Mode => core::mem::offset_of!(Gc, gc_mode) as i32,
             Self::State => core::mem::offset_of!(Gc, state) as i32,
@@ -926,8 +962,12 @@ impl Gc {
             work_units_total: 0,
             max_step_work_units: 0,
             stress_every_step: false,
-            jit_poll_required: false,
+            poll_required: false,
             last_step_stats: GcStepStats::default(),
+            value_slot_region_backoff: 0,
+            value_slot_region_cooldown: 0,
+            value_slot_region_admitted: 0,
+            literal_cache: literal_cache::LiteralCache::new(),
         })
     }
 
@@ -941,13 +981,23 @@ impl Gc {
         gc
     }
 
+    // Keep the owner check in hot collector accessors. Formatting the facade
+    // error belongs to one cold path, independent of host Wasm tiering feedback.
+    #[inline(always)]
     #[track_caller]
     fn reject_owner_proxy_api(&self, api: &str) {
         if self.owner_dispatch.is_some() {
-            panic!(
-                "native extension GC facade does not expose collector API `{api}`; use an allocator-neutral ExternCallContext helper"
-            );
+            Self::panic_owner_proxy_api(api);
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    #[track_caller]
+    fn panic_owner_proxy_api(api: &str) -> ! {
+        panic!(
+            "native extension GC facade does not expose collector API `{api}`; use an allocator-neutral ExternCallContext helper"
+        );
     }
 
     /// Get current GC state.
@@ -998,6 +1048,11 @@ impl Gc {
         };
         let region = core::mem::take(region);
         let unused_cells = region.unused_cells();
+        self.value_slot_region_admitted = 0;
+        if unused_cells == 0 {
+            self.value_slot_region_backoff = 0;
+            self.value_slot_region_cooldown = 0;
+        }
         if unused_cells != 0 {
             self.live_object_count = self.live_object_count.saturating_sub(unused_cells);
             let logical_bytes = unused_cells.saturating_mul(region.logical_size as usize);
@@ -1015,7 +1070,32 @@ impl Gc {
             }
         }
         self.heap.release_bump_lane(region.cursor, region.limit);
-        self.refresh_jit_poll_required();
+        self.refresh_poll_required();
+    }
+
+    /// Learn from an actual size mismatch. Collector/host boundaries can
+    /// interrupt a well-used allocation stream at any point and must not
+    /// penalize its next region merely for returning an unused tail.
+    #[inline]
+    fn observe_value_slot_size_change(&mut self, size: usize) {
+        let Some(region) = self
+            .value_slot_allocation_regions
+            .get(usize::from(self.active_value_slot_allocation_region))
+        else {
+            return;
+        };
+        if region.layout_size == ValueSlotAllocationRegionField::layout_size(size) {
+            return;
+        }
+        let unused = region.unused_cells();
+        // A bitmap-word suffix may have admitted fewer than 64 cells.
+        if unused != 0 && unused * 2 >= usize::from(self.value_slot_region_admitted) {
+            self.value_slot_region_backoff = self
+                .value_slot_region_backoff
+                .saturating_mul(2)
+                .clamp(8, 64);
+            self.value_slot_region_cooldown = self.value_slot_region_backoff;
+        }
     }
 
     #[inline]
@@ -1059,6 +1139,7 @@ impl Gc {
 
         #[cfg(not(feature = "gc-debug"))]
         {
+            self.observe_value_slot_size_change(size);
             self.close_value_slot_allocation_region();
             if self.owner_dispatch.is_some() || self.state != GcState::Pause {
                 return;
@@ -1071,7 +1152,19 @@ impl Gc {
             if self.stress_every_step {
                 return;
             }
-            let region_limit = 64;
+            if self.value_slot_region_cooldown != 0 {
+                self.value_slot_region_cooldown -= 1;
+                return;
+            }
+            // Retry a small probe after size churn. Reserving another full
+            // batch on every retry would still initialize roughly one wasted
+            // header per ordinary allocation at the maximum cooldown. A used
+            // probe clears backoff and restores full batches on the next fill.
+            let region_limit = if self.value_slot_region_backoff == 0 {
+                64
+            } else {
+                4
+            };
             let remaining_objects = self
                 .max_objects
                 .map(|limit| limit.saturating_sub(self.live_object_count))
@@ -1120,18 +1213,19 @@ impl Gc {
                 .allocation_bytes_total
                 .saturating_add(admitted_bytes as u64);
             self.debt = self.debt.saturating_add(admitted_bytes as i64);
-            self.refresh_jit_poll_required();
+            self.refresh_poll_required();
             self.value_slot_allocation_regions[class_index] = ValueSlotAllocationRegion {
                 cursor: lane.cursor,
                 limit: lane.limit,
                 bitmap_word: lane.bitmap_word,
                 live_cells: lane.live_cells,
                 logical_bytes: lane.logical_bytes,
-                shape: ValueSlotAllocationRegionField::shape(size, value_meta.to_raw()),
+                layout_size: ValueSlotAllocationRegionField::layout_size(size),
                 class_size: class_size as u32,
                 logical_size: size as u32,
             };
             self.active_value_slot_allocation_region = class_index as u8;
+            self.value_slot_region_admitted = admitted_cells as u8;
         }
     }
 
@@ -1220,7 +1314,7 @@ impl Gc {
         self.reject_owner_proxy_api("gc_request_major");
         self.force_major_cycle = true;
         self.debt = self.debt.max(1);
-        self.refresh_jit_poll_required();
+        self.refresh_poll_required();
     }
 
     /// Request ordinary cycle scheduling without changing the selected mode.
@@ -1228,7 +1322,7 @@ impl Gc {
     pub fn gc_request_cycle(&mut self) {
         self.reject_owner_proxy_api("gc_request_cycle");
         self.debt = self.debt.max(1);
-        self.refresh_jit_poll_required();
+        self.refresh_poll_required();
     }
 
     /// Notify the collector that a root changed after a completed remark or
@@ -1253,14 +1347,14 @@ impl Gc {
     pub fn gc_stop(&mut self) {
         self.reject_owner_proxy_api("gc_stop");
         self.automatic_gc = false;
-        self.refresh_jit_poll_required();
+        self.refresh_poll_required();
     }
 
     #[inline]
     pub fn gc_restart(&mut self) {
         self.reject_owner_proxy_api("gc_restart");
         self.automatic_gc = true;
-        self.refresh_jit_poll_required();
+        self.refresh_poll_required();
     }
 
     #[inline]
@@ -1490,6 +1584,9 @@ impl Gc {
     #[inline]
     pub fn is_dead_white(&self, obj: GcRef) -> bool {
         self.reject_owner_proxy_api("is_dead_white");
+        if obj.is_null() {
+            return false;
+        }
         let Some(obj) = self.canonicalize_ref(obj) else {
             return false;
         };
@@ -1527,21 +1624,12 @@ impl Gc {
         value_meta: ValueMeta,
         slots: u16,
     ) -> Result<GcRef, MemoryError> {
-        if let Some(dispatch) = self.owner_dispatch {
-            let object = unsafe {
-                (dispatch.alloc)(
-                    dispatch.state,
-                    value_meta.to_raw(),
-                    GC_OWNER_ALLOC_VALUE_SLOTS,
-                    slots,
-                    usize::from(slots),
-                )
-            };
-            return self.owner_allocation_result(object);
-        }
-        let object = self.try_alloc(value_meta, slots)?;
-        unsafe { Self::header_mut(object) }.set_value_slots_object();
-        Ok(object)
+        self.try_alloc_inner(
+            value_meta,
+            GC_OWNER_ALLOC_VALUE_SLOTS,
+            slots,
+            usize::from(slots),
+        )
     }
 
     /// Allocate through the bounded single-mutator region shared by the VM
@@ -1566,6 +1654,11 @@ impl Gc {
         if let Some(object) = self.take_value_slot_allocation(size, value_meta) {
             return Ok(object);
         }
+        self.observe_value_slot_size_change(size);
+        if self.value_slot_region_cooldown != 0 {
+            self.value_slot_region_cooldown -= 1;
+            return self.try_alloc_value_slots(value_meta, slots);
+        }
         let object = self.try_alloc_value_slots(value_meta, slots)?;
         self.prepare_value_slot_allocation_region(size, value_meta, slots);
         Ok(object)
@@ -1573,8 +1666,8 @@ impl Gc {
 
     /// Consume one already-admitted value-slot object without re-entering the
     /// general heap allocator. Admission initialized every header and charged
-    /// all collector/accounting state up front; consumption only publishes the
-    /// cell in the allocation bitmap.
+    /// all collector/accounting state up front; consumption installs the exact
+    /// type and publishes the cell in the allocation bitmap.
     #[inline]
     fn take_value_slot_allocation(&mut self, size: usize, value_meta: ValueMeta) -> Option<GcRef> {
         #[cfg(feature = "gc-debug")]
@@ -1591,7 +1684,7 @@ impl Gc {
                 return None;
             }
             let region = self.value_slot_allocation_regions.get_mut(class_index)?;
-            if region.shape != ValueSlotAllocationRegionField::shape(size, value_meta.to_raw())
+            if region.layout_size != ValueSlotAllocationRegionField::layout_size(size)
                 || region.cursor.is_null()
                 || region.cursor >= region.limit
             {
@@ -1602,6 +1695,9 @@ impl Gc {
             region.cursor = unsafe { raw.add(region.class_size as usize) };
             let allocated_bit = heap::allocation_bit(raw, region.class_size as usize);
             unsafe {
+                // Publish the exact type before making this cell enumerable.
+                // Equal-size value objects share admission independently of type.
+                (*(raw as *mut GcHeader)).value_meta = value_meta;
                 *region.bitmap_word |= allocated_bit;
             }
             Some(unsafe { raw.add(GcHeader::SIZE) as GcRef })
@@ -1671,18 +1767,19 @@ impl Gc {
         slots: usize,
     ) -> Result<GcRef, MemoryError> {
         if let Some(dispatch) = self.owner_dispatch {
-            // These object kinds install allocator-owning Rust payloads outside
-            // the GC allocation itself (for example MapInner and queue state).
-            // Extension code must use the corresponding context helper, whose
-            // complete construction runs inside the host callback.
-            match value_meta.value_kind() {
-                ValueKind::Map | ValueKind::Channel | ValueKind::Port | ValueKind::Island => {
-                    panic!(
-                        "native extension cannot construct {:?} through ctx.gc(); use an allocator-neutral host capability",
-                        value_meta.value_kind()
-                    );
-                }
-                _ => {}
+            // Complete runtime containers use host-owned construction helpers.
+            // Reference boxes use the same host-validated value-slot capability
+            // for both allocation and cloning; they own no container payload.
+            if allocation_kind != GC_OWNER_ALLOC_VALUE_SLOTS
+                && matches!(
+                    value_meta.value_kind(),
+                    ValueKind::Map | ValueKind::Channel | ValueKind::Port | ValueKind::Island
+                )
+            {
+                panic!(
+                    "native extension cannot construct {:?} through ctx.gc(); use an allocator-neutral host capability",
+                    value_meta.value_kind()
+                );
             }
             let object = unsafe {
                 (dispatch.alloc)(
@@ -1739,34 +1836,32 @@ impl Gc {
             }
         }
 
-        let allocation = match self.heap.allocate(total_size) {
+        // Publish the complete allocation shape before any scan/debug hook.
+        // Allocation and sweep share this header's native-resource predicate.
+        let mut header = GcHeader::new_with_white(value_meta, header_slots, self.current_white);
+        if allocation_kind == GC_OWNER_ALLOC_VALUE_SLOTS {
+            header.set_value_slots_object();
+        }
+        let allocation = match self.heap.allocate(
+            total_size,
+            header.requires_native_finalizer(),
+            self.cycle_id,
+        ) {
             Ok(allocation) => allocation,
             Err(error) => {
                 return self.allocation_failure(error.into());
             }
         };
         debug_assert!(allocation.capacity >= total_size);
-        let ptr = allocation.raw;
+        let ptr = allocation.as_ptr();
 
         // New object gets current white color. During marking, queue it gray so
         // its initialized slots are scanned before the cycle reaches sweep.
-        let header = GcHeader::new_with_white(value_meta, header_slots, self.current_white);
         unsafe {
             core::ptr::write(ptr as *mut GcHeader, header);
         }
 
         let data_ptr = unsafe { ptr.add(header_size) as GcRef };
-
-        let finalizable = (value_meta.value_kind() == ValueKind::Map
-            && header_slots == crate::objects::map::DATA_SLOTS)
-            || (value_meta.value_kind().is_queue()
-                && header_slots == crate::objects::queue_state::DATA_SLOTS);
-        self.heap
-            .record_small_allocation(ptr, total_size, finalizable)
-            .expect("new allocation must have heap block metadata");
-        if self.state != GcState::Pause {
-            self.heap.record_marked(ptr, self.cycle_id);
-        }
 
         self.total_bytes += total_size;
         self.live_object_count += 1;
@@ -1778,8 +1873,8 @@ impl Gc {
             .allocation_bytes_total
             .saturating_add(total_size as u64);
         self.debt += total_size as i64;
-        if !self.jit_poll_required && self.automatic_gc && self.debt > 0 {
-            self.jit_poll_required = true;
+        if !self.poll_required && self.automatic_gc && self.debt > 0 {
+            self.poll_required = true;
         }
         if matches!(self.state, GcState::Propagate | GcState::Atomic) {
             unsafe { Self::header_mut(data_ptr) }.set_gray();
@@ -1884,7 +1979,7 @@ impl Gc {
 
     fn allocated_data_size_bytes_for_base(&self, obj: GcRef) -> Option<usize> {
         let located = self.heap.locate(obj as usize, GcHeader::SIZE)?;
-        let base = unsafe { located.raw.add(GcHeader::SIZE) as GcRef };
+        let base = unsafe { located.as_ptr().add(GcHeader::SIZE) as GcRef };
         if base != obj {
             return None;
         }
@@ -1967,7 +2062,7 @@ impl Gc {
         }
 
         let located = self.heap.locate(addr, GcHeader::SIZE)?;
-        let base = unsafe { located.raw.add(GcHeader::SIZE) as GcRef };
+        let base = unsafe { located.as_ptr().add(GcHeader::SIZE) as GcRef };
         let data_size = located.logical_bytes.checked_sub(GcHeader::SIZE)?;
         let data_end = (base as usize).checked_add(data_size)?;
         (addr == base as usize || addr < data_end).then_some(base)
@@ -2105,6 +2200,31 @@ impl Gc {
         let Some(obj) = self.canonicalize_ref(obj) else {
             self.mark_gray_fail(obj);
         };
+        self.queue_allocated_for_scan(obj);
+    }
+
+    /// Publish initialized references in a freshly allocated object without
+    /// repeating its heap lookup. The checked entry remains available to hosts.
+    ///
+    /// # Safety
+    /// `obj` must be the live payload base returned by this collector's
+    /// successful allocation, fully initialized before this call. No GC step
+    /// may intervene between allocation and publication.
+    #[inline]
+    pub(crate) unsafe fn mark_allocated_exact_base_for_scan(&mut self, obj: GcRef) {
+        if let Some(dispatch) = self.owner_dispatch {
+            unsafe { (dispatch.mark_allocated_for_scan)(dispatch.state, obj) };
+            return;
+        }
+        if self.state != GcState::Sweep || obj.is_null() {
+            return;
+        }
+        debug_assert_eq!(self.canonicalize_ref(obj), Some(obj));
+        self.queue_allocated_for_scan(obj);
+    }
+
+    #[inline]
+    fn queue_allocated_for_scan(&mut self, obj: GcRef) {
         let header = unsafe { Self::header_mut(obj) };
         if header.marked & WHITE_BITS == self.current_white {
             header.set_gray();
@@ -2316,7 +2436,7 @@ impl Gc {
             self.close_value_slot_allocation_region();
         }
         self.stress_every_step = enabled;
-        self.refresh_jit_poll_required();
+        self.refresh_poll_required();
     }
 
     /// Returns whether GC stress mode is enabled.
@@ -2335,8 +2455,7 @@ impl Gc {
     #[inline]
     pub fn should_step(&self) -> bool {
         self.reject_owner_proxy_api("should_step");
-        self.stress_every_step
-            || (self.automatic_gc && (self.debt > 0 || self.state != GcState::Pause))
+        self.poll_required
     }
 
     /// Whether the collector is waiting for the owner to finish an exact root
@@ -2348,8 +2467,8 @@ impl Gc {
     }
 
     #[inline]
-    fn refresh_jit_poll_required(&mut self) {
-        self.jit_poll_required = self.stress_every_step
+    fn refresh_poll_required(&mut self) {
+        self.poll_required = self.stress_every_step
             || (self.automatic_gc && (self.debt > 0 || self.state != GcState::Pause));
     }
 
@@ -2640,6 +2759,10 @@ impl Gc {
                     self.sweep_root_scan_complete = false;
                     self.pending_root_scan = Some(GcRootScanKind::StartCycle);
                     self.state = GcState::Propagate;
+                    // An explicit step can start with no allocation debt.
+                    // Publish before invoking root scanners: native polls and
+                    // owner queries must observe the same active-cycle policy.
+                    self.refresh_poll_required();
                 }
 
                 GcState::Propagate => {
@@ -2802,6 +2925,7 @@ impl Gc {
         // finish within TARGET_PHASE_FRAMES) may far exceed the allocation budget;
         // crediting all of it would make debt hugely negative and delay the next cycle.
         self.debt -= (work as i64).min(work_limit as i64);
+        self.refresh_poll_required();
         stats.phase_after = self.state;
         stats.total_work_bytes = work;
         stats.heap_bytes_after = self.total_bytes;
@@ -2828,9 +2952,10 @@ impl Gc {
                 .heap
                 .walk_remembered_step(&mut self.remembered_scan_cursor)
             {
-                HeapWalkStep::Object(allocation) => {
+                HeapWalkStep::Object(walked) => {
+                    let allocation = walked.allocation;
                     work += SLOT_BYTES;
-                    let obj = unsafe { allocation.raw.add(GcHeader::SIZE) as GcRef };
+                    let obj = unsafe { allocation.as_ptr().add(GcHeader::SIZE) as GcRef };
                     let header = unsafe { Self::header(obj) };
                     debug_assert!(header.age() >= G_OLD);
                     if header.is_white() {
@@ -2969,7 +3094,7 @@ impl Gc {
         let dead_white = self.other_white();
 
         while work.saturating_add(SLOT_BYTES) <= limit && !self.sweep_complete {
-            let allocation = match self.heap.walk_allocated_step(&mut self.sweep_cursor) {
+            let walked = match self.heap.walk_allocated_step(&mut self.sweep_cursor) {
                 HeapWalkStep::Metadata => {
                     work += SLOT_BYTES;
                     continue;
@@ -2978,11 +3103,12 @@ impl Gc {
                     self.sweep_complete = true;
                     break;
                 }
-                HeapWalkStep::Object(allocation) => allocation,
+                HeapWalkStep::Object(walked) => walked,
             };
+            let allocation = walked.allocation;
             work += SLOT_BYTES;
 
-            let obj = unsafe { allocation.raw.add(GcHeader::SIZE) as GcRef };
+            let obj = unsafe { allocation.as_ptr().add(GcHeader::SIZE) as GcRef };
             let header = unsafe { Self::header(obj) };
             let obj_white = header.marked & WHITE_BITS;
             let age = header.age();
@@ -3009,7 +3135,7 @@ impl Gc {
                 #[cfg(not(feature = "gc-debug"))]
                 if let Some(reclaimed) = self
                     .heap
-                    .try_reclaim_unmarked_young_block(allocation.raw, self.cycle_id)
+                    .try_reclaim_walked_young_block(walked, self.cycle_id)
                 {
                     self.total_bytes = self.total_bytes.saturating_sub(reclaimed.logical_bytes);
                     self.live_object_count = self
@@ -3042,8 +3168,9 @@ impl Gc {
                 if promoted_to_old {
                     self.young_live_bytes -= size_bytes;
                     self.old_live_bytes += size_bytes;
-                    self.heap.record_promoted(allocation.raw);
-                    self.remember_parent(obj);
+                    self.heap
+                        .promote_walked(walked)
+                        .expect("sweep must promote an allocation owned by the Island heap");
                 }
             } else if obj_white == dead_white {
                 #[cfg(feature = "gc-debug")]
@@ -3066,16 +3193,11 @@ impl Gc {
                     self.runtime_backing_bytes -= size_bytes;
                 }
 
-                let finalizable = (header.kind() == ValueKind::Map
-                    && header.slots == crate::objects::map::DATA_SLOTS)
-                    || (header.kind().is_queue()
-                        && header.slots == crate::objects::queue_state::DATA_SLOTS);
                 self.heap
-                    .free_recorded(
-                        allocation.raw,
-                        size_bytes,
+                    .free_walked(
+                        walked,
                         age >= G_OLD,
-                        finalizable,
+                        header.requires_native_finalizer(),
                         runtime_backing,
                     )
                     .expect("sweep must release an allocation owned by the Island heap");
@@ -3110,7 +3232,7 @@ impl Gc {
         let growth_percent = self.pause.saturating_sub(100).max(1);
         let threshold = (self.estimate as u64 * growth_percent as u64 / 100) as i64;
         self.debt = -threshold.max(1024);
-        self.refresh_jit_poll_required();
+        self.refresh_poll_required();
     }
 
     pub fn total_bytes(&self) -> usize {
@@ -3130,8 +3252,9 @@ impl Gc {
         let mut cursor = self.heap.object_cursor();
         core::iter::from_fn(move || loop {
             match self.heap.walk_allocated_step(&mut cursor) {
-                HeapWalkStep::Object(allocation) => {
-                    return Some(unsafe { allocation.raw.add(GcHeader::SIZE) as GcRef });
+                HeapWalkStep::Object(walked) => {
+                    let allocation = walked.allocation;
+                    return Some(unsafe { allocation.as_ptr().add(GcHeader::SIZE) as GcRef });
                 }
                 HeapWalkStep::Metadata => {}
                 HeapWalkStep::Done => return None,
@@ -3195,11 +3318,7 @@ impl Gc {
         } else {
             GC_OWNER_ALLOC_OBJECT
         };
-        let owner_dispatched = self.owner_dispatch.is_some();
         let dst = self.try_alloc_inner(value_meta, allocation_kind, header.slots, actual_slots)?;
-        if header.is_value_slots_object() && !owner_dispatched {
-            unsafe { Self::header_mut(dst) }.set_value_slots_object();
-        }
 
         for i in 0..actual_slots {
             let val = unsafe { Self::read_slot(src, i) };

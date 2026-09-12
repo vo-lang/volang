@@ -4,29 +4,7 @@ use super::*;
 pub(super) fn block_may_increase_gc_debt(function: &FunctionDef, block: BasicBlock) -> bool {
     function.code[block.start..block.end]
         .iter()
-        .any(|instruction| {
-            matches!(
-                instruction.opcode(),
-                Opcode::PtrNew
-                    | Opcode::CallExtern
-                    | Opcode::StrConcat
-                    | Opcode::StrSlice
-                    | Opcode::ArrayNew
-                    | Opcode::SliceNew
-                    | Opcode::SliceSlice
-                    | Opcode::SliceAppend
-                    | Opcode::MapNew
-                    | Opcode::MapSet
-                    | Opcode::QueueNew
-                    | Opcode::ClosureNew
-                    | Opcode::GoStart
-                    | Opcode::DeferPush
-                    | Opcode::ErrDeferPush
-                    | Opcode::Panic
-                    | Opcode::IslandNew
-                    | Opcode::GoIsland
-            )
-        })
+        .any(|instruction| wasm_local_effects(instruction.opcode()).0)
 }
 
 pub(super) fn emit_pending_child_address(body: &mut Function) {
@@ -347,7 +325,7 @@ pub(super) fn compile_scalar_instruction(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_instruction(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     resolved_externs: &ResolvedExternTable,
     function_id: u32,
     function: &FunctionDef,
@@ -409,7 +387,7 @@ pub(super) fn compile_instruction(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_function(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     resolved_externs: &ResolvedExternTable,
     function_id: u32,
     function: &FunctionDef,
@@ -420,7 +398,9 @@ pub(super) fn compile_function(
     allocation_descriptors: &AllocationDescriptors,
     run_defer_index: u32,
     resumable: bool,
+    cooperative: bool,
 ) -> Result<Function, WasmAotError> {
+    debug_assert!(!cooperative || resumable);
     let (blocks, by_pc) = basic_blocks(function)?;
     let scalar_locals = ScalarLocals::new(function, SLOT_LOCAL_BASE);
     let mut local_declarations = vec![(9, ValType::I32), (1, ValType::I64), (1, ValType::I32)];
@@ -467,6 +447,19 @@ pub(super) fn compile_function(
 
     for (block_index, block) in blocks.iter().enumerate() {
         body.instruction(&W::End);
+        if cooperative {
+            body.instruction(&W::GlobalGet(runtime_globals.execution_quantum))
+                .instruction(&W::I32Eqz)
+                .instruction(&W::If(BlockType::Empty));
+            spill_scalar_range(&mut body, &scalar_locals, 0, function.local_slots);
+            save_resume_block(&mut body, block_index as u32);
+            return_status(&mut body, STATUS_YIELD);
+            body.instruction(&W::End)
+                .instruction(&W::GlobalGet(runtime_globals.execution_quantum))
+                .instruction(&W::I32Const(1))
+                .instruction(&W::I32Sub)
+                .instruction(&W::GlobalSet(runtime_globals.execution_quantum));
+        }
         emit_fuel_poll(&mut body, runtime_globals.fuel, None);
         // A block that can allocate polls before its next allocation. At this
         // boundary every live value is materialized in the frame. Keeping the
@@ -518,7 +511,7 @@ pub(super) fn compile_function(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_block(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     resolved_externs: &ResolvedExternTable,
     function_id: u32,
     function: &FunctionDef,

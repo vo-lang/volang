@@ -393,7 +393,15 @@ fn cmd_run_os(args: &[OsString]) -> i32 {
     let mut print_codegen = false;
     let mut jit_stats_json = None;
     let mut memory_config = VmMemoryConfig::default();
-    let mut program_args: Vec<Vec<u8>> = Vec::new();
+    // The executed path is argv[0]; flag.Parse consumes the arguments after it.
+    let program_name = match os_arg_into_bytes(file.as_os_str().to_os_string()) {
+        Ok(name) => name,
+        Err(error) => {
+            eprintln!("{error}");
+            return 1;
+        }
+    };
+    let mut program_args = vec![program_name];
     let mut saw_dashdash = false;
 
     for arg in command_args {
@@ -3513,6 +3521,46 @@ mod tests {
             strip_os_prefix(option, "--jit-stats-json=").unwrap(),
             OsStr::from_bytes(b"a\xffz")
         );
+    }
+
+    #[test]
+    fn run_command_preserves_program_name_and_first_flag() {
+        let root = unique_temp_dir("program-arguments");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("main.vo");
+        fs::write(
+            &source,
+            r#"package main
+import "flag"
+import "os"
+import "path/filepath"
+func main() {
+    message := flag.String("message", "unset", "test value")
+    flag.Parse()
+    assert(filepath.Base(os.Args[0]) == "main.vo")
+    assert(flag.CommandLine.Name() == os.Args[0])
+    if len(os.Args) == 1 {
+        assert(message.Value == "unset")
+        assert(flag.NArg() == 0)
+    } else {
+        assert(message.Value == "first")
+        assert(flag.NArg() == 1 && flag.Arg(0) == "")
+    }
+}
+"#,
+        )
+        .unwrap();
+        let mut modes = vec!["--mode=vm"];
+        if cfg!(feature = "jit") {
+            modes.push("--mode=jit");
+        }
+        for mode in modes {
+            let mut args = vec![source.as_os_str().to_os_string(), OsString::from(mode)];
+            assert_eq!(cmd_run_os(&args), 0);
+            args.extend(os_strings(&["--", "--message=first", ""]));
+            assert_eq!(cmd_run_os(&args), 0);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -140,7 +140,7 @@ fn gc_root_matrix_scans_every_nested_unwind_state_until_that_state_finishes() {
             ValueKind::Struct,
         )),
         trap_kind: None,
-        source_loc: Some((0, generation as u32)),
+        source_loc: vo_common_core::debug_info::DiagnosticSource::new(0, generation as u32),
         generation,
     };
     let parent_panic = panic_context(parent_panic_root, 1);

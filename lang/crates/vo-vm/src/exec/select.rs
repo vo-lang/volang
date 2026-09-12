@@ -65,69 +65,52 @@ pub fn exec_select_begin(
     has_default: bool,
 ) -> Result<(), crate::fiber::FiberIdentityExhausted> {
     let select_id = fiber.try_alloc_select_id()?;
-    let mut cases = fiber.auxiliary_vec();
-    cases
-        .try_reserve_exact(case_count as usize)
+    let mut state = fiber.select_scratch.take().unwrap_or_else(|| SelectState {
+        cases: fiber.auxiliary_vec().into(),
+        expected_cases: 0,
+        has_default: false,
+        woken_index: None,
+        woken_result: None,
+        select_id: 0,
+        registered_queues: fiber.auxiliary_vec().into(),
+    });
+    state
+        .cases
+        .try_reserve(case_count as usize)
         .map_err(|error| {
             fiber.pending_resource_error = Some(error);
             crate::fiber::FiberIdentityExhausted::HostAllocation("select cases")
         })?;
-    let mut registered_queues = fiber.auxiliary_vec();
-    registered_queues
-        .try_reserve_exact(case_count as usize)
-        .map_err(|error| {
-            fiber.pending_resource_error = Some(error);
-            crate::fiber::FiberIdentityExhausted::HostAllocation("select registrations")
-        })?;
-    fiber.select_state = Some(SelectState {
-        cases: cases.into(),
-        expected_cases: case_count,
-        has_default,
-        woken_index: None,
-        woken_result: None,
-        select_id,
-        registered_queues: registered_queues.into(),
-    });
+    state.expected_cases = case_count;
+    state.has_default = has_default;
+    state.select_id = select_id;
+    fiber.select_state = Some(state);
     Ok(())
 }
 
-fn copy_select_layout(
-    state: &SelectState,
-    layout: Option<&[vo_runtime::SlotType]>,
-    wake_bytes: usize,
-) -> Result<
-    (
-        Option<alloc::sync::Arc<Vec<vo_runtime::SlotType>>>,
-        Option<alloc::sync::Arc<crate::fiber_storage::AuxiliaryCharge>>,
-    ),
-    super::InstructionError,
-> {
-    let bytes = layout.map_or(0, |layout| {
-        layout.len() * core::mem::size_of::<vo_runtime::SlotType>()
-            + core::mem::size_of::<Vec<vo_runtime::SlotType>>()
-            + 2 * core::mem::size_of::<usize>()
-    }) + wake_bytes;
-    if bytes == 0 {
-        return Ok((None, None));
-    }
-    let storage = alloc::sync::Arc::new(state.cases.charge_payload(
-        bytes
+fn reserve_receive_snapshots(
+    state: &mut SelectState,
+) -> Result<(), crate::fiber::FiberCapacityError> {
+    state.cases.try_reserve(0)?;
+    for index in 0..state.cases.len() {
+        let case = &state.cases[index];
+        if case.kind != SelectCaseKind::Recv || case._storage.is_some() {
+            continue;
+        }
+        // Admit all wake snapshots before the first waiter is published.
+        let bytes = usize::from(case.elem_slots)
+            * (8 + core::mem::size_of::<vo_runtime::SlotType>())
+            + 2 * (core::mem::size_of::<Vec<u64>>() + 2 * core::mem::size_of::<usize>())
             + core::mem::size_of::<crate::fiber_storage::AuxiliaryCharge>()
-            + 2 * core::mem::size_of::<usize>(),
-    )?);
-    let layout = if let Some(layout) = layout {
-        let mut copy = Vec::new();
-        copy.try_reserve_exact(layout.len()).map_err(|_| {
-            crate::fiber::FiberCapacityError::HostAllocation {
-                resource: "select layout",
-            }
-        })?;
-        copy.extend_from_slice(layout);
-        Some(alloc::sync::Arc::new(copy))
-    } else {
-        None
-    };
-    Ok((layout, Some(storage)))
+            + 2 * core::mem::size_of::<usize>();
+        let storage = alloc::sync::Arc::new(state.cases.charge_payload(bytes)?);
+        state
+            .cases
+            .unique_mut()
+            .expect("select reserve owns its cases")[index]
+            ._storage = Some(storage);
+    }
+    Ok(())
 }
 
 #[inline]
@@ -136,7 +119,7 @@ pub fn exec_select_send_with_layout(
     queue_reg: u16,
     val_reg: u16,
     elem_slots: u16,
-    elem_layout: Option<&[vo_runtime::SlotType]>,
+    elem_layout: Option<alloc::sync::Arc<Vec<vo_runtime::SlotType>>>,
     result_index: u16,
 ) -> Result<(), super::InstructionError> {
     let Some(state) = select_state.as_mut() else {
@@ -149,9 +132,8 @@ pub fn exec_select_send_with_layout(
         )
         .into());
     }
-    let (elem_layout, storage) = copy_select_layout(state, elem_layout, 0)?;
     state.cases.push_reserved(SelectCase {
-        _storage: storage,
+        _storage: None,
         kind: SelectCaseKind::Send,
         result_index,
         queue_reg,
@@ -169,7 +151,7 @@ pub fn exec_select_recv_with_layout(
     dst_reg: u16,
     queue_reg: u16,
     elem_slots: u16,
-    elem_layout: Option<&[vo_runtime::SlotType]>,
+    elem_layout: Option<alloc::sync::Arc<Vec<vo_runtime::SlotType>>>,
     has_ok: bool,
     result_index: u16,
 ) -> Result<(), super::InstructionError> {
@@ -183,13 +165,8 @@ pub fn exec_select_recv_with_layout(
         )
         .into());
     }
-    // Reserve the receive snapshot before publishing a waiter. A selected
-    // payload and all transaction snapshots share the same immutable vectors.
-    let wake_bytes = usize::from(elem_slots) * (8 + core::mem::size_of::<vo_runtime::SlotType>())
-        + 2 * (core::mem::size_of::<Vec<u64>>() + 2 * core::mem::size_of::<usize>());
-    let (elem_layout, storage) = copy_select_layout(state, elem_layout, wake_bytes)?;
     state.cases.push_reserved(SelectCase {
-        _storage: storage,
+        _storage: None,
         kind: SelectCaseKind::Recv,
         result_index,
         queue_reg,
@@ -209,6 +186,72 @@ pub fn exec_select_recv_with_layout(
 pub fn exec_select_exec(
     ctx: SelectExecContext<'_>,
     select_state: &mut Option<SelectState>,
+    result_reg: u16,
+) -> SelectResult {
+    execute_select(
+        ctx,
+        &mut SelectExecution {
+            active: select_state,
+            scratch: None,
+        },
+        result_reg,
+    )
+}
+
+pub(crate) fn exec_select_exec_reusing(
+    ctx: SelectExecContext<'_>,
+    select_state: &mut Option<SelectState>,
+    scratch: &mut Option<SelectState>,
+    result_reg: u16,
+) -> SelectResult {
+    execute_select(
+        ctx,
+        &mut SelectExecution {
+            active: select_state,
+            scratch: Some(scratch),
+        },
+        result_reg,
+    )
+}
+
+/// Keep active state distinct from empty reusable storage. Rollback snapshots
+/// retain their immutable buffers; clearing shared storage detaches it before
+/// the next select can mutate it.
+struct SelectExecution<'a> {
+    active: &'a mut Option<SelectState>,
+    scratch: Option<&'a mut Option<SelectState>>,
+}
+
+impl core::ops::Deref for SelectExecution<'_> {
+    type Target = Option<SelectState>;
+    fn deref(&self) -> &Self::Target {
+        self.active
+    }
+}
+impl core::ops::DerefMut for SelectExecution<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.active
+    }
+}
+impl SelectExecution<'_> {
+    fn finish(&mut self) {
+        if let Some(mut state) = self.active.take() {
+            if let Some(scratch) = &mut self.scratch {
+                state.cases.clear();
+                state.registered_queues.clear();
+                state.woken_index = None;
+                state.woken_result = None;
+                state.expected_cases = 0;
+                state.select_id = 0;
+                **scratch = Some(state);
+            }
+        }
+    }
+}
+
+fn execute_select(
+    ctx: SelectExecContext<'_>,
+    select_state: &mut SelectExecution<'_>,
     result_reg: u16,
 ) -> SelectResult {
     let SelectExecContext {
@@ -262,7 +305,7 @@ pub fn exec_select_exec(
                 .and_then(|state| state.cases.get(case_index))
                 .cloned()
             else {
-                *select_state = None;
+                select_state.finish();
                 return SelectResult::Malformed(
                     "ready select case disappeared before execution".to_string(),
                 );
@@ -302,15 +345,15 @@ pub fn exec_select_exec(
         }
         ReadyCase::Default => {
             stack_set(stack, bp + result_reg as usize, u64::MAX);
-            *select_state = None;
+            select_state.finish();
             SelectResult::Continue
         }
         ReadyCase::UnsupportedRemotePort => {
-            *select_state = None;
+            select_state.finish();
             SelectResult::UnsupportedRemotePort
         }
         ReadyCase::Malformed(msg) => {
-            *select_state = None;
+            select_state.finish();
             SelectResult::Malformed(msg)
         }
         ReadyCase::None => {
@@ -320,15 +363,17 @@ pub fn exec_select_exec(
                     "SelectExec without active SelectBegin".to_string(),
                 );
             };
-            if let Err(error) = state.registered_queues.try_reserve(state.cases.len()) {
-                *select_state = None;
+            if let Err(error) = reserve_receive_snapshots(state)
+                .and_then(|_| state.registered_queues.try_reserve(state.cases.len()))
+            {
+                select_state.finish();
                 return SelectResult::Resource(error);
             }
             match register_select_waiters(stack, bp, island_id, fiber_key, vm_state, module, state)
             {
                 Ok(()) => SelectResult::Block,
                 Err(msg) => {
-                    *select_state = None;
+                    select_state.finish();
                     SelectResult::Malformed(msg)
                 }
             }
@@ -411,7 +456,7 @@ fn complete_woken_case(
     result_reg: u16,
     idx: usize,
     fiber_key: u64,
-    select_state: &mut Option<SelectState>,
+    select_state: &mut SelectExecution<'_>,
 ) -> SelectResult {
     let Some(state) = select_state.as_mut() else {
         return SelectResult::Malformed(
@@ -432,7 +477,7 @@ fn complete_woken_case(
     let result_index = case.result_index;
     let woken_result = state.woken_result.take();
 
-    let restore_woken = |select_state: &mut Option<SelectState>, woken_result| {
+    let restore_woken = |select_state: &mut SelectExecution<'_>, woken_result| {
         if let Some(state) = select_state.as_mut() {
             state.woken_index = Some(idx);
             state.woken_result = woken_result;
@@ -484,21 +529,11 @@ fn complete_woken_case(
                         return SelectResult::Malformed(msg);
                     }
                 };
-                if let Some(elem_layout) = elem_layout.as_deref().map(Vec::as_slice) {
-                    if elem_layout != expected_slot_types.as_slice() {
-                        restore_woken(
-                            select_state,
-                            Some(SelectWokenResult::Recv {
-                                data,
-                                slot_types,
-                                closed,
-                            }),
-                        );
-                        return SelectResult::Malformed(format!(
-                            "SelectRecv payload layout {elem_layout:?} does not match queue element layout {expected_slot_types:?}"
-                        ));
-                    }
-                }
+                // The case layout was checked against this queue above using
+                // the shared flow contract. Exact-base case slots may refine
+                // the queue's general-reference roots. Check the independently
+                // retained wake payload below without requiring those two
+                // valid root representations to be identical.
                 if let Err(msg) = super::validate_select_woken_recv_payload_contract(
                     data.len(),
                     slot_types.len(),
@@ -574,7 +609,7 @@ fn complete_woken_case(
                 if let Some(state) = select_state.as_mut() {
                     cancel_select_waiters(state, fiber_key);
                 }
-                *select_state = None;
+                select_state.finish();
                 return SelectResult::SendOnClosed;
             }
             None => super::QueueAction::Continue,
@@ -604,7 +639,7 @@ fn execute_send_case(
     val_reg: u16,
     vm_state: &mut crate::vm::VmState,
     module: Option<ModuleRuntimeMetadata<'_>>,
-    select_state: &mut Option<SelectState>,
+    select_state: &mut SelectExecution<'_>,
 ) -> SelectResult {
     let val_start = bp + val_reg as usize;
     let layout_result = if let Some(elem_layout) = elem_layout {
@@ -613,7 +648,7 @@ fn execute_send_case(
         super::validate_queue_payload_slots(ch, elem_slots, "SelectSend")
     };
     if let Err(msg) = layout_result {
-        *select_state = None;
+        select_state.finish();
         return SelectResult::Malformed(msg);
     }
     // Safety: select bytecode validation guarantees this stack span, and the
@@ -644,21 +679,21 @@ fn execute_send_case(
             finish_selected_queue_action(stack, bp, result_reg, result_index, select_state, action)
         }
         super::QueueAction::Trap(crate::vm::RuntimeTrapKind::SendOnClosedChannel) => {
-            *select_state = None;
+            select_state.finish();
             SelectResult::SendOnClosed
         }
         super::QueueAction::Block { .. } | super::QueueAction::ReplayThenBlock { .. } => {
-            *select_state = None;
+            select_state.finish();
             SelectResult::Malformed(
                 "execute_send_case: case was marked ready but try_send would block".to_string(),
             )
         }
         super::QueueAction::Malformed(msg) => {
-            *select_state = None;
+            select_state.finish();
             SelectResult::Malformed(msg)
         }
         other => {
-            *select_state = None;
+            select_state.finish();
             SelectResult::Malformed(format!("unexpected select send queue action: {other:?}"))
         }
     }
@@ -678,7 +713,7 @@ fn execute_recv_case(
     island_id: u32,
     vm_state: &crate::vm::VmState,
     module: Option<ModuleRuntimeMetadata<'_>>,
-    select_state: &mut Option<SelectState>,
+    select_state: &mut SelectExecution<'_>,
 ) -> SelectResult {
     // Use try_recv so that waiting senders are properly woken when the buffer
     // has space freed, or when consuming directly from waiting_senders.
@@ -697,7 +732,7 @@ fn execute_recv_case(
     ) {
         Ok(wake) => wake,
         Err(msg) => {
-            *select_state = None;
+            select_state.finish();
             return SelectResult::Malformed(msg);
         }
     };
@@ -709,7 +744,7 @@ fn finish_selected_queue_action(
     bp: usize,
     result_reg: u16,
     result_index: u16,
-    select_state: &mut Option<SelectState>,
+    select_state: &mut SelectExecution<'_>,
     mut action: super::QueueAction,
 ) -> SelectResult {
     match &mut action {
@@ -724,7 +759,7 @@ fn finish_selected_queue_action(
         _ => {}
     }
     stack_set(stack, bp + result_reg as usize, result_index as u64);
-    *select_state = None;
+    select_state.finish();
     match action {
         super::QueueAction::Continue => SelectResult::Continue,
         action @ (super::QueueAction::Wake { .. }

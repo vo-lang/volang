@@ -17,14 +17,16 @@ use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::jit_api::JitContextField;
 
+mod feedback;
+
 struct VirtualObject {
     active: Variable,
     pointer: Variable,
     fields: Vec<Variable>,
 }
 
-/// A tier carries its complete lowering decisions. Callers cannot combine a
-/// baseline tier with optimizing-only plans or omit an optimizing self entry.
+/// Each entry kind carries its complete lowering decisions. Continuations use
+/// canonical frame inputs and cannot acquire an ordinary optimizing self entry.
 pub(crate) enum FunctionCompilePlan<'a> {
     Baseline {
         inlines: &'a crate::optimizer::ModuleInlinePlan,
@@ -35,6 +37,59 @@ pub(crate) enum FunctionCompilePlan<'a> {
         instructions: &'a crate::optimizer::OptimizedFunction,
         self_entry: FuncRef,
     },
+    Continuation {
+        inlines: &'a crate::optimizer::ModuleInlinePlan,
+        instructions: &'a crate::optimizer::OptimizedFunction,
+        pcs: &'a [u32],
+    },
+}
+
+#[derive(Clone, Copy)]
+enum ContinuationValues {
+    Analyzed,
+    Canonical,
+}
+
+#[derive(Clone, Copy)]
+enum FunctionEntry<'a> {
+    Ordinary,
+    Continuation {
+        pcs: &'a [u32],
+        values: ContinuationValues,
+    },
+}
+
+impl<'a> FunctionEntry<'a> {
+    fn continuation(analysis: &FunctionAnalysis, pcs: &'a [u32]) -> Self {
+        // Resource-limited analysis falls back to canonical slot semantics.
+        // Value IDs are usable only if the graph models every artifact entry.
+        let values = if pcs
+            .iter()
+            .all(|&pc| analysis.ir().is_external_entry(pc as usize))
+        {
+            ContinuationValues::Analyzed
+        } else {
+            ContinuationValues::Canonical
+        };
+        Self::Continuation { pcs, values }
+    }
+
+    fn continuation_pcs(self) -> Option<&'a [u32]> {
+        match self {
+            Self::Ordinary => None,
+            Self::Continuation { pcs, .. } => Some(pcs),
+        }
+    }
+
+    fn uses_entry_ssa(self) -> bool {
+        !matches!(
+            self,
+            Self::Continuation {
+                values: ContinuationValues::Canonical,
+                ..
+            }
+        )
+    }
 }
 
 pub struct FunctionCompiler<'a> {
@@ -53,6 +108,8 @@ pub struct FunctionCompiler<'a> {
     instruction_optimization: Option<&'a crate::optimizer::OptimizedFunction>,
     self_native_ref: Option<FuncRef>,
     virtual_objects: Vec<VirtualObject>,
+    feedback_inlines: Vec<(usize, u32)>,
+    entry: FunctionEntry<'a>,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -68,29 +125,44 @@ impl<'a> FunctionCompiler<'a> {
         analysis: &'a FunctionAnalysis,
         plan: FunctionCompilePlan<'a>,
     ) -> Self {
-        let (tier, inline_plan, optimization_plan, instructions, self_native_ref) = match plan {
-            FunctionCompilePlan::Baseline {
-                inlines,
-                instructions,
-            } => (
-                vo_runtime::jit_api::JitTier::Baseline,
-                inlines,
-                None,
-                instructions,
-                None,
-            ),
-            FunctionCompilePlan::Optimizing {
-                module,
-                instructions,
-                self_entry,
-            } => (
-                vo_runtime::jit_api::JitTier::Optimizing,
-                module.inline_plan(),
-                Some(module),
-                instructions,
-                Some(self_entry),
-            ),
-        };
+        let (tier, inline_plan, optimization_plan, instructions, self_native_ref, entry) =
+            match plan {
+                FunctionCompilePlan::Baseline {
+                    inlines,
+                    instructions,
+                } => (
+                    vo_runtime::jit_api::JitTier::Baseline,
+                    inlines,
+                    None,
+                    instructions,
+                    None,
+                    FunctionEntry::Ordinary,
+                ),
+                FunctionCompilePlan::Optimizing {
+                    module,
+                    instructions,
+                    self_entry,
+                } => (
+                    vo_runtime::jit_api::JitTier::Optimizing,
+                    module.inline_plan(),
+                    Some(module),
+                    instructions,
+                    Some(self_entry),
+                    FunctionEntry::Ordinary,
+                ),
+                FunctionCompilePlan::Continuation {
+                    inlines,
+                    instructions,
+                    pcs,
+                } => (
+                    vo_runtime::jit_api::JitTier::Baseline,
+                    inlines,
+                    None,
+                    instructions,
+                    None,
+                    FunctionEntry::continuation(analysis, pcs),
+                ),
+            };
         let instruction_optimization = Some(instructions);
         let mut builder = FunctionBuilder::new(func, func_ctx);
         let entry_block = builder.create_block();
@@ -135,6 +207,8 @@ impl<'a> FunctionCompiler<'a> {
             instruction_optimization,
             self_native_ref,
             virtual_objects,
+            feedback_inlines: Vec::new(),
+            entry,
         }
     }
 
@@ -152,12 +226,26 @@ impl<'a> FunctionCompiler<'a> {
             self.instruction_optimization,
         )?;
 
+        if let Some(pcs) = self.entry.continuation_pcs() {
+            for &pc in pcs {
+                self.core
+                    .blocks
+                    .entry(pc as usize)
+                    .or_insert_with(|| self.builder.create_block());
+            }
+        }
+
         self.builder.switch_to_block(self.core.entry_block);
         self.emit_prologue();
         self.initialize_virtual_objects();
+        if let Some(pcs) = self.entry.continuation_pcs() {
+            self.emit_continuation_dispatch(pcs)?;
+        }
         crate::compile_common::drive_compile(&mut self)?;
 
         self.builder.seal_all_blocks();
+        crate::compile_common::forward_execution_budget(self.builder.func);
+        crate::compile_common::propagate_cold_paths(self.builder.func);
         self.builder.finalize(frontend_config);
 
         Ok(())
@@ -199,6 +287,7 @@ impl<'a> FunctionCompiler<'a> {
         let ok = self.builder.ins().iconst(types::I32, 0);
         self.builder.ins().return_(&[ok]);
         self.builder.seal_all_blocks();
+        crate::compile_common::propagate_cold_paths(self.builder.func);
         self.builder.finalize(frontend_config);
         Ok(())
     }
@@ -469,6 +558,16 @@ impl<'a> FunctionCompiler<'a> {
         let params = self.builder.block_params(self.core.entry_block).to_vec();
         let frame_bp = params[1];
         let _ret = params[2];
+
+        // Keep only a stable slot index across entry callbacks. Neither this
+        // definition nor the native stack guard observes guest frame memory.
+        let jit_bp_i32 = self.builder.ins().ireduce(types::I32, frame_bp);
+        self.builder.def_var(self.saved_jit_bp, frame_bp);
+        self.saved_caller_bp = jit_bp_i32;
+        self.saved_fiber_sp = self
+            .builder
+            .ins()
+            .iadd_imm_u(jit_bp_i32, i64::from(self.core.func_def.local_slots));
         crate::call_helpers::initialize_native_stack_budget(self);
         if self.tier == vo_runtime::jit_api::JitTier::Optimizing {
             let profiles = self.builder.ins().load(
@@ -557,9 +656,23 @@ impl<'a> FunctionCompiler<'a> {
                 .core
                 .helpers
                 .resolve(HelperKind::tier_up, self.builder.func);
-            // Tier-up runs before the function's local SSA state exists. A
-            // strict callback failure can therefore return directly without
-            // spilling locals; the VM frame remains the source of truth.
+            // Tier-up can reject entry before local SSA state exists. Publish
+            // the leading arguments on this cold path so failure preserves a
+            // complete parameter window even for register-only native callers.
+            // The helper cannot collect, schedule, or observe the guest frame.
+            let lane_count =
+                usize::from(self.core.func_def.param_slots).min(crate::NATIVE_ARG_LANES);
+            if matches!(self.entry, FunctionEntry::Ordinary) && lane_count != 0 {
+                let frame_ptr = self.fiber_stack_args_ptr();
+                for lane in 0..lane_count {
+                    crate::compile_common::store_memory_slot(
+                        &mut self.builder,
+                        frame_ptr,
+                        lane as u16,
+                        params[3 + lane],
+                    );
+                }
+            }
             let call =
                 crate::translator::emit_runtime_helper_call(self, tier_up, &[params[0], func_id]);
             let result = self.builder.inst_results(call)[0];
@@ -576,31 +689,45 @@ impl<'a> FunctionCompiler<'a> {
             self.store_context_field(current_func_id, JitContextField::CurrentFuncId);
         }
 
-        // The native ABI carries the canonical slot index directly. It stays
-        // valid across callbacks that relocate the fiber stack; raw pointers
-        // are reconstructed lazily only for memory-backed slots.
-        let jit_bp_i32 = self.builder.ins().ireduce(types::I32, frame_bp);
-        self.builder.def_var(self.saved_jit_bp, frame_bp);
-        self.saved_caller_bp = jit_bp_i32;
-        self.saved_fiber_sp = self
-            .builder
-            .ins()
-            .iadd_imm_u(jit_bp_i32, i64::from(self.core.func_def.local_slots));
+        if let FunctionEntry::Continuation { values, .. } = self.entry {
+            if matches!(values, ContinuationValues::Analyzed) {
+                // The chosen trampoline imports only its live values and roots.
+                // Other SSA cells stay defined without reading dead frame data.
+                crate::compile_common::CompilerStorage::for_function(
+                    self.core.func_def,
+                    &self.core.vars,
+                )
+                .initialize_ssa_from_zero(&mut self.builder, 0);
+            } else {
+                let base = self.fiber_stack_args_ptr();
+                crate::compile_common::CompilerStorage::for_function(
+                    self.core.func_def,
+                    &self.core.vars,
+                )
+                .reload_all_from_memory(&mut self.builder, base);
+            }
+            return;
+        }
 
         let param_slots = self.core.func_def.param_slots as usize;
         let needs_frame_ptr = param_slots > crate::NATIVE_ARG_LANES
-            || self
-                .core
-                .memory_slots
-                .slots()
-                .any(|slot| usize::from(slot) >= param_slots);
+            || self.core.memory_slots.slots().next().is_some();
         let frame_ptr = needs_frame_ptr.then(|| self.fiber_stack_args_ptr());
 
         // The internal native ABI carries the first raw argument words in
-        // machine lanes. Wide signatures continue in frame memory. Float
-        // locals receive an explicit raw-word bitcast at this boundary.
+        // machine lanes. Initialize alias-backed leading slots here before
+        // any guest safepoint. Wide signatures continue in frame memory; float
+        // SSA locals receive an explicit raw-word bitcast at this boundary.
         for i in 0..param_slots {
             let slot = i as u16;
+            if i < crate::NATIVE_ARG_LANES && self.core.memory_slots.contains(slot) {
+                crate::compile_common::store_memory_slot(
+                    &mut self.builder,
+                    frame_ptr.expect("alias-backed parameter requires frame memory"),
+                    slot,
+                    params[3 + i],
+                );
+            }
             let Some(variable) = self.core.vars.get(slot) else {
                 continue;
             };
@@ -624,19 +751,8 @@ impl<'a> FunctionCompiler<'a> {
         // Initialize only active non-parameter SSA slots. Slots forced into
         // memory by aliasing retain the canonical frame initialization.
         let zero_i64 = self.builder.ins().iconst(types::I64, 0);
-        let zero_f64 = self.builder.ins().f64const(0.0);
-        for (slot, variable) in self
-            .core
-            .vars
-            .iter()
-            .filter(|(slot, _)| usize::from(*slot) >= param_slots)
-        {
-            if self.core.is_float_slot(slot) {
-                self.builder.def_var(variable, zero_f64);
-            } else {
-                self.builder.def_var(variable, zero_i64);
-            }
-        }
+        crate::compile_common::CompilerStorage::for_function(self.core.func_def, &self.core.vars)
+            .initialize_ssa_from_zero(&mut self.builder, param_slots);
         for slot in self
             .core
             .memory_slots
@@ -650,6 +766,74 @@ impl<'a> FunctionCompiler<'a> {
                 zero_i64,
             );
         }
+    }
+
+    fn emit_continuation_dispatch(&mut self, pcs: &[u32]) -> Result<(), JitError> {
+        let costs = crate::compile_common::execution_budget_resume_costs(
+            self.core.analysis.ir(),
+            crate::compile_common::ControlPolicy::full_function(self.core.func_def.code.len()),
+            self.instruction_optimization.is_some(),
+            self.instruction_optimization,
+        )?;
+        let pc = self.builder.block_params(self.core.entry_block)[3];
+        let invalid = crate::compile_common::cold_block(&mut self.builder);
+        let mut switch = cranelift_frontend::Switch::new();
+        let mut entries = Vec::new();
+        for &entry_pc in pcs {
+            let trampoline = self.builder.create_block();
+            switch.set_entry(u128::from(entry_pc), trampoline);
+            entries.push((entry_pc as usize, trampoline));
+        }
+        // Build the dispatch before its targets, retaining the canonical slot
+        // variables as incoming SSA values on every resumption edge.
+        switch.emit(&mut self.builder, pc, invalid);
+        for (entry_pc, trampoline) in entries {
+            self.builder.switch_to_block(trampoline);
+            self.builder.seal_block(trampoline);
+            self.core.current_pc = entry_pc;
+            if self.entry.uses_entry_ssa() {
+                let slots = self
+                    .core
+                    .analysis
+                    .ir()
+                    .resume_slots(entry_pc)
+                    .ok_or_else(|| {
+                        JitError::Internal(format!(
+                            "continuation at pc {entry_pc} has no recovery state"
+                        ))
+                    })?;
+                let base = self.fiber_stack_args_ptr();
+                crate::compile_common::CompilerStorage::for_function(
+                    self.core.func_def,
+                    &self.core.vars,
+                )
+                .reload_slots_from_memory(&mut self.builder, base, slots);
+            }
+            if costs[entry_pc] != 0 {
+                self.emit_execution_budget_checkpoint(entry_pc, costs[entry_pc]);
+            }
+            let arguments = crate::compile_common::block_arguments(
+                &mut self.builder,
+                self.core.analysis.ir(),
+                &self.core.vars,
+                entry_pc,
+            );
+            self.builder
+                .ins()
+                .jump(self.core.blocks[&entry_pc], &arguments);
+        }
+        self.builder.switch_to_block(invalid);
+        self.builder.seal_block(invalid);
+        let error = self
+            .builder
+            .ins()
+            .iconst(types::I32, vo_runtime::jit_api::JitResult::JitError as i64);
+        self.builder.ins().return_(&[error]);
+        // The compile driver expects an unterminated starting block. This
+        // unreachable fallthrough keeps the ordinary PC-zero lowering shared.
+        let dead = self.builder.create_block();
+        self.builder.switch_to_block(dead);
+        Ok(())
     }
 
     fn translate_instruction(
@@ -811,7 +995,7 @@ impl<'a> FunctionCompiler<'a> {
         };
         let Some(inline) = self
             .optimization_plan
-            .and_then(|plan| plan.pure_leaf_inline(self.core.func_id, target))
+            .and_then(|plan| plan.small_inline(self.core.func_id, target))
         else {
             return Ok(false);
         };
@@ -933,7 +1117,7 @@ impl<'a> FunctionCompiler<'a> {
 
     /// Read variable as I64: SSA when safe, memory when slot may be aliased by SlotSet/SlotSetN.
     fn load_local(&mut self, slot: u16) -> Value {
-        if self.core.is_ssa_slot(slot) {
+        if self.entry.uses_entry_ssa() && self.core.is_ssa_slot(slot) {
             if let Some(value) = self.core.lowered_value_for_slot(slot) {
                 return if self.core.is_float_slot(slot) {
                     self.builder
@@ -1042,7 +1226,7 @@ impl<'a> FunctionCompiler<'a> {
         use vo_common_core::bytecode::ReturnFlags;
         let ret_ptr = self.builder.block_params(self.core.entry_block)[2];
         let flags = ReturnFlags::from_bits(inst.flags).ok_or_else(|| {
-            JitError::InvalidMetadata(crate::JitMetadataError::InvalidInstructionFlags {
+            JitError::InvalidMetadata(crate::verifier::JitMetadataError::InvalidInstructionFlags {
                 func: self.core.func_def.name.clone(),
                 pc: self.core.current_pc,
                 opcode: Opcode::Return,
@@ -1155,7 +1339,7 @@ impl<'a> FunctionCompiler<'a> {
             .filter(|target| *target == target_func_id)
             .and_then(|_| {
                 self.inline_plan
-                    .pure_leaf_inline(self.core.func_id, target_func_id)
+                    .small_inline(self.core.func_id, target_func_id)
             });
         if let Some(inline) = selected_inline {
             inline.emit(self, call_plan.arg_start)?;
@@ -1199,7 +1383,7 @@ impl<'a> crate::compile_common::CompileDriver for FunctionCompiler<'a> {
     }
 
     fn set_current_pc(&mut self, pc: usize) {
-        self.core.current_pc = pc;
+        self.core.begin_instruction(pc);
         self.core.current_bounds_check_elided = self
             .instruction_optimization
             .and_then(|graph| graph.instruction(pc))
@@ -1304,7 +1488,7 @@ impl<'a> crate::translator::SlotAccess<'a> for FunctionCompiler<'a> {
         self.core.func_def.local_slots as usize
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
-        if self.core.is_ssa_slot(slot) {
+        if self.entry.uses_entry_ssa() && self.core.is_ssa_slot(slot) {
             if let Some(value) = self.core.lowered_value_for_slot(slot) {
                 return if self.core.is_float_slot(slot) {
                     value
@@ -1412,6 +1596,13 @@ impl<'a> crate::translator::SelectSync<'a> for FunctionCompiler<'a> {
 }
 
 impl<'a> crate::translator::CallBoundary<'a> for FunctionCompiler<'a> {
+    fn try_emit_dynamic_inline_hit(
+        &mut self,
+        hit: crate::translator::DynamicInlineHit,
+    ) -> Result<(), JitError> {
+        self.emit_feedback_inline_hit(hit)
+    }
+
     fn call_caller_bp(&mut self) -> Value {
         self.saved_caller_bp
     }

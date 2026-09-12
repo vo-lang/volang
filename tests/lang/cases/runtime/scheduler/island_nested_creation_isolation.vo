@@ -1,0 +1,44 @@
+package main
+
+var marker = 0
+
+func readFreshMarker(reply port<- int) { reply <- marker }
+
+func nestedWithLocalReply(done port<- int) {
+    marker = 42
+    reply := make(port int, 1)
+    child := make(island)
+    go @(child) readFreshMarker(reply)
+    done <- <-reply
+}
+
+func descend(depth int, done port<- int) {
+    if marker != 0 { done <- marker; return }
+    marker = depth + 10
+    if depth == 0 { done <- 0; return }
+    child := make(island)
+    go @(child) descend(depth - 1, done)
+}
+
+func checkNestedCreation() {
+    marker = 1000
+    done := make(port int, 8)
+    first := make(island)
+    go @(first) nestedWithLocalReply(done)
+    assert(<-done == 0, "nested Island must read its own fresh globals")
+    // Simultaneous descendants and main-Island creations share one routing
+    // identity domain. Every descendant must remain an independent owner.
+    for i := 0; i < 8; i++ {
+        child := make(island)
+        go @(child) descend(3, done)
+    }
+    for i := 0; i < 8; i++ {
+        assert(<-done == 0, "descendant identity must not alias another Island")
+    }
+    assert(marker == 1000, "child writes must preserve main Island globals")
+}
+
+func main() {
+    checkNestedCreation()
+    println("island-nested-creation: PASS")
+}

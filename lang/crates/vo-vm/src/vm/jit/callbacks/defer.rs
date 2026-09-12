@@ -250,7 +250,7 @@ mod tests {
     }
 
     fn assert_defer_bool_abi_rejected(is_closure: u32, is_errdefer: u32) {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
         fiber.push_frame(0, 1, 0, 0);
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn vm_jit_callback_abi_defer_push_rejects_arg_count_overflow_before_truncation() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
         fiber.push_frame(0, 1, 0, 0);
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn vm_jit_callback_abi_defer_push_rejects_null_non_empty_args_before_defer_entry() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
         fiber.push_frame(0, 1, 0, 0);
@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn vm_jit_callback_abi_defer_push_rejects_arg_start_width_drift_before_defer_entry() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
         fiber.push_frame(0, 1, 0, 0);
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn vm_jit_defer_closure_kind_062_rejects_non_closure_before_defer_publication() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let non_closure = vm.state.gc.alloc(ValueMeta::new(0, ValueKind::String), 1);
         vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn vm_jit_defer_closure_kind_062_preserves_nil_defer_registration_for_recover() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
         fiber.push_frame(0, 1, 0, 0);
@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn vm_jit_callback_boundary_001_recover_rejects_null_result_pointer() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
         fiber.push_frame(0, 1, 0, 0);

@@ -34,7 +34,7 @@ mod tests;
 // The default is versioned independently of the package protocol. A new cache
 // layout gets a fresh owned leaf instead of adopting or deleting legacy data.
 const DEFAULT_MOD_CACHE_PARENT: &str = ".vo/mod";
-const COMPILE_CACHE_SCHEMA_VERSION: &str = "11";
+const COMPILE_CACHE_SCHEMA_VERSION: &str = "19";
 const COMPILE_CACHE_SLOT_NAMESPACE: &str = "vo-compile-cache-slot";
 const COMPILE_CACHE_NATIVE_NAMESPACE: &str = "vo-compile-cache-native";
 
@@ -667,16 +667,17 @@ fn load_real_path_compile_context_with_options(
     path: &Path,
     options: &ProjectContextOptions,
 ) -> Result<RealPathCompileContext, CompileError> {
-    #[cfg(not(windows))]
-    if let WorkspaceDiscovery::Explicit(selected) = &options.workspace {
-        if selected.is_absolute() {
-            if let Ok(canonical) = selected.canonicalize() {
-                #[cfg(target_os = "macos")]
-                let exact_spelling = path_has_exact_host_spelling(selected).unwrap_or(false);
-                #[cfg(not(target_os = "macos"))]
-                let exact_spelling = true;
-                if canonical != *selected || !exact_spelling {
-                    return Err(CompileError::ModuleSystem(
+    vo_common::compiler_phase!(WorkspaceContext, {
+        #[cfg(not(windows))]
+        if let WorkspaceDiscovery::Explicit(selected) = &options.workspace {
+            if selected.is_absolute() {
+                if let Ok(canonical) = selected.canonicalize() {
+                    #[cfg(target_os = "macos")]
+                    let exact_spelling = path_has_exact_host_spelling(selected).unwrap_or(false);
+                    #[cfg(not(target_os = "macos"))]
+                    let exact_spelling = true;
+                    if canonical != *selected || !exact_spelling {
+                        return Err(CompileError::ModuleSystem(
                         ModuleSystemError::new(
                             ModuleSystemStage::Workspace,
                             ModuleSystemErrorKind::ValidationFailed,
@@ -688,64 +689,65 @@ fn load_real_path_compile_context_with_options(
                         )
                         .with_path(selected),
                     ));
+                    }
                 }
             }
         }
-    }
-    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let path = canonical_path.as_path();
-    let source_root = pipeline::source_root(path);
-    let mod_cache = default_mod_cache_root()?;
-    // A project opened from the managed cache must hold the cache-wide read
-    // lease before its first metadata or source read. Merely probing an
-    // unrelated no-dependency project never creates the cache.
-    let module_cache_read_lease =
-        acquire_existing_module_cache_read_lease_for_path(&mod_cache, &source_root)?;
-    let base_fs = RealFs::new(".");
+        let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let path = canonical_path.as_path();
+        let source_root = pipeline::source_root(path);
+        let mod_cache = default_mod_cache_root()?;
+        // A project opened from the managed cache must hold the cache-wide read
+        // lease before its first metadata or source read. Merely probing an
+        // unrelated no-dependency project never creates the cache.
+        let module_cache_read_lease =
+            acquire_existing_module_cache_read_lease_for_path(&mod_cache, &source_root)?;
+        let base_fs = RealFs::new(".");
 
-    // Single-file entries go through the spec §5.6 single-file classifier so
-    // that inline `/*vo:mod ... */` metadata is recognized and the spec §5.6.4
-    // precedence rules are enforced uniformly for real-path compiles.
-    if path.is_file() {
-        let (ctx, source_generation) =
-            vo_module::project::load_single_file_context_with_options_and_generation(
-                &base_fs, path, options,
-            )
-            .map_err(module_system_error_from_project)?;
-        return real_path_compile_context_for_single_file(
-            ctx,
-            source_generation,
-            path,
+        // Single-file entries go through the spec §5.6 single-file classifier so
+        // that inline `/*vo:mod ... */` metadata is recognized and the spec §5.6.4
+        // precedence rules are enforced uniformly for real-path compiles.
+        if path.is_file() {
+            let (ctx, source_generation) =
+                vo_module::project::load_single_file_context_with_options_and_generation(
+                    &base_fs, path, options,
+                )
+                .map_err(module_system_error_from_project)?;
+            return real_path_compile_context_for_single_file(
+                ctx,
+                source_generation,
+                path,
+                source_root,
+                mod_cache,
+                options,
+                module_cache_read_lease,
+            );
+        }
+
+        let context =
+            vo_module::project::load_project_context_with_options(&base_fs, &source_root, options)
+                .map_err(module_system_error_from_project)?;
+        let project_root = context.project_root().to_path_buf();
+        let package_dir = relative_package_dir(&project_root, &source_root);
+        let workspace = WorkspaceCompileContext::from_project(&context, options);
+        let graph = ProjectGraphContext::from_project(&context);
+        let (_, project_plan, mut workspace_sources) = context.into_parts();
+        canonicalize_workspace_sources(&mut workspace_sources);
+        reject_workspace_sources_in_managed_cache(&workspace_sources, &mod_cache)?;
+        Ok(RealPathCompileContext {
             source_root,
+            project_root,
             mod_cache,
-            options,
+            package_dir,
+            single_file: None,
+            single_file_source_generation: None,
+            graph,
+            project_plan,
+            current_module_override: None,
+            workspace_sources,
+            workspace,
             module_cache_read_lease,
-        );
-    }
-
-    let context =
-        vo_module::project::load_project_context_with_options(&base_fs, &source_root, options)
-            .map_err(module_system_error_from_project)?;
-    let project_root = context.project_root().to_path_buf();
-    let package_dir = relative_package_dir(&project_root, &source_root);
-    let workspace = WorkspaceCompileContext::from_project(&context, options);
-    let graph = ProjectGraphContext::from_project(&context);
-    let (_, project_plan, mut workspace_sources) = context.into_parts();
-    canonicalize_workspace_sources(&mut workspace_sources);
-    reject_workspace_sources_in_managed_cache(&workspace_sources, &mod_cache)?;
-    Ok(RealPathCompileContext {
-        source_root,
-        project_root,
-        mod_cache,
-        package_dir,
-        single_file: None,
-        single_file_source_generation: None,
-        graph,
-        project_plan,
-        current_module_override: None,
-        workspace_sources,
-        workspace,
-        module_cache_read_lease,
+        })
     })
 }
 

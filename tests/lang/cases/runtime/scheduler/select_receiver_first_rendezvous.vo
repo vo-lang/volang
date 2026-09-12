@@ -35,5 +35,48 @@ func main() {
 	}()
 	assert(<-sendFirst == 9, "select send delivered to waiting receiver")
 	assert(<-sendResult, "receiver made select send ready")
+	testReferencePayloads()
 	fmt.Println("PASS: select_receiver_first_rendezvous")
+}
+
+func testReferencePayloads() {
+	text := make(chan string)
+	bytes := make(chan []byte)
+	tables := make(chan map[string]int)
+	channels := make(chan chan int)
+	go func() {
+		// Let the receiver register its select before each distinct payload.
+		time.Sleep(time.Millisecond)
+		text <- "reference wake"
+		time.Sleep(time.Millisecond)
+		bytes <- []byte{3, 5, 8}
+		time.Sleep(time.Millisecond)
+		tables <- map[string]int{"value": 42}
+		time.Sleep(time.Millisecond)
+		inner := make(chan int, 1)
+		inner <- 71
+		channels <- inner
+	}()
+	seen := 0
+	for i := 0; i < 4; i++ {
+		select {
+			case value := <-text:
+				assert(value == "reference wake")
+				assert(seen & 1 == 0)
+				seen |= 1
+			case value := <-bytes:
+				assert(len(value) == 3 && value[0] == 3 && value[2] == 8)
+				assert(seen & 2 == 0)
+				seen |= 2
+			case value := <-tables:
+				assert(value["value"] == 42)
+				assert(seen & 4 == 0)
+				seen |= 4
+			case value := <-channels:
+				assert(<-value == 71)
+				assert(seen & 8 == 0)
+				seen |= 8
+		}
+	}
+	assert(seen == 15)
 }

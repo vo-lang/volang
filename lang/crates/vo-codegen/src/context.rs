@@ -470,9 +470,6 @@ pub struct CodegenContext {
     /// Ensures same (type, interface) pair always gets same itab_id
     itab_cache: HashMap<(u32, u32), u32>,
 
-    /// Current function ID being compiled (for debug info recording)
-    current_func_id: Option<u32>,
-
     /// Builtin protocol interface meta IDs
     builtin_protocols: BuiltinProtocols,
 
@@ -526,7 +523,6 @@ impl CodegenContext {
             main_func_id: None,
             pending_itabs: Vec::new(),
             itab_cache: HashMap::new(),
-            current_func_id: None,
             builtin_protocols: BuiltinProtocols::default(),
             method_value_wrappers: HashMap::new(),
             wrapper_cache: HashMap::new(),
@@ -2601,16 +2597,6 @@ impl CodegenContext {
 
     // === Debug Info ===
 
-    /// Set the current function ID being compiled.
-    pub fn set_current_func_id(&mut self, func_id: u32) {
-        self.current_func_id = Some(func_id);
-    }
-
-    /// Get the current function ID being compiled.
-    pub fn current_func_id(&self) -> Option<u32> {
-        self.current_func_id
-    }
-
     /// Record a debug location from a Span using SourceMap.
     /// Stores line:col:len for error display and highlighting.
     pub fn add_debug_loc_from_span(
@@ -2635,14 +2621,6 @@ impl CodegenContext {
                 lc.column,
                 span.len(),
             );
-        }
-    }
-
-    /// Record debug location for current function from span.
-    /// Use this during function compilation when you have access to the span.
-    pub fn record_debug_loc(&mut self, pc: u32, span: Span, source_map: &SourceMap) {
-        if let Some(func_id) = self.current_func_id {
-            self.add_debug_loc_from_span(func_id, pc, span, source_map);
         }
     }
 
@@ -2678,6 +2656,7 @@ impl CodegenContext {
     }
 
     pub fn finish(mut self) -> Result<Module, String> {
+        crate::optimize::optimize_module(&mut self.module)?;
         let mut next = 0_u32;
         for function in &mut self.module.functions {
             for instruction in &mut function.code {

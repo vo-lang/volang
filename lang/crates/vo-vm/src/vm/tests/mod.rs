@@ -371,6 +371,8 @@ mod gc_roots;
 mod go_island;
 #[cfg(feature = "std")]
 mod host_services;
+#[cfg(feature = "std")]
+mod island_events;
 mod load_validation;
 mod pending_transitions;
 mod runtime_wake;
@@ -378,3 +380,5 @@ mod scheduler_and_frame;
 mod spawn_and_host;
 #[cfg(feature = "jit")]
 mod strict_jit;
+
+mod literal_reuse;

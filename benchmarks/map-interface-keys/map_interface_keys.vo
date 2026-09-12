@@ -1,0 +1,16 @@
+package main
+import "strconv"
+func main() {
+    keys := make([]any, 512)
+    m := make(map[any]int)
+    for i := 0; i < 512; i++ {
+        if i % 2 == 0 { keys[i] = i } else { keys[i] = "entry:" + strconv.Itoa(i) }
+        m[keys[i]] = i * 3 + 1
+    }
+    sum := 0
+    for round := 0; round < 1024; round++ {
+        for i := 0; i < 512; i++ { sum += m[keys[i]] }
+    }
+    assert(sum == 402391040)
+    println(sum)
+}

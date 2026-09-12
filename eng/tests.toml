@@ -6,6 +6,12 @@ gc_regression_alias = "gc"
 [matrices.default]
 targets = ["vm", "jit", "osr", "nostd", "wasm"]
 
+[matrices.backend-contract]
+targets = ["vm", "jit", "osr", "native-aot", "nostd", "wasm", "wasm-aot"]
+
+[matrices.backend-contract-gc]
+targets = ["vm", "jit", "osr", "native-aot", "nostd", "wasm", "wasm-aot", "gc-vm", "gc-jit"]
+
 [matrices.osr-contract]
 targets = ["vm", "jit", "osr", "gc-vm", "gc-osr"]
 

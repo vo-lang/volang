@@ -137,7 +137,7 @@ pub struct RuntimeTransition {
     queue_close_handles: HashSet<usize>,
     rollback: Option<RuntimeRollback>,
     queue_close_wake_keys: Option<HashSet<SelectActivationWakeKey>>,
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub pending_terminal_policy: PendingTransitionTerminalPolicy,
 }
 
@@ -193,7 +193,7 @@ pub(crate) enum RuntimeRollback {
         stack_slots: Vec<(usize, u64)>,
         select_state: Option<Option<SelectState>>,
     },
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     SelectWaiters {
         fiber_key: u64,
         select_state: Option<SelectState>,
@@ -202,7 +202,7 @@ pub(crate) enum RuntimeRollback {
     Composite(Vec<RuntimeRollback>),
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 #[derive(Debug)]
 pub(crate) struct SelectQueueWaiterUndo {
     ch: GcRef,
@@ -308,7 +308,7 @@ impl RuntimeRollback {
             Self::DirectQueueReceiver { stack_slots, .. } => {
                 stack_slots.push((index, value));
             }
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             Self::SelectWaiters { .. } => {}
             Self::Composite(rollbacks) => {
                 for rollback in rollbacks {
@@ -329,7 +329,7 @@ impl RuntimeRollback {
             Self::DirectQueueReceiver { select_state, .. } => {
                 *select_state = Some(state);
             }
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             Self::SelectWaiters { .. } => {}
             Self::Composite(rollbacks) => {
                 for rollback in rollbacks {
@@ -339,7 +339,7 @@ impl RuntimeRollback {
         }
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     fn select_waiters(
         fiber_key: u64,
         select_state: Option<SelectState>,
@@ -459,7 +459,7 @@ impl RuntimeRollback {
                     }
                 }
             }
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             Self::SelectWaiters {
                 fiber_key,
                 select_state,
@@ -521,7 +521,7 @@ impl EndpointTombstone {
     }
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingTransitionTerminalPolicy {
     CommitOnLanguagePanic,
@@ -543,7 +543,7 @@ impl RuntimeTransition {
             queue_close_handles: HashSet::new(),
             rollback: None,
             queue_close_wake_keys: None,
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             pending_terminal_policy: PendingTransitionTerminalPolicy::CommitOnLanguagePanic,
         }
     }
@@ -598,23 +598,23 @@ impl RuntimeTransition {
         }
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     fn merge_effect(&mut self, effect: GcRootEffect) {
         self.gc_roots = merge_gc_root_effects(self.gc_roots, effect);
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub fn with_pending_terminal_policy(mut self, policy: PendingTransitionTerminalPolicy) -> Self {
         self.pending_terminal_policy = policy;
         self
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub fn set_pending_terminal_policy(&mut self, policy: PendingTransitionTerminalPolicy) {
         self.pending_terminal_policy = policy;
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     fn merge_side_effects_from(&mut self, mut other: RuntimeTransition) {
         self.merge_effect(other.gc_roots);
         for wake in other.wakes.drain(..) {
@@ -638,14 +638,14 @@ impl RuntimeTransition {
         }
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub(crate) fn discard_response_awaiting_island_commands(&mut self) {
         self.island_commands
             .retain(|effect| !effect.expects_response());
     }
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 fn merge_vec<T>(target: &mut Vec<T>, source: &mut Vec<T>) {
     if target.is_empty() {
         core::mem::swap(target, source);
@@ -1019,7 +1019,7 @@ pub struct RuntimeCommandOutcome {
 }
 
 impl Vm {
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub(crate) fn push_pending_runtime_transition(&mut self, mut transition: RuntimeTransition) {
         if let Some(rollback) = self.select_waiter_rollback_for_pending_transition(&transition) {
             transition.set_rollback(rollback);
@@ -1028,21 +1028,21 @@ impl Vm {
         self.pending_runtime_transitions.push(transition);
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub(crate) fn discard_response_awaiting_island_commands_from_pending_transitions(&mut self) {
         for pending in &mut self.pending_runtime_transitions {
             pending.discard_response_awaiting_island_commands();
         }
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     fn restore_pending_runtime_transition_rollback(&mut self, mut pending: RuntimeTransition) {
         if let Some(rollback) = pending.rollback.take() {
             self.restore_runtime_rollback(self.scheduler.current, rollback);
         }
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     fn discard_pending_runtime_transitions(&mut self) {
         let mut pending_transitions = core::mem::take(&mut self.pending_runtime_transitions);
         for pending in pending_transitions.drain(..) {
@@ -1052,7 +1052,7 @@ impl Vm {
         self.pending_runtime_transitions = pending_transitions;
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     fn drain_pending_runtime_transitions_into(
         &mut self,
         transition: &mut RuntimeTransition,
@@ -1073,7 +1073,7 @@ impl Vm {
         committed_any
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub(crate) fn attach_pending_runtime_transitions(&mut self, result: ExecResult) -> ExecResult {
         if self.pending_runtime_transitions.is_empty() {
             return result;
@@ -1172,7 +1172,7 @@ impl Vm {
         }
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     fn pending_transitions_for_boundary(
         &mut self,
         boundary: RuntimeBoundary,
@@ -1197,7 +1197,7 @@ impl Vm {
         current_fiber: Option<FiberId>,
         mut transition: RuntimeTransition,
     ) -> Result<Option<SchedulingOutcome>, VmError> {
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         if self.state.jit_osr_borrow_lease_depth != 0 {
             return self.reject_runtime_transition_before_commit(
                 current_fiber,
@@ -1313,7 +1313,7 @@ impl Vm {
             queue_close_handles: _,
             rollback,
             queue_close_wake_keys: _,
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
                 pending_terminal_policy: _,
         } = transition;
         let mut rollback = rollback;
@@ -1730,6 +1730,11 @@ impl Vm {
         &self,
         transition: &RuntimeTransition,
     ) -> Result<(), VmError> {
+        // A singleton cannot contain duplicates. Payload and waiter identity
+        // validation still run for every wake in preflight_runtime_transition.
+        if transition.wakes.len() < 2 {
+            return Ok(());
+        }
         let mut seen = HashSet::new();
         seen.try_reserve(transition.wakes.len())
             .map_err(|_| VmError::Jit("wake activation plan allocation failed".into()))?;
@@ -1748,14 +1753,16 @@ impl Vm {
         &self,
         transition: &RuntimeTransition,
     ) -> Result<(), VmError> {
+        let capacity = transition
+            .wakes
+            .len()
+            .saturating_add(transition.island_commands.len());
+        if capacity < 2 {
+            return Ok(());
+        }
         let mut seen = HashSet::new();
-        seen.try_reserve(
-            transition
-                .wakes
-                .len()
-                .saturating_add(transition.island_commands.len()),
-        )
-        .map_err(|_| VmError::Jit("endpoint activation plan allocation failed".into()))?;
+        seen.try_reserve(capacity)
+            .map_err(|_| VmError::Jit("endpoint activation plan allocation failed".into()))?;
         for wake in &transition.wakes {
             let Some(key) = self.endpoint_response_activation_key_for_wake(wake) else {
                 continue;
@@ -1903,6 +1910,19 @@ impl Vm {
         &self,
         transition: &RuntimeTransition,
     ) -> Result<(), VmError> {
+        let mut source_keys = transition
+            .wakes
+            .iter()
+            .filter_map(|wake| self.endpoint_response_authorization_source_for_wake(wake))
+            .chain(transition.island_commands.iter().filter_map(|effect| {
+                self.endpoint_response_authorization_source_for_island_command(effect)
+            }))
+            .peekable();
+        // Ordinary local wakes carry no endpoint authorization dependency.
+        // Discover that before reserving a workspace for unrelated inputs.
+        if source_keys.peek().is_none() {
+            return Ok(());
+        }
         let mut sources = HashSet::new();
         sources
             .try_reserve(
@@ -1912,23 +1932,7 @@ impl Vm {
                     .saturating_add(transition.island_commands.len()),
             )
             .map_err(|_| VmError::Jit("endpoint authorization plan allocation failed".into()))?;
-        for wake in &transition.wakes {
-            let Some(source) = self.endpoint_response_authorization_source_for_wake(wake) else {
-                continue;
-            };
-            sources.insert(source);
-        }
-        for effect in &transition.island_commands {
-            let Some(source) =
-                self.endpoint_response_authorization_source_for_island_command(effect)
-            else {
-                continue;
-            };
-            sources.insert(source);
-        }
-        if sources.is_empty() {
-            return Ok(());
-        }
+        sources.extend(source_keys);
 
         let mut local_closed_wakes = HashSet::new();
         local_closed_wakes
@@ -2459,6 +2463,14 @@ impl Vm {
         &self,
         wakes: Vec<WakeCommand>,
     ) -> Result<(Vec<WakeCommand>, Vec<IslandCommandEffect>), VmError> {
+        // Preserve the owned buffer and order when no remote conversion is
+        // needed. The caller has already validated every local wake.
+        if wakes
+            .iter()
+            .all(|wake| wake.waiter().island_id() == self.state.current_island_id)
+        {
+            return Ok((wakes, Vec::new()));
+        }
         let mut local_wakes = Vec::new();
         let mut remote_commands = Vec::new();
         local_wakes
@@ -2543,7 +2555,7 @@ impl Vm {
         Ok(Some(effect))
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     fn select_waiter_rollback_for_pending_transition(
         &self,
         transition: &RuntimeTransition,
@@ -2559,7 +2571,7 @@ impl Vm {
         Some(rollbacks.fold(first, RuntimeRollback::combine))
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     fn select_waiter_rollback_for_pending_wake(
         &self,
         waiter: &QueueWaiter,
@@ -2610,14 +2622,14 @@ impl Vm {
         ))
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     fn cancel_select_sibling_waiters_for_transition(&mut self, transition: &RuntimeTransition) {
         for wake in &transition.wakes {
             self.cancel_select_sibling_waiters_for_pending_wake(wake.waiter());
         }
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     fn cancel_select_sibling_waiters_for_pending_wake(&mut self, waiter: &QueueWaiter) {
         let Some(select) = waiter.select_info() else {
             return;

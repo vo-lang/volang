@@ -1,5 +1,7 @@
 //! Switch and type switch statement compilation.
 
+mod integer;
+
 use vo_analysis::objects::TypeKey;
 use vo_common_core::instruction::Opcode;
 use vo_common_core::SlotType;
@@ -160,6 +162,7 @@ pub(crate) fn compile_type_switch(
             // Preserve source order within a type list. `nil` is a regular
             // entry and may be mixed with concrete or interface types.
             for case_type in &case.types {
+                func.begin_temp_region();
                 match case_type.type_expr() {
                     None => {
                         let ok_slot = emit_nil_interface_test(iface_slot, func);
@@ -194,6 +197,7 @@ pub(crate) fn compile_type_switch(
                         case_jumps.push((func.emit_jump(Opcode::JumpIf, ok_slot), case_idx));
                     }
                 }
+                func.end_temp_region();
             }
         }
     }
@@ -315,11 +319,7 @@ fn emit_switch_case_comparison(
         func.emit_op(Opcode::StrEq, cmp_result, tag, case_val);
     } else if info.is_float(tag_type) {
         if info.is_float32(tag_type) {
-            let tag_wide = func.alloc_slots(&[SlotType::Float]);
-            let case_wide = func.alloc_slots(&[SlotType::Float]);
-            func.emit_op(Opcode::ConvF32F64, tag_wide, tag, 0);
-            func.emit_op(Opcode::ConvF32F64, case_wide, case_val, 0);
-            func.emit_op(Opcode::EqF, cmp_result, tag_wide, case_wide);
+            func.emit_op(Opcode::EqF32, cmp_result, tag, case_val);
         } else {
             func.emit_op(Opcode::EqF, cmp_result, tag, case_val);
         }
@@ -373,28 +373,53 @@ pub(crate) fn compile_switch(
     let mut end_jumps: Vec<usize> = Vec::new();
     let mut default_case_idx: Option<usize> = None;
 
-    // Generate comparison and conditional jumps for each case
-    // NOTE: Default case jump is emitted AFTER all other cases are checked,
-    // regardless of its position in the source code.
-    for (case_idx, case) in switch_stmt.cases.iter().enumerate() {
-        if case.exprs.is_empty() {
-            default_case_idx = Some(case_idx);
-        } else {
-            for case_expr in &case.exprs {
-                let cmp_result = if let (Some(tag), Some(tt)) = (tag_reg, tag_type) {
-                    emit_switch_case_comparison(tag, tt, case_expr, ctx, func, info)?
-                } else {
-                    // Tagless switch: case expression is the condition itself
-                    crate::expr::compile_expr(case_expr, ctx, func, info)?
-                };
-
-                case_jumps.push((func.emit_jump(Opcode::JumpIf, cmp_result), case_idx));
+    let integer_keys = tag_type
+        .filter(|&type_key| info.is_int(type_key))
+        .and_then(|type_key| integer::keys(switch_stmt, info.is_unsigned(type_key), info));
+    let mut no_match_jumps = Vec::new();
+    if let (Some(keys), Some(tag), Some(type_key)) = (integer_keys, tag_reg, tag_type) {
+        default_case_idx = switch_stmt
+            .cases
+            .iter()
+            .position(|case| case.exprs.is_empty());
+        integer::emit(
+            &keys,
+            tag,
+            info.is_unsigned(type_key),
+            ctx,
+            func,
+            &mut case_jumps,
+            &mut no_match_jumps,
+        );
+    } else {
+        // Generate comparison and conditional jumps for each case
+        // NOTE: Default case jump is emitted AFTER all other cases are checked,
+        // regardless of its position in the source code.
+        for (case_idx, case) in switch_stmt.cases.iter().enumerate() {
+            if case.exprs.is_empty() {
+                default_case_idx = Some(case_idx);
+            } else {
+                for case_expr in &case.exprs {
+                    if let (Some(tag), Some(tt)) = (tag_reg, tag_type) {
+                        func.begin_temp_region();
+                        let result =
+                            emit_switch_case_comparison(tag, tt, case_expr, ctx, func, info)?;
+                        case_jumps.push((func.emit_jump(Opcode::JumpIf, result), case_idx));
+                        func.end_temp_region();
+                    } else {
+                        for jump in
+                            crate::expr::condition::compile_jump(case_expr, true, ctx, func, info)?
+                        {
+                            case_jumps.push((jump, case_idx));
+                        }
+                    }
+                }
             }
         }
-    }
 
-    // After all case conditions checked: jump to default or end
-    let fallthrough_jump = func.emit_jump(Opcode::Jump, 0);
+        // After all case conditions checked: jump to default or end
+        no_match_jumps.push(func.emit_jump(Opcode::Jump, 0));
+    }
 
     // Compile case bodies
     let mut case_body_starts: Vec<usize> = Vec::new();
@@ -437,7 +462,9 @@ pub(crate) fn compile_switch(
     let fallthrough_target = default_case_idx
         .map(|idx| case_body_starts[idx])
         .unwrap_or(end_pc);
-    func.patch_jump(fallthrough_jump, fallthrough_target);
+    for jump in no_match_jumps {
+        func.patch_jump(jump, fallthrough_target);
+    }
 
     // Patch end jumps (implicit break at end of case) and explicit breaks
     for jump_pc in end_jumps.into_iter().chain(break_patches) {

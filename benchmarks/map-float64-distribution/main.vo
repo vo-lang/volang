@@ -1,0 +1,25 @@
+package main
+func main() {
+    values := make(map[float64]int)
+    for i := 0; i < 768; i++ { values[float64(i * 17) + 0.25] = i * 3 + 1 }
+    total := 0
+    for round := 0; round < 128; round++ {
+        for i := 0; i < 768; i++ {
+            key := float64(i * 17) + 0.25
+            value, ok := values[key]
+            assert(ok)
+            total += value
+            if i & 7 == 0 {
+                _, present := values[float64((i + 2048) * 17) + 0.25]
+                assert(!present)
+            }
+        }
+        if round & 31 == 31 {
+            for i := 0; i < 256; i++ { delete(values, float64(i * 17) + 0.25) }
+            for i := 0; i < 256; i++ { values[float64(i * 17) + 0.25] = i * 3 + 1 }
+        }
+    }
+    assert(total == 113197056)
+    assert(len(values) == 768)
+    println(total)
+}

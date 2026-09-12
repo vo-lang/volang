@@ -87,7 +87,7 @@ pub(super) fn emit_deep_equal_child(
 }
 
 pub(super) fn compile_deep_equal(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     dynamic_compare_failed: u32,
 ) -> Result<Function, WasmAotError> {
     const INDEX: u32 = 3;
@@ -367,7 +367,7 @@ pub(super) fn emit_deep_hash_child(
 }
 
 pub(super) fn compile_deep_hash(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     dynamic_compare_failed: u32,
 ) -> Result<Function, WasmAotError> {
     const INDEX: u32 = 2;
@@ -599,7 +599,9 @@ pub(super) fn emit_sequence_element_address(
 /// Compare an array stored behind the sequence header used when an array is
 /// boxed in an interface. Compact scalar arrays retain their physical element
 /// width; wider elements use the ordinary logical-slot representation.
-pub(super) fn compile_sequence_deep_equal(module: &VoModule) -> Result<Function, WasmAotError> {
+pub(super) fn compile_sequence_deep_equal(
+    module: &ModuleAnalysis<'_>,
+) -> Result<Function, WasmAotError> {
     const INDEX: u32 = 3;
     const LEFT_DATA: u32 = 4;
     const RIGHT_DATA: u32 = 5;
@@ -727,7 +729,9 @@ pub(super) fn compile_sequence_deep_equal(module: &VoModule) -> Result<Function,
 
 /// Hash an interface-boxed array using exactly the same logical-value hash as
 /// an unboxed array, independent of compact sequence storage.
-pub(super) fn compile_sequence_deep_hash(module: &VoModule) -> Result<Function, WasmAotError> {
+pub(super) fn compile_sequence_deep_hash(
+    module: &ModuleAnalysis<'_>,
+) -> Result<Function, WasmAotError> {
     const INDEX: u32 = 2;
     const DATA: u32 = 3;
     const BITS: u32 = 4;
@@ -847,55 +851,17 @@ pub(super) fn compile_sequence_deep_hash(module: &VoModule) -> Result<Function, 
 }
 
 pub(super) fn compile_clone_begin(globals: RuntimeGlobals) -> Function {
-    const CURRENT: u32 = 0;
-    const GENERATION: u32 = 1;
-    let mut body = Function::new([(2, ValType::I32)]);
-    body.instruction(&W::I32Const(0))
-        .instruction(&W::GlobalSet(globals.clone_failed))
-        .instruction(&W::I32Const(0))
-        .instruction(&W::GlobalSet(globals.clone_work_head))
-        .instruction(&W::I32Const(0))
-        .instruction(&W::GlobalSet(globals.clone_active))
-        .instruction(&W::GlobalGet(globals.clone_generation))
-        .instruction(&W::I32Const(1))
-        .instruction(&W::I32Add)
-        .instruction(&W::LocalTee(GENERATION))
-        .instruction(&W::I32Eqz)
-        .instruction(&W::If(BlockType::Empty))
-        // Generation zero is reserved for untouched allocation headers. A
-        // full sweep on wrap keeps the alias table correct indefinitely.
-        .instruction(&W::GlobalGet(globals.heap_head))
-        .instruction(&W::LocalSet(CURRENT))
-        .instruction(&W::Block(BlockType::Empty))
-        .instruction(&W::Loop(BlockType::Empty))
-        .instruction(&W::LocalGet(CURRENT))
-        .instruction(&W::I32Eqz)
-        .instruction(&W::BrIf(1))
-        .instruction(&W::LocalGet(CURRENT))
-        .instruction(&W::I32Const(0))
-        .instruction(&W::I32Store(MemArg {
-            offset: 28,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::LocalGet(CURRENT))
-        .instruction(&W::I32Load(MemArg {
-            offset: 8,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::LocalSet(CURRENT))
-        .instruction(&W::Br(0))
-        .instruction(&W::End)
-        .instruction(&W::End)
-        .instruction(&W::I32Const(1))
-        .instruction(&W::LocalSet(GENERATION))
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(GENERATION))
-        .instruction(&W::LocalTee(GENERATION))
-        .instruction(&W::GlobalSet(globals.clone_generation))
-        .instruction(&W::LocalGet(GENERATION))
-        .instruction(&W::End);
+    let mut body = Function::new([]);
+    for global in [
+        globals.clone_failed,
+        globals.clone_work_head,
+        globals.clone_active,
+    ] {
+        body.instruction(&W::I32Const(0))
+            .instruction(&W::GlobalSet(global));
+    }
+    emit_memory_call(&mut body, MEMORY_CLONE_RESET, &[]);
+    body.instruction(&W::End);
     body
 }
 
@@ -925,6 +891,11 @@ pub(super) fn emit_clone_memory_layout(
                     .instruction(&W::LocalGet(generation_local))
                     .instruction(&W::Call(DEEP_CLONE_FUNCTION_INDEX))
                     .instruction(&W::I64ExtendI32U)
+                    .instruction(&W::LocalGet(address_local))
+                    .instruction(&W::I64Load(memarg(0)))
+                    .instruction(&W::I64Const(-4294967296))
+                    .instruction(&W::I64And)
+                    .instruction(&W::I64Or)
                     .instruction(&W::I64Store(memarg(0)));
             }
             value if value == vo_common_core::SlotType::Interface0 as u8 => {
@@ -954,6 +925,11 @@ pub(super) fn emit_clone_memory_layout(
                     .instruction(&W::LocalGet(generation_local))
                     .instruction(&W::Call(DEEP_CLONE_FUNCTION_INDEX))
                     .instruction(&W::I64ExtendI32U)
+                    .instruction(&W::LocalGet(address_local))
+                    .instruction(&W::I64Load(memarg(0)))
+                    .instruction(&W::I64Const(-4294967296))
+                    .instruction(&W::I64And)
+                    .instruction(&W::I64Or)
                     .instruction(&W::I64Store(memarg(0)))
                     .instruction(&W::End);
                     slot += 1;
@@ -1031,7 +1007,7 @@ pub(super) fn emit_clone_map_entries(
 }
 
 pub(super) fn compile_deep_clone(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     globals: RuntimeGlobals,
     descriptors: &AllocationDescriptors,
 ) -> Function {
@@ -1084,7 +1060,17 @@ pub(super) fn compile_deep_clone(
                 .instruction(&W::I32Const(descriptor_id as i32))
                 .instruction(&W::I32Eq)
                 .instruction(&W::If(BlockType::Empty))
+                .instruction(&W::I32Const(MEMORY_QUEUE_RESOLVE))
                 .instruction(&W::LocalGet(0))
+                .instruction(&W::LocalGet(HEADER))
+                .instruction(&W::I32Load(MemArg {
+                    offset: 28,
+                    align: 2,
+                    memory_index: 0,
+                }))
+                .instruction(&W::I32Const(0))
+                .instruction(&W::I32Const(0))
+                .instruction(&W::Call(0))
                 .instruction(&W::Return)
                 .instruction(&W::End);
         }
@@ -1093,22 +1079,11 @@ pub(super) fn compile_deep_clone(
     body.instruction(&W::LocalGet(0))
         .instruction(&W::LocalGet(SOURCE_DATA))
         .instruction(&W::I32Sub)
-        .instruction(&W::LocalSet(OFFSET))
-        .instruction(&W::LocalGet(HEADER))
-        .instruction(&W::I32Load(MemArg {
-            offset: 28,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::LocalGet(1))
-        .instruction(&W::I32Eq)
+        .instruction(&W::LocalSet(OFFSET));
+    emit_memory_call(&mut body, MEMORY_CLONE_LOOKUP, &[W::LocalGet(HEADER)]);
+    body.instruction(&W::LocalTee(CLONE_DATA))
         .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::LocalGet(HEADER))
-        .instruction(&W::I32Load(MemArg {
-            offset: 24,
-            align: 2,
-            memory_index: 0,
-        }))
+        .instruction(&W::LocalGet(CLONE_DATA))
         .instruction(&W::LocalGet(OFFSET))
         .instruction(&W::I32Add)
         .instruction(&W::Return)
@@ -1117,7 +1092,7 @@ pub(super) fn compile_deep_clone(
         .instruction(&W::GlobalSet(globals.allocation_descriptor))
         .instruction(&W::LocalGet(HEADER))
         .instruction(&W::I32Load(MemArg {
-            offset: 0,
+            offset: 16,
             align: 2,
             memory_index: 0,
         }))
@@ -1129,28 +1104,25 @@ pub(super) fn compile_deep_clone(
         .instruction(&W::GlobalSet(globals.clone_failed))
         .instruction(&W::I32Const(0))
         .instruction(&W::Return)
+        .instruction(&W::End);
+    // The host owns transaction identity independently of guest headers.
+    emit_memory_call(
+        &mut body,
+        MEMORY_CLONE_PUBLISH,
+        &[W::LocalGet(HEADER), W::LocalGet(CLONE_DATA)],
+    );
+    body.instruction(&W::I32Eqz)
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::I32Const(1))
+        .instruction(&W::GlobalSet(globals.clone_failed))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::Return)
         .instruction(&W::End)
-        // Publish the source-to-destination edge before walking children so
-        // cycles and repeated aliases terminate and preserve identity.
-        .instruction(&W::LocalGet(HEADER))
-        .instruction(&W::LocalGet(CLONE_DATA))
-        .instruction(&W::I32Store(MemArg {
-            offset: 24,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::LocalGet(HEADER))
-        .instruction(&W::LocalGet(1))
-        .instruction(&W::I32Store(MemArg {
-            offset: 28,
-            align: 2,
-            memory_index: 0,
-        }))
         .instruction(&W::LocalGet(CLONE_DATA))
         .instruction(&W::LocalGet(SOURCE_DATA))
         .instruction(&W::LocalGet(HEADER))
         .instruction(&W::I32Load(MemArg {
-            offset: 0,
+            offset: 16,
             align: 2,
             memory_index: 0,
         }))
@@ -1197,14 +1169,9 @@ pub(super) fn compile_deep_clone(
             align: 2,
             memory_index: 0,
         }))
-        .instruction(&W::LocalSet(DESCRIPTOR))
-        .instruction(&W::LocalGet(HEADER))
-        .instruction(&W::I32Load(MemArg {
-            offset: 24,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::LocalSet(CLONE_DATA));
+        .instruction(&W::LocalSet(DESCRIPTOR));
+    emit_memory_call(&mut body, MEMORY_CLONE_LOOKUP, &[W::LocalGet(HEADER)]);
+    body.instruction(&W::LocalSet(CLONE_DATA));
 
     for (descriptor_id, descriptor) in descriptors.entries.iter().enumerate() {
         body.instruction(&W::LocalGet(DESCRIPTOR))
@@ -1294,10 +1261,7 @@ pub(super) fn compile_deep_clone(
                     .instruction(&W::End)
                     .instruction(&W::End);
             }
-            AllocationDescriptor::Map {
-                key_slot_types,
-                value_slot_types,
-            } => {
+            AllocationDescriptor::Map { .. } => {
                 body.instruction(&W::LocalGet(CLONE_DATA))
                     .instruction(&W::I32Const(32))
                     .instruction(&W::I32Add)
@@ -1309,13 +1273,15 @@ pub(super) fn compile_deep_clone(
                     1,
                     &[vo_common_core::SlotType::GcRef as u8],
                 );
+            }
+            AllocationDescriptor::MapEntries {
+                key_slot_types,
+                value_slot_types,
+            } => {
+                let stride = ((1 + key_slot_types.len() + value_slot_types.len()) * 8) as i32;
                 body.instruction(&W::LocalGet(CLONE_DATA))
-                    .instruction(&W::I64Load(MemArg {
-                        offset: 32,
-                        align: 3,
-                        memory_index: 0,
-                    }))
-                    .instruction(&W::I32WrapI64)
+                    .instruction(&W::I32Const(MAP_BACKING_HEADER_BYTES))
+                    .instruction(&W::I32Add)
                     .instruction(&W::LocalSet(ENTRY))
                     .instruction(&W::LocalGet(CLONE_DATA))
                     .instruction(&W::I64Load(MemArg {
@@ -1324,40 +1290,6 @@ pub(super) fn compile_deep_clone(
                         memory_index: 0,
                     }))
                     .instruction(&W::I32WrapI64)
-                    .instruction(&W::LocalSet(COUNT))
-                    .instruction(&W::I32Const(
-                        ((1 + key_slot_types.len() + value_slot_types.len()) * 8) as i32,
-                    ))
-                    .instruction(&W::LocalSet(STRIDE));
-                emit_clone_map_entries(
-                    &mut body,
-                    CloneMapLocals {
-                        entry_local: ENTRY,
-                        count_local: COUNT,
-                        stride_local: STRIDE,
-                        current_local: CURRENT,
-                        address_local: ADDRESS,
-                        generation_local: 1,
-                    },
-                    key_slot_types,
-                    value_slot_types,
-                );
-            }
-            AllocationDescriptor::MapEntries {
-                key_slot_types,
-                value_slot_types,
-            } => {
-                let stride = ((1 + key_slot_types.len() + value_slot_types.len()) * 8) as i32;
-                body.instruction(&W::LocalGet(CLONE_DATA))
-                    .instruction(&W::LocalSet(ENTRY))
-                    .instruction(&W::LocalGet(HEADER))
-                    .instruction(&W::I32Load(MemArg {
-                        offset: 0,
-                        align: 2,
-                        memory_index: 0,
-                    }))
-                    .instruction(&W::I32Const(stride))
-                    .instruction(&W::I32DivU)
                     .instruction(&W::LocalSet(COUNT))
                     .instruction(&W::I32Const(stride))
                     .instruction(&W::LocalSet(STRIDE));
@@ -1388,6 +1320,42 @@ pub(super) fn compile_deep_clone(
     body
 }
 
+/// Preserve high input bits before selecting a power-of-two Map bucket.
+/// Mixing happens once at the Map boundary; recursive semantic hashing keeps
+/// its existing canonical zero, type identity and equality contract.
+fn emit_map_hash_finalizer(body: &mut Function, scratch: u32) {
+    for (shift, factor) in [
+        (30, Some(0xbf58_476d_1ce4_e5b9_u64)),
+        (27, Some(0x94d0_49bb_1331_11eb_u64)),
+        (31, None),
+    ] {
+        body.instruction(&W::LocalTee(scratch))
+            .instruction(&W::LocalGet(scratch))
+            .instruction(&W::I64Const(shift))
+            .instruction(&W::I64ShrU)
+            .instruction(&W::I64Xor);
+        if let Some(factor) = factor {
+            body.instruction(&W::I64Const(factor as i64))
+                .instruction(&W::I64Mul);
+        }
+    }
+}
+
+/// Map capacities are powers of two. Use the high log2(capacity) bits of
+/// a full-width product so sequential and low-bit-aligned integer keys both
+/// spread across the table. The common mask also handles capacity one.
+fn emit_integer_map_index(body: &mut Function, capacity_local: u32) {
+    body.instruction(&W::I64Const(0x9e37_79b9_7f4a_7c15_u64 as i64))
+        .instruction(&W::I64Mul)
+        .instruction(&W::I64Const(64))
+        .instruction(&W::LocalGet(capacity_local))
+        .instruction(&W::I32Ctz)
+        .instruction(&W::I64ExtendI32U)
+        .instruction(&W::I64Sub)
+        .instruction(&W::I64ShrU)
+        .instruction(&W::I32WrapI64);
+}
+
 pub(super) fn compile_map_lookup() -> Function {
     const CAPACITY: u32 = 3;
     const MASK: u32 = 4;
@@ -1396,11 +1364,11 @@ pub(super) fn compile_map_lookup() -> Function {
     const BYTE_INDEX: u32 = 7;
     const KEY_BYTES: u32 = 8;
     const STRIDE: u32 = 9;
-    const FIRST_TOMBSTONE: u32 = 10;
-    const PROBES: u32 = 11;
-    const KEY_KIND: u32 = 12;
-    const HASH_BITS: u32 = 13;
-    let mut body = Function::new([(10, ValType::I32), (1, ValType::I64)]);
+    const PROBES: u32 = 10;
+    const KEY_KIND: u32 = 11;
+    const HASH_BITS: u32 = 12;
+    const WORD_KEY: u32 = 13;
+    let mut body = Function::new([(9, ValType::I32), (1, ValType::I64), (1, ValType::I32)]);
     body.instruction(&W::LocalGet(0))
         .instruction(&W::I64Load(MemArg {
             offset: 8,
@@ -1461,11 +1429,25 @@ pub(super) fn compile_map_lookup() -> Function {
             align: 2,
             memory_index: 0,
         }))
-        .instruction(&W::Call(DEEP_HASH_FUNCTION_INDEX))
-        .instruction(&W::I32WrapI64)
+        .instruction(&W::Call(DEEP_HASH_FUNCTION_INDEX));
+    emit_map_hash_finalizer(&mut body, HASH_BITS);
+    body.instruction(&W::I32WrapI64)
         .instruction(&W::Else)
-        // Deterministic scalar mixer. Full raw-key equality below resolves
-        // collisions for wider, non-managed keys.
+        // Integer keys use the full-width multiply-shift index. The unsigned
+        // interval test excludes Bool, Void, floats and reference kinds.
+        .instruction(&W::LocalGet(KEY_KIND))
+        .instruction(&W::I32Const(ValueKind::Int as i32))
+        .instruction(&W::I32Sub)
+        .instruction(&W::I32Const(
+            ValueKind::Uint64 as i32 - ValueKind::Int as i32,
+        ))
+        .instruction(&W::I32LeU)
+        .instruction(&W::If(BlockType::Result(ValType::I32)))
+        .instruction(&W::LocalGet(1))
+        .instruction(&W::I64Load(memarg(0)));
+    emit_integer_map_index(&mut body, CAPACITY);
+    body.instruction(&W::Else)
+        // Other scalar kinds keep their canonical equality and avalanche.
         .instruction(&W::LocalGet(1))
         .instruction(&W::I64Load(memarg(0)))
         .instruction(&W::LocalSet(HASH_BITS))
@@ -1473,6 +1455,10 @@ pub(super) fn compile_map_lookup() -> Function {
         .instruction(&W::I32Const(12))
         .instruction(&W::I32Eq)
         .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::LocalGet(HASH_BITS))
+        .instruction(&W::I32WrapI64)
+        .instruction(&W::I64ExtendI32U)
+        .instruction(&W::LocalSet(HASH_BITS))
         .instruction(&W::LocalGet(HASH_BITS))
         .instruction(&W::I64Const(0x7fff_ffff))
         .instruction(&W::I64And)
@@ -1495,17 +1481,30 @@ pub(super) fn compile_map_lookup() -> Function {
         .instruction(&W::LocalSet(HASH_BITS))
         .instruction(&W::End)
         .instruction(&W::End)
-        .instruction(&W::LocalGet(HASH_BITS))
-        .instruction(&W::I64Const(-49064778989728563))
-        .instruction(&W::I64Mul)
-        .instruction(&W::I32WrapI64)
+        .instruction(&W::LocalGet(HASH_BITS));
+    emit_map_hash_finalizer(&mut body, HASH_BITS);
+    body.instruction(&W::I32WrapI64)
+        .instruction(&W::End)
         .instruction(&W::End)
         .instruction(&W::End)
         .instruction(&W::LocalGet(MASK))
         .instruction(&W::I32And)
         .instruction(&W::LocalSet(INDEX))
-        .instruction(&W::I32Const(0))
-        .instruction(&W::LocalSet(FIRST_TOMBSTONE))
+        // Key kind and width are invariant throughout probing. Float, array,
+        // struct, interface and string keys require their semantic equality;
+        // every other eight-byte key can compare its complete slot directly.
+        .instruction(&W::LocalGet(KEY_KIND))
+        .instruction(&W::I32Const(ValueKind::Float32 as i32))
+        .instruction(&W::I32Sub)
+        .instruction(&W::I32Const(
+            ValueKind::String as i32 - ValueKind::Float32 as i32,
+        ))
+        .instruction(&W::I32GtU)
+        .instruction(&W::LocalGet(KEY_BYTES))
+        .instruction(&W::I32Const(8))
+        .instruction(&W::I32Eq)
+        .instruction(&W::I32And)
+        .instruction(&W::LocalSet(WORD_KEY))
         .instruction(&W::I32Const(0))
         .instruction(&W::LocalSet(PROBES))
         .instruction(&W::Loop(BlockType::Empty))
@@ -1526,35 +1525,33 @@ pub(super) fn compile_map_lookup() -> Function {
         .instruction(&W::If(BlockType::Empty))
         .instruction(&W::LocalGet(2))
         .instruction(&W::If(BlockType::Result(ValType::I32)))
-        .instruction(&W::LocalGet(FIRST_TOMBSTONE))
-        .instruction(&W::If(BlockType::Result(ValType::I32)))
-        .instruction(&W::LocalGet(FIRST_TOMBSTONE))
-        .instruction(&W::Else)
         .instruction(&W::LocalGet(ENTRY))
-        .instruction(&W::End)
         .instruction(&W::Else)
         .instruction(&W::I32Const(0))
         .instruction(&W::End)
         .instruction(&W::Return)
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(2))
-        .instruction(&W::LocalGet(FIRST_TOMBSTONE))
-        .instruction(&W::I32Eqz)
-        .instruction(&W::I32And)
-        .instruction(&W::LocalGet(ENTRY))
-        .instruction(&W::I64Load(memarg(0)))
-        .instruction(&W::I64Const(2))
-        .instruction(&W::I64Eq)
-        .instruction(&W::I32And)
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::LocalGet(ENTRY))
-        .instruction(&W::LocalSet(FIRST_TOMBSTONE))
         .instruction(&W::End)
         .instruction(&W::LocalGet(ENTRY))
         .instruction(&W::I64Load(memarg(0)))
         .instruction(&W::I64Const(1))
         .instruction(&W::I64Eq)
         .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::LocalGet(WORD_KEY))
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::LocalGet(ENTRY))
+        .instruction(&W::I64Load(MemArg {
+            offset: 8,
+            align: 3,
+            memory_index: 0,
+        }))
+        .instruction(&W::LocalGet(1))
+        .instruction(&W::I64Load(memarg(0)))
+        .instruction(&W::I64Eq)
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::LocalGet(ENTRY))
+        .instruction(&W::Return)
+        .instruction(&W::End)
+        .instruction(&W::Else)
         .instruction(&W::LocalGet(KEY_KIND))
         .instruction(&W::I32Const(16))
         .instruction(&W::I32Eq)
@@ -1866,6 +1863,7 @@ pub(super) fn compile_map_lookup() -> Function {
         .instruction(&W::End)
         .instruction(&W::End)
         .instruction(&W::End)
+        .instruction(&W::End)
         .instruction(&W::LocalGet(INDEX))
         .instruction(&W::I32Const(1))
         .instruction(&W::I32Add)
@@ -1879,12 +1877,7 @@ pub(super) fn compile_map_lookup() -> Function {
         .instruction(&W::LocalGet(CAPACITY))
         .instruction(&W::I32GeU)
         .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::LocalGet(2))
-        .instruction(&W::If(BlockType::Result(ValType::I32)))
-        .instruction(&W::LocalGet(FIRST_TOMBSTONE))
-        .instruction(&W::Else)
         .instruction(&W::I32Const(0))
-        .instruction(&W::End)
         .instruction(&W::Return)
         .instruction(&W::End)
         .instruction(&W::Br(0))
@@ -1919,8 +1912,29 @@ pub(super) fn compile_map_grow(globals: RuntimeGlobals) -> Function {
     return_status(&mut body, STATUS_OUT_OF_MEMORY);
     body.instruction(&W::End)
         .instruction(&W::LocalGet(OLD_CAPACITY))
+        .instruction(&W::I32Eqz)
+        .instruction(&W::If(BlockType::Result(ValType::I32)))
+        .instruction(&W::I32Const(DEFAULT_MAP_CAPACITY as i32))
+        .instruction(&W::Else)
+        .instruction(&W::LocalGet(0))
+        .instruction(&W::I64Load(memarg(0)))
+        .instruction(&W::I64Const(1))
+        .instruction(&W::I64Add)
+        .instruction(&W::I64Const(4))
+        .instruction(&W::I64Mul)
+        .instruction(&W::LocalGet(OLD_CAPACITY))
+        .instruction(&W::I64ExtendI32U)
+        .instruction(&W::I64Const(3))
+        .instruction(&W::I64Mul)
+        .instruction(&W::I64GeU)
+        .instruction(&W::If(BlockType::Result(ValType::I32)))
+        .instruction(&W::LocalGet(OLD_CAPACITY))
         .instruction(&W::I32Const(2))
         .instruction(&W::I32Mul)
+        .instruction(&W::Else)
+        .instruction(&W::LocalGet(OLD_CAPACITY))
+        .instruction(&W::End)
+        .instruction(&W::End)
         .instruction(&W::LocalSet(NEW_CAPACITY))
         .instruction(&W::LocalGet(0))
         .instruction(&W::I64Load(MemArg {
@@ -1945,7 +1959,9 @@ pub(super) fn compile_map_grow(globals: RuntimeGlobals) -> Function {
         .instruction(&W::LocalGet(STRIDE))
         .instruction(&W::I64ExtendI32U)
         .instruction(&W::I64Mul)
-        .instruction(&W::I64Const(i64::from(u32::MAX)))
+        .instruction(&W::I64Const(
+            i64::from(u32::MAX) - i64::from(MAP_BACKING_HEADER_BYTES),
+        ))
         .instruction(&W::I64GtU)
         .instruction(&W::If(BlockType::Empty));
     return_status(&mut body, STATUS_OUT_OF_MEMORY);
@@ -1953,6 +1969,8 @@ pub(super) fn compile_map_grow(globals: RuntimeGlobals) -> Function {
         .instruction(&W::LocalGet(NEW_CAPACITY))
         .instruction(&W::LocalGet(STRIDE))
         .instruction(&W::I32Mul)
+        .instruction(&W::I32Const(MAP_BACKING_HEADER_BYTES))
+        .instruction(&W::I32Add)
         .instruction(&W::LocalTee(ALLOCATION_BYTES))
         .instruction(&W::LocalGet(0))
         .instruction(&W::I32Load(MemArg {
@@ -1971,6 +1989,26 @@ pub(super) fn compile_map_grow(globals: RuntimeGlobals) -> Function {
         .instruction(&W::I32Const(0))
         .instruction(&W::LocalGet(ALLOCATION_BYTES))
         .instruction(&W::MemoryFill(0))
+        .instruction(&W::LocalGet(NEW_DATA))
+        .instruction(&W::LocalGet(NEW_CAPACITY))
+        .instruction(&W::I64ExtendI32U)
+        .instruction(&W::I64Store(MemArg {
+            offset: 8,
+            align: 3,
+            memory_index: 0,
+        }))
+        .instruction(&W::LocalGet(NEW_DATA))
+        .instruction(&W::I32Const(MAP_BACKING_HEADER_BYTES))
+        .instruction(&W::I32Add)
+        .instruction(&W::LocalSet(NEW_DATA))
+        .instruction(&W::LocalGet(0))
+        .instruction(&W::LocalGet(0))
+        .instruction(&W::I64Load(memarg(0)))
+        .instruction(&W::I64Store(MemArg {
+            offset: MAP_USED_OFFSET,
+            align: 3,
+            memory_index: 0,
+        }))
         .instruction(&W::LocalGet(0))
         .instruction(&W::I64Load(MemArg {
             offset: 32,
@@ -2031,6 +2069,12 @@ pub(super) fn compile_map_grow(globals: RuntimeGlobals) -> Function {
             src_mem: 0,
             dst_mem: 0,
         })
+        .instruction(&W::LocalGet(ENTRY))
+        .instruction(&W::LocalGet(DESTINATION))
+        .instruction(&W::I64ExtendI32U)
+        .instruction(&W::I64Const(MAP_FORWARD_BASE))
+        .instruction(&W::I64Add)
+        .instruction(&W::I64Store(memarg(0)))
         .instruction(&W::End)
         .instruction(&W::LocalGet(INDEX))
         .instruction(&W::I32Const(1))
@@ -2038,6 +2082,15 @@ pub(super) fn compile_map_grow(globals: RuntimeGlobals) -> Function {
         .instruction(&W::LocalSet(INDEX))
         .instruction(&W::Br(0))
         .instruction(&W::End)
+        .instruction(&W::End)
+        .instruction(&W::LocalGet(OLD_DATA))
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::LocalGet(OLD_DATA))
+        .instruction(&W::I32Const(MAP_BACKING_HEADER_BYTES))
+        .instruction(&W::I32Sub)
+        .instruction(&W::LocalGet(NEW_DATA))
+        .instruction(&W::I64ExtendI32U)
+        .instruction(&W::I64Store(memarg(0)))
         .instruction(&W::End)
         .instruction(&W::I32Const(STATUS_OK))
         .instruction(&W::End);
@@ -2050,114 +2103,24 @@ pub(super) fn compile_map_grow(globals: RuntimeGlobals) -> Function {
 /// frames use eager zeroing for language zero values. Stack chunks initialize
 /// each active frame before publishing it and can safely preserve unused bytes.
 pub(super) fn compile_frame_alloc(globals: RuntimeGlobals, frame_descriptor: u32) -> Function {
-    const PREVIOUS: u32 = 2;
-    const CURRENT: u32 = 3;
-    const NEXT: u32 = 4;
-    const SIZE: u32 = 5;
-    let mut body = Function::new([(4, ValType::I32)]);
-    body.instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
-        .instruction(&W::LocalGet(0))
-        .instruction(&W::I32GtU)
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::I32Const(0))
-        .instruction(&W::Return)
-        .instruction(&W::End)
-        .instruction(&W::GlobalGet(globals.free_blocks))
-        .instruction(&W::LocalSet(CURRENT))
-        .instruction(&W::I32Const(0))
-        .instruction(&W::LocalSet(PREVIOUS))
-        .instruction(&W::Block(BlockType::Empty))
-        .instruction(&W::Loop(BlockType::Empty))
-        .instruction(&W::LocalGet(CURRENT))
+    let mut body = Function::new([(1, ValType::I32)]);
+    let _ = globals;
+    emit_memory_call(
+        &mut body,
+        MEMORY_ALLOC,
+        &[
+            W::LocalGet(0),
+            W::I32Const(frame_descriptor as i32),
+            W::LocalGet(1),
+        ],
+    );
+    body.instruction(&W::LocalTee(2))
         .instruction(&W::I32Eqz)
-        .instruction(&W::BrIf(1))
-        .instruction(&W::LocalGet(CURRENT))
-        .instruction(&W::I32Load(MemArg {
-            offset: FRAME_ALLOCATION_SIZE_OFFSET,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::LocalTee(SIZE))
-        .instruction(&W::LocalGet(0))
-        .instruction(&W::I32GeU)
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::LocalGet(CURRENT))
-        .instruction(&W::I32Load(MemArg {
-            offset: 0,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::LocalSet(NEXT))
-        .instruction(&W::LocalGet(PREVIOUS))
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::LocalGet(PREVIOUS))
-        .instruction(&W::LocalGet(NEXT))
-        .instruction(&W::I32Store(MemArg {
-            offset: 0,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::Else)
-        .instruction(&W::LocalGet(NEXT))
-        .instruction(&W::GlobalSet(globals.free_blocks))
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(1))
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::LocalGet(CURRENT))
-        .instruction(&W::I32Const(0))
-        .instruction(&W::LocalGet(SIZE))
-        .instruction(&W::MemoryFill(0))
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(CURRENT))
-        .instruction(&W::LocalGet(CURRENT))
-        .instruction(&W::LocalGet(SIZE))
-        .instruction(&W::I32Add)
-        .instruction(&W::I32Store(MemArg {
-            offset: FRAME_LIMIT_OFFSET,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::LocalGet(CURRENT))
-        .instruction(&W::LocalGet(SIZE))
-        .instruction(&W::I32Store(MemArg {
-            offset: FRAME_ALLOCATION_SIZE_OFFSET,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::LocalGet(CURRENT))
-        .instruction(&W::Return)
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(CURRENT))
-        .instruction(&W::LocalSet(PREVIOUS))
-        .instruction(&W::LocalGet(CURRENT))
-        .instruction(&W::I32Load(MemArg {
-            offset: 0,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::LocalSet(CURRENT))
-        .instruction(&W::Br(0))
-        .instruction(&W::End)
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(0))
-        .instruction(&W::I32Const(frame_descriptor as i32))
-        .instruction(&W::GlobalSet(globals.allocation_descriptor))
-        .instruction(&W::Call(1))
-        .instruction(&W::LocalTee(CURRENT))
-        .instruction(&W::I32Eqz)
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::I32Const(0))
-        .instruction(&W::Return)
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(1))
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::LocalGet(CURRENT))
-        .instruction(&W::I32Const(0))
-        .instruction(&W::LocalGet(0))
-        .instruction(&W::MemoryFill(0))
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(CURRENT))
-        .instruction(&W::LocalGet(CURRENT))
+        .instruction(&W::If(BlockType::Empty));
+    return_status(&mut body, 0);
+    body.instruction(&W::End)
+        .instruction(&W::LocalGet(2))
+        .instruction(&W::LocalGet(2))
         .instruction(&W::LocalGet(0))
         .instruction(&W::I32Add)
         .instruction(&W::I32Store(MemArg {
@@ -2165,14 +2128,14 @@ pub(super) fn compile_frame_alloc(globals: RuntimeGlobals, frame_descriptor: u32
             align: 2,
             memory_index: 0,
         }))
-        .instruction(&W::LocalGet(CURRENT))
+        .instruction(&W::LocalGet(2))
         .instruction(&W::LocalGet(0))
         .instruction(&W::I32Store(MemArg {
             offset: FRAME_ALLOCATION_SIZE_OFFSET,
             align: 2,
             memory_index: 0,
         }))
-        .instruction(&W::LocalGet(CURRENT))
+        .instruction(&W::LocalGet(2))
         .instruction(&W::End);
     body
 }

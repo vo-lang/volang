@@ -125,6 +125,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber) -> Result<JitContextWra
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: u32::MAX,
+        runtime_trap_origin: 0,
         current_func_id: u32::MAX,
         infra_error_message: &mut fiber.jit_infra_error_message as *mut String,
         callback_state: vm as *mut Vm as *mut core::ffi::c_void,
@@ -217,7 +218,7 @@ mod tests {
 
     #[test]
     fn jit_context_inherits_active_fiber_scheduler_budget() {
-        let mut vm = Vm::try_with_jit_config(crate::vm::JitConfig::default()).expect("JIT VM");
+        let mut vm = Vm::try_native_for_test(crate::vm::JitConfig::default()).expect("JIT VM");
         let mut module = Module::new("jit-context-budget-test".to_string());
         module.functions.push(function(1));
         vm.load(module).expect("load module");
@@ -246,7 +247,7 @@ mod tests {
 
     #[test]
     fn jit_context_uses_the_vm_loaded_image_as_its_only_module_authority() {
-        let mut vm = Vm::try_with_jit_config(crate::vm::JitConfig::default()).expect("JIT VM");
+        let mut vm = Vm::try_native_for_test(crate::vm::JitConfig::default()).expect("JIT VM");
         let mut loaded = Module::new("jit-context-loaded".to_string());
         loaded.functions.push(function(1));
         vm.load(loaded).expect("load module");

@@ -566,8 +566,7 @@ pub(super) fn compile(
                 })?;
             let key_bytes = u32::from(layout.key_slots) * 8;
             let value_bytes = u32::from(layout.val_slots) * 8;
-            let stride = 8 + key_bytes + value_bytes;
-            let allocation_bytes = 64 + DEFAULT_MAP_CAPACITY * stride;
+            let allocation_bytes = MAP_HEADER_BYTES;
             load_slot(body, instruction.b);
             body.instruction(&W::I64Const(32))
                 .instruction(&W::I64ShrU)
@@ -593,7 +592,7 @@ pub(super) fn compile(
                     memory_index: 0,
                 }))
                 .instruction(&W::LocalGet(ALLOC_LOCAL))
-                .instruction(&W::I64Const(i64::from(DEFAULT_MAP_CAPACITY)))
+                .instruction(&W::I64Const(0))
                 .instruction(&W::I64Store(MemArg {
                     offset: 8,
                     align: 3,
@@ -614,10 +613,7 @@ pub(super) fn compile(
                     memory_index: 0,
                 }))
                 .instruction(&W::LocalGet(ALLOC_LOCAL))
-                .instruction(&W::LocalGet(ALLOC_LOCAL))
-                .instruction(&W::I32Const(64))
-                .instruction(&W::I32Add)
-                .instruction(&W::I64ExtendI32U)
+                .instruction(&W::I64Const(0))
                 .instruction(&W::I64Store(MemArg {
                     offset: 32,
                     align: 3,
@@ -660,7 +656,10 @@ pub(super) fn compile(
             store_prefix(body, instruction.a);
             body.instruction(&W::LocalGet(ALLOC_LOCAL))
                 .instruction(&W::I64ExtendI32U)
-                .instruction(&W::I64Store(memarg(0)));
+                .instruction(&W::I64Store(memarg(0)))
+                .instruction(&W::LocalGet(ALLOC_LOCAL))
+                .instruction(&W::Call(MAP_GROW_FUNCTION_INDEX));
+            propagate_status(body);
         }
         Opcode::MapGet => {
             let layout = function
@@ -746,28 +745,6 @@ pub(super) fn compile(
                 current_block,
             );
             load_slot(body, instruction.a);
-            body.instruction(&W::I32WrapI64)
-                .instruction(&W::LocalTee(SEQUENCE_LOCAL))
-                .instruction(&W::I64Load(memarg(0)))
-                .instruction(&W::I64Const(1))
-                .instruction(&W::I64Add)
-                .instruction(&W::I64Const(4))
-                .instruction(&W::I64Mul)
-                .instruction(&W::LocalGet(SEQUENCE_LOCAL))
-                .instruction(&W::I64Load(MemArg {
-                    offset: 8,
-                    align: 3,
-                    memory_index: 0,
-                }))
-                .instruction(&W::I64Const(3))
-                .instruction(&W::I64Mul)
-                .instruction(&W::I64GeU)
-                .instruction(&W::If(BlockType::Empty))
-                .instruction(&W::LocalGet(SEQUENCE_LOCAL))
-                .instruction(&W::Call(MAP_GROW_FUNCTION_INDEX));
-            propagate_status(body);
-            body.instruction(&W::End);
-            load_slot(body, instruction.a);
             body.instruction(&W::I32WrapI64);
             store_prefix(body, instruction.b);
             body.instruction(&W::I32Const(0))
@@ -792,8 +769,40 @@ pub(super) fn compile(
                 .instruction(&W::I64Load(memarg(0)))
                 .instruction(&W::I64Const(1))
                 .instruction(&W::I64Ne)
+                .instruction(&W::If(BlockType::Empty));
+            load_slot(body, instruction.a);
+            body.instruction(&W::I32WrapI64)
+                .instruction(&W::LocalTee(SEQUENCE_LOCAL))
+                .instruction(&W::I64Load(MemArg {
+                    offset: MAP_USED_OFFSET,
+                    align: 3,
+                    memory_index: 0,
+                }))
+                .instruction(&W::I64Const(1))
+                .instruction(&W::I64Add)
+                .instruction(&W::I64Const(4))
+                .instruction(&W::I64Mul)
+                .instruction(&W::LocalGet(SEQUENCE_LOCAL))
+                .instruction(&W::I64Load(MemArg {
+                    offset: 8,
+                    align: 3,
+                    memory_index: 0,
+                }))
+                .instruction(&W::I64Const(3))
+                .instruction(&W::I64Mul)
+                .instruction(&W::I64GeU)
                 .instruction(&W::If(BlockType::Empty))
-                .instruction(&W::LocalGet(ALLOC_LOCAL))
+                .instruction(&W::LocalGet(SEQUENCE_LOCAL))
+                .instruction(&W::Call(MAP_GROW_FUNCTION_INDEX));
+            propagate_status(body);
+            load_slot(body, instruction.a);
+            body.instruction(&W::I32WrapI64);
+            store_prefix(body, instruction.b);
+            body.instruction(&W::I32Const(1))
+                .instruction(&W::Call(MAP_LOOKUP_FUNCTION_INDEX))
+                .instruction(&W::LocalSet(ALLOC_LOCAL))
+                .instruction(&W::End);
+            body.instruction(&W::LocalGet(ALLOC_LOCAL))
                 .instruction(&W::I64Const(1))
                 .instruction(&W::I64Store(memarg(0)))
                 .instruction(&W::LocalGet(ALLOC_LOCAL))
@@ -813,6 +822,20 @@ pub(super) fn compile(
                 .instruction(&W::I64Const(1))
                 .instruction(&W::I64Add)
                 .instruction(&W::I64Store(memarg(0)))
+                .instruction(&W::LocalGet(SEQUENCE_LOCAL))
+                .instruction(&W::LocalGet(SEQUENCE_LOCAL))
+                .instruction(&W::I64Load(MemArg {
+                    offset: MAP_USED_OFFSET,
+                    align: 3,
+                    memory_index: 0,
+                }))
+                .instruction(&W::I64Const(1))
+                .instruction(&W::I64Add)
+                .instruction(&W::I64Store(MemArg {
+                    offset: MAP_USED_OFFSET,
+                    align: 3,
+                    memory_index: 0,
+                }))
                 .instruction(&W::End)
                 .instruction(&W::LocalGet(ALLOC_LOCAL))
                 .instruction(&W::I32Const(8 + i32::from(layout.key_slots) * 8))
@@ -897,9 +920,39 @@ pub(super) fn compile(
             for slot in 0..vo_common_core::bytecode::MAP_ITER_SLOTS as u16 {
                 store_const(body, instruction.a + slot, 0);
             }
-            store_prefix(body, instruction.a);
+            store_prefix(
+                body,
+                instruction.a + vo_common_core::bytecode::MAP_ITER_MAP_SLOT,
+            );
             load_slot(body, instruction.b);
             body.instruction(&W::I64Store(memarg(0)));
+            load_slot(body, instruction.b);
+            body.instruction(&W::I32WrapI64)
+                .instruction(&W::LocalTee(ALLOC_LOCAL))
+                .instruction(&W::If(BlockType::Empty));
+            store_prefix(
+                body,
+                instruction.a + vo_common_core::bytecode::MAP_ITER_BACKING_SLOT,
+            );
+            body.instruction(&W::LocalGet(ALLOC_LOCAL))
+                .instruction(&W::I64Load(MemArg {
+                    offset: 32,
+                    align: 3,
+                    memory_index: 0,
+                }))
+                .instruction(&W::I64Store(memarg(0)));
+            store_prefix(
+                body,
+                instruction.a + vo_common_core::bytecode::MAP_ITER_CAPACITY_SLOT,
+            );
+            body.instruction(&W::LocalGet(ALLOC_LOCAL))
+                .instruction(&W::I64Load(MemArg {
+                    offset: 8,
+                    align: 3,
+                    memory_index: 0,
+                }))
+                .instruction(&W::I64Store(memarg(0)))
+                .instruction(&W::End);
         }
         Opcode::MapIterNext => {
             let layout = function
@@ -916,19 +969,23 @@ pub(super) fn compile(
                 store_const(body, instruction.a + slot, 0);
             }
             store_const(body, instruction.c, 0);
-            load_slot(body, instruction.b);
+            load_slot(
+                body,
+                instruction.b + vo_common_core::bytecode::MAP_ITER_BACKING_SLOT,
+            );
             body.instruction(&W::I32WrapI64)
                 .instruction(&W::LocalTee(ALLOC_LOCAL))
-                .instruction(&W::If(BlockType::Empty))
-                .instruction(&W::LocalGet(ALLOC_LOCAL))
-                .instruction(&W::I64Load(MemArg {
-                    offset: 8,
-                    align: 3,
-                    memory_index: 0,
-                }))
-                .instruction(&W::I32WrapI64)
+                .instruction(&W::If(BlockType::Empty));
+            load_slot(
+                body,
+                instruction.b + vo_common_core::bytecode::MAP_ITER_CAPACITY_SLOT,
+            );
+            body.instruction(&W::I32WrapI64)
                 .instruction(&W::LocalSet(CAPACITY_LOCAL));
-            load_slot(body, instruction.b + 1);
+            load_slot(
+                body,
+                instruction.b + vo_common_core::bytecode::MAP_ITER_INDEX_SLOT,
+            );
             body.instruction(&W::I32WrapI64)
                 .instruction(&W::LocalSet(LENGTH_LOCAL))
                 .instruction(&W::Block(BlockType::Empty))
@@ -938,12 +995,6 @@ pub(super) fn compile(
                 .instruction(&W::I32GeU)
                 .instruction(&W::BrIf(1))
                 .instruction(&W::LocalGet(ALLOC_LOCAL))
-                .instruction(&W::I64Load(MemArg {
-                    offset: 32,
-                    align: 3,
-                    memory_index: 0,
-                }))
-                .instruction(&W::I32WrapI64)
                 .instruction(&W::LocalGet(LENGTH_LOCAL))
                 .instruction(&W::I32Const(
                     8 + i32::from(layout.key_slots + layout.val_slots) * 8,
@@ -955,12 +1006,32 @@ pub(super) fn compile(
                 .instruction(&W::I32Const(1))
                 .instruction(&W::I32Add)
                 .instruction(&W::LocalSet(LENGTH_LOCAL));
-            store_prefix(body, instruction.b + 1);
+            store_prefix(
+                body,
+                instruction.b + vo_common_core::bytecode::MAP_ITER_INDEX_SLOT,
+            );
             body.instruction(&W::LocalGet(LENGTH_LOCAL))
                 .instruction(&W::I64ExtendI32U)
                 .instruction(&W::I64Store(memarg(0)))
+                // Rehash preserves each original bucket through a forwarding
+                // address. Deleted slots remain tombstones until the next table.
+                .instruction(&W::Block(BlockType::Empty))
+                .instruction(&W::Loop(BlockType::Empty))
                 .instruction(&W::LocalGet(SEQUENCE_LOCAL))
                 .instruction(&W::I64Load(memarg(0)))
+                .instruction(&W::LocalTee(PACKED_LOCAL))
+                .instruction(&W::I64Const(MAP_FORWARD_BASE))
+                .instruction(&W::I64LtU)
+                .instruction(&W::BrIf(1))
+                .instruction(&W::LocalGet(PACKED_LOCAL))
+                .instruction(&W::I64Const(MAP_FORWARD_BASE))
+                .instruction(&W::I64Sub)
+                .instruction(&W::I32WrapI64)
+                .instruction(&W::LocalSet(SEQUENCE_LOCAL))
+                .instruction(&W::Br(0))
+                .instruction(&W::End)
+                .instruction(&W::End)
+                .instruction(&W::LocalGet(PACKED_LOCAL))
                 .instruction(&W::I64Const(1))
                 .instruction(&W::I64Eq)
                 .instruction(&W::If(BlockType::Empty));

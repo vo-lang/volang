@@ -1,42 +1,16 @@
 //! One bounded command and its process tree. Cross-runner scheduling stays in Actions.
 use super::model::CiCommand;
+use crate::process_tree::ProcessTree;
 use anyhow::{anyhow, bail, Context, Result};
-use process_wrap::std::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const MAX_LOG_BYTES: u64 = 128 * 1024 * 1024;
-
-struct ProcessTree {
-    child: Box<dyn ChildWrapper>,
-    reaped: bool,
-}
-
-impl ProcessTree {
-    fn wait(&mut self) -> std::io::Result<ExitStatus> {
-        // JobObject::try_wait may have drained the completion port already.
-        // Termination still owns the whole job; reap the root without waiting
-        // for another notification that Windows need not send.
-        #[cfg(windows)]
-        return self.child.inner_mut().wait();
-        #[cfg(not(windows))]
-        self.child.wait()
-    }
-}
-
-impl Drop for ProcessTree {
-    fn drop(&mut self) {
-        if !self.reaped {
-            let _ = self.child.start_kill();
-            let _ = self.wait();
-        }
-    }
-}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -117,11 +91,6 @@ pub(crate) fn run_command(
     for (key, relative) in &spec.repo_env {
         command.env(key, root.canonicalize()?.join(relative));
     }
-    let mut command = CommandWrap::from(command);
-    #[cfg(unix)]
-    command.wrap(ProcessGroup::leader());
-    #[cfg(windows)]
-    command.wrap(JobObject);
     let start = Instant::now();
     let mut result = CommandResult {
         id: spec.id.clone(),
@@ -152,11 +121,8 @@ pub(crate) fn run_command(
             Some("task was cancelled or its deadline expired before this command started".into());
         return Ok(result);
     }
-    let mut tree = match command.spawn() {
-        Ok(child) => ProcessTree {
-            child,
-            reaped: false,
-        },
+    let mut tree = match ProcessTree::spawn(command) {
+        Ok(tree) => tree,
         Err(error) => {
             result.error = Some(error.to_string());
             return Ok(result);
@@ -184,21 +150,13 @@ pub(crate) fn run_command(
                 )
             });
             // start_kill targets the POSIX group or Windows Job Object, including descendants.
-            tree.child
-                .start_kill()
-                .context("could not terminate CI command process tree")?;
             let status = tree
-                .wait()
-                .context("could not reap CI command process tree")?;
-            tree.reaped = true;
+                .terminate()
+                .context("could not terminate and reap CI command process tree")?;
             result.exit_code = status.code();
             break;
         }
-        if let Some(status) = tree.child.try_wait()? {
-            // A successful parent may leave a server or worker behind. End the
-            // command's group before releasing its resources; an empty group is OK.
-            let _ = tree.child.start_kill();
-            tree.reaped = true;
+        if let Some(status) = tree.try_wait()? {
             result.exit_code = status.code();
             result.status = if status.success() {
                 CommandStatus::Passed

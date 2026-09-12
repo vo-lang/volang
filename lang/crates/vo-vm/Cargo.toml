@@ -13,7 +13,10 @@ publish = false
 default = ["std"]
 std = ["vo-runtime/std", "vo-stdlib/std", "fastrand/std"]
 # Enable JIT compilation support
-jit = ["std", "vo-jit"]
+native = ["std", "dep:vo-jit"]
+jit = ["native", "vo-jit/compiler"]
+# Separate work-count builds only; normal execution has no counters or storage.
+execution-profile = []
 
 [dependencies]
 vo-runtime = { path = "../vo-runtime", default-features = false }
@@ -23,7 +26,7 @@ hashbrown = "0.15"
 fastrand = { version = "2.0", default-features = false }
 
 # Optional JIT compiler
-vo-jit = { path = "../vo-jit", optional = true }
+vo-jit = { path = "../vo-jit", optional = true, default-features = false }
 
 [dev-dependencies]
 vo-common-core = { path = "../vo-common-core", default-features = false, features = ["test-support"] }

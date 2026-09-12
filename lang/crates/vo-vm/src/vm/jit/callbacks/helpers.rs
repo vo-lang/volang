@@ -94,7 +94,12 @@ impl JitCallbackVm<'_> {
             .ok_or_else(|| {
                 vo_jit::JitError::Internal("tier-up requested without a JIT manager".into())
             })?
-            .compile_optimizing(func_id, loaded.verified_module(), env)
+            .compile_optimizing_with_feedback(
+                func_id,
+                loaded.verified_module(),
+                env,
+                &self.vm.state.dynamic_call_ic,
+            )
             .map(|_| ());
         match result {
             Err(_) if best_effort => Ok(()),
@@ -407,6 +412,7 @@ pub fn record_runtime_trap(ctx: &mut JitContext, kind: JitRuntimeTrapKind, pc: u
         *ctx.is_user_panic = false;
     }
     ctx.runtime_trap_kind = kind as u8;
+    ctx.runtime_trap_origin = 0;
     ctx.runtime_trap_arg0 = 0;
     ctx.runtime_trap_arg1 = 0;
     ctx.runtime_trap_pc = pc;
@@ -440,7 +446,7 @@ mod scheduler_poll_tests {
         module
             .functions
             .push(crate::vm::jit::test_support::function(1));
-        let mut vm = Vm::try_with_jit_config(crate::vm::JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(crate::vm::JitConfig::default()).expect("jit vm");
         vm.load(module).expect("load module");
         let mut fiber = Fiber::new(7);
         fiber.push_frame(0, 1, 0, 0);

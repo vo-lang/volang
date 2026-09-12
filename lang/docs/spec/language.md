@@ -1685,6 +1685,12 @@ for range ch { ... }                  // range with no variables
   collection's ordinary mutation rules.
 - For slices and arrays, `i` is the index (`int`) and `v` is the element value.
 - For maps, `k` is the key and `v` is the value. Iteration order is unspecified.
+  An entry present when iteration begins and not deleted is produced exactly
+  once, including when insertion causes the backing storage to grow. Deleting
+  an entry before it is reached prevents that entry from being produced.
+  Updating an entry before it is reached yields its current value. Entries
+  inserted during iteration may be produced or skipped; this choice may vary
+  between entries. Deleting and reinserting a key creates a new entry.
 - For strings, `i` is the byte index and `v` is the decoded rune (`int32`).
   UTF-8 is decoded as in `[]rune(s)`: an ill-formed encoding consumes one byte
   at its start and yields `U+FFFD`.

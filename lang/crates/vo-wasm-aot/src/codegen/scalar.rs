@@ -60,43 +60,54 @@ pub(super) fn emit_scalar_arithmetic(
         | Opcode::Not
         | Opcode::BoolNot
         | Opcode::NegF
+        | Opcode::NegF32
         | Opcode::ConvI2F
         | Opcode::ConvF2I
         | Opcode::ConvF64F32
         | Opcode::ConvF32F64
         | Opcode::Trunc => false,
         Opcode::AddF
+        | Opcode::AddF32
         | Opcode::AddI
         | Opcode::And
         | Opcode::AndNot
         | Opcode::DivF
+        | Opcode::DivF32
         | Opcode::DivI
         | Opcode::DivU
         | Opcode::EqF
+        | Opcode::EqF32
         | Opcode::EqI
         | Opcode::GeF
+        | Opcode::GeF32
         | Opcode::GeI
         | Opcode::GeU
         | Opcode::GtF
+        | Opcode::GtF32
         | Opcode::GtI
         | Opcode::GtU
         | Opcode::LeF
+        | Opcode::LeF32
         | Opcode::LeI
         | Opcode::LeU
         | Opcode::LtF
+        | Opcode::LtF32
         | Opcode::LtI
         | Opcode::LtU
         | Opcode::ModI
         | Opcode::ModU
         | Opcode::MulF
+        | Opcode::MulF32
         | Opcode::MulI
         | Opcode::NeF
+        | Opcode::NeF32
         | Opcode::NeI
         | Opcode::Or
         | Opcode::Shl
         | Opcode::ShrS
         | Opcode::ShrU
         | Opcode::SubF
+        | Opcode::SubF32
         | Opcode::SubI
         | Opcode::Xor => true,
         _ => return false,
@@ -254,6 +265,48 @@ pub(super) fn emit_scalar_arithmetic(
             .instruction(&W::I64ExtendI32U);
             destination.store(body);
         }
+        Opcode::AddF32
+        | Opcode::SubF32
+        | Opcode::MulF32
+        | Opcode::DivF32
+        | Opcode::NegF32
+        | Opcode::EqF32
+        | Opcode::NeF32
+        | Opcode::LtF32
+        | Opcode::LeF32
+        | Opcode::GtF32
+        | Opcode::GeF32 => {
+            left.load(body);
+            body.instruction(&W::I32WrapI64)
+                .instruction(&W::F32ReinterpretI32);
+            if let Some(right) = right {
+                right.load(body);
+                body.instruction(&W::I32WrapI64)
+                    .instruction(&W::F32ReinterpretI32);
+            }
+            body.instruction(&match opcode {
+                Opcode::AddF32 => W::F32Add,
+                Opcode::SubF32 => W::F32Sub,
+                Opcode::MulF32 => W::F32Mul,
+                Opcode::DivF32 => W::F32Div,
+                Opcode::NegF32 => W::F32Neg,
+                Opcode::EqF32 => W::F32Eq,
+                Opcode::NeF32 => W::F32Ne,
+                Opcode::LtF32 => W::F32Lt,
+                Opcode::LeF32 => W::F32Le,
+                Opcode::GtF32 => W::F32Gt,
+                Opcode::GeF32 => W::F32Ge,
+                _ => unreachable!(),
+            });
+            if matches!(
+                opcode,
+                Opcode::AddF32 | Opcode::SubF32 | Opcode::MulF32 | Opcode::DivF32 | Opcode::NegF32
+            ) {
+                body.instruction(&W::I32ReinterpretF32);
+            }
+            body.instruction(&W::I64ExtendI32U);
+            destination.store(body);
+        }
         Opcode::AddF | Opcode::SubF | Opcode::MulF | Opcode::DivF => {
             left.load(body);
             body.instruction(&W::F64ReinterpretI64);
@@ -405,6 +458,17 @@ mod tests {
             Opcode::LeU,
             Opcode::GtU,
             Opcode::GeU,
+            Opcode::AddF32,
+            Opcode::SubF32,
+            Opcode::MulF32,
+            Opcode::DivF32,
+            Opcode::NegF32,
+            Opcode::EqF32,
+            Opcode::NeF32,
+            Opcode::LtF32,
+            Opcode::LeF32,
+            Opcode::GtF32,
+            Opcode::GeF32,
             Opcode::AddF,
             Opcode::SubF,
             Opcode::MulF,

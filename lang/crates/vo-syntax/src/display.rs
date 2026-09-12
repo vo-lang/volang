@@ -1008,7 +1008,11 @@ impl<'a> SourcePrinter<'a> {
         for elem in &lit.elems {
             let inline = self.inline_composite_elem(elem);
             let inline_width = inline.chars().count();
-            let fits_on_fresh_line = self.indent + inline_width < MAX_LINE_WIDTH;
+            // Function bodies and raw strings can contain newlines even in an
+            // inline probe. Render those through this printer so nested bodies
+            // inherit the enclosing indentation instead of the probe's zero.
+            let fits_on_fresh_line =
+                !inline.contains('\n') && self.indent + inline_width < MAX_LINE_WIDTH;
 
             if !fits_on_fresh_line {
                 if line_has_elements {
@@ -1064,7 +1068,8 @@ impl<'a> SourcePrinter<'a> {
     }
 
     fn expression_fits(&self, expr: &Expr) -> bool {
-        self.current_column() + self.inline_expr(expr).chars().count() <= MAX_LINE_WIDTH
+        let inline = self.inline_expr(expr);
+        !inline.contains('\n') && self.current_column() + inline.chars().count() <= MAX_LINE_WIDTH
     }
 
     fn write_call_args(&mut self, args: &[Expr], spread: bool) {
@@ -1255,6 +1260,33 @@ mod tests {
                 .lines()
                 .all(|line| line.chars().count() <= MAX_LINE_WIDTH),
             "{formatted}"
+        );
+    }
+
+    #[test]
+    fn format_indents_closures_in_short_and_nested_composite_literals() {
+        let source = "package main\nfunc main(){xs:=[]func() int{func() int{return 1}}\nys:=map[string][]func() int{\"x\":{func() int{return 2}}}\n_=xs\n_=ys}";
+        let formatted = assert_reformats_identically(source);
+        assert!(
+            formatted
+                .contains("xs := []func() int{\n\t\tfunc() int {\n\t\t\treturn 1\n\t\t},\n\t}"),
+            "{formatted}"
+        );
+        assert!(
+            formatted.contains("\"x\": {\n\t\t\tfunc() int {\n\t\t\t\treturn 2\n\t\t\t},\n\t\t}"),
+            "{formatted}"
+        );
+    }
+
+    #[test]
+    fn format_multiline_composite_preserves_comments_and_raw_string_bytes() {
+        let source = "package main\nfunc main(){xs:=[]func() string{func() string{\n// retained\nreturn `first  \nsecond  `\n}}\n_=xs}";
+        let formatted = crate::formatter::format_source(source).unwrap();
+        assert!(formatted.contains("\n\t\t\t// retained\n"), "{formatted}");
+        assert!(formatted.contains("`first  \nsecond  `"), "{formatted}");
+        assert_eq!(
+            crate::formatter::format_source(&formatted).unwrap(),
+            formatted
         );
     }
 

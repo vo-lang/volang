@@ -212,6 +212,7 @@ fn test_context<'a>(
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: u32::MAX,
+        runtime_trap_origin: 0,
         current_func_id: u32::MAX,
         infra_error_message: core::ptr::null_mut(),
         callback_state: vm as *mut Vm as *mut c_void,
@@ -511,7 +512,7 @@ fn vm_jit_goisland_callback_abi_057_nil_island_requires_active_caller_frame_befo
     assert!(vm.state.outbound_commands.is_empty());
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 #[test]
 fn vm_jit_gostart_pending_001_go_start_spawn_survives_later_terminal_result() {
     let mut module = Module::new("go-start-pending-spawn-test".to_string());
@@ -571,7 +572,7 @@ fn vm_jit_gostart_pending_001_go_start_spawn_survives_later_terminal_result() {
     assert_eq!(vm.scheduler.fibers.len(), 1);
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 #[test]
 fn vm_jit_gostart_pending_001_go_island_command_survives_later_terminal_result() {
     let mut module = Module::new("go-island-pending-command-test".to_string());
@@ -641,7 +642,7 @@ fn vm_jit_gostart_pending_001_go_island_command_survives_later_terminal_result()
     ));
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 #[test]
 fn vm_jit_goisland_route_preflight_058_missing_target_route_preserves_no_pending_transition() {
     let mut module = Module::new("go-island-route-preflight-test".to_string());
@@ -692,7 +693,7 @@ fn vm_jit_goisland_route_preflight_058_missing_target_route_preserves_no_pending
     assert!(vm.state.outbound_commands.is_empty());
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 #[test]
 fn vm_jit_goisland_transfer_txn_006_jit_error_commits_spawn_after_local_endpoint_prepare() {
     let mut module = Module::new("go-island-local-port-capture-terminal-test".to_string());
@@ -785,7 +786,7 @@ fn vm_jit_goisland_transfer_txn_006_jit_error_commits_spawn_after_local_endpoint
     ));
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 #[test]
 fn vm_jit_goisland_transfer_txn_006_validates_later_capture_before_endpoint_publication() {
     let mut module = Module::new("go-island-later-capture-preflight-terminal-test".to_string());
@@ -862,7 +863,7 @@ fn vm_jit_goisland_transfer_txn_006_validates_later_capture_before_endpoint_publ
     assert_eq!(vm.state.outbound_commands.len(), 0);
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 #[test]
 fn vm_direct_method_capture_protocol_006_jit_goisland_transfers_one_slot_struct_receiver_raw() {
     let mut module = direct_method_one_slot_struct_module();

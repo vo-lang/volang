@@ -119,15 +119,13 @@ pub(super) fn compile_short_var(
             } else if info.is_array(type_key) {
                 // Freeze the array value now. A later RHS can mutate the source,
                 // and new bindings must stay invisible until every RHS finishes.
-                let value = crate::array_value::prepare_expr(expr, type_key, ctx, func, info)?;
-                let value = match value {
-                    crate::array_value::ArrayValue::BorrowedRef(_) => {
-                        crate::array_value::ArrayValue::OwnedRef(
-                            value.into_owned_ref(type_key, ctx, func, info)?,
-                        )
-                    }
-                    value => value,
-                };
+                // Existing destinations keep their canonical snapshot path.
+                // New locals can prepare directly in their proven representation.
+                let needs_box =
+                    !info.is_def(name) || info.needs_boxing(info.get_def(name), type_key);
+                let value = crate::array_value::prepare_initializer(
+                    expr, type_key, needs_box, ctx, func, info,
+                )?;
                 rhs_temps.push(Some(PreparedRhs::Array { value, type_key }));
             } else {
                 let tmp = crate::expr::compile_expr_snapshot(expr, ctx, func, info)?;
@@ -179,7 +177,8 @@ pub(super) fn compile_short_var(
                         crate::assign::AssignSource::Slot { slot, type_key }
                     }
                     PreparedRhs::Array { value, type_key } => match value {
-                        crate::array_value::ArrayValue::FlatSlots(slot) => {
+                        crate::array_value::ArrayValue::FlatSlots(slot)
+                        | crate::array_value::ArrayValue::OwnedFlatSlots(slot) => {
                             crate::assign::AssignSource::Slot { slot, type_key }
                         }
                         crate::array_value::ArrayValue::BorrowedRef(slot)
@@ -303,17 +302,19 @@ fn compile_multi_value_assign(
             .map_err(CodegenError::Internal)?;
 
         if let Some((lv, lhs_type)) = lhs_opt {
-            crate::assign::emit_assign_to_lvalue(
-                &lv,
-                crate::assign::AssignSource::Slot {
-                    slot: tuple.base + offset,
-                    type_key: elem_type,
-                },
-                lhs_type,
-                ctx,
-                func,
-                info,
-            )?;
+            func.with_source_span(assign.lhs[i].span, |func| {
+                crate::assign::emit_assign_to_lvalue(
+                    &lv,
+                    crate::assign::AssignSource::Slot {
+                        slot: tuple.base + offset,
+                        type_key: elem_type,
+                    },
+                    lhs_type,
+                    ctx,
+                    func,
+                    info,
+                )
+            })?;
         }
         offset = offset.checked_add(elem_slots).ok_or_else(|| {
             CodegenError::Internal("assignment tuple slot offset exceeds u16".to_string())
@@ -368,19 +369,22 @@ fn compile_parallel_assign(
     }
 
     // 3. Assign temporaries to LHS
-    for (lhs_opt, (tmp, rhs_type)) in lhs_lvalues.into_iter().zip(rhs_temps.iter()) {
+    for (i, (lhs_opt, (tmp, rhs_type))) in lhs_lvalues.into_iter().zip(rhs_temps.iter()).enumerate()
+    {
         if let Some((lv, lhs_type)) = lhs_opt {
-            crate::assign::emit_assign_to_lvalue(
-                &lv,
-                crate::assign::AssignSource::Slot {
-                    slot: *tmp,
-                    type_key: *rhs_type,
-                },
-                lhs_type,
-                ctx,
-                func,
-                info,
-            )?;
+            func.with_source_span(assign.lhs[i].span, |func| {
+                crate::assign::emit_assign_to_lvalue(
+                    &lv,
+                    crate::assign::AssignSource::Slot {
+                        slot: *tmp,
+                        type_key: *rhs_type,
+                    },
+                    lhs_type,
+                    ctx,
+                    func,
+                    info,
+                )
+            })?;
         }
     }
     Ok(())
@@ -388,6 +392,18 @@ fn compile_parallel_assign(
 
 /// Compile assignment using LValue abstraction.
 fn compile_assign(
+    lhs: &Expr,
+    rhs: &Expr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    func.with_source_span(lhs.span, |func| {
+        compile_assign_inner(lhs, rhs, ctx, func, info)
+    })
+}
+
+fn compile_assign_inner(
     lhs: &Expr,
     rhs: &Expr,
     ctx: &mut CodegenContext,
@@ -439,6 +455,19 @@ fn compile_compound_assign(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
+    func.with_source_span(lhs.span, |func| {
+        compile_compound_assign_inner(lhs, rhs, op, ctx, func, info)
+    })
+}
+
+fn compile_compound_assign_inner(
+    lhs: &Expr,
+    rhs: &Expr,
+    op: vo_syntax::ast::AssignOp,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
     use crate::lvalue::{emit_lvalue_load, resolve_lvalue_for_read, snapshot_lvalue_operands};
     use vo_common_core::instruction::SHIFT_FLAG_RHS_UNSIGNED;
     use vo_syntax::ast::AssignOp;
@@ -447,20 +476,45 @@ fn compile_compound_assign(
     let lhs_type = info.expr_type(lhs.id);
     let rhs_type = info.expr_type(rhs.id);
     let is_float = info.is_float(lhs_type);
+    let is_float32 = info.is_float32(lhs_type);
     let is_string = info.is_string(lhs_type);
     let is_unsigned = info.is_unsigned(lhs_type);
 
     let opcode = match (op, is_float, is_string, is_unsigned) {
         (AssignOp::Add, false, false, _) => Opcode::AddI,
-        (AssignOp::Add, true, false, _) => Opcode::AddF,
+        (AssignOp::Add, true, false, _) => {
+            if is_float32 {
+                Opcode::AddF32
+            } else {
+                Opcode::AddF
+            }
+        }
         (AssignOp::Add, _, true, _) => Opcode::StrConcat,
         (AssignOp::Sub, false, _, _) => Opcode::SubI,
-        (AssignOp::Sub, true, _, _) => Opcode::SubF,
+        (AssignOp::Sub, true, _, _) => {
+            if is_float32 {
+                Opcode::SubF32
+            } else {
+                Opcode::SubF
+            }
+        }
         (AssignOp::Mul, false, _, _) => Opcode::MulI,
-        (AssignOp::Mul, true, _, _) => Opcode::MulF,
+        (AssignOp::Mul, true, _, _) => {
+            if is_float32 {
+                Opcode::MulF32
+            } else {
+                Opcode::MulF
+            }
+        }
         (AssignOp::Div, false, _, false) => Opcode::DivI,
         (AssignOp::Div, false, _, true) => Opcode::DivU,
-        (AssignOp::Div, true, _, _) => Opcode::DivF,
+        (AssignOp::Div, true, _, _) => {
+            if is_float32 {
+                Opcode::DivF32
+            } else {
+                Opcode::DivF
+            }
+        }
         (AssignOp::Rem, _, _, false) => Opcode::ModI,
         (AssignOp::Rem, _, _, true) => Opcode::ModU,
         (AssignOp::And, _, _, _) => Opcode::And,
@@ -503,25 +557,12 @@ fn compile_compound_assign(
     };
 
     let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
-    if info.is_float32(lhs_type) {
-        // Float32 values are stored as 32-bit IEEE bits in one VM slot. The
-        // arithmetic opcodes consume f64 bits, so widen both operands and
-        // round the result back to the declared storage type.
-        let lhs_wide = func.alloc_slots(&[vo_common_core::SlotType::Float]);
-        let rhs_wide = func.alloc_slots(&[vo_common_core::SlotType::Float]);
-        func.emit_op(Opcode::ConvF32F64, lhs_wide, tmp, 0);
-        func.emit_op(Opcode::ConvF32F64, rhs_wide, rhs_reg, 0);
-        func.emit_op(opcode, lhs_wide, lhs_wide, rhs_wide);
-        func.emit_op(Opcode::ConvF64F32, tmp, lhs_wide, 0);
+    let shift_flags = if matches!(op, AssignOp::Shl | AssignOp::Shr) && info.is_unsigned(rhs_type) {
+        SHIFT_FLAG_RHS_UNSIGNED
     } else {
-        let shift_flags =
-            if matches!(op, AssignOp::Shl | AssignOp::Shr) && info.is_unsigned(rhs_type) {
-                SHIFT_FLAG_RHS_UNSIGNED
-            } else {
-                0
-            };
-        func.emit_with_flags(opcode, shift_flags, tmp, tmp, rhs_reg);
-    }
+        0
+    };
+    func.emit_with_flags(opcode, shift_flags, tmp, tmp, rhs_reg);
     if !is_float && !is_string {
         emit_int_trunc(tmp, lhs_type, func, info);
     }

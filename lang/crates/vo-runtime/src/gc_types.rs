@@ -8,9 +8,7 @@
 use crate::gc::{
     trace_slots_by_types_precise, Gc, GcObjectScanChunk, GcRef, GcTraceCursor, GcTraceEdge,
 };
-#[cfg(test)]
-use crate::objects::string;
-use crate::objects::{array, closure, interface, map, queue, queue_state, slice};
+use crate::objects::{array, closure, interface, map, queue, queue_state, slice, string};
 use crate::slot::{byte_offset_for_slots, SLOT_BYTES};
 use vo_common_core::bytecode::{
     LoadedModule, ModuleRuntimeMetadata, RuntimeTypeFact, RuntimeTypeFacts, RuntimeTypeMetadata,
@@ -130,7 +128,7 @@ impl<'a> GcScanContext<'a> {
     #[inline]
     pub fn from_runtime_metadata(metadata: ModuleRuntimeMetadata<'a>) -> Self {
         Self {
-            struct_metas: metadata.type_metadata().struct_metas,
+            struct_metas: metadata.type_metadata().struct_metas(),
             runtime_type_facts: metadata.runtime_type_facts(),
         }
     }
@@ -316,7 +314,7 @@ fn try_typed_write_barrier_by_type_metadata(
                 type_metadata.ok_or(TypedWriteBarrierByMetaError::MissingModuleMetadata)?;
             let meta_id = meta.meta_id() as usize;
             let struct_meta = type_metadata
-                .struct_metas
+                .struct_metas()
                 .get(meta_id)
                 .ok_or(TypedWriteBarrierByMetaError::MissingStructMeta { meta_id })?;
             if !slot_types_may_contain_gc_refs(&struct_meta.slot_types) {
@@ -331,7 +329,7 @@ fn try_typed_write_barrier_by_type_metadata(
                 type_metadata.ok_or(TypedWriteBarrierByMetaError::MissingModuleMetadata)?;
             if let Some(runtime_type_facts) = runtime_type_facts {
                 let ctx = GcScanContext::with_runtime_type_facts(
-                    type_metadata.struct_metas,
+                    type_metadata.struct_metas(),
                     runtime_type_facts,
                 );
                 trace_value_slots_by_meta(vals, meta, ctx, &mut |edge| {
@@ -507,6 +505,14 @@ where
     }
 
     let gc_header = unsafe { Gc::header(obj) };
+    if gc_header.is_forwarded_backing_object() {
+        // A resize can retire this backing while its earlier layout cursor is
+        // suspended. The successor is its complete current layout regardless
+        // of how far that previous scan progressed.
+        unsafe { gc.mark_gray_exact_base(*obj as GcRef) };
+        return GcObjectScanChunk::complete(SLOT_BYTES);
+    }
+
     if gc_header.is_value_slots_object() {
         let slots =
             unsafe { core::slice::from_raw_parts(obj as *const u64, gc_header.slots as usize) };
@@ -533,12 +539,19 @@ where
         }
         ValueKind::String | ValueKind::Slice => {
             if cursor.reference_index == 0 {
-                let owner = unsafe { slice::owner_ref(obj) };
-                if !owner.is_null() {
+                if gc_header.kind() == ValueKind::String {
+                    let owner = unsafe { string::owner_ref(obj) };
+                    if !owner.is_null() {
+                        gc.mark_gray_exact_base(owner);
+                    }
+                } else {
                     // Inline-array views deliberately retain an interior pointer as
                     // their liveness anchor. Canonicalization is part of the owner
                     // field's representation contract.
-                    gc.mark_gray(owner);
+                    let owner = unsafe { slice::owner_ref(obj) };
+                    if !owner.is_null() {
+                        gc.mark_gray(owner);
+                    }
                 }
                 cursor.reference_index = 1;
                 GcObjectScanChunk::complete(SLOT_BYTES)
@@ -909,6 +922,10 @@ unsafe fn trace_object_edges_with_context<'a, F, V>(
     V: FnMut(GcTraceEdge),
 {
     let gc_header = unsafe { Gc::header(obj) };
+    if gc_header.is_forwarded_backing_object() {
+        visit(GcTraceEdge::ExactBase(unsafe { *obj as GcRef }));
+        return;
+    }
 
     if gc_header.is_value_slots_object() {
         let slots =
@@ -930,9 +947,9 @@ unsafe fn trace_object_edges_with_context<'a, F, V>(
             trace_array_children(obj, context, &mut visit);
         }
         ValueKind::String => {
-            let owner = slice::owner_ref(obj);
+            let owner = string::owner_ref(obj);
             if !owner.is_null() {
-                visit(GcTraceEdge::InteriorCapable(owner));
+                visit(GcTraceEdge::ExactBase(owner));
             }
         }
 
@@ -1569,28 +1586,8 @@ unsafe fn trace_struct_children<V>(
 /// Releases native resources (Box, etc.) not managed by GC.
 pub unsafe fn finalize_object(obj: GcRef) {
     let header = unsafe { Gc::header(obj) };
-    if header.is_value_slots_object() {
-        return;
-    }
-    match header.kind() {
-        kind if kind.is_queue() => {
-            // Only finalize real channel objects (DATA_SLOTS=3), not heap-boxed
-            // pointer-to-channel (1 slot) created by PtrNew.
-            if header.slots == queue_state::DATA_SLOTS {
-                unsafe {
-                    queue::drop_inner(obj);
-                }
-            }
-        }
-        ValueKind::Map => {
-            if header.slots == map::DATA_SLOTS {
-                unsafe {
-                    map::drop_inner(obj);
-                }
-            }
-        }
-        // Island has no native resources to finalize (channels managed by VM)
-        _ => {}
+    if header.requires_native_finalizer() {
+        unsafe { queue::drop_inner(obj) };
     }
 }
 
@@ -1918,6 +1915,38 @@ mod tests {
         assert!(unsafe { Gc::header(backing) }.is_gray());
         assert!(unsafe { Gc::header(key) }.is_gray());
         assert!(unsafe { Gc::header(value) }.is_gray());
+    }
+
+    #[test]
+    fn retired_map_backing_traces_successor_with_a_resumed_layout_cursor() {
+        let mut gc = Gc::new();
+        let int_meta = ValueMeta::new(0, ValueKind::Int64);
+        let map_ref = map::create(&mut gc, int_meta, int_meta, 1, 1, 0);
+        unsafe { map::set_checked(&mut gc, map_ref, &[0], &[0], None) }.unwrap();
+        let old = unsafe { map::backing_ref(map_ref) };
+        for key in 1..8 {
+            unsafe { map::set_checked(&mut gc, map_ref, &[key], &[key], None) }.unwrap();
+        }
+        let successor = unsafe { map::backing_ref(map_ref) };
+        assert_ne!(old, successor);
+        assert!(gc.is_white(successor));
+        let mut cursor = GcTraceCursor {
+            reference_index: 3,
+            ..Default::default()
+        };
+        let chunk = unsafe {
+            scan_object_chunk_with_context(
+                &mut gc,
+                old,
+                GcScanContext::new(&[]),
+                &|_| ClosureScanLayout::default(),
+                &mut cursor,
+                SLOT_BYTES,
+            )
+        };
+        assert!(chunk.done);
+        assert_eq!(chunk.work_bytes, SLOT_BYTES);
+        assert!(unsafe { Gc::header(successor) }.is_gray());
     }
 
     #[test]

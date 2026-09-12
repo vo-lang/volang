@@ -732,8 +732,13 @@ var Usage = func() {
 }
 
 // Parse parses the command-line flags from os.Args[1:].
+// An empty argument list from an embedding host has no flags.
 func Parse() {
-	CommandLine.Parse(os.Args[1:])
+	args := os.Args
+	if len(args) > 0 {
+		args = args[1:]
+	}
+	CommandLine.Parse(args)
 }
 
 // Parsed reports whether the command-line flags have been parsed.

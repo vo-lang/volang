@@ -104,10 +104,13 @@ mod tests {
     use super::*;
     use crate::vm::jit::test_support::function;
     use crate::vm::{JitConfig, JitSideExitReason, Vm};
+    #[cfg(feature = "jit")]
     use vo_runtime::instruction::{Instruction, Opcode};
+    #[cfg(feature = "jit")]
     use vo_runtime::SlotType;
 
     #[test]
+    #[cfg(feature = "jit")]
     fn vm_jit_deopt_rejects_absent_artifact_state() {
         let mut func = function(3);
         func.code = vec![
@@ -126,7 +129,7 @@ mod tests {
         let mut module = Module::new("jit-deopt".to_string());
         module.functions.push(func);
 
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         vm.load(module).expect("load deopt probe");
         let loaded = vm.module.as_ref().expect("loaded module").clone();
         let externs = vo_runtime::bytecode::ResolvedExternTable::empty();
@@ -188,7 +191,7 @@ mod tests {
 
     #[test]
     fn vm_jit_runtime_transition_materializes_next_pc_and_yields() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-runtime-transition".to_string());
         module.functions.push(function(1));
         vm.finish_load(module.clone());
@@ -226,7 +229,7 @@ mod tests {
 
     #[test]
     fn vm_jit_context_error_message_includes_infra_contract_detail() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut fiber = Fiber::new(11);
         let module = Module::new("jit-infra-message".to_string());
         vm.finish_load(module.clone());
@@ -246,7 +249,7 @@ mod tests {
 
     #[test]
     fn vm_jit_context_error_message_preserves_extern_not_registered_classification() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut fiber = Fiber::new(11);
         let module = Module::new("jit-extern-message".to_string());
         vm.finish_load(module.clone());
@@ -267,7 +270,7 @@ mod tests {
 
     #[test]
     fn vm_jit_call_request_abi_018_call_result_honors_infra_error_sentinel() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut fiber = Fiber::new(11);
         let module = Module::new("jit-call-request-infra".to_string());
         vm.finish_load(module.clone());
@@ -302,7 +305,7 @@ mod tests {
 
     #[test]
     fn vm_jit_runtime_panic_061_keeps_user_arg_equal_to_infra_sentinel() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut fiber = Fiber::new(11);
         let mut module = Module::new("jit-runtime-panic-sentinel-arg".to_string());
         module.runtime_types.push(vo_runtime::RuntimeType::Basic(
@@ -334,7 +337,7 @@ mod tests {
 
     #[test]
     fn vm_jit_prepared_call_request_abi_018_preserves_full_caller_resume_pc() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut fiber = Fiber::new(11);
         vm.finish_load(Module::new("jit-prepared-call-request".to_string()));
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");

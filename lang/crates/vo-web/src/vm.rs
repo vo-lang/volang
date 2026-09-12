@@ -4,9 +4,6 @@ use vo_vm::vm::SchedulingOutcome;
 
 use crate::js_types::RunResult;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::{Arc, Mutex, MutexGuard};
-
 #[cfg(any(all(target_arch = "wasm32", feature = "compiler"), test))]
 const VOPLAY_PERF_REPORT_MARKER: &str = "__VOPLAY_PERF_REPORT__";
 #[cfg(all(target_arch = "wasm32", feature = "compiler"))]
@@ -388,85 +385,13 @@ pub fn take_output() -> String {
 /// Keep the exported host runner independent of that feature choice by owning
 /// its capture sink per invocation. Browser builds retain the WASM global sink,
 /// which also drives the immediate console hook.
-#[cfg(not(target_arch = "wasm32"))]
-struct NativeRunOutput(Mutex<Vec<u8>>);
-
-#[cfg(not(target_arch = "wasm32"))]
-impl NativeRunOutput {
-    fn new() -> Arc<Self> {
-        Arc::new(Self(Mutex::new(Vec::new())))
-    }
-
-    fn buffer(&self) -> MutexGuard<'_, Vec<u8>> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn take(&self) -> String {
-        let bytes = std::mem::take(&mut *self.buffer());
-        render_native_output_text(&bytes)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn render_native_output_text(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    let mut rendered = String::new();
-    let mut remaining = bytes;
-    while !remaining.is_empty() {
-        match std::str::from_utf8(remaining) {
-            Ok(text) => {
-                rendered.push_str(text);
-                break;
-            }
-            Err(error) => {
-                let valid = error.valid_up_to();
-                if valid > 0 {
-                    rendered.push_str(
-                        std::str::from_utf8(&remaining[..valid])
-                            .expect("valid_up_to ends on a UTF-8 boundary"),
-                    );
-                }
-                let invalid = remaining[valid];
-                let _ = write!(rendered, "\\x{invalid:02x}");
-                remaining = &remaining[valid + 1..];
-            }
-        }
-    }
-    rendered
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl vo_runtime::output::OutputSink for NativeRunOutput {
-    fn write_bytes(&self, bytes: &[u8]) {
-        self.buffer().extend_from_slice(bytes);
-    }
-
-    fn writeln_bytes(&self, bytes: &[u8]) {
-        let mut output = self.buffer();
-        output.extend_from_slice(bytes);
-        output.push(b'\n');
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn run_with_host_output(bytecode: &[u8]) -> (Result<Vm, String>, String) {
-    let output = NativeRunOutput::new();
+    let output = vo_runtime::output::CaptureSink::new();
     let result = create_loaded_vm(bytecode, |_, _| Ok(())).and_then(|mut vm| {
         vm.set_output_sink(output.clone());
         run_loaded_vm(vm)
     });
-    let stdout = output.take();
-    (result, stdout)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn run_with_host_output(bytecode: &[u8]) -> (Result<Vm, String>, String) {
-    let result = create_vm(bytecode, |_, _| Ok(()));
-    let stdout = vo_runtime::output::take_output();
-    (result, stdout)
+    (result, output.take())
 }
 
 fn host_run_result(result: Result<Vm, String>, stdout: String) -> RunResult {

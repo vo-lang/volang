@@ -1,5 +1,62 @@
 use super::*;
 
+#[test]
+fn allocation_poll_preserves_pc_and_grants_one_instruction_retry() {
+    let vms = [
+        Vm::new(),
+        #[cfg(feature = "jit")]
+        Vm::try_with_jit_config(crate::JitConfig {
+            call_threshold: 1_000_000,
+            ..Default::default()
+        })
+        .expect("interpreter lease with native entry polling"),
+    ];
+    for mut vm in vms {
+        let mut module = gc_test_module_with_root_slots(3);
+        module
+            .constants
+            .push(Constant::String("allocation retry".into()));
+        let function = &mut module.functions[0];
+        function.slot_types = vec![SlotType::Value, SlotType::GcBase, SlotType::GcBase];
+        function.code = vec![
+            Instruction::new(Opcode::LoadInt, 0, 42, 0),
+            Instruction::new(Opcode::AddI, 0, 0, 0),
+            Instruction::new(Opcode::StrNew, 1, 0, 0),
+            Instruction::new(Opcode::AddI, 0, 0, 0),
+            Instruction::new(Opcode::StrNew, 2, 0, 0),
+            Instruction::new(Opcode::Return, 0, 0, 0),
+        ];
+        function.instruction_metadata = vec![InstructionMetadata::None; function.code.len()];
+        vm.load(module).expect("verified allocation-poll fixture");
+        vm.set_gc_stress_every_step(true);
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        vm.scheduler.get_fiber_mut(fid).push_frame(0, 3, 0, 0);
+
+        // Pure arithmetic runs even with pending GC. The first allocation
+        // yields before writing its destination or consuming its original PC.
+        assert!(matches!(vm.run_fiber(fid), ExecResult::Transition(ref t)
+            if t.boundary == RuntimeBoundary::Yield
+                && t.resume == ResumePolicy::PreserveFramePc));
+        let fiber = vm.scheduler.get_fiber(fid);
+        assert_eq!(fiber.frames.last().unwrap().pc, 2);
+        assert_eq!(fiber.gc_allocation_permit, Some((0, 2)));
+        assert_eq!(&fiber.stack[..3], &[84, 0, 0]);
+
+        // Leave stress active: the permit must allow exactly the interrupted
+        // allocation, then the next allocating instruction must yield again.
+        assert!(matches!(vm.run_fiber(fid), ExecResult::Transition(ref t)
+            if t.boundary == RuntimeBoundary::Yield));
+        let fiber = vm.scheduler.get_fiber(fid);
+        assert_eq!(fiber.frames.last().unwrap().pc, 4);
+        assert_eq!(fiber.gc_allocation_permit, Some((0, 4)));
+        assert_eq!(fiber.stack[0], 168);
+        assert_ne!(fiber.stack[1], 0);
+        assert_eq!(fiber.stack[2], 0);
+        assert!(matches!(vm.run_fiber(fid), ExecResult::Done));
+        assert_eq!(vm.scheduler.get_fiber(fid).gc_allocation_permit, None);
+    }
+}
+
 #[cfg(feature = "std")]
 #[test]
 fn run_scheduled_returns_interrupted_when_interrupt_flag_is_set() {
@@ -193,4 +250,125 @@ fn vm_gc_transition_boundary_dirties_current_fiber_047() {
             "transition boundaries must not let local root mutations inherit StableSinceLastScan"
         );
     }
+}
+
+#[test]
+fn stale_allocation_retry_cannot_reach_a_later_instruction() {
+    for permit in [Some((0, 0)), Some((0, 2)), Some((1, 2))] {
+        let mut vm = Vm::new();
+        let mut module = gc_test_module_with_root_slots(2);
+        module
+            .constants
+            .push(Constant::String("retry target".into()));
+        let function = &mut module.functions[0];
+        function.slot_types = vec![SlotType::Value, SlotType::GcBase];
+        function.code = vec![
+            Instruction::new(Opcode::LoadInt, 0, 21, 0),
+            Instruction::new(Opcode::AddI, 0, 0, 0),
+            Instruction::new(Opcode::StrNew, 1, 0, 0),
+            Instruction::new(Opcode::Return, 0, 0, 0),
+        ];
+        function.instruction_metadata = vec![InstructionMetadata::None; function.code.len()];
+        vm.load(module).unwrap();
+        vm.set_gc_stress_every_step(true);
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        let fiber = vm.scheduler.get_fiber_mut(fid);
+        fiber.push_frame(0, 2, 0, 0);
+        fiber.gc_allocation_permit = permit;
+        assert!(
+            matches!(vm.run_fiber(fid), ExecResult::Transition(ref transition)
+            if transition.boundary == RuntimeBoundary::Yield
+                && transition.resume == ResumePolicy::PreserveFramePc)
+        );
+        let fiber = vm.scheduler.get_fiber(fid);
+        assert_eq!(&fiber.stack[..2], &[42, 0]);
+        assert_eq!(fiber.frames.last().unwrap().pc, 2);
+        assert_eq!(fiber.gc_allocation_permit, Some((0, 2)));
+        assert!(matches!(vm.run_fiber(fid), ExecResult::Done));
+        assert_eq!(vm.scheduler.get_fiber(fid).gc_allocation_permit, None);
+    }
+}
+
+#[test]
+fn add_for_pair_preserves_exact_budget_pc_and_the_next_allocation_poll() {
+    // Place the pair on both sides of the scheduler boundary. The second
+    // case must expose the original ForLoop PC after executing only AddI.
+    for padding in [TIME_SLICE as usize - 2, TIME_SLICE as usize - 1] {
+        let mut module = gc_test_module_with_root_slots(4);
+        module.constants.push(Constant::String("after pair".into()));
+        let function = &mut module.functions[0];
+        function.slot_types = vec![
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::GcBase,
+        ];
+        function.code = vec![Instruction::new(Opcode::Hint, 0, 0, 0); padding];
+        function.code.extend([
+            Instruction::new(Opcode::AddI, 0, 0, 1),
+            Instruction::new(Opcode::ForLoop, 1, 2, (-2_i16) as u16),
+            Instruction::new(Opcode::StrNew, 3, 0, 0),
+            Instruction::new(Opcode::Return, 0, 0, 0),
+        ]);
+        function.instruction_metadata = vec![InstructionMetadata::None; function.code.len()];
+        let mut vm = Vm::new();
+        vm.load(module).expect("verified pair budget fixture");
+        vm.set_gc_stress_every_step(true);
+        let id = vm.scheduler.spawn(Fiber::new(0));
+        let fiber = vm.scheduler.get_fiber_mut(id);
+        fiber.push_frame(0, 4, 0, 0);
+        fiber.stack[..4].copy_from_slice(&[0, 5, 8, 0]);
+        assert!(matches!(vm.run_fiber(id), ExecResult::TimesliceExpired));
+        let fiber = vm.scheduler.get_fiber(id);
+        let pair_completed = padding == TIME_SLICE as usize - 2;
+        assert_eq!(
+            fiber.frames.last().unwrap().pc,
+            padding + usize::from(!pair_completed)
+        );
+        assert_eq!(
+            &fiber.stack[..4],
+            &[5, if pair_completed { 6 } else { 5 }, 8, 0]
+        );
+        assert!(matches!(vm.run_fiber(id), ExecResult::Transition(ref t)
+            if t.boundary == RuntimeBoundary::Yield && t.resume == ResumePolicy::PreserveFramePc));
+        let fiber = vm.scheduler.get_fiber(id);
+        assert_eq!(fiber.frames.last().unwrap().pc, padding + 2);
+        assert_eq!(&fiber.stack[..4], &[18, 8, 8, 0]);
+        assert_eq!(fiber.gc_allocation_permit, Some((0, padding + 2)));
+        assert!(matches!(vm.run_fiber(id), ExecResult::Done));
+        assert_eq!(vm.scheduler.get_fiber(id).gc_allocation_permit, None);
+    }
+}
+
+#[test]
+fn add_for_pair_reads_an_aliased_limit_after_the_addition() {
+    let mut module = gc_test_module_with_root_slots(4);
+    module
+        .constants
+        .push(Constant::String("alias boundary".into()));
+    let function = &mut module.functions[0];
+    function.slot_types = vec![
+        SlotType::Value,
+        SlotType::Value,
+        SlotType::Value,
+        SlotType::GcBase,
+    ];
+    function.code = vec![
+        Instruction::new(Opcode::AddI, 1, 1, 2),
+        Instruction::new(Opcode::ForLoop, 0, 1, (-2_i16) as u16),
+        Instruction::new(Opcode::StrNew, 3, 0, 0),
+        Instruction::new(Opcode::Return, 0, 0, 0),
+    ];
+    function.instruction_metadata = vec![InstructionMetadata::None; function.code.len()];
+    let mut vm = Vm::new();
+    vm.load(module).expect("verified aliased-limit fixture");
+    vm.set_gc_stress_every_step(true);
+    let id = vm.scheduler.spawn(Fiber::new(0));
+    let fiber = vm.scheduler.get_fiber_mut(id);
+    fiber.push_frame(0, 4, 0, 0);
+    fiber.stack[..4].copy_from_slice(&[0, 10, u64::MAX, 0]);
+    assert!(matches!(vm.run_fiber(id), ExecResult::Transition(_)));
+    let fiber = vm.scheduler.get_fiber(id);
+    assert_eq!(fiber.frames.last().unwrap().pc, 2);
+    assert_eq!(&fiber.stack[..4], &[5, 5, u64::MAX, 0]);
 }

@@ -192,6 +192,15 @@ manual, and test providers cannot register a compact helper name. Runtime
 builtins may register only a canonical name or an exact member of the VM
 whitelist, so provider APIs cannot revive legacy flattened identities.
 
+The ABI fingerprint includes the physical GC header, canonical array, compact
+three-slot string descriptor, seven-slot slice prefix, nine-slot extended
+slice layout and its tags, and the Map header, iterator, managed backing
+geometry, bucket control encoding, and key hash scheme. An extension built
+against an earlier object representation or key hash scheme MUST be rebuilt
+even when its C callback
+table still uses ABI v10. The loader MUST reject a fingerprint mismatch before
+invoking any extension entry.
+
 ### 3.3 ABI-v10 Call Boundary
 
 Every native entry has the C signature

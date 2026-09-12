@@ -4753,6 +4753,7 @@ dependencies = [
  "tar",
  "toml",
  "vo-common",
+ "vo-common-core",
  "vo-module",
  "vo-schema-compiler",
  "vo-syntax",
@@ -4882,6 +4883,7 @@ dependencies = [
  "libloading",
  "libm",
  "linkme",
+ "smallvec",
  "vo-common-core",
  "vo-ffi-macro",
 ]

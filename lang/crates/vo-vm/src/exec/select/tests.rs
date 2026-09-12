@@ -537,6 +537,123 @@ fn vm_select_woken_materialization_003_recv_uses_materialized_payload_when_queue
 }
 
 #[test]
+fn select_woken_receive_accepts_exact_base_case_with_general_reference_roots() {
+    for kind in [
+        ValueKind::String,
+        ValueKind::Slice,
+        ValueKind::Map,
+        ValueKind::Channel,
+    ] {
+        for closed in [false, true] {
+            let mut vm_state = crate::vm::VmState::new();
+            let ch = queue::create(
+                &mut vm_state.gc,
+                QueueKind::Chan,
+                ValueMeta::new(0, kind),
+                ValueRttid::new(0, kind),
+                1,
+                0,
+            );
+            let mut stack = vec![ch as u64, 99, 99, 99];
+            let mut select_state = select_state_with_case(SelectCaseKind::Recv);
+            let state = select_state.as_mut().unwrap();
+            let case = &mut state.cases.unique_mut().unwrap()[0];
+            case.elem_layout = Some(vec![SlotType::GcBase].into());
+            case.has_ok = true;
+            state.woken_index = Some(0);
+            state.woken_result = Some(SelectWokenResult::Recv {
+                data: if closed { vec![] } else { vec![0] }.into(),
+                slot_types: if closed {
+                    vec![]
+                } else {
+                    vec![SlotType::GcRef]
+                }
+                .into(),
+                closed,
+            });
+
+            let result = exec_select_exec(
+                SelectExecContext {
+                    stack: stack.as_mut_ptr(),
+                    bp: 0,
+                    island_id: 0,
+                    fiber_key: 1,
+                    vm_state: &mut vm_state,
+                    module: None,
+                },
+                &mut select_state,
+                3,
+            );
+
+            assert!(
+                matches!(result, SelectResult::Continue),
+                "{kind:?}, closed={closed}: {result:?}"
+            );
+            assert_eq!(&stack[1..], &[0, u64::from(!closed), 0]);
+            assert!(select_state.is_none());
+        }
+    }
+}
+
+#[test]
+fn select_woken_receive_rejects_invalid_case_and_snapshot_layouts_transactionally() {
+    for (case_layout, wake_layout) in [
+        (SlotType::Value, SlotType::GcRef),
+        (SlotType::GcBase, SlotType::Value),
+    ] {
+        let mut vm_state = crate::vm::VmState::new();
+        let ch = queue::create(
+            &mut vm_state.gc,
+            QueueKind::Chan,
+            ValueMeta::new(0, ValueKind::Slice),
+            ValueRttid::new(0, ValueKind::Slice),
+            1,
+            0,
+        );
+        let mut stack = vec![ch as u64, 91, 92];
+        let mut select_state = select_state_with_case(SelectCaseKind::Recv);
+        let state = select_state.as_mut().unwrap();
+        state.cases.unique_mut().unwrap()[0].elem_layout = Some(vec![case_layout].into());
+        state.woken_index = Some(0);
+        state.woken_result = Some(SelectWokenResult::Recv {
+            data: vec![0].into(),
+            slot_types: vec![wake_layout].into(),
+            closed: false,
+        });
+        let result = exec_select_exec(
+            SelectExecContext {
+                stack: stack.as_mut_ptr(),
+                bp: 0,
+                island_id: 0,
+                fiber_key: 1,
+                vm_state: &mut vm_state,
+                module: None,
+            },
+            &mut select_state,
+            2,
+        );
+
+        assert!(matches!(result, SelectResult::Malformed(_)), "{result:?}");
+        assert_eq!(&stack[1..], &[91, 92]);
+        let state = select_state
+            .as_ref()
+            .expect("failed validation retains the wake");
+        assert_eq!(state.woken_index, Some(0));
+        let Some(SelectWokenResult::Recv {
+            data,
+            slot_types,
+            closed,
+        }) = &state.woken_result
+        else {
+            panic!("failed validation lost the wake payload");
+        };
+        assert_eq!(data.as_slice(), &[0]);
+        assert_eq!(slot_types.as_slice(), &[wake_layout]);
+        assert!(!closed);
+    }
+}
+
+#[test]
 fn vm_select_woken_payload_contract_018_rejects_width_drift_before_stack_write() {
     let mut vm_state = crate::vm::VmState::new();
     let meta = ValueMeta::new(0, ValueKind::Struct);
@@ -708,7 +825,10 @@ fn ready_send_case_that_would_block_is_malformed_instead_of_unreachable_panic() 
             1,
             &mut vm_state,
             None,
-            &mut select_state,
+            &mut SelectExecution {
+                active: &mut select_state,
+                scratch: None,
+            },
         )
     }));
 
@@ -1097,7 +1217,10 @@ fn ready_recv_case_that_would_block_is_malformed_instead_of_unreachable_panic() 
             vm_state.current_island_id,
             &vm_state,
             None,
-            &mut select_state,
+            &mut SelectExecution {
+                active: &mut select_state,
+                scratch: None,
+            },
         )
     }));
 
@@ -1308,4 +1431,61 @@ fn vm_wake_remote_endpoint_001_select_recv_acks_remote_sender() {
             "VM-WAKE-REMOTE-ENDPOINT-001 select recv must ack remote endpoint sender, got {other:?}"
         ),
     }
+}
+
+#[test]
+fn completed_default_select_reuses_capacity_without_retaining_cases() {
+    let mut fiber = Fiber::new(0);
+    let mut vm_state = crate::vm::VmState::new();
+    let mut stack = [0u64; 3]; // Receiving from nil leaves the default ready.
+    let mut original_storage = None;
+    for _ in 0..100 {
+        exec_select_begin(&mut fiber, 1, true).unwrap();
+        exec_select_recv_with_layout(&mut fiber.select_state, 0, 1, 1, None, false, 0).unwrap();
+        let active = fiber.select_state.as_ref().unwrap();
+        assert!(
+            active.cases[0]._storage.is_none(),
+            "ready selects need no wake snapshot"
+        );
+        if let Some(pointer) = original_storage {
+            assert_eq!(active.cases.as_ptr(), pointer);
+        } else {
+            original_storage = Some(active.cases.as_ptr());
+        }
+        let result = exec_select_exec_reusing(
+            SelectExecContext {
+                stack: stack.as_mut_ptr(),
+                bp: 0,
+                island_id: 0,
+                fiber_key: 1,
+                vm_state: &mut vm_state,
+                module: None,
+            },
+            &mut fiber.select_state,
+            &mut fiber.select_scratch,
+            2,
+        );
+        assert!(matches!(result, SelectResult::Continue), "{result:?}");
+        assert!(fiber.select_state.is_none());
+        let scratch = fiber.select_scratch.as_ref().unwrap();
+        assert!(scratch.cases.is_empty());
+        assert!(scratch.registered_queues.is_empty());
+        assert!(scratch.woken_result.is_none());
+    }
+}
+
+#[test]
+fn recycling_select_storage_preserves_rollback_snapshot() {
+    let mut active = select_state_with_case(SelectCaseKind::Recv);
+    let snapshot = active.clone().unwrap();
+    let mut scratch = None;
+    SelectExecution {
+        active: &mut active,
+        scratch: Some(&mut scratch),
+    }
+    .finish();
+    assert!(active.is_none());
+    assert!(scratch.as_ref().unwrap().cases.is_empty());
+    assert_eq!(snapshot.cases.len(), 1);
+    assert_eq!(snapshot.cases[0].kind, SelectCaseKind::Recv);
 }

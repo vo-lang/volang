@@ -135,9 +135,29 @@ pub(crate) fn execution_budget_regions(
     executable_only: bool,
     optimized: Option<&crate::optimizer::OptimizedFunction>,
 ) -> Result<BTreeMap<usize, u32>, JitError> {
+    execution_budget_plan(ir, policy, executable_only, optimized).map(|(regions, _)| regions)
+}
+
+/// Work remaining when a static continuation enters inside an existing region.
+/// Checkpoint entries return zero because the shared body charges them itself.
+pub(crate) fn execution_budget_resume_costs(
+    ir: &FunctionIr,
+    policy: ControlPolicy,
+    executable_only: bool,
+    optimized: Option<&crate::optimizer::OptimizedFunction>,
+) -> Result<Vec<u32>, JitError> {
+    execution_budget_plan(ir, policy, executable_only, optimized).map(|(_, costs)| costs)
+}
+
+fn execution_budget_plan(
+    ir: &FunctionIr,
+    policy: ControlPolicy,
+    executable_only: bool,
+    optimized: Option<&crate::optimizer::OptimizedFunction>,
+) -> Result<(BTreeMap<usize, u32>, Vec<u32>), JitError> {
     let range = policy.pc_range();
     if range.is_empty() {
-        return Ok(BTreeMap::new());
+        return Ok((BTreeMap::new(), Vec::new()));
     }
 
     let mut starts = BTreeSet::new();
@@ -230,7 +250,7 @@ pub(crate) fn execution_budget_regions(
         let cost = instruction_budget_cost(optimized, start).saturating_add(tail);
         regions.insert(start, cost.max(1));
     }
-    Ok(regions)
+    Ok((regions, cost_to_checkpoint))
 }
 
 fn instruction_budget_cost(
@@ -449,6 +469,14 @@ mod tests {
         assert_eq!(regions.get(&0), Some(&(region as u32)));
         assert_eq!(regions.get(&region), Some(&(region as u32)));
         assert_eq!(regions.get(&(region * 2)), Some(&2));
+        let resumes =
+            execution_budget_resume_costs(&ir, ControlPolicy::full_function(len), false, None)
+                .unwrap();
+        assert_eq!(resumes[0], 0, "shared checkpoint charges its own entry");
+        assert_eq!(resumes[region], 0);
+        assert_eq!(resumes[1], region as u32 - 1);
+        assert_eq!(resumes[region - 1], 1);
+        assert_eq!(resumes[len - 1], 1);
     }
 
     #[test]

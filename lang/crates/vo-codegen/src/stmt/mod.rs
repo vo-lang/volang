@@ -41,6 +41,18 @@ fn compile_stmt_with_label(
     info: &TypeInfoWrapper,
     label: Option<vo_common::Symbol>,
 ) -> Result<(), CodegenError> {
+    func.with_source_span(stmt.span, |func| {
+        compile_stmt_with_label_inner(stmt, ctx, func, info, label)
+    })
+}
+
+fn compile_stmt_with_label_inner(
+    stmt: &Stmt,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+    label: Option<vo_common::Symbol>,
+) -> Result<(), CodegenError> {
     // Temp slot reuse: reclaim temp slots after statement completes.
     // This significantly reduces local_slots count, improving JIT compile time.
     //
@@ -125,36 +137,23 @@ fn compile_stmt_inner(
                 compile_stmt(init, ctx, func, info)?;
             }
 
-            // Optimize: if x == nil / if x != nil → direct JumpIf/JumpIfNot
-            let else_jump = if let vo_syntax::ast::ExprKind::Binary(bin) = &if_stmt.cond.kind {
-                if let Some((value_expr, is_eq)) = crate::expr::match_nil_comparison(bin, info) {
-                    let val_reg = crate::expr::compile_expr(value_expr, ctx, func, info)?;
-                    if is_eq {
-                        // x == nil: skip then when x != 0, i.e., JumpIf
-                        func.emit_jump(Opcode::JumpIf, val_reg)
-                    } else {
-                        // x != nil: skip then when x == 0, i.e., JumpIfNot
-                        func.emit_jump(Opcode::JumpIfNot, val_reg)
-                    }
-                } else {
-                    let cond_reg = crate::expr::compile_expr(&if_stmt.cond, ctx, func, info)?;
-                    func.emit_jump(Opcode::JumpIfNot, cond_reg)
-                }
-            } else {
-                let cond_reg = crate::expr::compile_expr(&if_stmt.cond, ctx, func, info)?;
-                func.emit_jump(Opcode::JumpIfNot, cond_reg)
-            };
+            let else_jumps =
+                crate::expr::condition::compile_jump(&if_stmt.cond, false, ctx, func, info)?;
 
             // Then branch
             compile_block(&if_stmt.then, ctx, func, info)?;
 
             if let Some(else_body) = &if_stmt.else_ {
                 let end_jump = func.emit_jump(Opcode::Jump, 0);
-                func.patch_jump(else_jump, func.current_pc());
+                for jump in else_jumps {
+                    func.patch_jump(jump, func.current_pc());
+                }
                 compile_stmt(else_body, ctx, func, info)?;
                 func.patch_jump(end_jump, func.current_pc());
             } else {
-                func.patch_jump(else_jump, func.current_pc());
+                for jump in else_jumps {
+                    func.patch_jump(jump, func.current_pc());
+                }
             }
 
             // Exit scope (restore any shadowed variables from init)
@@ -288,36 +287,25 @@ fn compile_stmt_inner(
             emit_lvalue_load(&lv, tmp, ctx, func)?;
 
             if info.is_float(expr_type) {
-                let one = func.alloc_slots(&[SlotType::Float]);
-                let one_idx = ctx.const_float(1.0);
-                func.emit_op(Opcode::LoadConst, one, one_idx, 0);
-
-                if info.is_float32(expr_type) {
-                    let wide = func.alloc_slots(&[SlotType::Float]);
-                    func.emit_op(Opcode::ConvF32F64, wide, tmp, 0);
-                    func.emit_op(
-                        if inc_dec.is_inc {
-                            Opcode::AddF
-                        } else {
-                            Opcode::SubF
-                        },
-                        wide,
-                        wide,
-                        one,
-                    );
-                    func.emit_op(Opcode::ConvF64F32, tmp, wide, 0);
+                let is_f32 = info.is_float32(expr_type);
+                let one = func.alloc_slots(&[if is_f32 {
+                    SlotType::Value
                 } else {
-                    func.emit_op(
-                        if inc_dec.is_inc {
-                            Opcode::AddF
-                        } else {
-                            Opcode::SubF
-                        },
-                        tmp,
-                        tmp,
-                        one,
-                    );
+                    SlotType::Float
+                }]);
+                if is_f32 {
+                    func.emit_int(one, i64::from(1.0_f32.to_bits()), ctx);
+                } else {
+                    let one_idx = ctx.const_float(1.0);
+                    func.emit_op(Opcode::LoadConst, one, one_idx, 0);
                 }
+                let opcode = match (inc_dec.is_inc, is_f32) {
+                    (true, true) => Opcode::AddF32,
+                    (false, true) => Opcode::SubF32,
+                    (true, false) => Opcode::AddF,
+                    (false, false) => Opcode::SubF,
+                };
+                func.emit_op(opcode, tmp, tmp, one);
             } else {
                 let one = func.alloc_slots(&[SlotType::Value]);
                 func.emit_op(Opcode::LoadInt, one, 1, 0);

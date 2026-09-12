@@ -87,6 +87,11 @@ pub fn translate_inst<'a>(
             neg_i(e, inst);
             Ok(Completed)
         }
+        AddF32 | SubF32 | MulF32 | DivF32 | NegF32 | EqF32 | NeF32 | LtF32 | LeF32 | GtF32
+        | GeF32 => {
+            super::float32::float32(e, inst);
+            Ok(Completed)
+        }
         AddF => {
             add_f(e, inst);
             Ok(Completed)

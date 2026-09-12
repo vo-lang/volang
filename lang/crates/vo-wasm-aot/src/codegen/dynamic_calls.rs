@@ -4,7 +4,7 @@ use super::*;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_invoke_dynamic_child(
     body: &mut Function,
-    _module: &VoModule,
+    _module: &ModuleAnalysis<'_>,
     target: u32,
     wasm_target: u32,
     current_block: u32,
@@ -166,7 +166,7 @@ pub(super) fn emit_clear_caught_panic(body: &mut Function, globals: RuntimeGloba
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_dynamic_caught_panic_error(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     instruction: vo_common_core::instruction::Instruction,
     abi: DynamicCallAbi,
     descriptors: &AllocationDescriptors,
@@ -232,7 +232,7 @@ pub(super) fn dynamic_call_abi(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_dynamic_call_error(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     instruction: vo_common_core::instruction::Instruction,
     abi: DynamicCallAbi,
     descriptors: &AllocationDescriptors,
@@ -340,7 +340,7 @@ pub(super) fn emit_load_dynamic_any_argument(
 }
 
 pub(super) fn dynamic_variadic_element(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     signature: &DynamicFunctionSignature,
 ) -> Result<Option<ValueRttid>, WasmAotError> {
     if !signature.variadic {
@@ -362,7 +362,7 @@ pub(super) fn dynamic_variadic_element(
 
 pub(super) fn emit_dynamic_arguments_compatible(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     signature: &DynamicFunctionSignature,
     args_slice_slot: u16,
     scratch_slot: u16,
@@ -437,7 +437,7 @@ pub(super) fn emit_dynamic_child_slot_address(body: &mut Function, slot_offset: 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_fill_dynamic_child_arguments(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     signature: &DynamicFunctionSignature,
     target: ClosureCallTarget,
     capture_source: DynamicCaptureSource,
@@ -662,7 +662,7 @@ pub(super) fn dynamic_call_meta_slots(
 }
 
 pub(super) fn dynamic_result_output_slots(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     target: ValueRttid,
     is_any: bool,
 ) -> u16 {
@@ -683,7 +683,7 @@ pub(super) fn dynamic_result_output_slots(
 
 pub(super) fn emit_dynamic_return_contract_matches(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     signature: &DynamicFunctionSignature,
     instruction: vo_common_core::instruction::Instruction,
     abi: DynamicCallAbi,
@@ -729,7 +729,7 @@ pub(super) fn emit_dynamic_return_contract_matches(
 
 pub(super) fn emit_prepare_dynamic_boxed_result(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     target: ValueRttid,
     scratch_slot: u16,
 ) -> Result<u16, WasmAotError> {
@@ -825,7 +825,7 @@ pub(super) fn emit_copy_dynamic_result_scratch(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_pack_dynamic_child_returns(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     signature: &DynamicFunctionSignature,
     target: ClosureCallTarget,
     instruction: vo_common_core::instruction::Instruction,
@@ -908,7 +908,7 @@ pub(super) fn emit_pack_dynamic_child_returns(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_pack_dynamic_boxed_result(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     instruction: vo_common_core::instruction::Instruction,
     abi: DynamicCallAbi,
     source_address_local: u32,
@@ -975,7 +975,7 @@ pub(super) fn emit_pack_dynamic_boxed_result(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_call_protocol(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     caller: &FunctionDef,
     pc: usize,
     instruction: vo_common_core::instruction::Instruction,
@@ -1108,7 +1108,7 @@ pub(super) fn compile_dynamic_call_protocol(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_known_dynamic_closure_call(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     caller: &FunctionDef,
     pc: usize,
     instruction: vo_common_core::instruction::Instruction,
@@ -1250,7 +1250,7 @@ pub(super) fn compile_known_dynamic_closure_call(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_closure_call(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     caller: &FunctionDef,
     pc: usize,
     instruction: vo_common_core::instruction::Instruction,
@@ -1281,8 +1281,9 @@ pub(super) fn compile_dynamic_closure_call(
     )?;
     body.instruction(&W::Br(1)).instruction(&W::End);
 
+    let instantiations = closure_instantiations(module);
     for signature in dynamic_function_signatures(module) {
-        let targets = dynamic_closure_targets_for_signature(module, &signature)?;
+        let targets = dynamic_closure_targets_for_signature(module, signature, instantiations)?;
         if targets.is_empty() {
             continue;
         }
@@ -1448,7 +1449,7 @@ pub(super) fn compile_dynamic_closure_call(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_call(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     caller: &FunctionDef,
     pc: usize,
     instruction: vo_common_core::instruction::Instruction,
@@ -1532,7 +1533,7 @@ pub(super) fn compile_dynamic_call(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_method_protocol(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     caller: &FunctionDef,
     pc: usize,
     instruction: vo_common_core::instruction::Instruction,
@@ -1677,7 +1678,7 @@ pub(super) fn compile_dynamic_method_protocol(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_method(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     caller: &FunctionDef,
     pc: usize,
     instruction: vo_common_core::instruction::Instruction,
@@ -1814,7 +1815,7 @@ pub(super) fn compile_dynamic_method(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compile_dynamic_pack_any_slice(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     instruction: vo_common_core::instruction::Instruction,
     arg_slots: u16,
     descriptors: &AllocationDescriptors,

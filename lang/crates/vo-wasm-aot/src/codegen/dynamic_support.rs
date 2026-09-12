@@ -17,7 +17,7 @@ pub(super) fn dynamic_string_ref(
 }
 
 pub(super) fn dynamic_error_layout(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     descriptors: &AllocationDescriptors,
 ) -> Result<(u32, u16, [u16; 2], u64), WasmAotError> {
     let struct_meta_id = module.well_known.error_struct_meta_id.ok_or_else(|| {
@@ -52,7 +52,7 @@ pub(super) fn dynamic_error_layout(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_dynamic_error_object(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     descriptors: &AllocationDescriptors,
     globals: RuntimeGlobals,
     static_data: &StaticData,
@@ -132,7 +132,7 @@ pub(super) fn emit_dynamic_success(body: &mut Function, destination: u16, return
 
 pub(super) fn emit_dynamic_get_error(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     descriptors: &AllocationDescriptors,
     globals: RuntimeGlobals,
     static_data: &StaticData,
@@ -155,7 +155,7 @@ pub(super) fn emit_dynamic_get_error(
 
 pub(super) fn emit_dynamic_error_sentinels(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     descriptors: &AllocationDescriptors,
     globals: RuntimeGlobals,
     static_data: &StaticData,
@@ -191,7 +191,7 @@ pub(super) fn emit_dynamic_error_sentinels(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_dynamic_pack_error(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     instruction: vo_common_core::instruction::Instruction,
     descriptors: &AllocationDescriptors,
     globals: RuntimeGlobals,
@@ -299,7 +299,7 @@ pub(super) fn emit_finish_dynamic_child(body: &mut Function, globals: RuntimeGlo
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_prepare_dynamic_child_frame(
     body: &mut Function,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     target: u32,
     materialized: &BTreeSet<u32>,
     current_block: u32,
@@ -331,15 +331,8 @@ pub(super) fn emit_prepare_dynamic_child_frame(
         .instruction(&W::If(BlockType::Empty));
     return_runtime_panic(body, stack_overflow_panic_ref, current_block);
     body.instruction(&W::End);
-    emit_materialized_stack_frame_alloc(body, frame_bytes, globals)?;
+    emit_materialized_stack_frame_alloc(body, frame_bytes, target, globals)?;
     body.instruction(&W::LocalGet(SEQUENCE_LOCAL))
-        .instruction(&W::I32Const(target as i32))
-        .instruction(&W::I32Store(MemArg {
-            offset: FRAME_FUNCTION_ID_OFFSET,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::LocalGet(SEQUENCE_LOCAL))
         .instruction(&W::LocalGet(FRAME_LOCAL))
         .instruction(&W::I32Store(MemArg {
             offset: FRAME_PARENT_OFFSET,

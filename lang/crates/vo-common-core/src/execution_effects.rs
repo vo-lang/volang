@@ -296,10 +296,15 @@ pub const fn opcode_effect_contract(opcode: Opcode) -> EffectContract {
         | Opcode::MulI
         | Opcode::NegI
         | Opcode::AddF
+        | Opcode::AddF32
         | Opcode::SubF
+        | Opcode::SubF32
         | Opcode::MulF
+        | Opcode::MulF32
         | Opcode::DivF
+        | Opcode::DivF32
         | Opcode::NegF
+        | Opcode::NegF32
         | Opcode::EqI
         | Opcode::NeI
         | Opcode::LtI
@@ -311,11 +316,17 @@ pub const fn opcode_effect_contract(opcode: Opcode) -> EffectContract {
         | Opcode::GeI
         | Opcode::GeU
         | Opcode::EqF
+        | Opcode::EqF32
         | Opcode::NeF
+        | Opcode::NeF32
         | Opcode::LtF
+        | Opcode::LtF32
         | Opcode::LeF
+        | Opcode::LeF32
         | Opcode::GtF
+        | Opcode::GtF32
         | Opcode::GeF
+        | Opcode::GeF32
         | Opcode::And
         | Opcode::Or
         | Opcode::Xor
@@ -412,6 +423,25 @@ pub const fn opcode_effect_contract(opcode: Opcode) -> EffectContract {
         Opcode::IfaceAssert | Opcode::IfaceEq => C_IFACE_PANIC,
         Opcode::Invalid => C_INVALID,
     }
+}
+
+// Keep the interpreter's per-instruction allocation predicate a single-byte
+// lookup. Derive it from the complete contract so new opcodes cannot acquire
+// an independent or stale allocation classification.
+static ALLOCATION_EFFECTS: [bool; 256] = {
+    let mut effects = [false; 256];
+    let mut raw = 0;
+    while raw < effects.len() {
+        effects[raw] = opcode_effect_contract(Opcode::from_u8(raw as u8)).may_alloc;
+        raw += 1;
+    }
+    effects
+};
+
+/// Allocation effect for hot execution paths that need no other facts.
+#[inline]
+pub fn opcode_may_allocate(opcode: Opcode) -> bool {
+    ALLOCATION_EFFECTS[opcode as u8 as usize]
 }
 
 #[cfg(test)]

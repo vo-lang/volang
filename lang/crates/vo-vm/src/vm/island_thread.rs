@@ -7,8 +7,61 @@ use vo_runtime::island_transport::IslandTransport;
 
 use crate::fiber::VmResourceLimits;
 
-pub use super::types::IslandRegistry;
 use super::{island_shared, types::IslandThreadEvent, InheritedProgramImage, Vm};
+
+pub use super::types::IslandRegistry;
+
+/// The unique worker sender publishes readiness after every event and after
+/// channel closure. Keeping the sender private prevents unnotified clones.
+pub(super) struct EventSender {
+    sender: Option<Sender<IslandThreadEvent>>,
+    pending: Arc<AtomicBool>,
+    host_waker: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl EventSender {
+    pub(super) fn new(
+        sender: Sender<IslandThreadEvent>,
+        pending: Arc<AtomicBool>,
+        host_waker: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Self {
+        Self {
+            sender: Some(sender),
+            pending,
+            host_waker,
+        }
+    }
+
+    pub(super) fn send(
+        &self,
+        event: IslandThreadEvent,
+    ) -> Result<(), std::sync::mpsc::SendError<IslandThreadEvent>> {
+        self.sender
+            .as_ref()
+            .expect("sender lives through worker execution")
+            .send(event)?;
+        self.notify();
+        Ok(())
+    }
+
+    fn notify(&self) {
+        self.pending
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(wake) = &self.host_waker {
+            wake();
+        }
+    }
+}
+
+impl Drop for EventSender {
+    fn drop(&mut self) {
+        // Disconnect must be visible before its notification is consumed.
+        drop(self.sender.take());
+        // Signal publication precedes any host callback. A callback panic must
+        // not cause a double panic during worker unwind and channel cleanup.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.notify()));
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IslandThreadOutcome {
@@ -16,7 +69,7 @@ pub(crate) enum IslandThreadOutcome {
     GuestExited(i32),
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 #[allow(clippy::result_large_err)]
 fn create_island_vm(
     jit_mode: super::ChildJitMode,
@@ -27,7 +80,7 @@ fn create_island_vm(
 }
 
 /// Run an island thread - processes commands and executes fibers.
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 pub(super) fn run_island_thread(
     island_id: u32,
     image: InheritedProgramImage,
@@ -38,8 +91,7 @@ pub(super) fn run_island_thread(
     memory_config: vo_runtime::gc::VmMemoryConfig,
     resource_limits: VmResourceLimits,
     interrupt_flag: Arc<AtomicBool>,
-    event_waker: Option<Arc<dyn Fn() + Send + Sync>>,
-    events: &Sender<IslandThreadEvent>,
+    events: &EventSender,
 ) -> Result<IslandThreadOutcome, String> {
     let mut vm = create_island_vm(jit_mode, memory_config, resource_limits)
         .map_err(|err| format!("island {island_id}: VM construction failed: {err}"))?;
@@ -51,12 +103,11 @@ pub(super) fn run_island_thread(
         host_services_v2,
         &mut vm,
         interrupt_flag,
-        event_waker,
         events,
     )
 }
 
-#[cfg(not(feature = "jit"))]
+#[cfg(not(feature = "native"))]
 pub(super) fn run_island_thread(
     island_id: u32,
     image: InheritedProgramImage,
@@ -66,8 +117,7 @@ pub(super) fn run_island_thread(
     memory_config: vo_runtime::gc::VmMemoryConfig,
     resource_limits: VmResourceLimits,
     interrupt_flag: Arc<AtomicBool>,
-    event_waker: Option<Arc<dyn Fn() + Send + Sync>>,
-    events: &Sender<IslandThreadEvent>,
+    events: &EventSender,
 ) -> Result<IslandThreadOutcome, String> {
     let mut vm = Vm::try_with_memory_and_resource_limits(memory_config, resource_limits)
         .map_err(|err| format!("island {island_id}: VM construction failed: {err}"))?;
@@ -79,7 +129,6 @@ pub(super) fn run_island_thread(
         host_services_v2,
         &mut vm,
         interrupt_flag,
-        event_waker,
         events,
     )
 }
@@ -92,8 +141,7 @@ fn run_island_vm(
     host_services_v2: Option<vo_runtime::host_services_v2::HostServicesV2Binding>,
     vm: &mut Vm,
     interrupt_flag: Arc<AtomicBool>,
-    event_waker: Option<Arc<dyn Fn() + Send + Sync>>,
-    events: &Sender<IslandThreadEvent>,
+    events: &EventSender,
 ) -> Result<IslandThreadOutcome, String> {
     vm.set_interrupt_flag(interrupt_flag);
     if let Some(host_services_v2) = host_services_v2 {
@@ -124,14 +172,13 @@ fn run_island_vm(
     events
         .send(IslandThreadEvent::Ready)
         .map_err(|_| format!("island {island_id}: parent dropped startup channel"))?;
-    run_island_loop(vm, &transport, event_waker.as_ref(), events)
+    run_island_loop(vm, &transport, events)
 }
 
 fn run_island_loop(
     vm: &mut Vm,
     transport: &dyn IslandTransport,
-    event_waker: Option<&Arc<dyn Fn() + Send + Sync>>,
-    events: &Sender<IslandThreadEvent>,
+    events: &EventSender,
 ) -> Result<IslandThreadOutcome, String> {
     const ACTIVE_WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
     const IDLE_INTERRUPT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -151,7 +198,6 @@ fn run_island_loop(
                         vm,
                         envelope.source_island_id,
                         envelope.command,
-                        event_waker,
                         events,
                         &mut pending_entry_launch,
                     )? {
@@ -172,7 +218,6 @@ fn run_island_loop(
                     if let Some(launch_token) = pending_entry_launch.take() {
                         emit_entry_event(
                             events,
-                            event_waker,
                             IslandThreadEvent::EntryFailed {
                                 launch_token,
                                 error: format!("entry factory execution failed: {error:?}"),
@@ -183,12 +228,7 @@ fn run_island_loop(
                     return Err(format!("island scheduler failed: {error:?}"));
                 }
             };
-            if handle_pending_entry_outcome(
-                &mut pending_entry_launch,
-                outcome,
-                event_waker,
-                events,
-            )? {
+            if handle_pending_entry_outcome(&mut pending_entry_launch, outcome, events)? {
                 return Ok(IslandThreadOutcome::Shutdown);
             }
             if let super::SchedulingOutcome::Exited(code) = outcome {
@@ -212,7 +252,6 @@ fn run_island_loop(
                     vm,
                     envelope.source_island_id,
                     envelope.command,
-                    event_waker,
                     events,
                     &mut pending_entry_launch,
                 )? {
@@ -235,9 +274,8 @@ mod loop_tests {
     use super::*;
     use crate::bytecode::Module;
     use crate::test_support::{queue, queue_state::QueueKind};
-    use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use vo_runtime::bytecode::{FunctionDef, InstructionMetadata};
     use vo_runtime::host_services_v2::{
         CallerEndpointHandle, HostServicesV2, HostServicesV2Binding, SharedHostServicesV2,
@@ -301,13 +339,14 @@ mod loop_tests {
         vm.set_interrupt_flag(interrupt.clone());
         let (_sender, transport) = vo_runtime::island_transport::InThreadTransport::new();
         let (events, _event_rx) = std::sync::mpsc::channel();
+        let events = super::EventSender::new(events, Arc::new(AtomicBool::new(false)), None);
         let interrupter = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(20));
             interrupt.store(true, Ordering::SeqCst);
         });
 
         assert_eq!(
-            run_island_loop(&mut vm, &transport, None, &events)
+            run_island_loop(&mut vm, &transport, &events)
                 .expect("interrupt is a clean island shutdown"),
             IslandThreadOutcome::Shutdown
         );
@@ -321,9 +360,10 @@ mod loop_tests {
         vm.scheduler.spawn(crate::fiber::Fiber::new(0));
         let (_sender, transport) = vo_runtime::island_transport::InThreadTransport::new();
         let (events, _event_rx) = std::sync::mpsc::channel();
+        let events = super::EventSender::new(events, Arc::new(AtomicBool::new(false)), None);
 
         assert_eq!(
-            run_island_loop(&mut vm, &transport, None, &events)
+            run_island_loop(&mut vm, &transport, &events)
                 .expect("guest exit is a clean terminal outcome"),
             IslandThreadOutcome::GuestExited(37)
         );
@@ -373,9 +413,10 @@ mod loop_tests {
             .send_command(HOME_ISLAND, IslandCommand::Shutdown)
             .expect("queue island shutdown");
         let (events, _event_rx) = std::sync::mpsc::channel();
+        let events = super::EventSender::new(events, Arc::new(AtomicBool::new(false)), None);
 
         assert_eq!(
-            run_island_loop(&mut vm, &transport, None, &events).expect("run island worker loop"),
+            run_island_loop(&mut vm, &transport, &events).expect("run island worker loop"),
             IslandThreadOutcome::Shutdown
         );
         let peers = &queue::home_info(endpoint)
@@ -400,8 +441,9 @@ mod loop_tests {
         sender
             .send_command(0, IslandCommand::Shutdown)
             .expect("queue island shutdown");
-        let registry = Arc::new(Mutex::new(HashMap::new()));
+        let registry = Arc::new(super::super::types::IslandFamily::new(Some(2)));
         let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let events_tx = super::EventSender::new(events_tx, Arc::new(AtomicBool::new(false)), None);
 
         let outcome = run_island_vm(
             1,
@@ -411,7 +453,6 @@ mod loop_tests {
             Some(services_v2),
             &mut vm,
             Arc::new(AtomicBool::new(false)),
-            None,
             &events_tx,
         )
         .expect("island runner");
@@ -428,13 +469,17 @@ mod loop_tests {
     }
 }
 
-#[cfg(all(test, feature = "jit"))]
+#[cfg(all(test, feature = "native"))]
 mod tests {
+    #[cfg(feature = "jit")]
     use super::super::{ChildJitMode, JitConfig, JitManager, VmJitState};
+    #[cfg(feature = "jit")]
     use super::create_island_vm;
+    #[cfg(feature = "jit")]
     use crate::fiber::VmResourceLimits;
 
     #[test]
+    #[cfg(feature = "jit")]
     fn island_child_jit_mode_preserves_parent_policy() {
         let best_effort_config = JitConfig {
             call_threshold: 11,
@@ -556,8 +601,7 @@ fn handle_command(
     vm: &mut Vm,
     source_island_id: u32,
     cmd: IslandCommand,
-    event_waker: Option<&Arc<dyn Fn() + Send + Sync>>,
-    events: &Sender<IslandThreadEvent>,
+    events: &EventSender,
     pending_entry_launch: &mut Option<u64>,
 ) -> Result<bool, String> {
     match cmd {
@@ -581,7 +625,6 @@ fn handle_command(
                 pending_entry_launch.take();
                 emit_entry_event(
                     events,
-                    event_waker,
                     IslandThreadEvent::EntryFailed {
                         launch_token,
                         error: format!("entry factory spawn failed: {error:?}"),
@@ -595,7 +638,6 @@ fn handle_command(
                     pending_entry_launch.take();
                     emit_entry_event(
                         events,
-                        event_waker,
                         IslandThreadEvent::EntryFailed {
                             launch_token,
                             error: format!("entry factory execution failed: {error:?}"),
@@ -604,7 +646,7 @@ fn handle_command(
                     return Ok(true);
                 }
             };
-            handle_pending_entry_outcome(pending_entry_launch, outcome, event_waker, events)
+            handle_pending_entry_outcome(pending_entry_launch, outcome, events)
         }
         IslandCommand::WakeHostEvent { token, data } => {
             let key = vm
@@ -639,8 +681,7 @@ fn handle_command(
 fn handle_pending_entry_outcome(
     pending_entry_launch: &mut Option<u64>,
     outcome: super::SchedulingOutcome,
-    event_waker: Option<&Arc<dyn Fn() + Send + Sync>>,
-    events: &Sender<IslandThreadEvent>,
+    events: &EventSender,
 ) -> Result<bool, String> {
     let Some(launch_token) = *pending_entry_launch else {
         return Ok(false);
@@ -648,11 +689,7 @@ fn handle_pending_entry_outcome(
     let failure = match outcome {
         super::SchedulingOutcome::Blocked => {
             pending_entry_launch.take();
-            emit_entry_event(
-                events,
-                event_waker,
-                IslandThreadEvent::EntryRunning { launch_token },
-            )?;
+            emit_entry_event(events, IslandThreadEvent::EntryRunning { launch_token })?;
             return Ok(false);
         }
         super::SchedulingOutcome::Suspended | super::SchedulingOutcome::SuspendedForHostEvents => {
@@ -669,7 +706,6 @@ fn handle_pending_entry_outcome(
     pending_entry_launch.take();
     emit_entry_event(
         events,
-        event_waker,
         IslandThreadEvent::EntryFailed {
             launch_token,
             error: failure,
@@ -678,16 +714,9 @@ fn handle_pending_entry_outcome(
     Ok(true)
 }
 
-fn emit_entry_event(
-    events: &Sender<IslandThreadEvent>,
-    event_waker: Option<&Arc<dyn Fn() + Send + Sync>>,
-    event: IslandThreadEvent,
-) -> Result<(), String> {
+fn emit_entry_event(events: &EventSender, event: IslandThreadEvent) -> Result<(), String> {
     events
         .send(event)
         .map_err(|_| String::from("entry factory parent dropped lifecycle channel"))?;
-    if let Some(wake) = event_waker {
-        wake();
-    }
     Ok(())
 }

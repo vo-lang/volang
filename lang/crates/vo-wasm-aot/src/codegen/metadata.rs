@@ -2,7 +2,7 @@
 use super::*;
 
 pub(super) fn interface_array_assertion_layout(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     target_rttid: u32,
     result_slots: u16,
 ) -> Result<Option<InterfaceArrayLayout>, WasmAotError> {
@@ -24,7 +24,7 @@ pub(super) fn interface_array_assertion_layout(
 /// Layout of the canonical array object used by interface comparison/hash.
 /// Only assertion materialization is constrained by a frame result width.
 pub(super) fn interface_array_layout(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     target_rttid: u32,
 ) -> Result<Option<InterfaceArrayLayout>, WasmAotError> {
     let value_rttid = module.value_rttid_for_rttid(target_rttid).ok_or_else(|| {
@@ -129,7 +129,7 @@ pub(super) fn sequence_element_storage(kind: ValueKind, logical_slots: usize) ->
 }
 
 pub(super) fn build_allocation_descriptors(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     reachable: &[u32],
 ) -> Result<AllocationDescriptors, WasmAotError> {
     let mut requested =
@@ -560,7 +560,7 @@ pub(super) fn align_up(value: u32, alignment: u32) -> Result<u32, WasmAotError> 
         .ok_or_else(|| WasmAotError::InvalidModule("WebAssembly memory layout overflow".into()))
 }
 
-pub(super) fn build_static_data(module: &VoModule) -> Result<StaticData, WasmAotError> {
+pub(super) fn build_static_data(module: &ModuleAnalysis<'_>) -> Result<StaticData, WasmAotError> {
     fn push_string(bytes: &mut Vec<u8>, value: &str) -> Result<u32, WasmAotError> {
         if value.is_empty() {
             return Ok(0);
@@ -767,10 +767,14 @@ pub(super) fn build_static_data(module: &VoModule) -> Result<StaticData, WasmAot
     let static_end = STATIC_DATA_START
         .checked_add(bytes.len() as u32)
         .ok_or_else(|| WasmAotError::InvalidModule("static data exceeds wasm32".into()))?;
-    let stack_base = align_up(
-        static_end.max(WASM_PAGE_BYTES as u32),
-        WASM_PAGE_BYTES as u32,
-    )?;
+    // Four bytes per possible wasm32 page classify barrier destinations. This
+    // is a conservative fast-path hint; allocation membership stays host-owned.
+    let barrier_pages = align_up(static_end, 4)?;
+    let barrier_end = barrier_pages
+        .checked_add(65536 * 4 + 32)
+        .ok_or_else(|| WasmAotError::InvalidModule("barrier page map exceeds wasm32".into()))?;
+    // The preceding 32 bytes hold the static entry frame's barrier hints.
+    let stack_base = align_up(barrier_end, WASM_PAGE_BYTES as u32)?;
     let entry = module
         .functions
         .get(module.entry_func as usize)
@@ -790,14 +794,8 @@ pub(super) fn build_static_data(module: &VoModule) -> Result<StaticData, WasmAot
         .checked_add(entry_bytes)
         .and_then(|end| end.checked_add(SHADOW_STACK_BASE_CHUNK_BYTES))
         .ok_or_else(|| WasmAotError::InvalidModule("AOT root stack exceeds wasm32".into()))?;
-    let allocation_index_base = align_up(root_stack_end, WASM_PAGE_BYTES as u32)?;
-    let heap_base = allocation_index_base
-        .checked_add(ALLOCATION_INDEX_BYTES)
-        .ok_or_else(|| WasmAotError::InvalidModule("AOT allocation index exceeds wasm32".into()))?;
-    let required_bytes = heap_base
-        .checked_add(WASM_PAGE_BYTES as u32)
-        .ok_or_else(|| WasmAotError::InvalidModule("AOT heap base exceeds wasm32".into()))?;
-    let memory_pages = required_bytes.div_ceil(WASM_PAGE_BYTES as u32);
+    let stack_limit = align_up(root_stack_end, WASM_PAGE_BYTES as u32)?;
+    let memory_pages = stack_limit / WASM_PAGE_BYTES as u32;
     Ok(StaticData {
         bytes,
         string_refs,
@@ -814,7 +812,8 @@ pub(super) fn build_static_data(module: &VoModule) -> Result<StaticData, WasmAot
         index_panic_prefix_ref,
         index_panic_middle_ref,
         stack_base,
-        allocation_index_base,
+        stack_limit,
+        barrier_pages,
         memory_pages,
         dynamic_dispatch,
         dynamic_lookup_function: 0,
@@ -835,7 +834,7 @@ pub(super) fn extern_source_tag(source: RegisteredExternSource) -> u8 {
 }
 
 pub(super) fn encode_extern_manifest(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     resolved_externs: &ResolvedExternTable,
     required_externs: &BTreeSet<u32>,
 ) -> Result<Vec<u8>, WasmAotError> {
@@ -897,7 +896,7 @@ pub(super) fn encode_extern_manifest(
 /// bytecode frame's u16 slot domain. Count nested arrays without flattening
 /// them; actual materialization remains subject to its instruction ABI.
 pub(super) fn runtime_value_slot_count(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     value: ValueRttid,
 ) -> Result<u32, WasmAotError> {
     let resolver = module.runtime_type_resolver();
@@ -937,7 +936,7 @@ pub(super) fn runtime_value_slot_count(
 }
 
 pub(super) fn runtime_storage_bytes(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     value: ValueRttid,
 ) -> Result<u32, WasmAotError> {
     let bytes = match value.value_kind() {
@@ -957,7 +956,7 @@ pub(super) fn runtime_storage_bytes(
 }
 
 pub(super) fn encode_runtime_metadata(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     descriptors: &AllocationDescriptors,
 ) -> Result<Vec<u8>, WasmAotError> {
     let resolver = module.runtime_type_resolver();
@@ -1130,7 +1129,7 @@ pub(super) fn encode_runtime_metadata(
     Ok(bytes)
 }
 
-pub(super) fn encode_debug_metadata(module: &VoModule) -> Result<Vec<u8>, WasmAotError> {
+pub(super) fn encode_debug_metadata(module: &ModuleAnalysis<'_>) -> Result<Vec<u8>, WasmAotError> {
     let file_count: u32 = module
         .debug_info
         .files
@@ -1138,13 +1137,12 @@ pub(super) fn encode_debug_metadata(module: &VoModule) -> Result<Vec<u8>, WasmAo
         .try_into()
         .map_err(|_| WasmAotError::InvalidModule("debug file count exceeds u32".into()))?;
     let function_count: u32 = module
-        .debug_info
-        .funcs
+        .functions
         .len()
         .try_into()
         .map_err(|_| WasmAotError::InvalidModule("debug function count exceeds u32".into()))?;
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"VODBG002");
+    bytes.extend_from_slice(b"VODBG003");
     bytes.extend_from_slice(&file_count.to_le_bytes());
     bytes.extend_from_slice(&function_count.to_le_bytes());
     // runtime.Caller is implemented by the host because file paths and line
@@ -1164,7 +1162,13 @@ pub(super) fn encode_debug_metadata(module: &VoModule) -> Result<Vec<u8>, WasmAo
         bytes.extend_from_slice(&length.to_le_bytes());
         bytes.extend_from_slice(encoded);
     }
-    for function in &module.debug_info.funcs {
+    // Keep the module's complete function domain even when trailing functions
+    // have no optional source locations. Inline ancestry names that same domain.
+    for function_id in 0..module.functions.len() {
+        let Some(function) = module.debug_info.funcs.get(function_id) else {
+            bytes.extend_from_slice(&0_u32.to_le_bytes());
+            continue;
+        };
         // DebugInfo::lookup resolves duplicate PCs to the last recorded span.
         // Preserve that canonical meaning while giving the public AOT section
         // a strictly increasing PC table that every host can binary-search.
@@ -1200,11 +1204,64 @@ pub(super) fn encode_debug_metadata(module: &VoModule) -> Result<Vec<u8>, WasmAo
                     "debug location references a missing file".into(),
                 ));
             }
+            // Same canonical unsigned LEB128 coordinates as the VOB codec.
+            // Count/layout fields stay fixed-width and can be checked first.
+            for value in [entry.pc, entry.file_id, entry.line, entry.col, entry.len] {
+                wasm_encoder::Encode::encode(&value, &mut bytes);
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+/// Optional debug data shares the common source DAG and its limits. The
+/// ordinary Caller table stays exact and physical; executable frame offsets,
+/// roots and resume PCs are unaffected by these immutable source coordinates.
+pub(super) fn encode_inline_source_metadata(
+    module: &ModuleAnalysis<'_>,
+) -> Result<Vec<u8>, WasmAotError> {
+    let sources = &module.debug_info.inline_sources;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"VOINS001");
+    let mut word = |value: usize| -> Result<(), WasmAotError> {
+        let value = u32::try_from(value)
+            .map_err(|_| WasmAotError::InvalidModule("inline source count exceeds u32".into()))?;
+        bytes.extend_from_slice(&value.to_le_bytes());
+        Ok(())
+    };
+    word(module.functions.len())?;
+    word(sources.frames.len())?;
+    word(sources.functions.len())?;
+    for frame in &sources.frames {
+        bytes.extend_from_slice(&frame.parent.to_le_bytes());
+        bytes.extend_from_slice(&frame.function_id.to_le_bytes());
+        let values = frame.span.map_or([u32::MAX, 0, 0, 0], |span| {
+            [span.file_id, span.line, span.col, span.len]
+        });
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    for function in &sources.functions {
+        let definition = module
+            .functions
+            .get(function.function_id as usize)
+            .ok_or_else(|| {
+                WasmAotError::InvalidModule("inline source function is absent".into())
+            })?;
+        for value in [
+            function.function_id as usize,
+            definition.code.len(),
+            function.entries.len(),
+        ] {
+            let value = u32::try_from(value).map_err(|_| {
+                WasmAotError::InvalidModule("inline source function extent exceeds u32".into())
+            })?;
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for entry in &function.entries {
             bytes.extend_from_slice(&entry.pc.to_le_bytes());
-            bytes.extend_from_slice(&entry.file_id.to_le_bytes());
-            bytes.extend_from_slice(&entry.line.to_le_bytes());
-            bytes.extend_from_slice(&entry.col.to_le_bytes());
-            bytes.extend_from_slice(&entry.len.to_le_bytes());
+            bytes.extend_from_slice(&entry.frame.to_le_bytes());
         }
     }
     Ok(bytes)

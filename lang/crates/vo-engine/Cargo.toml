@@ -10,6 +10,8 @@ homepage.workspace = true
 publish = false
 
 [features]
+execution-profile = ["vo-vm/execution-profile"]
+compiler-profile = ["vo-common/compiler-profile", "vo-analysis/compiler-profile", "vo-codegen/compiler-profile"]
 default = ["jit", "aot-native", "aot-wasm"]
 aot-native = ["dep:vo-jit"]
 aot-wasm = ["dep:vo-wasm-aot"]
@@ -53,3 +55,15 @@ zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
 toml = "0.8"
+
+[[example]]
+name = "compiler_pipeline"
+required-features = ["compiler-profile"]
+
+[[example]]
+name = "island_poll"
+required-features = ["jit"]
+
+[[example]]
+name = "execution_phases"
+required-features = ["jit"]

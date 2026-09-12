@@ -2,6 +2,7 @@
 
 use core::num::NonZeroU64;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use vo_common_core::debug_info::DiagnosticSource;
 
 #[cfg(not(feature = "std"))]
 use alloc::format;
@@ -557,7 +558,7 @@ pub enum BlockReason {
     },
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JitExternSuspend {
     Exit {
@@ -611,7 +612,7 @@ pub enum PanicState {
 pub struct PanicContext {
     pub state: PanicState,
     pub trap_kind: Option<RuntimeTrapKind>,
-    pub source_loc: Option<(u32, u32)>,
+    pub source_loc: Option<DiagnosticSource>,
     pub generation: u64,
 }
 
@@ -1193,6 +1194,8 @@ pub struct Fiber {
     pub unwinding: UnwindingStack,
     pub queue_wait_state: Option<QueueWaitState>,
     pub select_state: Option<SelectState>,
+    /// Empty, charged case/registration buffers retained for the next select.
+    pub(crate) select_scratch: Option<SelectState>,
     /// Next unique select ID within this fiber; `None` permanently records
     /// exhaustion until the scheduler safely resets the fiber generation.
     next_select_id: Option<u64>,
@@ -1204,9 +1207,9 @@ pub struct Fiber {
     /// Generation of `panic_state`; differs from `panic_generation` after a
     /// nested panic is recovered and an older panic becomes active again.
     pub active_panic_generation: Option<u64>,
-    /// Source location (func_id, pc) captured at panic initiation, before frames are unwound.
+    /// Diagnostic source anchors captured before physical frames are unwound.
     /// Used by kill_current() to report accurate error locations.
-    pub panic_source_loc: Option<(u32, u32)>,
+    pub panic_source_loc: Option<DiagnosticSource>,
     /// Saved invocation failure, raised only when this fiber next executes.
     pub(crate) entry_trap: Option<crate::vm::RuntimeTrapKind>,
     pub(crate) pending_resource_error: Option<FiberCapacityError>,
@@ -1222,9 +1225,9 @@ pub struct Fiber {
     /// JIT resume stack for suspended call chains.
     /// When JIT returns Call/WaitIo, resume points are pushed here.
     /// On resume, they are popped and converted to VM frames.
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub resume_stack: crate::fiber_storage::AuxiliaryVec<ResumePoint>,
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub jit_extern_suspend: Option<JitExternSuspend>,
     /// Closure callback suspend/replay state for extern functions.
     pub closure_replay: ClosureReplayState,
@@ -1235,22 +1238,22 @@ pub struct Fiber {
     pub(crate) map_scratch: crate::exec::MapScratch,
     /// JIT panic flag — set by JIT code when a runtime error occurs (nil deref, bounds check).
     /// Replaces the per-call Box<JitOwnedState> allocation.
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub jit_panic_flag: bool,
     /// JIT user panic flag — true when panic is from explicit `panic()` call, false for runtime errors.
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub jit_is_user_panic: bool,
     /// JIT panic message — the interface{} value passed to panic().
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub jit_panic_msg: InterfaceSlot,
     /// JIT infrastructure diagnostic message published by runtime callbacks.
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub jit_infra_error_message: String,
     /// Reused wide-result storage for VM-to-JIT calls.
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub(crate) jit_return_scratch: crate::fiber_storage::AuxiliaryVec<u64>,
     /// Reused wide argument/result frame for JIT-to-extern callbacks.
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub(crate) jit_extern_scratch: crate::fiber_storage::AuxiliaryVec<u64>,
     /// Pending remote recv response data from home island.
     /// Set by handle_chan_response_command before waking fiber.
@@ -1370,13 +1373,13 @@ impl Fiber {
             unwinding: UnwindingStack {
                 states: crate::fiber_storage::AuxiliaryVec::new(Arc::clone(&storage_budget)),
             },
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             resume_stack: crate::fiber_storage::AuxiliaryVec::new(Arc::clone(&storage_budget)),
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             jit_return_scratch: crate::fiber_storage::AuxiliaryVec::new(Arc::clone(
                 &storage_budget,
             )),
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             jit_extern_scratch: crate::fiber_storage::AuxiliaryVec::new(Arc::clone(
                 &storage_budget,
             )),
@@ -1386,6 +1389,7 @@ impl Fiber {
             accounted_storage_bytes: 0,
             queue_wait_state: None,
             select_state: None,
+            select_scratch: None,
             next_select_id: Some(0),
             panic_state: None,
             panic_trap_kind: None,
@@ -1399,21 +1403,40 @@ impl Fiber {
             resume_io_token: None,
             resume_host_event_token: None,
             resume_host_event_data: None,
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             jit_extern_suspend: None,
             execution_budget: 0,
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             jit_panic_flag: false,
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             jit_is_user_panic: false,
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             jit_panic_msg: InterfaceSlot::default(),
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             jit_infra_error_message: String::new(),
             remote_recv_response: None,
             remote_send_closed: false,
             remote_endpoint_wait: None,
             next_remote_endpoint_wait_id: Some(1),
+        }
+    }
+
+    /// Replay credit belongs to the next exact allocating instruction. Validate
+    /// it whenever execution enters/refetches a frame, before ordinary code can
+    /// reach a later allocation or return to a prior PC.
+    #[inline]
+    pub(crate) fn retain_allocation_retry(
+        &mut self,
+        func_id: u32,
+        pc: usize,
+        opcode: vo_runtime::Opcode,
+    ) {
+        if let Some(target) = self.gc_allocation_permit {
+            if target != (func_id, pc)
+                || !vo_common_core::execution_effects::opcode_may_allocate(opcode)
+            {
+                self.gc_allocation_permit = None;
+            }
         }
     }
 
@@ -1607,7 +1630,7 @@ impl Fiber {
         self.unwinding.clear();
         self.closure_replay.reset();
         self.select_state = None;
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         {
             self.resume_stack.clear();
             self.jit_extern_suspend = None;
@@ -1638,15 +1661,15 @@ impl Fiber {
         }
         self.resume_host_event_token = None;
         self.resume_host_event_data = None;
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         self.resume_stack.clear();
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         {
             self.jit_extern_suspend = None;
         }
         self.closure_replay.reset();
         self.execution_budget = 0;
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         {
             self.jit_panic_flag = false;
             self.jit_is_user_panic = false;
@@ -1669,6 +1692,12 @@ impl Fiber {
                 .capacity()
                 .saturating_mul(core::mem::size_of::<UnwindingState>())
                 > 64 * 1024
+            || self.select_scratch.as_ref().is_some_and(|state| {
+                state.cases.capacity() * core::mem::size_of::<SelectCase>()
+                    + state.registered_queues.capacity()
+                        * core::mem::size_of::<SelectRegisteredQueue>()
+                    > 64 * 1024
+            })
             || self.map_scratch.capacity_bytes() > 64 * 1024
             || self.closure_replay.cache_bytes() > 64 * 1024
             || self.jit_auxiliary_cache_bytes() > 64 * 1024
@@ -1680,12 +1709,12 @@ impl Fiber {
     }
 
     fn jit_auxiliary_cache_bytes(&self) -> usize {
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         {
             self.resume_stack.capacity() * core::mem::size_of::<ResumePoint>()
                 + (self.jit_return_scratch.capacity() + self.jit_extern_scratch.capacity()) * 8
         }
-        #[cfg(not(feature = "jit"))]
+        #[cfg(not(feature = "native"))]
         {
             0
         }
@@ -2347,7 +2376,7 @@ impl Fiber {
         self.panic_source_loc = self
             .frames
             .last()
-            .map(|f| (f.func_id, f.pc.saturating_sub(1) as u32));
+            .and_then(|f| DiagnosticSource::new(f.func_id, f.pc.saturating_sub(1) as u32));
     }
 
     #[inline]
@@ -2400,6 +2429,7 @@ mod tests {
         MAX_RETAINED_CALL_FRAMES, MAX_RETAINED_STACK_SLOTS, MAX_STACK_CAPACITY, MIN_STACK_SLOTS,
     };
     use crate::test_support::queue as test_queue;
+    use vo_common_core::debug_info::DiagnosticSource;
     use vo_runtime::island::{EndpointResponseKind, EndpointWaitKey};
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{InterfaceSlot, RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
@@ -2765,7 +2795,7 @@ mod tests {
         fiber.current_frame_mut().unwrap().pc = 12;
         fiber.set_recoverable_panic(InterfaceSlot::nil());
         fiber.capture_panic_source_loc();
-        assert_eq!(fiber.panic_source_loc, Some((7, 11)));
+        assert_eq!(fiber.panic_source_loc, DiagnosticSource::new(7, 11));
 
         assert!(fiber.take_recoverable_panic().is_some());
         assert!(
@@ -2781,9 +2811,30 @@ mod tests {
 
         assert_eq!(
             fiber.panic_source_loc,
-            Some((9, 20)),
+            DiagnosticSource::new(9, 20),
             "a later independent panic must report its own source location"
         );
+    }
+
+    #[test]
+    fn recovering_a_nested_panic_restores_both_original_source_anchors() {
+        use vo_common_core::debug_info::InstructionSource;
+        let mut fiber = Fiber::new(1);
+        fiber.set_recoverable_panic(InterfaceSlot::nil());
+        let original = DiagnosticSource::from_instruction(
+            InstructionSource::from_parts(7, 11).unwrap(),
+            InstructionSource::from_parts(3, 5),
+        );
+        fiber.panic_source_loc = Some(original);
+        let saved = fiber.panic_context();
+        fiber.set_recoverable_panic(InterfaceSlot::nil());
+        fiber.panic_source_loc = DiagnosticSource::new(9, 20);
+        assert!(fiber.take_recoverable_panic().is_some());
+        assert!(fiber.panic_source_loc.is_none());
+        fiber.restore_panic_context(saved);
+        assert_eq!(fiber.panic_source_loc, Some(original));
+        fiber.restore_panic_context(None);
+        assert!(fiber.panic_source_loc.is_none());
     }
 
     #[test]

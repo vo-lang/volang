@@ -208,7 +208,8 @@ const _: () = assert!(JitDispatchEntry::SIZE == 24);
 /// Mutable per-function profile owned by one Island-local JIT manager.
 /// Baseline prologues update `entries` only during the tier-training window,
 /// including nested native calls. VM-boundary feedback owns the remaining
-/// aggregate counters. Optimizing code carries no profiling instructions.
+/// aggregate counters. Optimizing code records only a sticky entry proof; it
+/// does not increment the baseline training counter.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct JitProfileCounters {
@@ -262,6 +263,9 @@ pub struct PreparedCall {
     /// Non-zero when the selected native entry can run without publishing a
     /// callee VM execution context on its successful fast path.
     pub jit_frame_elided: u16,
+    /// Validated user argument offset for an IC hit: zero for a function
+    /// without hidden state, one for a closure or receiver.
+    pub ic_arg_offset: u16,
     /// Dispatch generation paired with `ic_jit_func_ptr`.
     pub dispatch_generation: u64,
 }
@@ -280,6 +284,7 @@ impl PreparedCall {
         core::mem::offset_of!(PreparedCall, native_link_eligible) as i32;
     pub const OFFSET_JIT_FRAME_ELIDED: i32 =
         core::mem::offset_of!(PreparedCall, jit_frame_elided) as i32;
+    pub const OFFSET_IC_ARG_OFFSET: i32 = core::mem::offset_of!(Self, ic_arg_offset) as i32;
     pub const OFFSET_DISPATCH_GENERATION: i32 =
         core::mem::offset_of!(PreparedCall, dispatch_generation) as i32;
     pub const SIZE: usize = core::mem::size_of::<PreparedCall>();
@@ -296,6 +301,7 @@ impl Default for PreparedCall {
             jit_may_gc: 0,
             native_link_eligible: 0,
             jit_frame_elided: 0,
+            ic_arg_offset: 0,
             dispatch_generation: 0,
         }
     }
@@ -550,6 +556,9 @@ pub struct JitContext {
     pub runtime_trap_arg0: u64,
     pub runtime_trap_arg1: u64,
     pub runtime_trap_pc: u32,
+    /// Optional logical instruction source for an inlined trap. Zero selects
+    /// the physical frame and runtime_trap_pc. Never used for materialization.
+    pub runtime_trap_origin: u64,
 
     /// Function id for the currently executing JIT body.
     ///
@@ -1528,6 +1537,7 @@ pub fn set_jit_infra_error(ctx: *mut JitContext, code: u64, detail: u64) -> JitR
             *is_user_panic = false;
         }
         ctx.runtime_trap_kind = JitRuntimeTrapKind::None as u8;
+        ctx.runtime_trap_origin = 0;
         ctx.runtime_trap_arg0 = JIT_INFRA_ERROR_SENTINEL;
         ctx.runtime_trap_arg1 = code;
         ctx.runtime_trap_pc = detail as u32;
@@ -2016,6 +2026,7 @@ pub extern "C" fn vo_panic(ctx: *mut JitContext, msg_slot0: u64, msg_slot1: u64)
         *panic_flag = true;
         *is_user_panic = true;
         ctx.runtime_trap_kind = JitRuntimeTrapKind::None as u8;
+        ctx.runtime_trap_origin = 0;
         ctx.runtime_trap_pc = u32::MAX;
         panic_msg.slot0 = msg_slot0;
         panic_msg.slot1 = msg_slot1;
@@ -2033,6 +2044,7 @@ pub extern "C" fn vo_runtime_trap(
     arg0: u64,
     arg1: u64,
     pc: u32,
+    origin: u64,
 ) -> JitResult {
     let Ok(kind) = u8::try_from(kind) else {
         return set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, u64::from(kind));
@@ -2056,9 +2068,11 @@ pub extern "C" fn vo_runtime_trap(
         *panic_flag = true;
         *is_user_panic = false;
         ctx.runtime_trap_kind = kind;
+        ctx.runtime_trap_origin = 0;
         ctx.runtime_trap_arg0 = arg0;
         ctx.runtime_trap_arg1 = arg1;
         ctx.runtime_trap_pc = pc;
+        ctx.runtime_trap_origin = origin;
     }
     JitResult::Panic
 }
@@ -3191,22 +3205,25 @@ pub extern "C" fn vo_str_new(gc: *mut Gc, data: *const u8, len: u64) -> u64 {
     }
 }
 
-/// Copy a literal from the immutable loaded module. The module owns its bytes
-/// throughout JIT and Native AOT execution; generated code needs no temporary
-/// native buffer or embedded process address.
+/// Evaluate an immutable module literal using the current Island's collector.
+/// Generated code carries a verified constant ID and keeps the conservative
+/// allocation poll; a missing reuse scope falls back to ordinary construction.
 #[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_str_new_const(ctx: *mut JitContext, index: u32) -> u64 {
     let Some(ctx) = (unsafe { ctx.as_ref() }) else {
         return 0;
     };
-    let Some(module) = (unsafe { ctx.module_ref() }) else {
+    let Some(module) = (unsafe { ctx.loaded_module.as_ref() }) else {
         return 0;
     };
-    let Some(crate::bytecode::Constant::String(value)) = module.constants.get(index as usize)
-    else {
+    let Some(gc) = (unsafe { ctx.gc.as_mut() }) else {
         return 0;
     };
-    vo_str_new(ctx.gc, value.as_ptr(), value.len() as u64)
+    match crate::objects::string::try_from_literal(gc, module, index) {
+        Ok(Some(value)) => value as u64,
+        Ok(None) => 0,
+        Err(error) => gc.sticky_allocation_failure(error) as u64,
+    }
 }
 
 // =============================================================================
@@ -3286,7 +3303,7 @@ fn jit_interface_payload_matches(
     value_rttid: ValueRttid,
     slot1: u64,
 ) -> bool {
-    use crate::objects::{closure, map, queue_state, slice};
+    use crate::objects::{closure, map, queue_state, slice, string};
 
     let value_kind = value_rttid.value_kind();
     if !value_kind.may_contain_gc_refs() {
@@ -3318,11 +3335,12 @@ fn jit_interface_payload_matches(
         ValueKind::Array => {
             jit_interface_array_payload_matches(gc, module, value_rttid, object, header)
         }
-        ValueKind::String | ValueKind::Slice => {
+        ValueKind::String => {
             header.kind() == value_kind
                 && header.meta_id() == expected_meta.meta_id()
-                && header.slots >= slice::DATA_SLOTS
+                && header.slots == string::DATA_SLOTS
         }
+        ValueKind::Slice => slice::has_valid_descriptor_shape(gc, object),
         ValueKind::Map => {
             header.kind() == value_kind
                 && header.meta_id() == expected_meta.meta_id()
@@ -4158,6 +4176,7 @@ pub extern "C" fn vo_iface_assert(
             *ctx_ref.panic_flag = false;
             *ctx_ref.is_user_panic = false;
             ctx_ref.runtime_trap_kind = JitRuntimeTrapKind::TypeAssertionFailed as u8;
+            ctx_ref.runtime_trap_origin = 0;
             ctx_ref.runtime_trap_arg0 = 0;
             ctx_ref.runtime_trap_arg1 = 0;
             JitResult::Panic
@@ -4578,7 +4597,7 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
         },
         JitRuntimeHelperAbi {
             name: "vo_runtime_trap",
-            params: &[T::Ptr, T::U32, T::U64, T::U64, T::U32],
+            params: &[T::Ptr, T::U32, T::U64, T::U64, T::U32, T::U64],
             ret: T::JitResult,
             return_policy: Ret::JitResult,
             panic_policy: Panic::RecordsRuntimeTrap,

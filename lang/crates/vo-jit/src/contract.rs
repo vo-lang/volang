@@ -13,41 +13,8 @@ use vo_runtime::jit_api::{JitContextField, JitResult, JitRuntimeTrapKind};
 use crate::translator::{emit_runtime_helper_call, HelperKind, SlotAccess, TrapEmitter};
 use crate::JitCompileEnv;
 
+pub(crate) use crate::entry_contract::opcode_contract;
 pub use vo_common_core::execution_effects::EffectContract;
-
-pub fn opcode_contract(opcode: Opcode) -> EffectContract {
-    vo_common_core::execution_effects::opcode_effect_contract(opcode)
-}
-
-pub fn function_contract(func: &FunctionDef) -> EffectContract {
-    let mut contract = EffectContract::PURE;
-    if func.has_defer {
-        contract = contract.union(EffectContract {
-            may_unwind: true,
-            may_observe_frame: true,
-            needs_frame: true,
-            ..EffectContract::PURE
-        });
-    }
-    if func.has_calls || func.has_call_extern {
-        contract = contract.union(EffectContract {
-            may_gc: true,
-            may_alloc: true,
-            may_panic: true,
-            may_unwind: true,
-            may_call: true,
-            may_schedule: func.has_call_extern,
-            may_observe_frame: true,
-            needs_frame: true,
-            needs_slot_metadata: true,
-            ..EffectContract::PURE
-        });
-    }
-    for inst in &func.code {
-        contract = contract.union(opcode_contract(inst.opcode()));
-    }
-    contract
-}
 
 /// Compute the entry contract using the same resolved extern routes and
 /// register constants consumed by native lowering.
@@ -120,7 +87,8 @@ pub(crate) fn function_contract_in_env(
 ///
 /// Static calls are lowered by the JIT call boundary itself. GC reachability is
 /// propagated through the complete call graph, while frame-elided entry stays
-/// limited to calls inside a genuinely recursive SCC. Prepared shadow entry
+/// limited to calls inside a recursive SCC or complete total-scalar expansions
+/// admitted for every possible artifact entry. Prepared shadow entry
 /// starts from local effects and remains available through a call chain only
 /// when every reachable callee can preserve the shadow-frame contract.
 #[cfg(test)]
@@ -129,13 +97,14 @@ pub(crate) fn module_frame_entry_eligibility(
     env: JitCompileEnv<'_>,
 ) -> Vec<crate::JitFrameEntryEligibility> {
     let graph = crate::call_graph::ModuleCallGraph::build(module);
-    module_frame_entry_eligibility_with_graph(module, env, &graph)
+    module_frame_entry_eligibility_with_graph(module, env, &graph, None)
 }
 
 pub(crate) fn module_frame_entry_eligibility_with_graph(
     module: &Module,
     env: JitCompileEnv<'_>,
     graph: &crate::call_graph::ModuleCallGraph,
+    inlines: Option<&crate::optimizer::ModuleInlinePlan>,
 ) -> Vec<crate::JitFrameEntryEligibility> {
     let local_contracts = module
         .functions
@@ -152,7 +121,13 @@ pub(crate) fn module_frame_entry_eligibility_with_graph(
                 .callees(func_id)
                 .iter()
                 .any(|&callee_id| !graph.is_recursive_edge(func_id, callee_id));
-            if has_non_recursive_call {
+            let calls_fully_inlined = has_non_recursive_call
+                && inlines.is_some_and(|plan| {
+                    u32::try_from(func_id)
+                        .ok()
+                        .is_some_and(|id| plan.has_total_static_inline_cover(id, func))
+                });
+            if has_non_recursive_call && !calls_fully_inlined {
                 frame_contract = frame_contract.union(opcode_contract(Opcode::Call));
             }
             let mut entry = crate::jit_frame_entry_eligibility_for_contract(func, frame_contract);
@@ -375,7 +350,7 @@ pub fn emit_runtime_trap_return<'a>(
     let current_pc = e.current_pc();
     let pc_val = e.builder().ins().iconst(types::I32, current_pc as i64);
     let trap_func = e.helper(HelperKind::runtime_trap);
-    let call = emit_runtime_helper_call(e, trap_func, &[ctx, kind_val, arg0, arg1, pc_val]);
+    let call = emit_runtime_helper_call(e, trap_func, &[ctx, kind_val, arg0, arg1, pc_val, zero]);
     let panic_ret = e.builder().inst_results(call)[0];
     e.builder().ins().return_(&[panic_ret]);
 }
@@ -407,6 +382,17 @@ pub fn emit_runtime_trap_if<'a>(
     arg0: Option<Value>,
     arg1: Option<Value>,
 ) {
+    emit_runtime_trap_if_at(e, condition, kind, arg0, arg1, None);
+}
+
+pub(crate) fn emit_runtime_trap_if_at<'a>(
+    e: &mut impl TrapEmitter<'a>,
+    condition: Value,
+    kind: JitRuntimeTrapKind,
+    arg0: Option<Value>,
+    arg1: Option<Value>,
+    origin: Option<vo_common_core::debug_info::InstructionSource>,
+) {
     let recovery = e.cold_recovery_values();
     let variables: Vec<_> = recovery
         .iter()
@@ -415,7 +401,7 @@ pub fn emit_runtime_trap_if<'a>(
     let existing = e.native_trap_blocks().by_variables.get(&variables).copied();
     let panic_block = existing.unwrap_or_else(|| crate::compile_common::cold_block(e.builder()));
     if existing.is_none() {
-        for ty in [types::I32, types::I64, types::I64, types::I32] {
+        for ty in [types::I32, types::I64, types::I64, types::I32, types::I64] {
             e.builder().append_block_param(panic_block, ty);
         }
         for (_, value) in &recovery {
@@ -430,11 +416,16 @@ pub fn emit_runtime_trap_if<'a>(
     let kind = e.builder().ins().iconst(types::I32, kind as i64);
     let pc = e.current_pc();
     let pc = e.builder().ins().iconst(types::I32, pc as i64);
+    let origin = e
+        .builder()
+        .ins()
+        .iconst(types::I64, origin.map_or(0, |source| source.raw()) as i64);
     let mut arguments: Vec<cranelift_codegen::ir::BlockArg> = vec![
         kind.into(),
         arg0.unwrap_or(zero).into(),
         arg1.unwrap_or(zero).into(),
         pc.into(),
+        origin.into(),
     ];
     arguments.extend(
         recovery
@@ -451,14 +442,17 @@ pub fn emit_runtime_trap_if<'a>(
         // Later bytecodes may add predecessors with the same recovery layout.
         // The compiler seals all shared blocks after lowering the whole body.
         for (index, (variable, _)) in recovery.iter().enumerate() {
-            let value = e.builder().block_params(panic_block)[index + 4];
+            let value = e.builder().block_params(panic_block)[index + 5];
             e.builder().def_var(*variable, value);
         }
         let ctx = e.ctx_param();
-        let params = e.builder().block_params(panic_block)[..4].to_vec();
+        let params = e.builder().block_params(panic_block)[..5].to_vec();
         let trap = e.helper(HelperKind::runtime_trap);
-        let call =
-            emit_runtime_helper_call(e, trap, &[ctx, params[0], params[1], params[2], params[3]]);
+        let call = emit_runtime_helper_call(
+            e,
+            trap,
+            &[ctx, params[0], params[1], params[2], params[3], params[4]],
+        );
         let result = e.builder().inst_results(call)[0];
         e.builder().ins().return_(&[result]);
     }
@@ -679,3 +673,7 @@ mod tests {
         assert!(eligibility[2].static_prepared_shadow);
     }
 }
+
+#[cfg(test)]
+#[path = "contract/inline_calls.rs"]
+mod inline_calls;

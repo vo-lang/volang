@@ -1,0 +1,11 @@
+package main
+func main() {
+    sum := 0
+    for i := 0; i < 100000; i++ {
+        m := make(map[int]int)
+        m[i] = i + 1
+        sum += m[i]
+    }
+    assert(sum == 5000050000)
+    println(sum)
+}

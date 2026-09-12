@@ -23,13 +23,16 @@ struct CallerLocation {
 fn logical_pc(func_id: u32, pc: u32) -> u64 {
     // Reserve zero for Caller failure while retaining both components without
     // collision. Function IDs are restricted to 24 bits by codegen.
-    (u64::from(func_id) + 1) << 32 | u64::from(pc)
+    vo_common_core::debug_info::InstructionSource::from_parts(func_id, pc)
+        .map_or(0, |source| source.raw())
 }
 
 fn exact_source_location(module: &Module, func_id: u32, pc: u32) -> Option<SourceLoc> {
     let function = module.debug_info.funcs.get(func_id as usize)?;
-    let index = function.entries.partition_point(|entry| entry.pc < pc);
-    let entry = function.entries.get(index)?;
+    // Relocation can merge several source entries at one PC. The last entry
+    // is authoritative, matching DebugInfo::lookup and Core Wasm metadata.
+    let end = function.entries.partition_point(|entry| entry.pc <= pc);
+    let entry = function.entries.get(end.checked_sub(1)?)?;
     if entry.pc != pc {
         return None;
     }
@@ -211,6 +214,31 @@ mod tests {
         assert_eq!(outer.source.line, 11);
         assert_eq!(outer.logical_pc, logical_pc(3, 4));
         assert!(caller_location(&fiber.frames, &module, 2).is_none());
+    }
+
+    #[test]
+    fn caller_uses_the_last_exact_location_after_pc_coalescing() {
+        let mut module = Module::new("caller-coalesced-debug".to_string());
+        module.debug_info.add_loc(0, 2, "removed.vo", 3, 1, 1);
+        module.debug_info.add_loc(0, 2, "outer.vo", 17, 5, 9);
+        module.debug_info.add_loc(0, 3, "following.vo", 19, 1, 1);
+        module.debug_info.add_loc(1, 0, "removed.vo", 23, 1, 1);
+        module.debug_info.add_loc(1, 0, "inner.vo", 29, 7, 11);
+        module.debug_info.finalize();
+        let mut fiber = Fiber::new(1);
+        fiber.push_frame(0, 1, 0, 0);
+        fiber.current_frame_mut().unwrap().pc = 3;
+        fiber.push_frame(1, 1, 0, 0);
+        fiber.current_frame_mut().unwrap().pc = 0;
+        for (skip, function, pc, expected) in [
+            (0, 1, 0, SourceLoc::new("inner.vo", 29, 7, 11)),
+            (1, 0, 2, SourceLoc::new("outer.vo", 17, 5, 9)),
+        ] {
+            let location = caller_location(&fiber.frames, &module, skip).unwrap();
+            assert_eq!(location.logical_pc, logical_pc(function, pc));
+            assert_eq!(location.source, expected);
+            assert_eq!(module.debug_info.lookup(function, pc), Some(expected));
+        }
     }
 
     #[test]

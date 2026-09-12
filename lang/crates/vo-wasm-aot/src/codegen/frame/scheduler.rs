@@ -180,6 +180,17 @@ pub(super) fn compile(
             store_prefix(body, instruction.a);
             body.instruction(&W::LocalGet(ALLOC_LOCAL))
                 .instruction(&W::I64ExtendI32U)
+                .instruction(&W::LocalGet(ALLOC_LOCAL))
+                .instruction(&W::I32Const(4))
+                .instruction(&W::I32Sub)
+                .instruction(&W::I64Load32U(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }))
+                .instruction(&W::I64Const(32))
+                .instruction(&W::I64Shl)
+                .instruction(&W::I64Or)
                 .instruction(&W::I64Store(memarg(0)));
         }
         Opcode::QueueSend => {
@@ -229,9 +240,8 @@ pub(super) fn compile(
                 static_data.nil_reference_panic_ref,
                 current_block,
             );
-            load_slot(body, instruction.a);
-            body.instruction(&W::I32WrapI64)
-                .instruction(&W::LocalTee(ALLOC_LOCAL))
+            load_queue_pointer(body, instruction.a);
+            body.instruction(&W::LocalTee(ALLOC_LOCAL))
                 .instruction(&W::I64Load(MemArg {
                     offset: QUEUE_CLOSED_OFFSET,
                     align: 3,
@@ -268,6 +278,7 @@ pub(super) fn compile(
                     memory_index: 0,
                 }));
             clear_pending_queue_receiver(body);
+            notify_queue(body, 4);
             mark_scheduler_progress(body, runtime_globals);
         }
         Opcode::QueueLen | Opcode::QueueCap => {
@@ -277,19 +288,18 @@ pub(super) fn compile(
                 .instruction(&W::If(BlockType::Result(ValType::I64)))
                 .instruction(&W::I64Const(0))
                 .instruction(&W::Else);
-            load_slot(body, instruction.b);
-            body.instruction(&W::I32WrapI64)
-                .instruction(&W::I64Load(MemArg {
-                    offset: if opcode == Opcode::QueueLen {
-                        QUEUE_LENGTH_OFFSET
-                    } else {
-                        QUEUE_CAPACITY_OFFSET
-                    },
-                    align: 3,
-                    memory_index: 0,
-                }))
-                .instruction(&W::End)
-                .instruction(&W::I64Store(memarg(0)));
+            load_queue_pointer(body, instruction.b);
+            body.instruction(&W::I64Load(MemArg {
+                offset: if opcode == Opcode::QueueLen {
+                    QUEUE_LENGTH_OFFSET
+                } else {
+                    QUEUE_CAPACITY_OFFSET
+                },
+                align: 3,
+                memory_index: 0,
+            }))
+            .instruction(&W::End)
+            .instruction(&W::I64Store(memarg(0)));
         }
         Opcode::SelectBegin | Opcode::SelectSend | Opcode::SelectRecv => {
             // The verifier has already materialized the complete transaction
@@ -319,14 +329,15 @@ pub(super) fn compile(
                 .ok_or_else(|| {
                     WasmAotError::InvalidModule("island state size exceeds wasm32".into())
                 })?;
-            body.instruction(&W::I32Const(island_state_bytes as i32));
-            select_allocation_descriptor(
+            emit_memory_call(
                 body,
-                allocation_descriptors.island_state,
-                runtime_globals,
+                MEMORY_ISLAND_NEW,
+                &[
+                    W::I32Const(island_state_bytes as i32),
+                    W::I32Const(allocation_descriptors.island_state as i32),
+                ],
             );
-            body.instruction(&W::Call(1))
-                .instruction(&W::LocalTee(ALLOC_LOCAL))
+            body.instruction(&W::LocalTee(ALLOC_LOCAL))
                 .instruction(&W::I32Eqz)
                 .instruction(&W::If(BlockType::Empty));
             return_status(body, STATUS_OUT_OF_MEMORY);
@@ -365,9 +376,16 @@ pub(super) fn compile(
             // transition atomically replaces this marker with one.
             load_slot(body, instruction.a);
             body.instruction(&W::I32WrapI64)
+                .instruction(&W::I64Load(memarg(0)))
+                .instruction(&W::I64Const(-1))
+                .instruction(&W::I64Ne)
+                .instruction(&W::If(BlockType::Empty));
+            load_slot(body, instruction.a);
+            body.instruction(&W::I32WrapI64)
                 .instruction(&W::LocalGet(LENGTH_LOCAL))
                 .instruction(&W::I64ExtendI32U)
-                .instruction(&W::I64Store(memarg(0)));
+                .instruction(&W::I64Store(memarg(0)))
+                .instruction(&W::End);
         }
         Opcode::GoIsland => {
             reject_nil_reference(
@@ -382,6 +400,12 @@ pub(super) fn compile(
                 static_data.nil_reference_panic_ref,
                 current_block,
             );
+            load_slot(body, instruction.a);
+            body.instruction(&W::I32WrapI64)
+                .instruction(&W::I64Load(memarg(0)))
+                .instruction(&W::I64Const(-1))
+                .instruction(&W::I64Ne)
+                .instruction(&W::If(BlockType::Empty));
             // Island creation schedules package initialization ahead of any
             // routed work. Keep the caller at this exact operation until the
             // initializer publishes completion, preserving the VM's rule that
@@ -431,7 +455,7 @@ pub(super) fn compile(
                 body.instruction(&W::Br(1)).instruction(&W::End);
             }
             return_status(body, STATUS_INVALID_CONTROL_FLOW);
-            body.instruction(&W::End);
+            body.instruction(&W::End).instruction(&W::End);
         }
         Opcode::GoStart => {
             if instruction.call_shape_is_closure() {

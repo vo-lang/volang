@@ -8,7 +8,7 @@ use crate::translator::{HelperKind, IrEmitter};
 use super::{
     emit_call_depth_increment, emit_call_depth_leave,
     emit_checked_jit_result_indirect_callback_call, emit_effect_aware_jit_call, emit_native_link,
-    emit_raw_jit_context_callback_call, import_jit_func_sig, load_native_arg_lanes_dynamic,
+    emit_raw_jit_context_callback_call, import_jit_func_sig, load_native_arg_lanes,
     restore_caller_execution_context, JitCallGcMode, JitCallOperands, JIT_RESULT_CALL,
     JIT_RESULT_OK, PREPARED_CALL_POP_FRAME_CALLSITE, PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
 };
@@ -63,10 +63,6 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
         .builder()
         .ins()
         .icmp(IntCC::Equal, p.jit_func_ptr, null_ptr);
-    let depth = emitter.load_context_field(types::I32, JitContextField::CallDepth);
-    let depth_limit = emitter.load_context_field(types::I32, JitContextField::CallDepthLimit);
-    let depth_exhausted = super::native_chain_exhausted(emitter, depth, depth_limit);
-    let link_or_call_block = crate::compile_common::cold_block(emitter.builder());
     let link_block = crate::compile_common::cold_block(emitter.builder());
     let trampoline_block = crate::compile_common::cold_block(emitter.builder());
     let jit_call_block = emitter.builder().create_block();
@@ -78,16 +74,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
         None => emitter.builder().create_block(),
     };
 
-    emitter.builder().ins().brif(
-        depth_exhausted,
-        trampoline_block,
-        &[],
-        link_or_call_block,
-        &[],
-    );
-
-    emitter.builder().switch_to_block(link_or_call_block);
-    emitter.builder().seal_block(link_or_call_block);
+    let depth = super::emit_native_chain_guard(emitter, trampoline_block);
     emitter.builder().ins().brif(
         is_null,
         link_block,
@@ -170,7 +157,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
 
     let old_call_depth = emit_call_depth_increment(emitter, depth);
     let jit_func_sig = import_jit_func_sig(emitter);
-    let arg_lanes = load_native_arg_lanes_dynamic(emitter, p.callee_args_ptr, p.callee_local_slots);
+    let arg_lanes = load_native_arg_lanes(emitter, p.callee_args_ptr, p.callee_local_slots);
     let callee_bp = emitter.load_context_field(types::I32, JitContextField::JitBp);
     let frame_bp = emitter.builder().ins().uextend(types::I64, callee_bp);
     let jit_result = emit_effect_aware_jit_call(

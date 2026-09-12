@@ -83,6 +83,11 @@ use crate::types::{SlotType, ValueKind, ValueMeta, ValueRttid, INVALID_META_ID};
 use crate::RuntimeType;
 
 pub const MAP_ITER_SLOTS: usize = 7;
+/// Backend-neutral field locations in the opaque iterator's slot window.
+pub const MAP_ITER_INDEX_SLOT: u16 = 1;
+pub const MAP_ITER_BACKING_SLOT: u16 = 2;
+pub const MAP_ITER_CAPACITY_SLOT: u16 = 3;
+pub const MAP_ITER_MAP_SLOT: u16 = 6;
 
 /// Maximum number of namespaced, backend-neutral artifacts attached to one
 /// bytecode module. Artifacts are deliberately bounded because a VOB can be
@@ -2175,8 +2180,10 @@ pub struct LoadedModule {
     module: Module,
     runtime_type_facts: RuntimeTypeFacts,
     dynamic_callsite_count: usize,
+    execution_layouts: crate::execution_layouts::ExecutionLayoutMaps,
     element_layout_maps: crate::execution_layouts::ElementLayoutMaps,
     pointer_layout_maps: crate::execution_layouts::PointerLayoutMaps,
+    select_layout_maps: crate::execution_layouts::SelectLayoutMaps,
     frame_root_maps: crate::frame_roots::FrameRootMaps,
     global_root_slots: Vec<GlobalRootSlot>,
     exact_base_maps: crate::exact_bases::ExactBaseMaps,
@@ -2204,9 +2211,11 @@ impl LoadedModule {
         }
         debug_assert_eq!(runtime_type_facts.len(), module.runtime_types.len());
         let dynamic_callsite_count = module.dynamic_callsite_count();
-        let element_layout_maps = crate::execution_layouts::ElementLayoutMaps::build(&module);
-        let pointer_layout_maps =
-            crate::execution_layouts::PointerLayoutMaps::build(&module, &exact_base_maps);
+        let select_layout_maps = crate::execution_layouts::SelectLayoutMaps::build(&module);
+        let execution_layouts =
+            crate::execution_layouts::ExecutionLayoutMaps::build(&module, &exact_base_maps);
+        let element_layout_maps = execution_layouts.element_maps();
+        let pointer_layout_maps = execution_layouts.pointer_maps();
         let mut global_root_slots = Vec::new();
         let mut base = 0;
         for (definition, global) in module.globals.iter().enumerate() {
@@ -2229,8 +2238,10 @@ impl LoadedModule {
             module,
             runtime_type_facts,
             dynamic_callsite_count,
+            execution_layouts,
             element_layout_maps,
             pointer_layout_maps,
+            select_layout_maps,
             frame_root_maps,
             global_root_slots,
             exact_base_maps,
@@ -2255,6 +2266,11 @@ impl LoadedModule {
     }
 
     #[inline]
+    pub fn execution_layouts(&self) -> &crate::execution_layouts::ExecutionLayoutMaps {
+        &self.execution_layouts
+    }
+
+    #[inline]
     pub fn element_layout_maps(&self) -> &crate::execution_layouts::ElementLayoutMaps {
         &self.element_layout_maps
     }
@@ -2262,6 +2278,11 @@ impl LoadedModule {
     #[inline]
     pub fn pointer_layout_maps(&self) -> &crate::execution_layouts::PointerLayoutMaps {
         &self.pointer_layout_maps
+    }
+
+    #[inline]
+    pub fn select_layout_maps(&self) -> &crate::execution_layouts::SelectLayoutMaps {
+        &self.select_layout_maps
     }
 
     #[inline]
@@ -2341,9 +2362,12 @@ pub struct ModuleRuntimeMetadata<'a> {
 /// This keeps type-only paths independent from the full module container.
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeTypeMetadata<'a> {
-    pub struct_metas: &'a [StructMeta],
-    pub named_type_metas: &'a [NamedTypeMeta],
-    pub runtime_types: &'a [RuntimeType],
+    // Keep the table view immutable so loaded facts cannot be paired with
+    // replacement tables. Construction-time users create a view with `new`.
+    struct_metas: &'a [StructMeta],
+    named_type_metas: &'a [NamedTypeMeta],
+    runtime_types: &'a [RuntimeType],
+    runtime_type_facts: Option<&'a RuntimeTypeFacts>,
 }
 
 impl<'a> RuntimeTypeMetadata<'a> {
@@ -2357,6 +2381,32 @@ impl<'a> RuntimeTypeMetadata<'a> {
             struct_metas,
             named_type_metas,
             runtime_types,
+            runtime_type_facts: None,
+        }
+    }
+
+    #[inline]
+    pub const fn struct_metas(self) -> &'a [StructMeta] {
+        self.struct_metas
+    }
+
+    #[inline]
+    pub const fn named_type_metas(self) -> &'a [NamedTypeMeta] {
+        self.named_type_metas
+    }
+
+    #[inline]
+    pub const fn runtime_types(self) -> &'a [RuntimeType] {
+        self.runtime_types
+    }
+
+    /// Loaded views reuse the immutable verified width index. Raw table views
+    /// retain checked layout expansion; unavailable loaded facts fail closed.
+    #[inline]
+    pub fn slot_count(self, value: ValueRttid) -> Option<usize> {
+        match self.runtime_type_facts {
+            Some(facts) => facts.slot_count(value),
+            None => self.resolver().slot_count_for_value_rttid(value),
         }
     }
 
@@ -2400,7 +2450,10 @@ impl<'a> ModuleRuntimeMetadata<'a> {
 
     #[inline]
     pub fn type_metadata(self) -> RuntimeTypeMetadata<'a> {
-        self.module.into()
+        RuntimeTypeMetadata {
+            runtime_type_facts: self.runtime_type_facts,
+            ..self.module.into()
+        }
     }
 
     /// Compare with the canonical physical layout. Loaded modules use their
@@ -3038,6 +3091,62 @@ pub fn slot_type_for_value_kind(kind: ValueKind) -> SlotType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_type_metadata_preserves_loaded_width_facts() {
+        let mut module = Module::new("comparison-widths".to_string());
+        module.runtime_types = vec![
+            RuntimeType::Basic(ValueKind::Int64),
+            RuntimeType::Array {
+                len: 4,
+                elem: ValueRttid::new(0, ValueKind::Int64),
+            },
+            RuntimeType::Array {
+                len: 3,
+                elem: ValueRttid::new(1, ValueKind::Array),
+            },
+            RuntimeType::Array {
+                len: 0,
+                elem: ValueRttid::new(2, ValueKind::Array),
+            },
+            RuntimeType::Array {
+                len: u64::MAX,
+                elem: ValueRttid::new(0, ValueKind::Int64),
+            },
+        ];
+        let facts = RuntimeTypeFacts::from_module_parts(
+            &module.struct_metas,
+            &module.named_type_metas,
+            &module.runtime_types,
+        )
+        .unwrap();
+        let loaded = ModuleRuntimeMetadata {
+            module: &module,
+            runtime_type_facts: Some(&facts),
+        }
+        .type_metadata();
+        let raw = ModuleRuntimeMetadata::unverified(&module).type_metadata();
+        for (index, width) in [Some(1), Some(4), Some(12), Some(0), None]
+            .into_iter()
+            .enumerate()
+        {
+            let kind = if index == 0 {
+                ValueKind::Int64
+            } else {
+                ValueKind::Array
+            };
+            let value = ValueRttid::new(index as u32, kind);
+            assert_eq!(loaded.slot_count(value), width);
+            assert_eq!(raw.slot_count(value), width);
+        }
+        let wrong_kind = ValueRttid::new(2, ValueKind::String);
+        assert_eq!(loaded.slot_count(wrong_kind), None);
+        assert_eq!(raw.slot_count(wrong_kind), None);
+        assert_eq!(
+            loaded.slot_count(ValueRttid::new(999, ValueKind::Array)),
+            None
+        );
+    }
 
     #[test]
     fn ext_slot_kind_rejects_unknown_tags() {

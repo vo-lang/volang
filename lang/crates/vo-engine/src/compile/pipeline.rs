@@ -304,9 +304,12 @@ impl AnalyzedCompilation {
         .map_err(CompileError::ModuleSystem)?;
 
         let module = compile_analyzed_project(engine, &self.project)?;
-        let module = vo_common_core::verifier::verify_loaded_module(module)
-            .map(Arc::new)
-            .map_err(|err| CompileError::Codegen(format!("generated invalid bytecode: {err}")))?;
+        let module = vo_common::compiler_phase!(
+            Verification,
+            vo_common_core::verifier::verify_loaded_module(module)
+        )
+        .map(Arc::new)
+        .map_err(|err| CompileError::Codegen(format!("generated invalid bytecode: {err}")))?;
 
         Ok(CompileOutput {
             module,
@@ -388,15 +391,20 @@ pub(super) fn load_bytecode(path: &Path) -> Result<CompileOutput, CompileError> 
         path,
         vo_common_core::serialize::MAX_VOB_BYTES,
     )?;
-    let module = vo_vm::bytecode::Module::deserialize(&bytes).map_err(|e| {
-        CompileError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("{:?}", e),
-        ))
-    })?;
-    let module = vo_common_core::verifier::verify_loaded_module(module)
-        .map(Arc::new)
-        .map_err(invalid_bytecode_error)?;
+    let module =
+        vo_common::compiler_phase!(BytecodeDecode, vo_vm::bytecode::Module::deserialize(&bytes))
+            .map_err(|e| {
+                CompileError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{:?}", e),
+                ))
+            })?;
+    let module = vo_common::compiler_phase!(
+        Verification,
+        vo_common_core::verifier::verify_loaded_module(module)
+    )
+    .map(Arc::new)
+    .map_err(invalid_bytecode_error)?;
     Ok(CompileOutput {
         module,
         source_root: path.parent().unwrap_or(Path::new(".")).to_path_buf(),
@@ -694,29 +702,31 @@ fn prepare_project_snapshot_with_generated_inputs(
     snapshot: Arc<CompileInputSnapshot>,
     generated_inputs: &BTreeSet<PathBuf>,
 ) -> Result<PreparedProjectSnapshot, CompileError> {
-    let context_fs = ResolverFs::snapshot_global(Arc::clone(&snapshot));
-    let captured_context = validate_captured_project_context_with_generated_inputs(
-        &context_fs,
-        inputs.project_root,
-        inputs.graph,
-        inputs.project_plan,
-        inputs.workspace_sources,
-        inputs.current_module_override,
-        inputs.workspace,
-        generated_inputs,
-    )?;
-    let module_fs = ResolverFs::snapshot(Arc::clone(&snapshot), inputs.mod_cache);
-    let ready_modules = prepare_materialized_modules(
-        &module_fs,
-        captured_context.project_plan(),
-        captured_context.workspace_modules(),
-    )?;
-    let (_, project_plan, workspace_sources) = captured_context.into_parts();
-    Ok(PreparedProjectSnapshot {
-        snapshot,
-        project_plan,
-        workspace_sources,
-        ready_modules,
+    vo_common::compiler_phase!(SnapshotContext, {
+        let context_fs = ResolverFs::snapshot_global(Arc::clone(&snapshot));
+        let captured_context = validate_captured_project_context_with_generated_inputs(
+            &context_fs,
+            inputs.project_root,
+            inputs.graph,
+            inputs.project_plan,
+            inputs.workspace_sources,
+            inputs.current_module_override,
+            inputs.workspace,
+            generated_inputs,
+        )?;
+        let module_fs = ResolverFs::snapshot(Arc::clone(&snapshot), inputs.mod_cache);
+        let ready_modules = prepare_materialized_modules(
+            &module_fs,
+            captured_context.project_plan(),
+            captured_context.workspace_modules(),
+        )?;
+        let (_, project_plan, workspace_sources) = captured_context.into_parts();
+        Ok(PreparedProjectSnapshot {
+            snapshot,
+            project_plan,
+            workspace_sources,
+            ready_modules,
+        })
     })
 }
 

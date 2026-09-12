@@ -115,6 +115,18 @@ pub fn compile_expr_to_ptr(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
+    func.with_source_span(expr.span, |func| {
+        compile_expr_to_ptr_inner(expr, dst, ctx, func, info)
+    })
+}
+
+fn compile_expr_to_ptr_inner(
+    expr: &Expr,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
     let expr_type = info.expr_type(expr.id);
 
     // Case 1: Expression is already pointer type → just compile it

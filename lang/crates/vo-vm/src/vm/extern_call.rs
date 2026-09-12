@@ -147,7 +147,7 @@ pub(crate) fn prepare_extern_closure_replay_call(
 
 pub(crate) struct ExternReplaySetup {
     pub(crate) result: ExecResult,
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub(crate) replay_frame_published: bool,
 }
 
@@ -160,16 +160,16 @@ pub(crate) fn prepare_typed_extern_closure_replay_setup(
     args: TypedSlotPayload,
     replay_pc: u32,
 ) -> ExternReplaySetup {
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     let replay_boundary_count = fiber.closure_replay.boundary_count();
     let result = FrameCallBuilder::new_with_itab_cache(gc, fiber, module, itab_cache)
         .call_extern_replay_closure_at(closure_ref, args, replay_pc as usize);
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     let replay_frame_published = matches!(result, ExecResult::FrameChanged)
         && fiber.closure_replay.boundary_count() > replay_boundary_count;
     ExternReplaySetup {
         result,
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         replay_frame_published,
     }
 }

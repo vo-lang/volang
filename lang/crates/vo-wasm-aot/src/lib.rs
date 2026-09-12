@@ -12,13 +12,15 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 use vo_common_core::{Module as VoModule, ModuleArtifact, ResolvedExternTable};
-use vo_target::{ArtifactKind, HostSurface, TargetFamily, TargetSpec};
+use vo_target::{ArtifactKind, HostSurface, RuntimeMemoryContract, TargetFamily, TargetSpec};
 use wasm_encoder::{CustomSection, Module};
 
-pub const WASM_AOT_MANIFEST_SECTION: &str = "volang.aot.v5";
+pub const WASM_AOT_MANIFEST_SECTION: &str = "volang.aot.v8";
 pub const WASM_AOT_EXTERN_SECTION: &str = "volang.externs.v3";
 pub const WASM_AOT_RUNTIME_METADATA_SECTION: &str = "volang.runtime.v1";
-pub const WASM_AOT_DEBUG_METADATA_SECTION: &str = "volang.debug.v2";
+pub const WASM_AOT_DEBUG_METADATA_SECTION: &str = "volang.debug.v3";
+/// Optional, additive source ancestry for debug tools; execution ABI is unchanged.
+pub const WASM_AOT_INLINE_SOURCE_SECTION: &str = "volang.inline-sources.v1";
 pub const WASM_AOT_ARTIFACT_SECTION: &str = "volang.artifacts.v1";
 pub const WASM_AOT_RUNTIME_MODULE: &str = "volang:runtime/v3";
 pub const WASM_AOT_RUNTIME_FUNCTION: &str = "call-extern";
@@ -33,10 +35,10 @@ pub const WASM_AOT_PANIC_DATA_EXPORT: &str = "vo_panic_data";
 pub const WASM_AOT_RAISE_HOST_PANIC_EXPORT: &str = "vo_raise_host_panic";
 pub const WASM_AOT_FUEL_EXPORT: &str = "vo_fuel";
 pub const WASM_AOT_MEMORY_EXPORT: &str = "memory";
-pub const WASM_AOT_ABI_VERSION: u16 = 5;
+pub const WASM_AOT_ABI_VERSION: u16 = 9;
 pub const WASM_PAGE_BYTES: u64 = 64 * 1024;
 
-const MANIFEST_MAGIC: &[u8; 8] = b"VOAOTW05";
+const MANIFEST_MAGIC: &[u8; 8] = b"VOAOTW09";
 const ARTIFACT_MAGIC: &[u8; 8] = b"VOART001";
 const MAX_TARGET_BYTES: usize = 255;
 
@@ -72,6 +74,7 @@ pub struct WasmAotManifest {
     /// in the executable image.
     pub module_len: u32,
     pub memory_pages: u32,
+    pub memory_contract: RuntimeMemoryContract,
     pub module_sha256: [u8; 32],
 }
 
@@ -176,6 +179,7 @@ fn build_manifest(
             .try_into()
             .map_err(|_| WasmAotError::InvalidModule("module length exceeds u32".to_string()))?,
         memory_pages,
+        memory_contract: target.runtime_memory_contract(),
         module_sha256: Sha256::digest(module_bytes).into(),
     })
 }
@@ -186,7 +190,7 @@ fn encode_manifest(manifest: &WasmAotManifest) -> Vec<u8> {
     bytes.extend_from_slice(MANIFEST_MAGIC);
     bytes.extend_from_slice(&manifest.abi_version.to_le_bytes());
     bytes.push(manifest.kind as u8);
-    bytes.push(0);
+    bytes.push(manifest.memory_contract as u8);
     bytes.extend_from_slice(&manifest.module_len.to_le_bytes());
     bytes.extend_from_slice(&manifest.memory_pages.to_le_bytes());
     bytes.extend_from_slice(&manifest.module_sha256);
@@ -254,9 +258,9 @@ pub fn decode_wasm_aot_manifest(bytes: &[u8]) -> Result<WasmAotManifest, WasmAot
             .ok_or_else(|| WasmAotError::InvalidManifest("truncated kind".to_string()))?,
     )?;
     offset += 1;
-    if data.get(offset).copied() != Some(0) {
+    if data.get(offset).copied() != Some(RuntimeMemoryContract::IslandSpanHeap as u8) {
         return Err(WasmAotError::InvalidManifest(
-            "reserved manifest flags are non-zero".to_string(),
+            "unsupported Core Wasm memory contract".to_string(),
         ));
     }
     offset += 1;
@@ -309,6 +313,7 @@ pub fn decode_wasm_aot_manifest(bytes: &[u8]) -> Result<WasmAotManifest, WasmAot
         target_triple,
         module_len,
         memory_pages,
+        memory_contract: target.runtime_memory_contract(),
         module_sha256,
     })
 }
@@ -518,6 +523,13 @@ pub fn compile_wasm_aot_with_externs(
     target: &TargetSpec,
 ) -> Result<WasmAotArtifact, WasmAotError> {
     validate_target(target)?;
+    // The public backend API also accepts directly assembled modules. Check
+    // optional ancestry with its shared owner before publishing a debug section.
+    vo_module
+        .debug_info
+        .inline_sources
+        .validate(&vo_module.functions, vo_module.debug_info.files.len())
+        .map_err(|error| WasmAotError::InvalidModule(error.into()))?;
     let semantic_bytes = vo_module
         .serialize()
         .map_err(|error| WasmAotError::InvalidModule(error.to_string()))?;
@@ -556,6 +568,9 @@ pub fn compile_wasm_aot_with_externs(
 
 #[cfg(test)]
 mod tests {
+    mod local_aggregates;
+    mod static_literals;
+
     use super::*;
     use vo_common_core::bytecode::{
         ExternDef, ExternEffects, ExternIntrinsic, ExternJitRoute, FunctionDef,
@@ -1232,25 +1247,6 @@ mod tests {
         .unwrap()
     }
 
-    fn count_operators(bytes: &[u8]) -> (usize, usize) {
-        let mut host_calls = 0;
-        let mut square_roots = 0;
-        for payload in wasmparser::Parser::new(0).parse_all(bytes) {
-            let wasmparser::Payload::CodeSectionEntry(body) = payload.unwrap() else {
-                continue;
-            };
-            let mut operators = body.get_operators_reader().unwrap();
-            while !operators.eof() {
-                match operators.read().unwrap() {
-                    wasmparser::Operator::Call { function_index: 0 } => host_calls += 1,
-                    wasmparser::Operator::F64Sqrt => square_roots += 1,
-                    _ => {}
-                }
-            }
-        }
-        (host_calls, square_roots)
-    }
-
     fn code_operators(bytes: &[u8], body_index: usize) -> Vec<wasmparser::Operator<'_>> {
         wasmparser::Parser::new(0)
             .parse_all(bytes)
@@ -1436,10 +1432,113 @@ mod tests {
         let file_length = read_u32(32) as usize;
         let function_offset = 36 + file_length;
         assert_eq!(read_u32(function_offset), 1);
-        assert_eq!(read_u32(function_offset + 4), 2);
-        assert_eq!(read_u32(function_offset + 12), 29);
-        assert_eq!(read_u32(function_offset + 16), 13);
-        assert_eq!(read_u32(function_offset + 20), 8);
+        assert_eq!(
+            &section[function_offset + 4..function_offset + 9],
+            &[2, 0, 29, 13, 8]
+        );
+    }
+
+    #[test]
+    fn optional_inline_sources_preserve_wide_spans_and_physical_ownership() {
+        use vo_common_core::debug_info::{
+            InlineFunctionSources, InlineSourceEntry, InlineSourceFrame, SourceSpan,
+        };
+        let target = TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN).unwrap();
+        let mut module = scalar_module();
+        let mut leaf = module.functions[0].clone();
+        leaf.name = "inlined_leaf".into();
+        module.functions.push(leaf);
+        module.debug_info.add_loc(0, 2, "physical.vo", 30, 2, 3);
+        let file = module.debug_info.get_or_add_file("leaf.vo");
+        module.debug_info.inline_sources.frames = vec![
+            InlineSourceFrame {
+                parent: InlineSourceFrame::NO_PARENT,
+                function_id: 0,
+                span: None,
+            },
+            InlineSourceFrame {
+                parent: 0,
+                function_id: 1,
+                span: Some(SourceSpan {
+                    file_id: file,
+                    line: 10,
+                    col: 70_000,
+                    len: 80_000,
+                }),
+            },
+        ];
+        module
+            .debug_info
+            .inline_sources
+            .functions
+            .push(InlineFunctionSources {
+                function_id: 0,
+                entries: vec![InlineSourceEntry { pc: 2, frame: 1 }],
+            });
+        let artifact = compile_wasm_aot(&module, &target).unwrap();
+        let physical = wasmparser::Parser::new(0)
+            .parse_all(&artifact.bytes)
+            .find_map(|payload| match payload.unwrap() {
+                wasmparser::Payload::CustomSection(section)
+                    if section.name() == WASM_AOT_DEBUG_METADATA_SECTION =>
+                {
+                    Some(section.data().to_vec())
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(physical[12..16].try_into().unwrap()), 2);
+        assert_eq!(&physical[physical.len() - 4..], &0_u32.to_le_bytes());
+        let sections = wasmparser::Parser::new(0)
+            .parse_all(&artifact.bytes)
+            .filter_map(|payload| match payload.unwrap() {
+                wasmparser::Payload::CustomSection(section)
+                    if section.name() == WASM_AOT_INLINE_SOURCE_SECTION =>
+                {
+                    Some(section.data().to_vec())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sections.len(), 1);
+        let bytes = &sections[0];
+        assert_eq!(&bytes[..8], b"VOINS001");
+        let words: Vec<_> = bytes[8..]
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect();
+        assert_eq!(
+            words,
+            [
+                2,
+                2,
+                1,
+                u32::MAX,
+                0,
+                u32::MAX,
+                0,
+                0,
+                0,
+                0,
+                1,
+                file,
+                10,
+                70_000,
+                80_000,
+                0,
+                4,
+                1,
+                2,
+                1
+            ]
+        );
+        module.debug_info.inline_sources.frames[0].function_id = 1;
+        assert!(compile_wasm_aot(&module, &target).is_err());
+        module.debug_info.inline_sources = Default::default();
+        let artifact = compile_wasm_aot(&module, &target).unwrap();
+        assert!(!wasmparser::Parser::new(0).parse_all(&artifact.bytes).any(|payload| {
+            matches!(payload.unwrap(), wasmparser::Payload::CustomSection(section) if section.name() == WASM_AOT_INLINE_SOURCE_SECTION)
+        }));
     }
 
     #[test]
@@ -1468,11 +1567,44 @@ mod tests {
         let host = compile_wasm_aot(&module, &target).unwrap();
         let intrinsic = compile_wasm_aot_with_externs(&module, &sqrt_externs(), &target).unwrap();
 
-        assert_eq!(count_operators(&host.bytes), (1, 0));
-        // Direct functions retain a durable continuation body. Both lowerings
-        // authenticate the intrinsic independently and neither reaches host
-        // dispatch.
-        assert_eq!(count_operators(&intrinsic.bytes), (0, 2));
+        let host_body = code_operators(&host.bytes, vo_body_index(0));
+        assert!(host_body
+            .iter()
+            .any(|op| matches!(op, wasmparser::Operator::Call { function_index: 0 })));
+        assert!(!host_body
+            .iter()
+            .any(|op| matches!(op, wasmparser::Operator::F64Sqrt)));
+        let bodies = wasmparser::Parser::new(0)
+            .parse_all(&intrinsic.bytes)
+            .filter_map(|payload| match payload.unwrap() {
+                wasmparser::Payload::CodeSectionEntry(body) => Some(body),
+                _ => None,
+            })
+            .map(|body| {
+                body.get_operators_reader()
+                    .unwrap()
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(bodies
+            .iter()
+            .flatten()
+            .any(|op| matches!(op, wasmparser::Operator::F64Sqrt)));
+        // A guest extern dispatch has a nonnegative extern identity, explicit
+        // frame, and three immediate slot operands. Memory operations use
+        // negative identities and remain present in the same module.
+        assert!(!bodies
+            .iter()
+            .any(|body| body.windows(6).any(|ops| matches!(ops, [
+            wasmparser::Operator::I32Const { value },
+            wasmparser::Operator::LocalGet { .. },
+            wasmparser::Operator::I32Const { .. },
+            wasmparser::Operator::I32Const { .. },
+            wasmparser::Operator::I32Const { .. },
+            wasmparser::Operator::Call { function_index: 0 },
+        ] if *value >= 0))));
     }
 
     #[test]
@@ -1505,6 +1637,95 @@ mod tests {
         assert!(operators
             .iter()
             .any(|operator| matches!(operator, wasmparser::Operator::BrTable { .. })));
+    }
+
+    #[test]
+    fn typed_loop_uses_structured_branches_and_preserves_fuel_polls() {
+        let mut module = scalar_loop_module();
+        let function = &mut module.functions[0];
+        function.name = "loop_count".into();
+        function.ret_slots = 1;
+        function.ret_slot_types = vec![SlotType::Value];
+        *function.code.last_mut().unwrap() = Instruction::new(Opcode::Return, 0, 1, 0);
+        let mut caller = scalar_loop_module().functions.remove(0);
+        caller.local_slots = 1;
+        caller.slot_types = vec![SlotType::Value];
+        caller.has_calls = true;
+        caller.code = vec![
+            Instruction::new(Opcode::Call, 0, 0, 0),
+            Instruction::new(Opcode::Return, 0, 0, 0),
+        ];
+        caller.instruction_metadata = vec![InstructionMetadata::None; 2];
+        module.functions.push(caller);
+        module.entry_func = 1;
+        let target = TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN).unwrap();
+        let artifact = compile_wasm_aot(&module, &target).unwrap();
+        wasmparser::validate(&artifact.bytes).unwrap();
+        // Two canonical functions precede the typed loop body.
+        let operators = code_operators(&artifact.bytes, vo_body_index(2));
+        assert!(!operators
+            .iter()
+            .any(|op| matches!(op, wasmparser::Operator::BrTable { .. })));
+        assert!(operators
+            .iter()
+            .any(|op| matches!(op, wasmparser::Operator::Loop { .. })));
+        assert!(operators
+            .iter()
+            .any(|op| matches!(op, wasmparser::Operator::BrIf { .. })));
+        assert_eq!(
+            operators
+                .iter()
+                .filter(|op| matches!(op, wasmparser::Operator::GlobalSet { .. }))
+                .count(),
+            3,
+            "each of the three original blocks retains its fuel poll"
+        );
+    }
+
+    #[test]
+    fn typed_irreducible_bytecode_retains_the_dispatcher() {
+        let mut module = scalar_loop_module();
+        let function = &mut module.functions[0];
+        function.name = "two_entries".into();
+        function.param_count = 1;
+        function.param_slots = 1;
+        function.ret_slots = 1;
+        function.ret_slot_types = vec![SlotType::Value];
+        let jump = |opcode, slot, offset: i32| {
+            Instruction::new(opcode, slot, offset as u16, (offset as u32 >> 16) as u16)
+        };
+        // The cycle 3..6 is entered through both 3 and 5. Verified bytecode
+        // permits this CFG even though source goto is deliberately unsupported.
+        function.code = vec![
+            Instruction::new(Opcode::LoadInt, 1, 0, 0),
+            Instruction::new(Opcode::LoadInt, 2, 1, 0),
+            jump(Opcode::JumpIf, 0, 3),
+            Instruction::new(Opcode::AddI, 1, 1, 2),
+            jump(Opcode::JumpIf, 1, 3),
+            Instruction::new(Opcode::AddI, 1, 1, 2),
+            jump(Opcode::JumpIf, 1, -3),
+            Instruction::new(Opcode::Return, 1, 1, 0),
+        ];
+        function.instruction_metadata = vec![InstructionMetadata::None; function.code.len()];
+        let mut caller = scalar_loop_module().functions.remove(0);
+        caller.has_calls = true;
+        caller.code = vec![
+            Instruction::new(Opcode::LoadInt, 0, 1, 0),
+            Instruction::new(Opcode::Call, 0, 0, 0),
+            Instruction::new(Opcode::Return, 0, 0, 0),
+        ];
+        caller.instruction_metadata = vec![InstructionMetadata::None; caller.code.len()];
+        module.functions.push(caller);
+        module.entry_func = 1;
+        module.island_init_func = 1;
+        vo_common_core::verifier::verify_module(&module).unwrap();
+        let target = TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN).unwrap();
+        let artifact = compile_wasm_aot(&module, &target).unwrap();
+        wasmparser::validate(&artifact.bytes).unwrap();
+        let operators = code_operators(&artifact.bytes, vo_body_index(2));
+        assert!(operators
+            .iter()
+            .any(|op| matches!(op, wasmparser::Operator::BrTable { .. })));
     }
 
     #[test]
@@ -1550,128 +1771,51 @@ mod tests {
         )));
     }
 
-    #[test]
-    fn allocation_dense_recursion_uses_gc_visible_rooted_frame() {
+    fn assert_durable_allocation_frame(module: VoModule, recursive: bool) {
         let target = TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN).unwrap();
-        let artifact = compile_wasm_aot(&allocation_dense_recursive_module(), &target).unwrap();
+        let artifact = compile_wasm_aot(&module, &target).unwrap();
         wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
             .validate_all(&artifact.bytes)
             .unwrap();
-
-        // Allocation-bearing recursion uses a bounded GC-visible native
-        // segment and retains a durable continuation entry for the segment
-        // boundary. The canonical adapter reaches both paths.
         let body = code_operators(&artifact.bytes, vo_body_index(0));
-        let rooted_body = vo_function_index(2);
-        let synchronous_runner = vo_function_index(9);
-        assert!(body.iter().any(|operator| matches!(
-            operator,
-            wasmparser::Operator::Call { function_index } if *function_index == rooted_body
-        )));
-        assert!(body.iter().any(|operator| matches!(
-            operator,
-            wasmparser::Operator::Call { function_index } if *function_index == synchronous_runner
-        )));
-        assert!(body
-            .iter()
-            .any(|operator| matches!(operator, wasmparser::Operator::Call { function_index: 7 })));
-        let rooted = code_operators(&artifact.bytes, vo_body_index(2));
-        assert!(rooted
-            .iter()
-            .any(|operator| matches!(operator, wasmparser::Operator::Call { function_index: 1 })));
-        assert_eq!(
-            rooted
-                .iter()
-                .filter(|operator| matches!(
-                    operator,
-                    wasmparser::Operator::I32Store { memarg } if memarg.offset == 80
-                ))
-                .count(),
-            3,
-            "only the two allocations and recursive call publish observable PCs"
+        assert!(
+            body.iter()
+                .any(|op| matches!(op, wasmparser::Operator::Call { function_index: 1 })),
+            "guest allocation remains generated code"
         );
-    }
-
-    #[test]
-    fn allocating_leaf_uses_gc_visible_rooted_frame() {
-        let target = TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN).unwrap();
-        let artifact = compile_wasm_aot(&allocating_leaf_module(), &target).unwrap();
-        wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
-            .validate_all(&artifact.bytes)
-            .unwrap();
-
-        let adapter = code_operators(&artifact.bytes, vo_body_index(0));
-        assert!(adapter.iter().any(|operator| matches!(
-            operator,
-            wasmparser::Operator::I32Store { memarg } if memarg.offset == 120
-        )));
-        // One chunk/limit pair publishes a spawned fiber's lazy base chunk;
-        // the other pairs publish and restore temporary overflow chunks.
-        for offset in [128, 144] {
-            assert_eq!(
-                adapter
-                    .iter()
-                    .filter(|operator| matches!(
-                        operator,
-                        wasmparser::Operator::I32Store { memarg } if memarg.offset == offset
-                    ))
-                    .count(),
-                3
+        assert!(
+            body.iter().any(|op| matches!(op,
+            wasmparser::Operator::I32Store { memarg } if memarg.offset == 0)),
+            "GC can pause with a durable continuation"
+        );
+        assert!(
+            !body.iter().any(|op| matches!(op,
+            wasmparser::Operator::I32Store { memarg } if memarg.offset == 120)),
+            "allocation-bearing frames cannot rely on a temporary native shadow stack"
+        );
+        if recursive {
+            assert!(
+                body.iter().any(|op| matches!(op,
+                wasmparser::Operator::Call { function_index }
+                    if *function_index == codegen::MATERIALIZED_FRAME_ALLOC_FUNCTION_INDEX)),
+                "recursive calls create independently traceable frames"
             );
         }
-        // Both the lazy base-chunk path and the overflow path skip the
-        // allocator-owned frame header before publishing their usable tops.
-        for destination in [7, 9] {
-            assert!(adapter.windows(3).any(|window| matches!(
-                window,
-                [
-                    wasmparser::Operator::I32Const { value },
-                    wasmparser::Operator::I32Add,
-                    wasmparser::Operator::LocalSet { local_index }
-                ] if *value == codegen::FRAME_STATE_BYTES as i32
-                    && *local_index == destination
-            )));
-        }
-        for chunk_bytes in [4 * 1024, 64 * 1024] {
-            assert!(adapter.iter().any(|operator| matches!(
-                operator,
-                wasmparser::Operator::I32Const { value } if *value == chunk_bytes
-            )));
-        }
-        assert_eq!(
-            adapter
-                .windows(2)
-                .filter(|window| matches!(
-                    window,
-                    [
-                        wasmparser::Operator::I32Const { value: 0 },
-                        wasmparser::Operator::Call { function_index: 6 }
-                    ]
-                ))
-                .count(),
-            2,
-            "shadow-stack chunks skip whole-block clearing; each rooted record is initialized"
-        );
     }
 
     #[test]
-    fn allocation_sparse_recursion_has_rooted_and_durable_paths() {
-        let target = TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN).unwrap();
-        let artifact = compile_wasm_aot(&allocation_sparse_recursive_module(), &target).unwrap();
-        wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
-            .validate_all(&artifact.bytes)
-            .unwrap();
+    fn allocation_dense_recursion_uses_durable_frames() {
+        assert_durable_allocation_frame(allocation_dense_recursive_module(), true);
+    }
 
-        let recursive_body = code_operators(&artifact.bytes, vo_body_index(0));
-        assert!(recursive_body.iter().any(|operator| matches!(
-            operator,
-            wasmparser::Operator::I32Store { memarg } if memarg.offset == 120
-        )));
-        assert!(recursive_body.iter().any(|operator| matches!(
-            operator,
-            wasmparser::Operator::Call { function_index }
-                if *function_index == vo_function_index(9)
-        )));
+    #[test]
+    fn allocating_leaf_uses_durable_frame() {
+        assert_durable_allocation_frame(allocating_leaf_module(), false);
+    }
+
+    #[test]
+    fn allocation_sparse_recursion_uses_durable_frames() {
+        assert_durable_allocation_frame(allocation_sparse_recursive_module(), true);
     }
 
     #[test]

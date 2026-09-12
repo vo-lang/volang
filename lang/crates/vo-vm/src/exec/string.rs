@@ -7,34 +7,32 @@ use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::string;
 use vo_runtime::slot::Slot;
 
-use crate::bytecode::Constant;
 use crate::exec::InstructionError;
 use crate::instruction::Instruction;
 use crate::vm::helpers::{stack_get, stack_set};
+use vo_runtime::bytecode::LoadedModule;
 
 #[inline]
 pub fn exec_str_new(
     stack: *mut Slot,
     bp: usize,
     inst: &Instruction,
-    constants: &[Constant],
+    module: &LoadedModule,
     gc: &mut Gc,
 ) -> Result<(), InstructionError> {
-    let constant = constants.get(inst.b as usize).ok_or_else(|| {
-        format!(
-            "StrNew constant index {} out of bounds for {} constants",
-            inst.b,
-            constants.len()
-        )
+    let str_ref = string::try_from_literal(gc, module, u32::from(inst.b))?.ok_or_else(|| {
+        match module.constants.get(inst.b as usize) {
+            Some(constant) => format!(
+                "StrNew constant {} expected string, got {constant:?}",
+                inst.b
+            ),
+            None => format!(
+                "StrNew constant index {} out of bounds for {} constants",
+                inst.b,
+                module.constants.len()
+            ),
+        }
     })?;
-    let Constant::String(s) = constant else {
-        return Err(format!(
-            "StrNew constant {} expected string, got {constant:?}",
-            inst.b
-        )
-        .into());
-    };
-    let str_ref = string::try_from_rust_str(gc, s)?;
     stack_set(stack, bp + inst.a as usize, str_ref as u64);
     Ok(())
 }

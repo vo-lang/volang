@@ -1,6 +1,10 @@
 //! Typed and rooted direct-call lowering and adapters.
 use super::*;
 
+pub(super) mod aggregate;
+mod control;
+use control::{DirectControl, StructuredControlPlan};
+
 pub(super) fn typed_local(body: &mut Function, locals: TypedFunctionLocals, slot: u16) {
     body.instruction(&W::LocalGet(locals.slot(slot)));
 }
@@ -145,16 +149,16 @@ pub(super) fn set_typed_block(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn compile_direct_scalar_instruction(
+fn compile_direct_scalar_instruction(
     body: &mut Function,
     locals: TypedFunctionLocals,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     resolved_externs: &ResolvedExternTable,
     function: &FunctionDef,
     pc: usize,
     instruction: vo_common_core::instruction::Instruction,
     by_pc: &BTreeMap<usize, u32>,
-    loop_depth: u32,
+    control: DirectControl<'_>,
     fast_functions: &BTreeMap<u32, FastAbiFunction>,
     materialized: &BTreeSet<u32>,
     static_data: &StaticData,
@@ -198,9 +202,26 @@ pub(super) fn compile_direct_scalar_instruction(
             body.instruction(&W::I64Const(value));
             set_typed_local(body, locals, instruction.a);
         }
+        Opcode::StrNew => {
+            let reference = static_data
+                .string_refs
+                .get(instruction.b as usize)
+                .copied()
+                .ok_or_else(|| {
+                    WasmAotError::InvalidModule(format!(
+                        "{} pc {pc} references missing string constant {}",
+                        function.name, instruction.b,
+                    ))
+                })?;
+            body.instruction(&W::I64Const(i64::from(reference)));
+            set_typed_local(body, locals, instruction.a);
+        }
         Opcode::Copy => {
             typed_local(body, locals, instruction.b);
             set_typed_local(body, locals, instruction.a);
+        }
+        Opcode::CopyN | Opcode::SlotGet | Opcode::SlotGetN | Opcode::SlotSet | Opcode::SlotSetN => {
+            aggregate::emit(body, locals, function, pc, instruction)?;
         }
         Opcode::PtrGet | Opcode::PtrGetN => {
             reject_typed_nil_reference(
@@ -469,7 +490,7 @@ pub(super) fn compile_direct_scalar_instruction(
         }
         Opcode::Jump => {
             let target = block_id(by_pc, branch_target(pc, &instruction), function)?;
-            set_typed_block(body, locals, target, loop_depth);
+            control.jump(body, locals, target);
             return Ok(true);
         }
         Opcode::JumpIf | Opcode::JumpIfNot => {
@@ -480,14 +501,7 @@ pub(super) fn compile_direct_scalar_instruction(
             if opcode == Opcode::JumpIf {
                 body.instruction(&W::I32Eqz);
             }
-            body.instruction(&W::If(BlockType::Empty))
-                .instruction(&W::I32Const(target as i32))
-                .instruction(&W::LocalSet(locals.block))
-                .instruction(&W::Else)
-                .instruction(&W::I32Const(fallthrough as i32))
-                .instruction(&W::LocalSet(locals.block))
-                .instruction(&W::End)
-                .instruction(&W::Br(loop_depth));
+            control.conditional(body, locals, target, fallthrough);
             return Ok(true);
         }
         Opcode::ForLoop => {
@@ -516,14 +530,7 @@ pub(super) fn compile_direct_scalar_instruction(
             });
             let target = block_id(by_pc, branch_target(pc, &instruction), function)?;
             let fallthrough = block_id(by_pc, pc + 1, function)?;
-            body.instruction(&W::If(BlockType::Empty))
-                .instruction(&W::I32Const(target as i32))
-                .instruction(&W::LocalSet(locals.block))
-                .instruction(&W::Else)
-                .instruction(&W::I32Const(fallthrough as i32))
-                .instruction(&W::LocalSet(locals.block))
-                .instruction(&W::End)
-                .instruction(&W::Br(loop_depth));
+            control.conditional(body, locals, target, fallthrough);
             return Ok(true);
         }
         Opcode::CallExtern => {
@@ -625,7 +632,7 @@ pub(super) fn compile_direct_scalar_instruction(
 pub(super) fn compile_typed_inline_call(
     body: &mut Function,
     caller_locals: TypedFunctionLocals,
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     resolved_externs: &ResolvedExternTable,
     caller: &FunctionDef,
     call: vo_common_core::instruction::Instruction,
@@ -676,7 +683,7 @@ pub(super) fn compile_typed_inline_call(
             pc,
             instruction,
             &empty_blocks,
-            0,
+            DirectControl::Dispatch { loop_depth: 0 },
             fast_functions,
             materialized,
             static_data,
@@ -698,7 +705,7 @@ pub(super) fn compile_typed_inline_call(
 }
 
 pub(super) fn compile_direct_scalar_function(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     resolved_externs: &ResolvedExternTable,
     function: &FunctionDef,
     fast_functions: &BTreeMap<u32, FastAbiFunction>,
@@ -728,24 +735,13 @@ pub(super) fn compile_direct_scalar_function(
         .instruction(&W::If(BlockType::Empty));
     return_typed_status(&mut body, STATUS_STACK_OVERFLOW, function.ret_slots);
     body.instruction(&W::End);
-    body.instruction(&W::I32Const(0))
-        .instruction(&W::LocalSet(locals.block))
-        .instruction(&W::Block(BlockType::Empty))
-        .instruction(&W::Loop(BlockType::Empty));
-    for _ in 0..blocks.len() {
-        body.instruction(&W::Block(BlockType::Empty));
-    }
-    let table: Vec<u32> = (0..blocks.len() as u32).collect();
-    body.instruction(&W::LocalGet(locals.block))
-        .instruction(&W::BrTable(Cow::Owned(table), blocks.len() as u32 + 1));
-    for (block_index, block) in blocks.iter().enumerate() {
-        body.instruction(&W::End);
-        emit_fuel_poll(&mut body, fuel_global, Some(function.ret_slots));
-        let loop_depth = (blocks.len() - block_index - 1) as u32;
+    let emit_block = |body: &mut Function, block_index: usize, control: DirectControl<'_>| {
+        let block = &blocks[block_index];
+        emit_fuel_poll(body, fuel_global, Some(function.ret_slots));
         let mut terminated = false;
         for pc in block.start..block.end {
             if compile_direct_scalar_instruction(
-                &mut body,
+                body,
                 locals,
                 module,
                 resolved_externs,
@@ -753,7 +749,7 @@ pub(super) fn compile_direct_scalar_function(
                 pc,
                 function.code[pc],
                 &by_pc,
-                loop_depth,
+                control,
                 fast_functions,
                 materialized,
                 static_data,
@@ -766,15 +762,38 @@ pub(super) fn compile_direct_scalar_function(
         if !terminated {
             let next = block_index + 1;
             if next < blocks.len() {
-                set_typed_block(&mut body, locals, next as u32, loop_depth);
+                control.jump(body, locals, next as u32);
             } else {
-                return_typed_status(&mut body, STATUS_INVALID_CONTROL_FLOW, function.ret_slots);
+                return_typed_status(body, STATUS_INVALID_CONTROL_FLOW, function.ret_slots);
             }
         }
+        Ok(())
+    };
+    if let Some(plan) = StructuredControlPlan::for_function(function, &blocks, &by_pc) {
+        plan.emit(&mut body, emit_block)?;
+    } else {
+        body.instruction(&W::I32Const(0))
+            .instruction(&W::LocalSet(locals.block))
+            .instruction(&W::Block(BlockType::Empty))
+            .instruction(&W::Loop(BlockType::Empty));
+        for _ in 0..blocks.len() {
+            body.instruction(&W::Block(BlockType::Empty));
+        }
+        let table: Vec<u32> = (0..blocks.len() as u32).collect();
+        body.instruction(&W::LocalGet(locals.block))
+            .instruction(&W::BrTable(Cow::Owned(table), blocks.len() as u32 + 1));
+        for block_index in 0..blocks.len() {
+            body.instruction(&W::End);
+            let loop_depth = (blocks.len() - block_index - 1) as u32;
+            emit_block(
+                &mut body,
+                block_index,
+                DirectControl::Dispatch { loop_depth },
+            )?;
+        }
+        body.instruction(&W::End).instruction(&W::End);
     }
-    body.instruction(&W::End)
-        .instruction(&W::End)
-        .instruction(&W::I32Const(STATUS_INVALID_CONTROL_FLOW));
+    body.instruction(&W::I32Const(STATUS_INVALID_CONTROL_FLOW));
     for _ in 0..function.ret_slots {
         body.instruction(&W::I64Const(0));
     }
@@ -887,401 +906,6 @@ pub(super) fn compile_retry_safe_recursive_adapter(
         .instruction(&W::LocalGet(STATUS))
         .instruction(&W::End);
     body
-}
-
-pub(super) fn compile_rooted_fast_adapter(
-    function_id: u32,
-    function: &FunctionDef,
-    rooted_body: u32,
-    synchronous_run: u32,
-    stack_overflow_panic_ref: u32,
-    globals: RuntimeGlobals,
-) -> Result<Function, WasmAotError> {
-    const STATUS: u32 = 3;
-    const FIBER: u32 = 4;
-    const PREVIOUS_HEAD: u32 = 5;
-    const PREVIOUS_CHUNK: u32 = 6;
-    const PREVIOUS_TOP: u32 = 7;
-    const PREVIOUS_LIMIT: u32 = 8;
-    const RECORD: u32 = 9;
-    const ROOT_FRAME: u32 = 10;
-    const END: u32 = 11;
-    const CURRENT_CHUNK: u32 = 12;
-    const CURRENT_LIMIT: u32 = 13;
-    const PREVIOUS_FRAME_LIMIT: u32 = 14;
-    const RAW: u32 = 15;
-    const USE_DURABLE: u32 = 16;
-    const STACK_USAGE: u32 = 17;
-
-    let frame_bytes = u32::from(function.local_slots)
-        .checked_mul(8)
-        .and_then(|bytes| bytes.checked_add(FRAME_STATE_BYTES))
-        .ok_or_else(|| {
-            WasmAotError::InvalidModule(format!(
-                "rooted frame for {} exceeds wasm32",
-                function.name
-            ))
-        })?;
-    let record_bytes = frame_bytes
-        .checked_add(SHADOW_FRAME_LINK_BYTES)
-        .ok_or_else(|| {
-            WasmAotError::InvalidModule(format!(
-                "rooted frame record for {} exceeds wasm32",
-                function.name
-            ))
-        })?;
-    // Heap-backed chunks retain the ordinary frame header at their base. The
-    // allocator keeps the block limit and allocation size there so a released
-    // chunk remains eligible for exact-size free-list reuse.
-    let minimum_chunk_bytes = record_bytes.checked_add(FRAME_STATE_BYTES).ok_or_else(|| {
-        WasmAotError::InvalidModule(format!(
-            "rooted frame chunk for {} exceeds wasm32",
-            function.name
-        ))
-    })?;
-    let base_chunk_bytes = SHADOW_STACK_BASE_CHUNK_BYTES.max(minimum_chunk_bytes);
-    let overflow_chunk_bytes = SHADOW_STACK_CHUNK_BYTES.max(minimum_chunk_bytes);
-    let call_cost = DIRECT_CALL_STACK_COST_BYTES.max(record_bytes);
-    let stack_usage_limit = STACK_RESERVE_BYTES.saturating_sub(frame_bytes);
-    let mut body = Function::new([(15, ValType::I32)]);
-    body.instruction(&W::GlobalGet(globals.current_fiber))
-        .instruction(&W::LocalTee(FIBER))
-        .instruction(&W::I32Eqz)
-        .instruction(&W::If(BlockType::Empty));
-    return_status(&mut body, STATUS_INVALID_CONTROL_FLOW);
-    body.instruction(&W::End)
-        .instruction(&W::LocalGet(DIRECT_BUDGET_LOCAL))
-        .instruction(&W::I32Const(call_cost as i32))
-        .instruction(&W::I32LtU)
-        .instruction(&W::LocalSet(USE_DURABLE));
-    for (local, offset) in [
-        (PREVIOUS_HEAD, FIBER_SHADOW_HEAD_OFFSET),
-        (PREVIOUS_CHUNK, FIBER_SHADOW_CHUNK_OFFSET),
-        (PREVIOUS_TOP, FIBER_SHADOW_TOP_OFFSET),
-        (PREVIOUS_LIMIT, FIBER_SHADOW_LIMIT_OFFSET),
-    ] {
-        body.instruction(&W::LocalGet(FIBER))
-            .instruction(&W::I32Load(MemArg {
-                offset,
-                align: 2,
-                memory_index: 0,
-            }))
-            .instruction(&W::LocalSet(local));
-    }
-    if frame_bytes > STACK_RESERVE_BYTES {
-        return_direct_stack_overflow_panic(&mut body, stack_overflow_panic_ref);
-    } else {
-        body.instruction(&W::LocalGet(PREVIOUS_HEAD))
-            .instruction(&W::If(BlockType::Result(ValType::I32)))
-            .instruction(&W::LocalGet(PREVIOUS_HEAD))
-            .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
-            .instruction(&W::I32Sub)
-            .instruction(&W::I32Load(MemArg {
-                offset: FRAME_STACK_USAGE_OFFSET,
-                align: 2,
-                memory_index: 0,
-            }))
-            .instruction(&W::Else)
-            .instruction(&W::LocalGet(DIRECT_OWNER_FRAME_LOCAL))
-            .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
-            .instruction(&W::I32Sub)
-            .instruction(&W::I32Load(MemArg {
-                offset: FRAME_STACK_USAGE_OFFSET,
-                align: 2,
-                memory_index: 0,
-            }))
-            .instruction(&W::End)
-            .instruction(&W::LocalTee(STACK_USAGE))
-            .instruction(&W::I32Const(stack_usage_limit as i32))
-            .instruction(&W::I32GtU)
-            .instruction(&W::If(BlockType::Empty));
-        return_direct_stack_overflow_panic(&mut body, stack_overflow_panic_ref);
-        body.instruction(&W::End)
-            .instruction(&W::LocalGet(STACK_USAGE))
-            .instruction(&W::I32Const(frame_bytes as i32))
-            .instruction(&W::I32Add)
-            .instruction(&W::LocalSet(STACK_USAGE));
-    }
-    body.instruction(&W::LocalGet(PREVIOUS_CHUNK))
-        .instruction(&W::I32Eqz)
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::I32Const(base_chunk_bytes as i32))
-        .instruction(&W::I32Const(FRAME_ALLOC_UNINITIALIZED))
-        .instruction(&W::Call(FRAME_ALLOC_FUNCTION_INDEX))
-        .instruction(&W::LocalTee(PREVIOUS_CHUNK))
-        .instruction(&W::I32Eqz)
-        .instruction(&W::If(BlockType::Empty));
-    return_status(&mut body, STATUS_OUT_OF_MEMORY);
-    body.instruction(&W::End)
-        .instruction(&W::LocalGet(PREVIOUS_CHUNK))
-        .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
-        .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(PREVIOUS_TOP))
-        .instruction(&W::LocalGet(PREVIOUS_CHUNK))
-        .instruction(&W::I32Const(base_chunk_bytes as i32))
-        .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(PREVIOUS_LIMIT));
-    // Spawned fibers acquire their base shadow chunk lazily. Publish it here so
-    // later rooted calls reuse it and fiber teardown can release it. Overflow
-    // chunks remain scoped to the individual direct call below.
-    for (offset, local) in [
-        (FIBER_SHADOW_CHUNK_OFFSET, PREVIOUS_CHUNK),
-        (FIBER_SHADOW_LIMIT_OFFSET, PREVIOUS_LIMIT),
-    ] {
-        body.instruction(&W::LocalGet(FIBER))
-            .instruction(&W::LocalGet(local))
-            .instruction(&W::I32Store(MemArg {
-                offset,
-                align: 2,
-                memory_index: 0,
-            }));
-    }
-    body.instruction(&W::End)
-        .instruction(&W::LocalGet(PREVIOUS_TOP))
-        .instruction(&W::LocalSet(RECORD))
-        .instruction(&W::LocalGet(PREVIOUS_CHUNK))
-        .instruction(&W::LocalSet(CURRENT_CHUNK))
-        .instruction(&W::LocalGet(PREVIOUS_LIMIT))
-        .instruction(&W::LocalSet(CURRENT_LIMIT))
-        .instruction(&W::LocalGet(RECORD))
-        .instruction(&W::I32Const(record_bytes as i32))
-        .instruction(&W::I32Add)
-        .instruction(&W::LocalTee(END))
-        .instruction(&W::LocalGet(RECORD))
-        .instruction(&W::I32LtU)
-        .instruction(&W::LocalGet(END))
-        .instruction(&W::LocalGet(CURRENT_LIMIT))
-        .instruction(&W::I32GtU)
-        .instruction(&W::I32Or)
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::I32Const(overflow_chunk_bytes as i32))
-        .instruction(&W::I32Const(FRAME_ALLOC_UNINITIALIZED))
-        .instruction(&W::Call(FRAME_ALLOC_FUNCTION_INDEX))
-        .instruction(&W::LocalTee(CURRENT_CHUNK))
-        .instruction(&W::I32Eqz)
-        .instruction(&W::If(BlockType::Empty));
-    return_status(&mut body, STATUS_OUT_OF_MEMORY);
-    body.instruction(&W::End)
-        .instruction(&W::LocalGet(CURRENT_CHUNK))
-        .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
-        .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(RECORD))
-        .instruction(&W::LocalGet(CURRENT_CHUNK))
-        .instruction(&W::I32Const(overflow_chunk_bytes as i32))
-        .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(CURRENT_LIMIT))
-        .instruction(&W::LocalGet(RECORD))
-        .instruction(&W::I32Const(record_bytes as i32))
-        .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(END))
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(RECORD))
-        .instruction(&W::I32Const(0))
-        .instruction(&W::I32Const(record_bytes as i32))
-        .instruction(&W::MemoryFill(0));
-    body.instruction(&W::LocalGet(RECORD))
-        .instruction(&W::LocalGet(PREVIOUS_HEAD))
-        .instruction(&W::I32Store(MemArg {
-            offset: SHADOW_PREVIOUS_HEAD_OFFSET,
-            align: 2,
-            memory_index: 0,
-        }));
-    body.instruction(&W::LocalGet(RECORD))
-        .instruction(&W::I32Const(SHADOW_FRAME_LINK_BYTES as i32))
-        .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(RAW))
-        .instruction(&W::LocalGet(RAW))
-        .instruction(&W::I32Const(function_id as i32))
-        .instruction(&W::I32Store(MemArg {
-            offset: FRAME_FUNCTION_ID_OFFSET,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::LocalGet(RAW))
-        .instruction(&W::LocalGet(DIRECT_OWNER_FRAME_LOCAL))
-        .instruction(&W::I32Store(MemArg {
-            offset: FRAME_ROOT_OWNER_OFFSET,
-            align: 2,
-            memory_index: 0,
-        }));
-    for (offset, local) in [
-        (FRAME_LIMIT_OFFSET, END),
-        (FRAME_PARENT_OFFSET, DIRECT_OWNER_FRAME_LOCAL),
-        (FRAME_STACK_USAGE_OFFSET, STACK_USAGE),
-    ] {
-        body.instruction(&W::LocalGet(RAW))
-            .instruction(&W::LocalGet(local))
-            .instruction(&W::I32Store(MemArg {
-                offset,
-                align: 2,
-                memory_index: 0,
-            }));
-    }
-    body.instruction(&W::LocalGet(RAW))
-        .instruction(&W::I32Const(FRAME_CHILD_RUNNING))
-        .instruction(&W::I32Store(MemArg {
-            offset: FRAME_COMPLETION_STATUS_OFFSET,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::LocalGet(RAW))
-        .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
-        .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(ROOT_FRAME));
-    for (offset, local) in [
-        (FIBER_SHADOW_HEAD_OFFSET, ROOT_FRAME),
-        (FIBER_SHADOW_TOP_OFFSET, END),
-    ] {
-        body.instruction(&W::LocalGet(FIBER))
-            .instruction(&W::LocalGet(local))
-            .instruction(&W::I32Store(MemArg {
-                offset,
-                align: 2,
-                memory_index: 0,
-            }));
-    }
-    body.instruction(&W::LocalGet(CURRENT_CHUNK))
-        .instruction(&W::LocalGet(PREVIOUS_CHUNK))
-        .instruction(&W::I32Ne)
-        .instruction(&W::If(BlockType::Empty));
-    for (offset, local) in [
-        (FIBER_SHADOW_CHUNK_OFFSET, CURRENT_CHUNK),
-        (FIBER_SHADOW_LIMIT_OFFSET, CURRENT_LIMIT),
-    ] {
-        body.instruction(&W::LocalGet(FIBER))
-            .instruction(&W::LocalGet(local))
-            .instruction(&W::I32Store(MemArg {
-                offset,
-                align: 2,
-                memory_index: 0,
-            }));
-    }
-    body.instruction(&W::End)
-        .instruction(&W::LocalGet(FIBER))
-        .instruction(&W::LocalGet(USE_DURABLE))
-        .instruction(&W::If(BlockType::Result(ValType::I32)))
-        .instruction(&W::I32Const(0))
-        .instruction(&W::Else)
-        .instruction(&W::LocalGet(DIRECT_BUDGET_LOCAL))
-        .instruction(&W::I32Const(call_cost as i32))
-        .instruction(&W::I32Sub)
-        .instruction(&W::End)
-        .instruction(&W::I32Store(MemArg {
-            offset: FIBER_DIRECT_BUDGET_OFFSET,
-            align: 2,
-            memory_index: 0,
-        }));
-    if function.param_slots > 0 {
-        body.instruction(&W::LocalGet(ROOT_FRAME))
-            .instruction(&W::LocalGet(FRAME_LOCAL))
-            .instruction(&W::I32Const(i32::from(function.param_slots) * 8))
-            .instruction(&W::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
-    }
-    body.instruction(&W::GlobalGet(globals.frame_limit))
-        .instruction(&W::LocalSet(PREVIOUS_FRAME_LIMIT))
-        .instruction(&W::LocalGet(CURRENT_LIMIT))
-        .instruction(&W::LocalGet(PREVIOUS_FRAME_LIMIT))
-        .instruction(&W::I32Ne)
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::LocalGet(CURRENT_LIMIT))
-        .instruction(&W::GlobalSet(globals.frame_limit))
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(USE_DURABLE))
-        .instruction(&W::If(BlockType::Result(ValType::I32)))
-        .instruction(&W::I32Const(function_id as i32))
-        .instruction(&W::LocalGet(ROOT_FRAME))
-        .instruction(&W::LocalGet(DIRECT_OWNER_FRAME_LOCAL))
-        .instruction(&W::Call(synchronous_run))
-        .instruction(&W::Else)
-        .instruction(&W::LocalGet(ROOT_FRAME))
-        .instruction(&W::Call(rooted_body))
-        .instruction(&W::End)
-        .instruction(&W::LocalSet(STATUS))
-        .instruction(&W::LocalGet(CURRENT_LIMIT))
-        .instruction(&W::LocalGet(PREVIOUS_FRAME_LIMIT))
-        .instruction(&W::I32Ne)
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::LocalGet(PREVIOUS_FRAME_LIMIT))
-        .instruction(&W::GlobalSet(globals.frame_limit))
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(STATUS))
-        .instruction(&W::I32Const(STATUS_PANIC))
-        .instruction(&W::I32Eq)
-        .instruction(&W::If(BlockType::Empty))
-        // The synchronous durable subtree has completed its own explicit
-        // frames. Continue the active panic through the owning resumable frame
-        // exactly as an ordinary materialized child completion would.
-        .instruction(&W::LocalGet(DIRECT_OWNER_FRAME_LOCAL))
-        .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
-        .instruction(&W::I32Sub)
-        .instruction(&W::I32Const(3))
-        .instruction(&W::I32Store(MemArg {
-            offset: FRAME_UNWIND_MODE_OFFSET,
-            align: 2,
-            memory_index: 0,
-        }))
-        .instruction(&W::I32Const(STATUS_UNWIND_PENDING))
-        .instruction(&W::LocalSet(STATUS))
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(STATUS))
-        .instruction(&W::I32Eqz)
-        .instruction(&W::If(BlockType::Empty));
-    if function.ret_slots > 0 {
-        body.instruction(&W::LocalGet(FRAME_LOCAL))
-            .instruction(&W::I32Const(i32::from(function.param_slots) * 8))
-            .instruction(&W::I32Add)
-            .instruction(&W::LocalGet(ROOT_FRAME))
-            .instruction(&W::I32Const(i32::from(function.param_slots) * 8))
-            .instruction(&W::I32Add)
-            .instruction(&W::I32Const(i32::from(function.ret_slots) * 8))
-            .instruction(&W::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
-    }
-    body.instruction(&W::End);
-    for (offset, local) in [
-        (FIBER_SHADOW_HEAD_OFFSET, PREVIOUS_HEAD),
-        (FIBER_SHADOW_TOP_OFFSET, PREVIOUS_TOP),
-        // The canonical direct ABI receives the fiber's current budget. Keep
-        // that value in the parameter instead of loading a duplicate copy
-        // from the fiber on every rooted call.
-        (FIBER_DIRECT_BUDGET_OFFSET, DIRECT_BUDGET_LOCAL),
-    ] {
-        body.instruction(&W::LocalGet(FIBER))
-            .instruction(&W::LocalGet(local))
-            .instruction(&W::I32Store(MemArg {
-                offset,
-                align: 2,
-                memory_index: 0,
-            }));
-    }
-    body.instruction(&W::LocalGet(CURRENT_CHUNK))
-        .instruction(&W::LocalGet(PREVIOUS_CHUNK))
-        .instruction(&W::I32Ne)
-        .instruction(&W::If(BlockType::Empty));
-    for (offset, local) in [
-        (FIBER_SHADOW_CHUNK_OFFSET, PREVIOUS_CHUNK),
-        (FIBER_SHADOW_LIMIT_OFFSET, PREVIOUS_LIMIT),
-    ] {
-        body.instruction(&W::LocalGet(FIBER))
-            .instruction(&W::LocalGet(local))
-            .instruction(&W::I32Store(MemArg {
-                offset,
-                align: 2,
-                memory_index: 0,
-            }));
-    }
-    body.instruction(&W::LocalGet(CURRENT_CHUNK))
-        .instruction(&W::Call(FRAME_FREE_FUNCTION_INDEX))
-        .instruction(&W::Drop)
-        .instruction(&W::End)
-        .instruction(&W::LocalGet(STATUS))
-        .instruction(&W::End);
-    Ok(body)
 }
 
 pub(super) fn block_id(

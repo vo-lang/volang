@@ -1,0 +1,41 @@
+package main
+
+func empty() {}
+func zero() int { return 11 }
+func captureZero(value int) func() int { return func() int { return value } }
+func five(a,b,c,d,e int) int { return a + 3*b + 5*c + 7*d + 11*e }
+func captureFive(value int) func(int,int,int,int,int) int {
+    return func(a,b,c,d,e int) int { return value + a + 3*b + 5*c + 7*d + 11*e }
+}
+func six(a,b,c,d,e,f int) int { return a + 3*b + 5*c + 7*d + 11*e + 13*f }
+func captureSix(value int) func(int,int,int,int,int,int) int {
+    return func(a,b,c,d,e,f int) int { return value + a + 3*b + 5*c + 7*d + 11*e + 13*f }
+}
+func textSix(text string,a,b,c,d,e int) string { return text }
+func captureText(value string) func(string,int,int,int,int,int) string {
+    return func(text string,a,b,c,d,e int) string { return value }
+}
+func check() {
+    emptyCalls := []func(){empty, func() {}}
+    for i := 0; i < 2000; i++ { emptyCalls[i & 1]() }
+    zeroCalls := []func() int{zero, captureZero(17)}
+    total := 0
+    for i := 0; i < 6000; i++ { total += zeroCalls[i & 1]() }
+    assert(total == 84000, "zero-argument hidden slot layout")
+    fiveCalls := []func(int,int,int,int,int) int{five, captureFive(17)}
+    total = 0
+    for i := 0; i < 6000; i++ { total += fiveCalls[i & 1](1,2,3,4,5) }
+    assert(total == 681000, "five register lanes and hidden-slot spill")
+    sixCalls := []func(int,int,int,int,int,int) int{six,
+        func(a,b,c,d,e,f int) int { return a + 3*b + 5*c + 7*d + 11*e + 13*f },
+        captureSix(17)}
+    total = 0
+    for i := 0; i < 6000; i++ { total += sixCalls[i % 3](1,2,3,4,5,6) }
+    assert(total == 1132000, "register and shadow-tail argument placement")
+    textCalls := []func(string,int,int,int,int,int) string{textSix, captureText("captured")}
+    for i := 0; i < 6000; i++ {
+        value := textCalls[i & 1]("argument",1,2,3,4,5)
+        if i & 1 == 0 { assert(value == "argument") } else { assert(value == "captured") }
+    }
+}
+func main() { check(); println("dynamic-hidden-args: PASS") }

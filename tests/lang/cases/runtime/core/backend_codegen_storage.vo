@@ -1,0 +1,107 @@
+package main
+
+type StorageNode struct {
+	value int
+}
+
+func arrayRead(a [4]int, i int) int {
+	return a[i]
+}
+
+func arrayValues(x int) int {
+	a := [4]int{x, x + 1, x + 2, x + 3}
+	b := a
+	b[0] = 99
+	assert(a[0] == x)
+	return arrayRead(b, 3)
+}
+
+func references() {
+	left := [2]*StorageNode{&StorageNode{7}, &StorageNode{9}}
+	right := left
+	right[0] = &StorageNode{11}
+	assert(left[0].value == 7 && right[0].value == 11)
+	right[1].value = 13
+	assert(left[1].value == 13)
+	narrow := [3]int8{-128, 0, 127}
+	copied := narrow
+	copied[0] = 1
+	assert(narrow[0] == -128 && copied[2] == 127)
+}
+
+func lookups() {
+	m := map[int]int{1: 42}
+	change := func() int {
+		m = map[int]int{1: 99}
+		return 1
+	}
+	assert(m[change()] == 42)
+	assert(m[1] == 99)
+	wide := map[[2]int]int{[2]int{3, 4}: 56}
+	assert(wide[[2]int{3, 4}] == 56)
+	boxed := map[any]int{3: 7, "x": 9}
+	value, ok := boxed["x"]
+	assert(ok && value == 9)
+}
+
+func scopes() (out int) {
+	var read func() int
+	{
+		value := 41
+		read = func() int {
+			return value
+		}
+	}
+	{
+		value := "after"
+		assert(value == "after")
+	}
+	defer func() {
+		out += read()
+	}()
+	sum := 0
+	loop: for sum < 3 {
+		{
+			var a [2]int
+			a[1] = sum
+			sum = a[1] + 1
+		}
+		if sum == 2 {
+			continue loop
+		}
+		if sum == 3 {
+			break loop
+		}
+	}
+	return sum
+}
+
+func nestedPanic() {
+	called := false
+	defer func() {
+		assert(recover() != nil && !called)
+	}()
+	a := [2][2]int{}
+	bad := 2
+	effect := func() int {
+		called = true
+		return 0
+	}
+	_ = a[bad][effect()]
+}
+
+func immediates(x int) int {
+	return x + 100000 + 2147483647 - 2147483648
+}
+
+func main() {
+	for i := 0; i < 200; i++ {
+		assert(arrayValues(i) == i + 3)
+		references()
+		lookups()
+		assert(scopes() == 44)
+		assert(immediates(i) == i + 99999)
+	}
+	nestedPanic()
+	println("backend codegen storage ok")
+}

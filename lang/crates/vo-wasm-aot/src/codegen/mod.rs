@@ -27,6 +27,9 @@ mod functions;
 use functions::*;
 mod heap;
 use heap::*;
+mod barriers;
+mod memory_contract;
+use memory_contract::*;
 mod metadata;
 use metadata::*;
 mod objects;
@@ -66,19 +69,20 @@ use wasm_encoder::{
 
 use crate::{
     WasmAotError, WASM_AOT_ALLOC_EXPORT, WASM_AOT_DEBUG_METADATA_SECTION, WASM_AOT_ENTRY_EXPORT,
-    WASM_AOT_EXTERN_SECTION, WASM_AOT_FUEL_EXPORT, WASM_AOT_MAP_LOOKUP_EXPORT,
-    WASM_AOT_MEMORY_EXPORT, WASM_AOT_PANIC_DATA_EXPORT, WASM_AOT_PANIC_MESSAGE_EXPORT,
-    WASM_AOT_PANIC_TYPE_EXPORT, WASM_AOT_RAISE_HOST_PANIC_EXPORT, WASM_AOT_RUNTIME_FUNCTION,
-    WASM_AOT_RUNTIME_METADATA_SECTION, WASM_AOT_RUNTIME_MODULE, WASM_AOT_SEQUENCE_ALLOC_EXPORT,
-    WASM_AOT_TYPED_ALLOC_EXPORT, WASM_PAGE_BYTES,
+    WASM_AOT_EXTERN_SECTION, WASM_AOT_FUEL_EXPORT, WASM_AOT_INLINE_SOURCE_SECTION,
+    WASM_AOT_MAP_LOOKUP_EXPORT, WASM_AOT_MEMORY_EXPORT, WASM_AOT_PANIC_DATA_EXPORT,
+    WASM_AOT_PANIC_MESSAGE_EXPORT, WASM_AOT_PANIC_TYPE_EXPORT, WASM_AOT_RAISE_HOST_PANIC_EXPORT,
+    WASM_AOT_RUNTIME_FUNCTION, WASM_AOT_RUNTIME_METADATA_SECTION, WASM_AOT_RUNTIME_MODULE,
+    WASM_AOT_SEQUENCE_ALLOC_EXPORT, WASM_AOT_TYPED_ALLOC_EXPORT, WASM_PAGE_BYTES,
 };
 
 const STATIC_DATA_START: u32 = 1024;
+const MAP_HEADER_BYTES: u32 = 72;
+const MAP_USED_OFFSET: u64 = 64;
+const MAP_BACKING_HEADER_BYTES: i32 = 16;
+const MAP_FORWARD_BASE: i64 = 3;
 const STACK_RESERVE_BYTES: u32 = 16 * 1024 * 1024;
 const SHADOW_STACK_BASE_CHUNK_BYTES: u32 = 4 * 1024;
-const SHADOW_STACK_CHUNK_BYTES: u32 = 64 * 1024;
-const SHADOW_FRAME_LINK_BYTES: u32 = 8;
-const SHADOW_PREVIOUS_HEAD_OFFSET: u64 = 0;
 // Keep direct Wasm recursion below conservative cross-engine native-stack
 // limits while accounting it against the same 16 MiB guest stack contract.
 // Seventy-two calls preserve useful recursion while leaving enough host stack
@@ -102,6 +106,8 @@ const STATUS_DEFER_DONE: i32 = 13;
 const STATUS_UNWIND_PENDING: i32 = 14;
 const STATUS_FUEL_EXHAUSTED: i32 = 15;
 const STATUS_CALL_TRANSFER: i32 = 16;
+const STATUS_YIELD: i32 = 17;
+const SCHEDULER_BLOCK_QUANTUM: i32 = 4096;
 const STATUS_INVALID_CONTROL_FLOW: i32 = 126;
 const SCHEDULER_CALL_QUANTUM: i32 = 256;
 
@@ -109,7 +115,7 @@ const SCHEDULER_CALL_QUANTUM: i32 = 256;
 // completion status, and cumulative stack usage in the frame header lets the
 // scheduler trampoline calls without consuming the host engine's native
 // Wasm stack.
-pub(crate) const FRAME_STATE_BYTES: u32 = 104;
+pub(crate) const FRAME_STATE_BYTES: u32 = 88;
 const FRAME_RESUME_OFFSET: u64 = 0;
 const FRAME_PENDING_CALL_OFFSET: u64 = 4;
 const FRAME_LIMIT_OFFSET: u64 = 8;
@@ -129,13 +135,6 @@ const FRAME_PREVIOUS_DIRECT_DEFER_RECOVERED_OFFSET: u64 = 60;
 const FRAME_PREVIOUS_DIRECT_DEFER_BASE_GENERATION_OFFSET: u64 = 64;
 const FRAME_RECOVERED_ORIGINAL_PANIC_OFFSET: u64 = 72;
 const FRAME_DEBUG_PC_OFFSET: u64 = 80;
-// Materialized calls use the same per-fiber chunk stack as rooted direct
-// calls. These links restore the allocator state when the child completes;
-// the current chunk is released only when this frame opened it.
-const FRAME_PREVIOUS_STACK_CHUNK_OFFSET: u64 = 88;
-const FRAME_PREVIOUS_STACK_TOP_OFFSET: u64 = 92;
-const FRAME_PREVIOUS_STACK_LIMIT_OFFSET: u64 = 96;
-const FRAME_STACK_CHUNK_OFFSET: u64 = 100;
 const FRAME_CHILD_RUNNING: i32 = -1;
 const FIBER_RECORD_BYTES: u32 = 176;
 const FIBER_NEXT_OFFSET: u64 = 0;
@@ -182,7 +181,6 @@ const MAP_GROW_FUNCTION_INDEX: u32 = 5;
 const FRAME_ALLOC_FUNCTION_INDEX: u32 = 6;
 const FRAME_FREE_FUNCTION_INDEX: u32 = 7;
 const STRING_DECODE_FUNCTION_INDEX: u32 = 8;
-const GC_MARK_FUNCTION_INDEX: u32 = 9;
 const GC_COLLECT_FUNCTION_INDEX: u32 = 10;
 const RAISE_PANIC_FUNCTION_INDEX: u32 = 11;
 const DEEP_EQUAL_FUNCTION_INDEX: u32 = 12;
@@ -197,8 +195,8 @@ pub(crate) const MATERIALIZED_FRAME_ALLOC_FUNCTION_INDEX: u32 = 20;
 pub(crate) const MATERIALIZED_FRAME_FREE_FUNCTION_INDEX: u32 = 21;
 pub(crate) const FIRST_VO_FUNCTION_INDEX: u32 = 22;
 const DIRECT_FUNCTION_TYPE_INDEX: u32 = 8;
-const FRAME_ALLOC_UNINITIALIZED: i32 = 0;
 const FRAME_ALLOC_ZEROED: i32 = 1;
+const FRAME_ALLOC_FIBER: i32 = 2;
 const DEFAULT_MAP_CAPACITY: u32 = 8;
 const HEAP_HEADER_BYTES: u32 = 32;
 const QUEUE_LENGTH_OFFSET: u64 = 0;
@@ -220,17 +218,8 @@ const QUEUE_PENDING_RECV_DESTINATION_OFFSET: u64 = 96;
 const QUEUE_PENDING_RECV_OK_DESTINATION_OFFSET: u64 = 104;
 const QUEUE_PENDING_RECV_TOKEN_OFFSET: u64 = 112;
 const QUEUE_HEADER_BYTES: u32 = 120;
-// A compact debt window returns short-lived objects to the size-segregated
-// reuse path before the bounded ownership index fills. Logarithmic ownership
-// lookup keeps tracing cost predictable even for multi-megabyte live graphs.
+// Allocating durable blocks return bounded work slices to the host owner.
 const GC_DEBT_TRIGGER_BYTES: i32 = 8 * 1024 * 1024;
-// The index contains one sorted header pointer for every distinct bump-heap
-// allocation. Reused objects keep their original entry. One million entries
-// cover at least 32 MiB of minimum-sized heap objects; images that outgrow the
-// index retain correctness through the bounded-index fallback in the lookup
-// helper.
-const ALLOCATION_INDEX_CAPACITY: u32 = 1024 * 1024;
-const ALLOCATION_INDEX_BYTES: u32 = ALLOCATION_INDEX_CAPACITY * 4;
 const ALLOCATION_DESCRIPTOR_NONE: i32 = 0;
 const INLINE_DYNAMIC_DISPATCH_LIMIT: usize = 6;
 
@@ -256,7 +245,8 @@ struct StaticData {
     index_panic_prefix_ref: u32,
     index_panic_middle_ref: u32,
     stack_base: u32,
-    allocation_index_base: u32,
+    stack_limit: u32,
+    barrier_pages: u32,
     memory_pages: u32,
     dynamic_dispatch: BTreeMap<(u32, usize, DynamicDispatchKind), DynamicDispatchTable>,
     dynamic_lookup_function: u32,
@@ -322,10 +312,6 @@ impl FunctionCapabilities {
             && !self.may_suspend
             && !self.may_allocate
             && !self.has_host_effect
-    }
-
-    fn rooted_fast_abi(self) -> bool {
-        !self.may_suspend
     }
 }
 
@@ -462,28 +448,24 @@ impl AllocationDescriptors {
 
 #[derive(Debug, Clone, Copy)]
 struct RuntimeGlobals {
-    heap: u32,
-    heap_head: u32,
-    heap_tail: u32,
     allocation_descriptor: u32,
-    free_objects: u32,
     gc_debt: u32,
     fiber_head: u32,
     fiber_tail: u32,
     current_fiber: u32,
     scheduler_progress: u32,
-    free_blocks: u32,
     frame_limit: u32,
-    clone_generation: u32,
     clone_failed: u32,
-    gc_work_head: u32,
-    gc_mark_active: u32,
+    barrier_enabled: u32,
     clone_work_head: u32,
     clone_active: u32,
-    allocation_count: u32,
     dynamic_compare_failed: u32,
     host_wait_pending: u32,
     scheduler_initialized: u32,
+    select_random: u32,
+    execution_quantum: u32,
+    host_yield_requested: u32,
+    memory_failed: u32,
     fuel: u32,
 }
 
@@ -534,6 +516,8 @@ pub(crate) fn compile_core_module(
             }
         }
     }
+    let analysis = ModuleAnalysis::new(vo_module);
+    let vo_module = &analysis;
     let mut static_data = build_static_data(vo_module)?;
     let reachable = reachable_functions(vo_module, resolved_externs)?;
     let statically_reachable = statically_reachable_functions(vo_module)?;
@@ -554,9 +538,7 @@ pub(crate) fn compile_core_module(
         .collect();
     let allocation_descriptors = build_allocation_descriptors(vo_module, &reachable)?;
     let capabilities = analyze_function_capabilities(vo_module, resolved_externs, &reachable)?;
-    let rooted_candidates = rooted_candidate_functions(&reachable, &capabilities);
-    let materialized =
-        materialized_functions(vo_module, &reachable, &capabilities, &rooted_candidates)?;
+    let materialized = materialized_functions(vo_module, &reachable, &capabilities)?;
     let retry_safe_recursive = retry_safe_scalar_recursive_functions(
         vo_module,
         resolved_externs,
@@ -580,21 +562,8 @@ pub(crate) fn compile_core_module(
                     .is_some_and(|capabilities| capabilities.typed_fast_abi())
         })
         .collect();
-    let rooted_function_ids: Vec<u32> = reachable
-        .iter()
-        .copied()
-        .filter(|function_id| {
-            !materialized.contains(function_id)
-                && capabilities.get(function_id).is_some_and(|capabilities| {
-                    !capabilities.typed_fast_abi() && capabilities.rooted_fast_abi()
-                })
-        })
-        .collect();
-    // Every direct function retains a durable lowering. Rooted adapters use
-    // it when their bounded native segment is exhausted, and the scheduler
-    // uses it for explicit fiber/continuation entry. Keeping the secondary
-    // entry universal makes the transition closed under every static and
-    // dynamic callee instead of relying on a benchmark-shaped call graph.
+    // Every direct function retains a durable scheduler entry, including
+    // explicit Fiber/continuation entry and bounded recursive fallback.
     let direct_slow_function_ids: Vec<u32> = reachable
         .iter()
         .copied()
@@ -607,19 +576,13 @@ pub(crate) fn compile_core_module(
         .filter(|function_id| materialized.contains(function_id))
         .collect();
     let first_fast_function_index = FIRST_VO_FUNCTION_INDEX + reachable.len() as u32;
-    let first_rooted_function_index = first_fast_function_index + fast_function_ids.len() as u32;
-    let rooted_functions: BTreeMap<u32, u32> = rooted_function_ids
-        .iter()
-        .enumerate()
-        .map(|(index, function_id)| (*function_id, first_rooted_function_index + index as u32))
-        .collect();
     let retry_safe_recursive_ids: Vec<u32> = reachable
         .iter()
         .copied()
         .filter(|function_id| retry_safe_recursive.contains(function_id))
         .collect();
     let first_retry_slow_function_index =
-        first_rooted_function_index + rooted_function_ids.len() as u32;
+        first_fast_function_index + fast_function_ids.len() as u32;
     let retry_slow_functions: BTreeMap<u32, u32> = retry_safe_recursive_ids
         .iter()
         .enumerate()
@@ -755,7 +718,7 @@ pub(crate) fn compile_core_module(
     functions.function(4);
     functions.function(1);
     functions.function(6);
-    functions.function(1);
+    functions.function(4); // materialized frame: size and function identity
     functions.function(1);
     for function_id in &reachable {
         functions.function(if materialized.contains(function_id) {
@@ -766,9 +729,6 @@ pub(crate) fn compile_core_module(
     }
     for function_id in &fast_function_ids {
         functions.function(fast_functions[function_id].type_index);
-    }
-    for _ in &rooted_function_ids {
-        functions.function(1);
     }
     for _ in &retry_safe_recursive_ids {
         functions.function(1);
@@ -828,69 +788,42 @@ pub(crate) fn compile_core_module(
     });
     module.section(&tables);
 
-    let global_slots = vo_module
-        .globals
-        .iter()
-        .try_fold(0usize, |total, global| {
-            total.checked_add(global.slots as usize)
-        })
-        .ok_or_else(|| WasmAotError::InvalidModule("global slot count overflow".into()))?;
-    let mut globals = GlobalSection::new();
-    for _ in 0..global_slots {
-        globals.global(
-            GlobalType {
-                val_type: ValType::I64,
-                mutable: true,
-                shared: false,
-            },
-            &ConstExpr::i64_const(0),
-        );
-    }
-    let heap_base = static_data
-        .allocation_index_base
-        .checked_add(ALLOCATION_INDEX_BYTES)
-        .ok_or_else(|| WasmAotError::InvalidModule("Core-Wasm allocation index overflow".into()))?;
+    // Guest globals are fields of each Island state. Only scheduler-wide
+    // execution registers belong to the Wasm instance's global section.
     let runtime_globals = RuntimeGlobals {
-        heap: global_slots as u32,
-        heap_head: global_slots as u32 + 1,
-        heap_tail: global_slots as u32 + 2,
-        allocation_descriptor: global_slots as u32 + 3,
-        free_objects: global_slots as u32 + 4,
-        gc_debt: global_slots as u32 + 5,
-        fiber_head: global_slots as u32 + 6,
-        fiber_tail: global_slots as u32 + 7,
-        current_fiber: global_slots as u32 + 8,
-        scheduler_progress: global_slots as u32 + 9,
-        free_blocks: global_slots as u32 + 10,
-        frame_limit: global_slots as u32 + 11,
-        clone_generation: global_slots as u32 + 12,
-        clone_failed: global_slots as u32 + 13,
-        gc_work_head: global_slots as u32 + 14,
-        gc_mark_active: global_slots as u32 + 15,
-        clone_work_head: global_slots as u32 + 16,
-        clone_active: global_slots as u32 + 17,
-        allocation_count: global_slots as u32 + 18,
-        dynamic_compare_failed: global_slots as u32 + 19,
-        host_wait_pending: global_slots as u32 + 20,
-        scheduler_initialized: global_slots as u32 + 21,
-        fuel: global_slots as u32 + 22,
+        allocation_descriptor: 0,
+        gc_debt: 1,
+        fiber_head: 2,
+        fiber_tail: 3,
+        current_fiber: 4,
+        scheduler_progress: 5,
+        frame_limit: 6,
+        clone_failed: 7,
+        barrier_enabled: 8,
+        clone_work_head: 9,
+        clone_active: 10,
+        dynamic_compare_failed: 11,
+        host_wait_pending: 12,
+        scheduler_initialized: 13,
+        select_random: 14,
+        execution_quantum: 15,
+        host_yield_requested: 16,
+        memory_failed: 17,
+        fuel: 18,
     };
-    globals.global(
-        GlobalType {
-            val_type: ValType::I32,
-            mutable: true,
-            shared: false,
-        },
-        &ConstExpr::i32_const(heap_base as i32),
-    );
-    for _ in 0..21 {
+    let mut globals = GlobalSection::new();
+    for index in 0..runtime_globals.fuel {
         globals.global(
             GlobalType {
                 val_type: ValType::I32,
                 mutable: true,
                 shared: false,
             },
-            &ConstExpr::i32_const(0),
+            &ConstExpr::i32_const(if index == runtime_globals.select_random {
+                0x6d2b79f5
+            } else {
+                0
+            }),
         );
     }
     globals.global(
@@ -958,6 +891,16 @@ pub(crate) fn compile_core_module(
         runtime_globals.fuel,
     );
     exports.export(WASM_AOT_MEMORY_EXPORT, ExportKind::Memory, 0);
+    for (name, index) in [
+        ("vo_current_fiber", runtime_globals.current_fiber),
+        ("vo_fiber_head", runtime_globals.fiber_head),
+        ("vo_gc_debt", runtime_globals.gc_debt),
+        ("vo_gc_barrier", runtime_globals.barrier_enabled),
+        ("vo_memory_failed", runtime_globals.memory_failed),
+        ("vo_execution_quantum", runtime_globals.execution_quantum),
+    ] {
+        exports.export(name, ExportKind::Global, index);
+    }
     module.section(&exports);
 
     let mut elements = ElementSection::new();
@@ -974,10 +917,7 @@ pub(crate) fn compile_core_module(
     module.section(&elements);
 
     let mut code = CodeSection::new();
-    code.function(&compile_allocator(
-        runtime_globals,
-        static_data.allocation_index_base,
-    ));
+    code.function(&compile_allocator(runtime_globals));
     code.function(&compile_string_hash());
     code.function(&compile_string_compare());
     code.function(&compile_map_lookup());
@@ -986,14 +926,10 @@ pub(crate) fn compile_core_module(
         runtime_globals,
         allocation_descriptors.frame,
     ));
-    code.function(&compile_frame_free(runtime_globals.free_blocks));
+    code.function(&compile_frame_free());
     code.function(&compile_string_decode());
-    code.function(&compile_gc_mark(runtime_globals, &allocation_descriptors));
-    code.function(&compile_gc_collect(
-        vo_module,
-        runtime_globals,
-        &allocation_descriptors,
-    ));
+    code.function(&compile_gc_mark());
+    code.function(&compile_gc_collect(runtime_globals));
     code.function(&compile_raise_panic(
         runtime_globals,
         allocation_descriptors.panic_context,
@@ -1014,10 +950,7 @@ pub(crate) fn compile_core_module(
         runtime_globals,
         &allocation_descriptors,
     ));
-    code.function(&compile_find_allocation(
-        runtime_globals,
-        static_data.allocation_index_base,
-    ));
+    code.function(&compile_find_allocation());
     code.function(&compile_index_panic_message(
         runtime_globals,
         static_data.index_panic_prefix_ref,
@@ -1047,15 +980,7 @@ pub(crate) fn compile_core_module(
                 &allocation_descriptors,
                 run_defer_index,
                 true,
-            )?
-        } else if rooted_functions.contains_key(function_id) {
-            compile_rooted_fast_adapter(
-                *function_id,
-                function,
-                rooted_functions[function_id],
-                synchronous_run_index,
-                static_data.runtime_panic_refs[STATUS_STACK_OVERFLOW as usize],
-                runtime_globals,
+                capabilities[function_id].may_suspend,
             )?
         } else {
             compile_typed_fast_adapter(function, fast_functions[function_id])
@@ -1074,22 +999,6 @@ pub(crate) fn compile_core_module(
             runtime_globals.fuel,
         )?);
     }
-    for function_id in &rooted_function_ids {
-        let function = &vo_module.functions[*function_id as usize];
-        code.function(&compile_function(
-            vo_module,
-            resolved_externs,
-            *function_id,
-            function,
-            &function_indices,
-            &materialized,
-            runtime_globals,
-            &static_data,
-            &allocation_descriptors,
-            run_defer_index,
-            false,
-        )?);
-    }
     for function_id in &retry_safe_recursive_ids {
         let function = &vo_module.functions[*function_id as usize];
         code.function(&compile_function(
@@ -1104,6 +1013,7 @@ pub(crate) fn compile_core_module(
             &allocation_descriptors,
             run_defer_index,
             true,
+            false,
         )?);
     }
     for function_id in &direct_slow_function_ids {
@@ -1120,6 +1030,7 @@ pub(crate) fn compile_core_module(
             &allocation_descriptors,
             run_defer_index,
             true,
+            false,
         )?);
     }
     for function_id in &materialized_function_ids {
@@ -1150,7 +1061,7 @@ pub(crate) fn compile_core_module(
         dispatch_index,
         runtime_globals,
         static_data.stack_base,
-        static_data.allocation_index_base,
+        static_data.stack_limit,
         allocation_descriptors.island_state,
     )?);
     code.function(&compile_host_allocator(runtime_globals));
@@ -1198,6 +1109,14 @@ pub(crate) fn compile_core_module(
         )?),
     });
     module.section(&CustomSection {
+        name: Cow::Borrowed(MEMORY_METADATA_SECTION),
+        data: Cow::Owned(encode_memory_metadata(
+            vo_module,
+            &allocation_descriptors,
+            &static_data,
+        )),
+    });
+    module.section(&CustomSection {
         name: Cow::Borrowed(WASM_AOT_RUNTIME_METADATA_SECTION),
         data: Cow::Owned(encode_runtime_metadata(vo_module, &allocation_descriptors)?),
     });
@@ -1205,6 +1124,12 @@ pub(crate) fn compile_core_module(
         name: Cow::Borrowed(WASM_AOT_DEBUG_METADATA_SECTION),
         data: Cow::Owned(encode_debug_metadata(vo_module)?),
     });
+    if !vo_module.debug_info.inline_sources.functions.is_empty() {
+        module.section(&CustomSection {
+            name: Cow::Borrowed(WASM_AOT_INLINE_SOURCE_SECTION),
+            data: Cow::Owned(encode_inline_source_metadata(vo_module)?),
+        });
+    }
     let mut function_names = NameMap::new();
     for (index, name) in [
         "volang.runtime_call",
@@ -1249,15 +1174,6 @@ pub(crate) fn compile_core_module(
             first_fast_function_index + offset as u32,
             &format!(
                 "vo.{function_id}.fast:{}",
-                vo_module.functions[*function_id as usize].name
-            ),
-        );
-    }
-    for (offset, function_id) in rooted_function_ids.iter().enumerate() {
-        function_names.append(
-            first_rooted_function_index + offset as u32,
-            &format!(
-                "vo.{function_id}.rooted:{}",
                 vo_module.functions[*function_id as usize].name
             ),
         );
@@ -1311,8 +1227,25 @@ pub(crate) fn compile_core_module(
     names.module(&vo_module.name);
     names.functions(&function_names);
     module.section(&names);
+    let barrier_frames = function_indices
+        .iter()
+        .chain(retry_slow_functions.iter())
+        .chain(direct_slow_functions.iter())
+        .map(|(&function, &index)| {
+            (
+                index,
+                encoded_slot_types(&vo_module.functions[function as usize].slot_types),
+            )
+        })
+        .collect();
     Ok(CompiledCoreModule {
-        module,
+        module: barriers::instrument_memory(
+            &module.finish(),
+            runtime_globals.barrier_enabled,
+            static_data.barrier_pages,
+            allocation_descriptors.frame,
+            barrier_frames,
+        )?,
         memory_pages: static_data.memory_pages,
     })
 }

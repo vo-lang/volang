@@ -74,9 +74,6 @@ pub fn compile_slot_comparison(
     }
 
     let tmp_cmp = func.alloc_slots(&[SlotType::Value]);
-    let float32_operands = slot_vks
-        .contains(&vo_common_core::ValueKind::Float32)
-        .then(|| func.alloc_slots(&[SlotType::Float, SlotType::Float]));
     let mut mismatch_jumps = Vec::new();
 
     let mut i = 0u16;
@@ -117,10 +114,7 @@ pub fn compile_slot_comparison(
             }
             SlotType::Float => {
                 if slot_vks.get(i as usize) == Some(&vo_common_core::ValueKind::Float32) {
-                    let operands = float32_operands.expect("float32 operands must be allocated");
-                    func.emit_op(Opcode::ConvF32F64, operands, left_reg + i, 0);
-                    func.emit_op(Opcode::ConvF32F64, operands + 1, right_reg + i, 0);
-                    func.emit_op(Opcode::EqF, tmp_cmp, operands, operands + 1);
+                    func.emit_op(Opcode::EqF32, tmp_cmp, left_reg + i, right_reg + i);
                 } else {
                     func.emit_op(Opcode::EqF, tmp_cmp, left_reg + i, right_reg + i);
                 }

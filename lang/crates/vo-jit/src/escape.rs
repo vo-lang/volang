@@ -1,6 +1,11 @@
 //! Conservative escape analysis for field-level scalar replacement.
 
-use std::collections::BTreeSet;
+use std::collections::VecDeque;
+
+// Scalar replacement is optional. A compact candidate universe gives every
+// alias operation a fixed cost and makes its temporary memory pre-admittable.
+const MAX_SCALAR_CANDIDATES: usize = u64::BITS as usize;
+const MAX_ESCAPE_WORK: usize = 8 * 1024 * 1024;
 
 use vo_runtime::bytecode::{FunctionDef, InstructionMetadata};
 use vo_runtime::instruction::Opcode;
@@ -46,6 +51,9 @@ impl EscapePlan {
                 if slots == 0 {
                     continue;
                 }
+                if candidates.len() == MAX_SCALAR_CANDIDATES {
+                    return Self::default();
+                }
                 let object = candidates.len() as u32;
                 *allocation_id = Some(object);
                 candidates.push(ScalarReplacement {
@@ -59,14 +67,26 @@ impl EscapePlan {
             return Self::default();
         }
 
+        // Two persistent states per block, one transfer scratch state, and
+        // CopyN scratch. Include candidate liveness output in the admission.
         let state_cells = ir
             .blocks()
             .len()
+            .saturating_mul(2)
+            .saturating_add(2)
             .saturating_mul(usize::from(function.local_slots));
-        let retained_state_bytes = state_cells.saturating_mul(
-            core::mem::size_of::<Option<u32>>() + core::mem::size_of::<BTreeSet<u32>>(),
-        );
-        if retained_state_bytes > crate::MAX_JIT_COMPILE_WORK_BYTES {
+        let temporary_bytes = state_cells
+            .saturating_mul(core::mem::size_of::<Option<u32>>() + core::mem::size_of::<u64>())
+            .saturating_add(
+                function.code.len().saturating_mul(
+                    candidates
+                        .len()
+                        .saturating_mul(core::mem::size_of::<std::ops::Range<u32>>())
+                        + 32,
+                ),
+            )
+            .saturating_add(ir.blocks().len().saturating_mul(256));
+        if temporary_bytes > crate::MAX_JIT_COMPILE_WORK_BYTES / 4 {
             return Self::default();
         }
 
@@ -76,6 +96,7 @@ impl EscapePlan {
         let mut invalid = vec![false; candidates.len()];
         let mut accesses = Vec::new();
         let mut live_ranges = vec![Vec::<std::ops::Range<u32>>::new(); candidates.len()];
+        let mut remaining_alias_work = MAX_ESCAPE_WORK;
         for block in ir.blocks().iter().filter(|block| block.reachable) {
             let Some(mut state) = block_states[block.id.index()].clone() else {
                 continue;
@@ -83,11 +104,11 @@ impl EscapePlan {
             for pc in block.start_pc as usize..block.end_pc as usize {
                 // Recovery and GC use the same bytecode liveness. An object's
                 // private native pointer must never outlive its rooted aliases.
-                let mut live_objects = BTreeSet::new();
+                let mut live_objects = 0u64;
                 for value in ir.resume_values(pc).unwrap_or_default() {
-                    live_objects.extend(state.possible[usize::from(value.slot)].iter().copied());
+                    live_objects |= state.possible[usize::from(value.slot)];
                 }
-                for object in live_objects {
+                for object in candidate_ids(live_objects) {
                     let ranges = &mut live_ranges[object as usize];
                     if let Some(last) = ranges.last_mut().filter(|last| last.end == pc as u32) {
                         last.end += 1;
@@ -101,7 +122,16 @@ impl EscapePlan {
                         invalid[object as usize] = true;
                     }
                 }
-                validate_alias_uses(ir, pc, &state, &mut invalid, &mut accesses);
+                if !validate_alias_uses(
+                    ir,
+                    pc,
+                    &state,
+                    &mut invalid,
+                    &mut accesses,
+                    &mut remaining_alias_work,
+                ) {
+                    return Self::default();
+                }
                 transfer_alias_state(ir, pc, &allocation_ids, &mut state);
             }
         }
@@ -179,35 +209,40 @@ fn scalar_ptr_layout(function: &FunctionDef, pc: usize) -> Option<&[SlotType]> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AliasState {
     definite: Vec<Option<u32>>,
-    possible: Vec<BTreeSet<u32>>,
+    possible: Vec<u64>,
 }
 
 impl AliasState {
     fn empty(slots: usize) -> Self {
         Self {
             definite: vec![None; slots],
-            possible: vec![BTreeSet::new(); slots],
+            possible: vec![0; slots],
         }
     }
 
-    fn merge(&mut self, other: &Self) {
+    fn merge(&mut self, other: &Self) -> bool {
+        let mut changed = false;
         for slot in 0..self.definite.len() {
             if self.definite[slot] != other.definite[slot] {
+                changed |= self.definite[slot].is_some();
                 self.definite[slot] = None;
             }
-            self.possible[slot].extend(other.possible[slot].iter().copied());
+            let possible = self.possible[slot] | other.possible[slot];
+            changed |= possible != self.possible[slot];
+            self.possible[slot] = possible;
         }
+        changed
     }
 
     fn clear(&mut self, slot: u16) {
         let slot = usize::from(slot);
         self.definite[slot] = None;
-        self.possible[slot].clear();
+        self.possible[slot] = 0;
     }
 
     fn copy_slot(&mut self, destination: u16, source: u16) {
         let definite = self.definite[usize::from(source)];
-        let possible = self.possible[usize::from(source)].clone();
+        let possible = self.possible[usize::from(source)];
         let destination = usize::from(destination);
         self.definite[destination] = definite;
         self.possible[destination] = possible;
@@ -216,7 +251,7 @@ impl AliasState {
     fn define_object(&mut self, slot: u16, object: u32) {
         let slot = usize::from(slot);
         self.definite[slot] = Some(object);
-        self.possible[slot] = BTreeSet::from([object]);
+        self.possible[slot] = 1u64 << object;
     }
 }
 
@@ -226,62 +261,48 @@ fn analyze_alias_states(
     allocation_ids: &[Option<u32>],
 ) -> Option<Vec<Option<AliasState>>> {
     let entry = ir.blocks().first()?.id;
-    let mut incoming = vec![Vec::<crate::ir::BlockId>::new(); ir.blocks().len()];
-    for block in ir
-        .blocks()
-        .iter()
-        .filter(|block| ir.is_executable_block(block.id))
-    {
-        for edge in ir.executable_successors(block.id) {
-            incoming[edge.target.index()].push(block.id);
-        }
-    }
-
-    let empty = AliasState::empty(usize::from(function.local_slots));
     let mut block_states = vec![None; ir.blocks().len()];
-    block_states[entry.index()] = Some(empty.clone());
-    let max_iterations = ir.blocks().len().saturating_mul(4).max(8);
-    for _ in 0..max_iterations {
-        let mut block_out = vec![None; ir.blocks().len()];
-        for block in ir
-            .blocks()
-            .iter()
-            .filter(|block| ir.is_executable_block(block.id))
-        {
-            let Some(mut state) = block_states[block.id.index()].clone() else {
+    let mut block_out = vec![None; ir.blocks().len()];
+    block_states[entry.index()] = Some(AliasState::empty(usize::from(function.local_slots)));
+    let mut queue = VecDeque::from([entry]);
+    let mut queued = vec![false; ir.blocks().len()];
+    queued[entry.index()] = true;
+    let mut remaining_work = MAX_ESCAPE_WORK;
+    while let Some(id) = queue.pop_front() {
+        queued[id.index()] = false;
+        let block = &ir.blocks()[id.index()];
+        let successor_count = ir.executable_successors(id).count();
+        let cost = usize::from(function.local_slots)
+            .saturating_mul(successor_count.saturating_add(2))
+            .saturating_add((block.end_pc - block.start_pc) as usize);
+        remaining_work = remaining_work.checked_sub(cost)?;
+        let mut state = block_states[id.index()].as_ref()?.clone();
+        for pc in block.start_pc as usize..block.end_pc as usize {
+            transfer_alias_state(ir, pc, allocation_ids, &mut state);
+        }
+        if block_out[id.index()].as_ref() == Some(&state) {
+            continue;
+        }
+        for edge in ir.executable_successors(id) {
+            if edge.target == entry {
                 continue;
-            };
-            for pc in block.start_pc as usize..block.end_pc as usize {
-                transfer_alias_state(ir, pc, allocation_ids, &mut state);
             }
-            block_out[block.id.index()] = Some(state);
-        }
-
-        let mut next = vec![None; ir.blocks().len()];
-        next[entry.index()] = Some(empty.clone());
-        for block in ir
-            .blocks()
-            .iter()
-            .filter(|block| block.id != entry && ir.is_executable_block(block.id))
-        {
-            let mut merged = None::<AliasState>;
-            for predecessor in &incoming[block.id.index()] {
-                let Some(candidate) = block_out[predecessor.index()].as_ref() else {
-                    continue;
-                };
-                match &mut merged {
-                    None => merged = Some(candidate.clone()),
-                    Some(current) => current.merge(candidate),
+            let input = &mut block_states[edge.target.index()];
+            let changed = match input {
+                None => {
+                    *input = Some(state.clone());
+                    true
                 }
+                Some(previous) => previous.merge(&state),
+            };
+            if changed && !queued[edge.target.index()] {
+                queued[edge.target.index()] = true;
+                queue.push_back(edge.target);
             }
-            next[block.id.index()] = merged;
         }
-        if next == block_states {
-            return Some(next);
-        }
-        block_states = next;
+        block_out[id.index()] = Some(state);
     }
-    None
+    Some(block_states)
 }
 
 fn transfer_alias_state(
@@ -297,19 +318,11 @@ fn transfer_alias_state(
     match instruction.opcode() {
         Opcode::Copy => state.copy_slot(instruction.a, instruction.b),
         Opcode::CopyN => {
-            let copies = (0..instruction.copy_n_count())
-                .map(|offset| {
-                    (
-                        state.definite[usize::from(instruction.b + offset)],
-                        state.possible[usize::from(instruction.b + offset)].clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            for (offset, (definite, possible)) in copies.into_iter().enumerate() {
-                let destination = usize::from(instruction.a) + offset;
-                state.definite[destination] = definite;
-                state.possible[destination] = possible;
-            }
+            let source = usize::from(instruction.b);
+            let end = source + usize::from(instruction.copy_n_count());
+            let destination = usize::from(instruction.a);
+            state.definite.copy_within(source..end, destination);
+            state.possible.copy_within(source..end, destination);
         }
         _ => {
             for &output in ir.outputs(typed) {
@@ -322,8 +335,19 @@ fn transfer_alias_state(
     }
 }
 
-fn invalidate_possible(objects: &BTreeSet<u32>, invalid: &mut [bool]) {
-    for &object in objects {
+fn candidate_ids(mut mask: u64) -> impl Iterator<Item = u32> {
+    std::iter::from_fn(move || {
+        if mask == 0 {
+            return None;
+        }
+        let object = mask.trailing_zeros();
+        mask &= mask - 1;
+        Some(object)
+    })
+}
+
+fn invalidate_possible(objects: &u64, invalid: &mut [bool]) {
+    for object in candidate_ids(*objects) {
         invalid[object as usize] = true;
     }
 }
@@ -334,16 +358,27 @@ fn validate_alias_uses(
     state: &AliasState,
     invalid: &mut [bool],
     accesses: &mut Vec<(u32, u32)>,
-) {
+    remaining_alias_work: &mut usize,
+) -> bool {
     let typed = *ir
         .instruction(pc)
         .expect("escape validation traverses a verified IR instruction");
     let instruction = typed.source();
-    let input_slots = ir
-        .inputs(typed)
-        .iter()
-        .map(|value| ir.value(*value).slot)
-        .collect::<Vec<_>>();
+    // Indexed frame accesses expose references without scalar SSA operands.
+    // A pointer loaded through this range can escape the private field state;
+    // a store can also replace an alias without an ordinary register write.
+    // Retain canonical object fields for every candidate visible in the range.
+    if let crate::effects::MemorySyncEffect::AliasedRange { start, count } = typed.memory_sync() {
+        let Some(remaining) = remaining_alias_work.checked_sub(usize::from(count)) else {
+            return false;
+        };
+        *remaining_alias_work = remaining;
+        let start = usize::from(start);
+        for possible in &state.possible[start..start + usize::from(count)] {
+            invalidate_possible(possible, invalid);
+        }
+    }
+    let input_slots = ir.inputs(typed).iter().map(|value| ir.value(*value).slot);
     match instruction.opcode() {
         Opcode::Copy | Opcode::CopyN => {}
         Opcode::PtrGet | Opcode::PtrGetN => {
@@ -378,6 +413,7 @@ fn validate_alias_uses(
             }
         }
     }
+    true
 }
 
 #[cfg(test)]
@@ -443,6 +479,56 @@ mod tests {
         assert!(EscapePlan::analyze(&escaping, &escaping_ir)
             .replacements()
             .is_empty());
+    }
+
+    #[test]
+    fn scalar_replacement_rejects_array_alias_reads_and_overwrites() {
+        for opcode in [
+            Opcode::SlotGet,
+            Opcode::SlotGetN,
+            Opcode::SlotSet,
+            Opcode::SlotSetN,
+        ] {
+            let (mut module, mut function) = scalar_object_function(false);
+            function.local_slots = 8;
+            function.slot_types.extend([
+                SlotType::GcRef,
+                SlotType::Value,
+                SlotType::GcRef,
+                SlotType::Value,
+            ]);
+            function.code.splice(
+                4..4,
+                [
+                    Instruction::new(Opcode::Copy, 4, 1, 0),
+                    Instruction::new(Opcode::LoadInt, 5, 0, 0),
+                    if matches!(opcode, Opcode::SlotGet | Opcode::SlotGetN) {
+                        Instruction::new(opcode, 6, 4, 5)
+                    } else {
+                        Instruction::new(opcode, 4, 5, 1)
+                    },
+                ],
+            );
+            function.instruction_metadata.splice(
+                4..4,
+                [
+                    InstructionMetadata::None,
+                    InstructionMetadata::None,
+                    InstructionMetadata::SlotLayout {
+                        array_len: 1,
+                        elem_layout: vec![SlotType::GcRef],
+                    },
+                ],
+            );
+            module.functions[0] = function.clone();
+            let ir = FunctionIr::build(&function, &module).unwrap();
+            assert!(
+                EscapePlan::analyze(&function, &ir)
+                    .replacements()
+                    .is_empty(),
+                "{opcode:?}"
+            );
+        }
     }
 
     #[test]

@@ -47,6 +47,7 @@ pub fn dispatch_jit_frame(
         module,
         jit_func,
         frame.bp,
+        frame.pc,
         func_def.ret_slots as usize,
     )
 }
@@ -58,6 +59,7 @@ fn invoke_jit_and_handle(
     module: &Module,
     jit_func: vo_jit::JitFunc,
     jit_bp: usize,
+    entry_pc: usize,
     ret_slots: usize,
 ) -> ExecResult {
     let mut ctx = match build_jit_context(vm, fiber) {
@@ -97,16 +99,32 @@ fn invoke_jit_and_handle(
     if entry_func_id.is_some() {
         if let Some(jit_mgr) = vm.jit.manager_mut() {
             jit_mgr.record_function_entry();
+            if entry_pc != 0 {
+                jit_mgr.record_aot_continuation_entry();
+            }
         }
     }
     let result = unsafe {
-        vo_jit::invoke_native_from_frame(
-            jit_func,
-            ctx.as_ptr(),
-            args_ptr,
-            ret.as_mut_ptr(),
-            param_slots,
-        )
+        if entry_pc != 0 {
+            jit_func(
+                ctx.as_ptr(),
+                jit_bp as u64,
+                ret.as_mut_ptr(),
+                entry_pc as u64,
+                0,
+                0,
+                0,
+                0,
+            )
+        } else {
+            vo_jit::invoke_native_from_frame(
+                jit_func,
+                ctx.as_ptr(),
+                args_ptr,
+                ret.as_mut_ptr(),
+                param_slots,
+            )
+        }
     };
     // Value-slot allocation regions pre-admit a bounded run of cells. Close
     // the run before the VM observes telemetry, object limits, or a side exit.
@@ -120,7 +138,12 @@ fn invoke_jit_and_handle(
     fiber.execution_budget = budget_after;
 
     if let (Some(func_id), Some(jit_mgr)) = (entry_func_id, vm.jit.manager_mut()) {
-        if let Err(err) = jit_mgr.record_function_outcome(func_id, result, work_consumed) {
+        let feedback = if entry_pc == 0 {
+            jit_mgr.record_function_outcome(func_id, result, work_consumed)
+        } else {
+            jit_mgr.record_continuation_outcome(func_id, entry_pc, result, work_consumed)
+        };
+        if let Err(err) = feedback {
             return ExecResult::JitError(format!(
                 "JIT execution feedback failed for function {func_id}: {err}"
             ));
@@ -240,7 +263,7 @@ mod tests {
 
     #[test]
     fn vm_heap_return_metadata_mismatch_is_jit_error() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-heap-return-bounds-test".to_string());
         let mut func = function(1);
         func.heap_ret_gcref_count = 1;
@@ -265,7 +288,7 @@ mod tests {
 
     #[test]
     fn vm_stack_return_error_slot_outside_ret_buffer_is_jit_error() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-stack-return-error-slot-test".to_string());
         let mut func = function(1);
         func.ret_slots = 1;
@@ -287,7 +310,7 @@ mod tests {
 
     #[test]
     fn vm_jit_ok_errdefer_heap_return_check_rejects_short_error_allocation_before_defer_059() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-errdefer-heap-return-short-error".to_string());
         let mut func = function(1);
         func.slot_types = vec![SlotType::GcRef];

@@ -1,8 +1,8 @@
 # Volang Runtime Memory Specification
 
-Version: 1.0
+Version: 1.1
 Status: Accepted
-Date: 2026-07-30
+Date: 2026-09-11
 
 ## 1. Scope
 
@@ -78,9 +78,13 @@ it executes. Scalar-only and safepoint-free artifacts MAY omit that record.
 Direct `GcRef` values live across a safepoint MUST have precise SP-relative
 stack-map entries in an explicit shadow-root area. Ordinary non-GC calls MUST
 NOT require root maps. Conditional roots whose pointer interpretation depends
-on runtime type tags MUST carry a machine-readable materialization requirement.
-Collection MUST wait until those frames have been materialized into typed VM
-frames.
+on runtime type tags MUST publish the complete adjacent header/payload pair in
+a precise shadow-root entry. The collector MAY trace that pair directly using
+its runtime tag; an untagged payload MUST NOT be treated as an unconditional
+root. Collection MUST wait for typed VM-frame materialization whenever an exact
+published representation is unavailable. If a bounded native root scan must
+yield to the scheduler, the native chain MUST first materialize its live state;
+native stack addresses MUST NOT survive that return.
 
 Allocation-capable generated code MUST poll before consuming new managed-heap
 capacity. The no-work path MAY use runtime-owned raw GC field offsets. The
@@ -124,6 +128,101 @@ When `growth_allowed` is false:
 
 When `allocation_allowed` is false, every managed allocation entry point MUST
 fail with `AllocationForbidden`.
+
+### 3.1 Immutable string descriptors
+
+The Rust runtime represents a non-empty string by a three-slot `StringData`
+descriptor: an exact-base reference to a canonical packed Uint8 array, a pointer
+to the view's first byte, and its byte length. Nested views MUST retain the
+original array directly. The complete byte range MUST fit in that array.
+String consumers MUST use this descriptor contract; mutable slice capacity,
+element layout and backing geometry MUST NOT be read from a string object.
+Core Wasm MAY retain its independent physical representation.
+
+Dynamic string construction and non-empty slicing preserve their allocation
+entry points, admission checks, and sticky failure propagation. Literal
+expression evaluation MAY reuse immutable storage as specified in §3.3.
+Telemetry MUST count actual requested bytes and allocations. Empty strings
+retain the null representation. Descriptor size reduction alone does not
+authorize allocation elimination or shared managed ownership across Islands.
+
+### 3.2 Slice descriptors
+
+The Rust runtime represents a slice with a seven-slot common prefix containing
+its owner, data pointer, length, capacity, element metadata, layout tag, element
+byte width and storage stride. The 32-bit metadata and 32-bit tag share one
+slot. A canonical packed array view derives its complete backing range from
+its exact-base Array owner. An extended descriptor appends two slots containing
+the complete backing pointer and length; this representation covers inline
+subobjects, permanently rooted global storage and flat-slot views.
+
+Compact array views MUST match their owner's element metadata and width, and
+their storage stride MUST equal that width. Boundary validation MUST establish
+the physical descriptor shape and canonical owner before reading derived
+backing data. Extended tails MUST NOT be read through a compact descriptor.
+Nested views MUST preserve complete backing geometry, three-index capacity
+and alias relationships, including across Island transfer. Capacity and stride
+retain the full target address width, including zero-width element layouts.
+
+Both representations preserve allocation entry points, admission, precise
+owner tracing, typed mutation barriers and sticky allocation failures. Actual
+requested sizes and allocation counts remain observable in memory telemetry.
+Core Wasm MAY retain its independent physical representation.
+
+### 3.3 Immutable literal evaluation and allocation observability
+
+A string literal expression MAY reuse already-existing immutable storage within
+its Island. An implementation MAY also represent literals using immutable
+program-image storage whose lifetime covers every reference to that image.
+Shared program bytes MUST NOT introduce a foreign managed object into an
+Island heap. String value, byte, slicing and conversion semantics remain
+unchanged; a mutable byte conversion MUST preserve its required independence.
+
+A reuse hit performs no managed allocation and MAY succeed while allocation is
+disabled. Materialization on a miss MUST use ordinary allocation admission,
+hard limits, accounting and failure propagation. A pending sticky memory error
+MUST stop execution before the reused value can enable later guest effects.
+Memory telemetry describes actual storage operations; evaluating a literal is
+not a guarantee of a fresh allocation, a stable object identity or a fixed
+allocation count across backends, collections or optimization choices.
+
+Optional reuse metadata MUST have an explicit finite bound and owner. Admission
+failure MAY fall back to ordinary construction without introducing an extra
+guest memory error. Reuse MUST NOT extend an object's lifetime through an
+unreported root, return reclaimed or repurposed storage, or retain a value from
+a replaced module scope. A weak cache MUST validate object liveness without
+adding unbounded work to any collector slice. Existing conservative allocation
+polls and exactly-once retry/progress rules remain valid when reuse is possible.
+
+This permission applies to immutable literal evaluation. Fixed-array local
+values have the representation permission in §3.4. Other dynamic constructors
+and non-empty slice/string views retain their existing allocation entry points.
+
+### 3.4 Independent local fixed-array values
+
+A fixed-array value held by a local that requires no escaping identity MAY be
+constructed and copied in precisely typed frame slots. Initializer evaluation
+MUST preserve source order and produce an independent value snapshot before
+any newly declared binding becomes visible. Later initializers, aliases,
+closures, failures and deferred calls MUST observe the same language values
+and side effects. Typed roots MUST describe every live reference, including
+nested values and conditional interface payloads.
+
+An implementation MAY omit an intermediate managed array used only to stage
+such a local value. Stack representation performs no managed allocation and
+MAY succeed with managed allocation disabled. Telemetry counts actual storage
+operations. A pending sticky memory error MUST still stop later guest effects;
+this permission does not waive frame capacity limits or collector progress.
+
+An array requiring canonical identity through address escape, slicing,
+capture, global storage or a heap-owning boundary MUST retain the required
+independent stable storage. Construction/materialization of that storage MUST
+use ordinary allocation admission, accounting, precise publication and sticky
+failure propagation. This local-value permission does not authorize delaying a
+required canonical allocation past guest effects, merging independently mutable
+objects, or retaining a pointer to an expired frame interval. Large and
+zero-element-width canonical arrays MUST remain representable without forcing
+their logical length through a flattened frame ABI.
 
 ## 4. Collector
 
@@ -373,7 +472,8 @@ A conforming implementation MUST test:
 - minor/major reachability under mutation;
 - Interpreter and generated JIT OOM exits;
 - full-function and loop-OSR precise stack maps, nested native-frame chains,
-  conditional-root materialization, and bounded safepoint scans;
+  tagged conditional roots, materialization on bounded scan exhaustion, and
+  bounded safepoint scans;
 - managed map and queue backing reachability;
 - child-Island configuration inheritance and heap isolation;
 - lease generation and capacity failures;

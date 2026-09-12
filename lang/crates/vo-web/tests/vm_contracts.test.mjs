@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,5 +47,26 @@ func main() {
     assert.equal(result.stderr, 'unhandled panic: runtime error: call of nil function');
   } finally {
     rmSync(work, { recursive: true, force: true });
+  }
+});
+
+
+test('Wasm VM concurrent runs retain their own output across host waits', async () => {
+  const wasm = await import('../pkg/vo_web.js');
+  await wasm.default({ module_or_path: readFileSync(new URL('../pkg/vo_web_bg.wasm', import.meta.url)) });
+  const program = (name, delay) => `package main
+import "time"
+func main() {
+  println("${name}:before")
+  time.Sleep(${delay} * time.Millisecond)
+  println("${name}:after")
+}`;
+  const [first, second] = await Promise.all([
+    wasm.compileAndRun(program('first', 30), 'first.vo'),
+    wasm.compileAndRun(program('second', 5), 'second.vo'),
+  ]);
+  for (const [name, result] of [['first', first], ['second', second]]) {
+    assert.equal(result.status, 'ok', result.stderr);
+    assert.equal(result.stdout, `${name}:before\n${name}:after\n`);
   }
 });

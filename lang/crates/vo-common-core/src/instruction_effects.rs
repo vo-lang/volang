@@ -152,6 +152,7 @@ pub fn visit_instruction_register_reads(
         | Opcode::PtrGetN
         | Opcode::NegI
         | Opcode::NegF
+        | Opcode::NegF32
         | Opcode::Not
         | Opcode::BoolNot
         | Opcode::StrLen
@@ -178,9 +179,13 @@ pub fn visit_instruction_register_reads(
         | Opcode::ModI
         | Opcode::ModU
         | Opcode::AddF
+        | Opcode::AddF32
         | Opcode::SubF
+        | Opcode::SubF32
         | Opcode::MulF
+        | Opcode::MulF32
         | Opcode::DivF
+        | Opcode::DivF32
         | Opcode::EqI
         | Opcode::NeI
         | Opcode::LtI
@@ -192,11 +197,17 @@ pub fn visit_instruction_register_reads(
         | Opcode::GeI
         | Opcode::GeU
         | Opcode::EqF
+        | Opcode::EqF32
         | Opcode::NeF
+        | Opcode::NeF32
         | Opcode::LtF
+        | Opcode::LtF32
         | Opcode::LeF
+        | Opcode::LeF32
         | Opcode::GtF
+        | Opcode::GtF32
         | Opcode::GeF
+        | Opcode::GeF32
         | Opcode::And
         | Opcode::Or
         | Opcode::Xor

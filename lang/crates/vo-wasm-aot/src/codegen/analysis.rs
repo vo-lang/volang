@@ -1,7 +1,38 @@
 //! Closed-world reachability, effects, and ABI planning.
 use super::*;
 
-pub(super) fn closure_target_ids(module: &VoModule) -> BTreeSet<u32> {
+/// Derived facts belong to one immutable compilation input. Lowering and
+/// reachability share these caches; no process-global invalidation is needed.
+pub(super) struct ModuleAnalysis<'a> {
+    module: &'a VoModule,
+    signatures: std::sync::OnceLock<Vec<DynamicFunctionSignature>>,
+    closures: std::sync::OnceLock<BTreeMap<u32, BTreeSet<u16>>>,
+    interfaces: std::cell::RefCell<BTreeMap<u32, Result<Vec<(u32, Vec<u32>)>, WasmAotError>>>,
+}
+
+impl<'a> ModuleAnalysis<'a> {
+    pub(super) fn new(module: &'a VoModule) -> Self {
+        Self {
+            module,
+            signatures: Default::default(),
+            closures: Default::default(),
+            interfaces: Default::default(),
+        }
+    }
+}
+impl core::ops::Deref for ModuleAnalysis<'_> {
+    type Target = VoModule;
+    fn deref(&self) -> &Self::Target {
+        self.module
+    }
+}
+
+// Portable Wasm engines admit at least this many parameters/results. Keep
+// aggregate expansion below the validator limits; wider values use slots.
+const MAX_FAST_ABI_PARAMS: usize = 1000;
+const MAX_FAST_ABI_RESULTS: usize = 1000;
+
+pub(super) fn closure_target_ids(module: &ModuleAnalysis<'_>) -> BTreeSet<u32> {
     let mut targets: BTreeSet<u32> = module
         .functions
         .iter()
@@ -23,7 +54,7 @@ pub(super) fn closure_target_ids(module: &VoModule) -> BTreeSet<u32> {
 /// Closure bodies that the bytecode constructs explicitly. Named methods are
 /// added to `closure_target_ids` for reflective dynamic method lookup, but
 /// they are speculative until such a lookup succeeds at runtime.
-pub(super) fn explicit_closure_target_ids(module: &VoModule) -> BTreeSet<u32> {
+pub(super) fn explicit_closure_target_ids(module: &ModuleAnalysis<'_>) -> BTreeSet<u32> {
     module
         .functions
         .iter()
@@ -35,7 +66,17 @@ pub(super) fn explicit_closure_target_ids(module: &VoModule) -> BTreeSet<u32> {
         .collect()
 }
 
-pub(super) fn dynamic_function_signatures(module: &VoModule) -> Vec<DynamicFunctionSignature> {
+pub(super) fn dynamic_function_signatures<'a>(
+    module: &'a ModuleAnalysis<'_>,
+) -> &'a [DynamicFunctionSignature] {
+    module
+        .signatures
+        .get_or_init(|| compute_dynamic_function_signatures(module))
+}
+
+fn compute_dynamic_function_signatures(
+    module: &ModuleAnalysis<'_>,
+) -> Vec<DynamicFunctionSignature> {
     (0..module.runtime_types.len() as u32)
         .filter_map(|rttid| {
             let value_rttid = module.value_rttid_for_rttid(rttid)?;
@@ -66,21 +107,41 @@ pub(super) fn dynamic_function_signatures(module: &VoModule) -> Vec<DynamicFunct
 }
 
 pub(super) fn dynamic_function_signature(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     signature_rttid: u32,
 ) -> Result<DynamicFunctionSignature, WasmAotError> {
-    dynamic_function_signatures(module)
-        .into_iter()
-        .find(|signature| signature.value_rttid.rttid() == signature_rttid)
-        .ok_or_else(|| {
-            WasmAotError::InvalidModule(format!(
-                "dynamic function signature RTTID {signature_rttid} is missing"
-            ))
-        })
+    let missing = || {
+        WasmAotError::InvalidModule(format!(
+            "dynamic function signature RTTID {signature_rttid} is missing"
+        ))
+    };
+    let value_rttid = module
+        .value_rttid_for_rttid(signature_rttid)
+        .ok_or_else(missing)?;
+    let (
+        _,
+        RuntimeType::Func {
+            params,
+            results,
+            variadic,
+        },
+    ) = module
+        .runtime_type_resolver()
+        .resolve_value_rttid(value_rttid)
+        .ok_or_else(missing)?
+    else {
+        return Err(missing());
+    };
+    Ok(DynamicFunctionSignature {
+        value_rttid,
+        params: params.clone(),
+        results: results.clone(),
+        variadic: *variadic,
+    })
 }
 
 pub(super) fn flattened_value_layout(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     values: &[ValueRttid],
 ) -> Result<Vec<vo_common_core::SlotType>, WasmAotError> {
     let mut layout = Vec::new();
@@ -96,7 +157,7 @@ pub(super) fn flattened_value_layout(
 }
 
 pub(super) fn dynamic_signature_matches_target(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     signature: &DynamicFunctionSignature,
     target: ClosureCallTarget,
 ) -> Result<bool, WasmAotError> {
@@ -125,17 +186,18 @@ pub(super) fn dynamic_signature_matches_target(
 }
 
 pub(super) fn dynamic_closure_targets_for_signature(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     signature: &DynamicFunctionSignature,
+    instantiations: &BTreeMap<u32, BTreeSet<u16>>,
 ) -> Result<Vec<ClosureCallTarget>, WasmAotError> {
     let mut targets = Vec::new();
-    for (function_id, capture_counts) in closure_instantiations(module) {
+    for (&function_id, capture_counts) in instantiations {
         let function = module.functions.get(function_id as usize).ok_or_else(|| {
             WasmAotError::InvalidModule(format!(
                 "closure instantiation references missing function {function_id}"
             ))
         })?;
-        for capture_slots in capture_counts {
+        for &capture_slots in capture_counts {
             let target = ClosureCallTarget {
                 function_id,
                 capture_slots,
@@ -149,7 +211,15 @@ pub(super) fn dynamic_closure_targets_for_signature(
     Ok(targets)
 }
 
-pub(super) fn closure_instantiations(module: &VoModule) -> BTreeMap<u32, BTreeSet<u16>> {
+pub(super) fn closure_instantiations<'a>(
+    module: &'a ModuleAnalysis<'_>,
+) -> &'a BTreeMap<u32, BTreeSet<u16>> {
+    module
+        .closures
+        .get_or_init(|| compute_closure_instantiations(module))
+}
+
+fn compute_closure_instantiations(module: &ModuleAnalysis<'_>) -> BTreeMap<u32, BTreeSet<u16>> {
     let mut instantiations = BTreeMap::<u32, BTreeSet<u16>>::new();
     for function in &module.functions {
         for instruction in &function.code {
@@ -220,7 +290,7 @@ pub(super) fn closure_prefix_code(prefix: ClosureArgumentPrefix) -> u32 {
 }
 
 pub(super) fn closure_callsite_targets(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     caller: &FunctionDef,
     pc: usize,
     result_use: ClosureResultUse,
@@ -237,13 +307,13 @@ pub(super) fn closure_callsite_targets(
         })?;
     let instantiations = closure_instantiations(module);
     let mut candidates = Vec::new();
-    for (target_id, capture_counts) in instantiations {
+    for (&target_id, capture_counts) in instantiations {
         let target = module.functions.get(target_id as usize).ok_or_else(|| {
             WasmAotError::InvalidModule(format!(
                 "closure instantiation references missing function {target_id}"
             ))
         })?;
-        for capture_slots in capture_counts {
+        for &capture_slots in capture_counts {
             let abi = closure_call_abi(target, capture_slots)?;
             let user_args =
                 &target.slot_types[usize::from(abi.arg_offset)..usize::from(target.param_slots)];
@@ -263,7 +333,7 @@ pub(super) fn closure_callsite_targets(
 }
 
 pub(super) fn closure_callsite_candidates(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     caller: &FunctionDef,
     pc: usize,
     function_indices: &BTreeMap<u32, u32>,
@@ -286,7 +356,22 @@ pub(super) fn closure_callsite_candidates(
 /// complete even when the bytecode module never materialized a particular
 /// concrete/interface itab pair at a static assignment site.
 pub(super) fn interface_implementations(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
+    iface_meta_id: u32,
+) -> Result<Vec<(u32, Vec<u32>)>, WasmAotError> {
+    if let Some(result) = module.interfaces.borrow().get(&iface_meta_id) {
+        return result.clone();
+    }
+    let result = compute_interface_implementations(module, iface_meta_id);
+    module
+        .interfaces
+        .borrow_mut()
+        .insert(iface_meta_id, result.clone());
+    result
+}
+
+fn compute_interface_implementations(
+    module: &ModuleAnalysis<'_>,
     iface_meta_id: u32,
 ) -> Result<Vec<(u32, Vec<u32>)>, WasmAotError> {
     let target_iface = module
@@ -331,7 +416,7 @@ pub(super) fn interface_implementations(
 }
 
 pub(super) fn reachable_functions(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     resolved_externs: &ResolvedExternTable,
 ) -> Result<Vec<u32>, WasmAotError> {
     let mut reachable = BTreeSet::from([module.entry_func]);
@@ -445,7 +530,7 @@ pub(super) fn reachable_functions(
 /// them, while an actual call continues to fail closed in the dispatcher when
 /// its provider is unavailable.
 pub(super) fn statically_reachable_functions(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
 ) -> Result<BTreeSet<u32>, WasmAotError> {
     let explicit_closures = explicit_closure_target_ids(module);
     let mut reachable = BTreeSet::from([module.entry_func]);
@@ -513,7 +598,7 @@ pub(super) fn statically_reachable_functions(
 }
 
 pub(super) fn instruction_calls_materialized(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     function: &FunctionDef,
     pc: usize,
     instruction: &vo_common_core::instruction::Instruction,
@@ -581,7 +666,7 @@ pub(super) fn extern_may_suspend(resolved_externs: &ResolvedExternTable, extern_
 }
 
 pub(super) fn instruction_callees(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     function: &FunctionDef,
     pc: usize,
     instruction: &vo_common_core::instruction::Instruction,
@@ -618,17 +703,46 @@ pub(super) fn instruction_callees(
 }
 
 pub(super) fn analyze_function_capabilities(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     resolved_externs: &ResolvedExternTable,
     reachable: &[u32],
 ) -> Result<BTreeMap<u32, FunctionCapabilities>, WasmAotError> {
+    // A program with concurrent guest work or asynchronous host operations must
+    // be able to suspend every unbounded call chain. Pure synchronous images
+    // retain their direct numeric ABI and are still constrained by total fuel.
+    let cooperative = reachable.iter().any(|id| {
+        module.functions[*id as usize].code.iter().any(|i| {
+            matches!(
+                i.opcode(),
+                Opcode::GoStart
+                    | Opcode::GoIsland
+                    | Opcode::QueueSend
+                    | Opcode::QueueRecv
+                    | Opcode::SelectExec
+            ) || (i.opcode() == Opcode::CallExtern
+                && extern_may_suspend(resolved_externs, u32::from(i.b)))
+        })
+    });
+    let recursive = if cooperative {
+        recursive_functions(module, reachable)?
+    } else {
+        BTreeSet::new()
+    };
     let mut capabilities = BTreeMap::new();
     for function_id in reachable {
         let function = module.functions.get(*function_id as usize).ok_or_else(|| {
             WasmAotError::InvalidModule(format!("reachable function {function_id} is missing"))
         })?;
         let mut local = FunctionCapabilities {
-            may_suspend: function.has_defer
+            may_suspend: (cooperative
+                && (recursive.contains(function_id)
+                    || function.code.iter().enumerate().any(|(pc, i)| {
+                        matches!(
+                            i.opcode(),
+                            Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot | Opcode::ForLoop
+                        ) && branch_target(pc, i) <= pc
+                    })))
+                || function.has_defer
                 || function.code.iter().any(|instruction| {
                     matches!(
                         instruction.opcode(),
@@ -666,7 +780,11 @@ pub(super) fn analyze_function_capabilities(
                 .slot_types
                 .iter()
                 .any(|slot_type| !matches!(slot_type, SlotType::Value | SlotType::Float)),
-            direct_local_supported: is_direct_local_candidate(module, resolved_externs, function),
+            // Keep wide aggregates on the durable memory ABI. The two owner/budget
+            // parameters and status result count against the Wasm type limits.
+            direct_local_supported: usize::from(function.param_slots) + 2 <= MAX_FAST_ABI_PARAMS
+                && usize::from(function.ret_slots) + 1 <= MAX_FAST_ABI_RESULTS
+                && is_direct_local_candidate(module, resolved_externs, function),
             observes_call_stack: function.code.iter().any(|instruction| {
                 if instruction.opcode() != Opcode::CallExtern {
                     return false;
@@ -679,6 +797,19 @@ pub(super) fn analyze_function_capabilities(
                     .is_some_and(|key| key.package() == "runtime" && key.function() == "Caller")
             }),
         };
+        local.may_suspend |= local.may_allocate
+            || function.code.iter().any(|instruction| {
+                instruction.opcode() == Opcode::CallExtern
+                    && resolved_externs
+                        .get(u32::from(instruction.b))
+                        .and_then(|resolved| {
+                            vo_common_core::extern_key::decode_extern_name(&resolved.name).ok()
+                        })
+                        .is_some_and(|key| {
+                            key.package() == "runtime/mem"
+                                && matches!(key.function(), "GCStep" | "GCCollect")
+                        })
+            });
         if function.has_defer {
             local.may_allocate = true;
         }
@@ -711,28 +842,8 @@ pub(super) fn analyze_function_capabilities(
     }
 }
 
-pub(super) fn rooted_candidate_functions(
-    reachable: &[u32],
-    capabilities: &BTreeMap<u32, FunctionCapabilities>,
-) -> BTreeSet<u32> {
-    // A non-suspending allocating function needs a precise root frame on every
-    // path, independent of where its first allocation appears. The bump-backed
-    // shadow record has the same lifetime and asymptotic cost as a durable
-    // frame; bounded direct segments remove dispatcher traffic, while the
-    // universal durable entry handles arbitrarily deep recursion safely.
-    reachable
-        .iter()
-        .copied()
-        .filter(|function_id| {
-            capabilities
-                .get(function_id)
-                .is_some_and(|capability| capability.rooted_fast_abi() && capability.may_allocate)
-        })
-        .collect()
-}
-
 pub(super) fn recursive_functions(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     reachable: &[u32],
 ) -> Result<BTreeSet<u32>, WasmAotError> {
     let mut graph = BTreeMap::<u32, BTreeSet<u32>>::new();
@@ -766,13 +877,13 @@ pub(super) fn recursive_functions(
 }
 
 pub(super) fn retry_safe_scalar_recursive_functions(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     resolved_externs: &ResolvedExternTable,
     reachable: &[u32],
     capabilities: &BTreeMap<u32, FunctionCapabilities>,
 ) -> Result<BTreeSet<u32>, WasmAotError> {
     fn instruction_is_retry_safe(
-        module: &VoModule,
+        module: &ModuleAnalysis<'_>,
         resolved_externs: &ResolvedExternTable,
         function: &FunctionDef,
         pc: usize,
@@ -827,16 +938,27 @@ pub(super) fn retry_safe_scalar_recursive_functions(
             | Opcode::GtU
             | Opcode::GeU
             | Opcode::AddF
+            | Opcode::AddF32
             | Opcode::SubF
+            | Opcode::SubF32
             | Opcode::MulF
+            | Opcode::MulF32
             | Opcode::DivF
+            | Opcode::DivF32
             | Opcode::NegF
+            | Opcode::NegF32
             | Opcode::EqF
+            | Opcode::EqF32
             | Opcode::NeF
+            | Opcode::NeF32
             | Opcode::LtF
+            | Opcode::LtF32
             | Opcode::LeF
+            | Opcode::LeF32
             | Opcode::GtF
+            | Opcode::GtF32
             | Opcode::GeF
+            | Opcode::GeF32
             | Opcode::ConvI2F
             | Opcode::ConvF2I
             | Opcode::ConvF64F32
@@ -899,10 +1021,9 @@ pub(super) fn retry_safe_scalar_recursive_functions(
 }
 
 pub(super) fn materialized_functions(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     reachable: &[u32],
     capabilities: &BTreeMap<u32, FunctionCapabilities>,
-    rooted_candidates: &BTreeSet<u32>,
 ) -> Result<BTreeSet<u32>, WasmAotError> {
     // The root entry is the one function whose frame is owned for the whole
     // scheduler lifetime. Other dispatcher targets may use the direct ABI
@@ -911,10 +1032,9 @@ pub(super) fn materialized_functions(
     // safe point; an owning-frame parameter preserves precise panic unwinding.
     // Deferred callees retain their dispatcher-owned frame identity so
     // recover can prove that it is executing in the directly invoked defer.
-    // Wasm engines impose independent native-stack limits. Recursive SCCs use
-    // scheduler-owned frames unless their transitive effects admit a precise
-    // rooted ABI. Rooted SCCs use bounded native segments and continue on the
-    // durable stack at the segment boundary.
+    // Allocating functions retain durable state for bounded GC progress.
+    // Recursive SCCs retain a scheduler entry for Wasm stack limits; separately
+    // proven retry-safe scalar recursion may also receive a direct adapter.
     let recursive = recursive_functions(module, reachable)?;
     let mut deferred = BTreeSet::new();
     let mut fiber_entries = BTreeSet::new();
@@ -965,7 +1085,7 @@ pub(super) fn materialized_functions(
         .copied()
         .filter(|function_id| {
             *function_id == module.entry_func
-                || (recursive.contains(function_id) && !rooted_candidates.contains(function_id))
+                || recursive.contains(function_id)
                 || deferred.contains(function_id)
                 // runtime.Caller makes every transitively active logical Vo
                 // frame observable. Keep that subgraph on scheduler-owned
@@ -973,14 +1093,14 @@ pub(super) fn materialized_functions(
                 // caller identities or source locations.
                 || capabilities
                     .get(function_id)
-                    .is_some_and(|capabilities| capabilities.observes_call_stack)
+                    .is_some_and(|capabilities| capabilities.observes_call_stack || capabilities.may_allocate)
                 || (fiber_entries.contains(function_id)
                     && capabilities
                         .get(function_id)
                         .is_none_or(|capabilities| capabilities.may_unwind))
                 || module.functions[*function_id as usize].code.is_empty()
                 || capabilities.get(function_id).is_none_or(|capabilities| {
-                    !capabilities.typed_fast_abi() && !rooted_candidates.contains(function_id)
+                    !capabilities.typed_fast_abi()
                 })
         })
         .collect();
@@ -1021,12 +1141,12 @@ pub(super) fn materialized_functions(
 }
 
 pub(super) fn required_shared_frame_slots(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     function_id: u32,
     materialized: &BTreeSet<u32>,
 ) -> Result<u32, WasmAotError> {
     fn direct_scratch_slots(
-        module: &VoModule,
+        module: &ModuleAnalysis<'_>,
         function_id: u32,
         materialized: &BTreeSet<u32>,
         visiting: &mut BTreeSet<u32>,
@@ -1216,7 +1336,7 @@ pub(super) fn basic_blocks(
 }
 
 pub(super) fn is_direct_local_candidate(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     resolved_externs: &ResolvedExternTable,
     function: &FunctionDef,
 ) -> bool {
@@ -1232,6 +1352,10 @@ pub(super) fn is_direct_local_candidate(
                 module.constants.get(instruction.b as usize),
                 Some(Constant::Nil | Constant::Bool(_) | Constant::Int(_) | Constant::Float(_))
             ),
+            Opcode::CopyN => super::direct::aggregate::copy_slots(instruction).is_some(),
+            Opcode::SlotGet | Opcode::SlotGetN | Opcode::SlotSet | Opcode::SlotSetN => {
+                super::direct::aggregate::projection_shape(function, pc).is_some()
+            }
             Opcode::CallExtern => {
                 direct_intrinsic(resolved_externs, function, pc, instruction).is_some()
             }
@@ -1242,7 +1366,10 @@ pub(super) fn is_direct_local_candidate(
                 .is_some_and(|layout| {
                     matches!(layout.bytes, 1 | 2 | 4 | 8) || layout.bytes % 8 == 0
                 }),
-            Opcode::Hint
+            // Literal descriptors and bytes already belong to immutable image
+            // data. This lowering does not allocate or introduce a safe point.
+            Opcode::StrNew
+            | Opcode::Hint
             | Opcode::LoadInt
             | Opcode::Copy
             | Opcode::AddI
@@ -1273,16 +1400,27 @@ pub(super) fn is_direct_local_candidate(
             | Opcode::GtU
             | Opcode::GeU
             | Opcode::AddF
+            | Opcode::AddF32
             | Opcode::SubF
+            | Opcode::SubF32
             | Opcode::MulF
+            | Opcode::MulF32
             | Opcode::DivF
+            | Opcode::DivF32
             | Opcode::NegF
+            | Opcode::NegF32
             | Opcode::EqF
+            | Opcode::EqF32
             | Opcode::NeF
+            | Opcode::NeF32
             | Opcode::LtF
+            | Opcode::LtF32
             | Opcode::LeF
+            | Opcode::LeF32
             | Opcode::GtF
+            | Opcode::GtF32
             | Opcode::GeF
+            | Opcode::GeF32
             | Opcode::PtrGet
             | Opcode::PtrSet
             | Opcode::PtrGetN
@@ -1310,7 +1448,7 @@ pub(super) fn is_direct_local_candidate(
 }
 
 pub(super) fn inline_instruction_cost(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     instruction: &vo_common_core::instruction::Instruction,
 ) -> Option<u32> {
     match instruction.opcode() {
@@ -1344,16 +1482,27 @@ pub(super) fn inline_instruction_cost(
         | Opcode::GtU
         | Opcode::GeU
         | Opcode::AddF
+        | Opcode::AddF32
         | Opcode::SubF
+        | Opcode::SubF32
         | Opcode::MulF
+        | Opcode::MulF32
         | Opcode::NegF
+        | Opcode::NegF32
         | Opcode::EqF
+        | Opcode::EqF32
         | Opcode::NeF
+        | Opcode::NeF32
         | Opcode::LtF
+        | Opcode::LtF32
         | Opcode::LeF
+        | Opcode::LeF32
         | Opcode::GtF
-        | Opcode::GeF => Some(1),
+        | Opcode::GtF32
+        | Opcode::GeF
+        | Opcode::GeF32 => Some(1),
         Opcode::DivF
+        | Opcode::DivF32
         | Opcode::ConvI2F
         | Opcode::ConvF2I
         | Opcode::ConvF64F32
@@ -1363,7 +1512,10 @@ pub(super) fn inline_instruction_cost(
     }
 }
 
-pub(super) fn inline_candidate_cost(module: &VoModule, function: &FunctionDef) -> Option<u32> {
+pub(super) fn inline_candidate_cost(
+    module: &ModuleAnalysis<'_>,
+    function: &FunctionDef,
+) -> Option<u32> {
     const MAX_INLINE_INSTRUCTIONS: usize = 12;
     const MAX_INLINE_SLOTS: u16 = 16;
     if function.local_slots > MAX_INLINE_SLOTS
@@ -1387,7 +1539,7 @@ pub(super) fn inline_candidate_cost(module: &VoModule, function: &FunctionDef) -
 }
 
 pub(super) fn plan_typed_inlining(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     function: &FunctionDef,
     fast_functions: &BTreeMap<u32, FastAbiFunction>,
     first_extra_local: u32,
@@ -1430,7 +1582,7 @@ pub(super) fn plan_typed_inlining(
 }
 
 pub(super) fn direct_function_may_panic(
-    module: &VoModule,
+    module: &ModuleAnalysis<'_>,
     function_id: u32,
     materialized: &BTreeSet<u32>,
     visiting: &mut BTreeSet<u32>,

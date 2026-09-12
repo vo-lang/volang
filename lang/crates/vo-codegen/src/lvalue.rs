@@ -179,6 +179,9 @@ struct NestedStackArrayInfo {
 }
 
 fn snapshot_value_slot(src: u16, func: &mut FuncBuilder) -> u16 {
+    if func.is_current_temporary_range(src, 1) {
+        return src;
+    }
     let snapshot = func.alloc_slots(&[SlotType::Value]);
     func.emit_copy(snapshot, src, 1);
     snapshot
@@ -411,6 +414,18 @@ fn resolve_lvalue_with_mode(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<LValue, CodegenError> {
+    func.with_source_span(expr.span, |func| {
+        resolve_lvalue_with_mode_inner(expr, mode, ctx, func, info)
+    })
+}
+
+fn resolve_lvalue_with_mode_inner(
+    expr: &Expr,
+    mode: ResolveMode,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<LValue, CodegenError> {
     match &expr.kind {
         // === Identifier ===
         ExprKind::Ident(ident) => {
@@ -597,7 +612,7 @@ fn resolve_index_lvalue(
     // Check for nested stack array FIRST (before compiling any index)
     // This handles a[i][j][k]... with arbitrary nesting depth
     // Note: try_resolve_nested_stack_array correctly evaluates in left-to-right order
-    if mode.is_read() && info.is_array(container_type) {
+    if mode.is_read() && info.is_array(container_type) && is_index_expression(&idx.expr) {
         if let Some(nested_info) = try_resolve_nested_stack_array(expr, ctx, func, info)? {
             let elem_type = info.array_elem_type(container_type);
             let inner_elem_slots = info.type_slot_count(elem_type);

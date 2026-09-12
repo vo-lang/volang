@@ -78,17 +78,17 @@ fn emit_jit_small_ptr_new<'a>(
             .offset_for_size(total_size)
             .expect("verified small allocation must have a value-slot region")
     };
-    let expected_shape = ValueSlotAllocationRegionField::shape(total_size, meta_raw);
-    let active_shape = e.load_trusted(
+    let expected_size = ValueSlotAllocationRegionField::layout_size(total_size);
+    let active_size = e.load_trusted(
         JitMemoryRegion::Gc,
         types::I64,
         gc,
-        region_offset(ValueSlotAllocationRegionField::Shape),
+        region_offset(ValueSlotAllocationRegionField::LayoutSize),
     );
     let region_matches =
         e.builder()
             .ins()
-            .icmp_imm_u(IntCC::Equal, active_shape, expected_shape as i64);
+            .icmp_imm_u(IntCC::Equal, active_size, expected_size as i64);
     let cursor = e.load_trusted(
         JitMemoryRegion::Gc,
         types::I64,
@@ -121,6 +121,16 @@ fn emit_jit_small_ptr_new<'a>(
         next_cursor,
         gc,
         region_offset(ValueSlotAllocationRegionField::Cursor),
+    );
+
+    // Type metadata is per object. A size-compatible region can serve
+    // different verified types without preparing or refunding another batch.
+    let metadata = e.builder().ins().iconst(types::I32, i64::from(meta_raw));
+    e.builder().ins().store(
+        MemFlags::trusted(),
+        metadata,
+        cursor,
+        (vo_runtime::gc::GcHeader::SIZE as i32) + vo_runtime::gc::JIT_GC_HEADER_VALUE_META_OFFSET,
     );
 
     let bitmap_word = e.load_trusted(

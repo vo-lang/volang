@@ -433,10 +433,9 @@ fn compile_call_with_placement(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    let previous_span = func.replace_active_call_span(Some(expr.span));
-    let compiled = compile_call_inner(expr, call, result, ctx, func, info);
-    func.replace_active_call_span(previous_span);
-    compiled
+    func.with_source_span(expr.span, |func| {
+        compile_call_inner(expr, call, result, ctx, func, info)
+    })
 }
 
 fn compile_call_inner(

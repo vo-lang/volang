@@ -7,9 +7,9 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { runAot } from './dist/index.js';
+import { compilerPath, repositoryRoot } from './aot_test_compiler.mjs';
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
-const repositoryRoot = resolve(scriptDirectory, '../../..');
 
 function readRequest() {
   const request = JSON.parse(readFileSync(0, 'utf8'));
@@ -17,13 +17,6 @@ function readRequest() {
     throw new Error('AOT test worker requires a source path');
   }
   return request;
-}
-
-function compilerPath() {
-  const profile = process.env.VO_TEST_PROFILE === 'release' ? 'release' : 'debug';
-  const executable = process.platform === 'win32' ? 'vo.exe' : 'vo';
-  const targetDirectory = resolve(repositoryRoot, process.env.CARGO_TARGET_DIR || 'target');
-  return join(targetDirectory, profile, executable);
 }
 
 async function main() {

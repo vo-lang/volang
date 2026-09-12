@@ -26,3 +26,7 @@ icu_properties = { version = "=2.0.2", default-features = false, features = ["co
 default = ["std"]
 std = ["string-interner"]
 test-support = []
+
+[[example]]
+name = "layout_resources"
+required-features = ["std"]

@@ -144,6 +144,74 @@ fn jit_interface_accepts_large_canonical_arrays_and_rejects_header_drift() {
 }
 
 #[test]
+fn jit_interface_checks_each_sequence_descriptor_layout() {
+    use crate::objects::{interface, slice, string};
+
+    let mut module = Module::new("sequence-interface".into());
+    module
+        .runtime_types
+        .push(RuntimeType::Basic(ValueKind::String));
+    module
+        .runtime_types
+        .push(RuntimeType::Basic(ValueKind::Uint8));
+    module
+        .runtime_types
+        .push(RuntimeType::Slice(ValueRttid::new(1, ValueKind::Uint8)));
+    let mut gc = Gc::new();
+    let string_type = ValueRttid::new(0, ValueKind::String);
+    let string_slot0 = interface::pack_slot0(0, 0, ValueKind::String);
+    for slots in [
+        string::DATA_SLOTS,
+        slice::DATA_SLOTS,
+        slice::EXTENDED_DATA_SLOTS,
+        string::DATA_SLOTS - 1,
+        string::DATA_SLOTS + 1,
+    ] {
+        let value = gc.alloc(ValueMeta::new(0, ValueKind::String), slots);
+        assert_eq!(
+            validate_jit_interface_value(&gc, &module, string_slot0, value as u64),
+            (slots == string::DATA_SLOTS).then_some(string_type)
+        );
+    }
+    let slice_type = ValueRttid::new(2, ValueKind::Slice);
+    let slice_slot0 = interface::pack_slot0(0, 2, ValueKind::Slice);
+    let meta = ValueMeta::new(0, ValueKind::Uint8);
+    let compact = slice::create(&mut gc, meta, 1, 2, 4);
+    let owner = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 4);
+    let extended =
+        unsafe { slice::inline_array_slice(&mut gc, owner, owner.cast(), meta, 1, 8, 4, 0, 2) }
+            .unwrap();
+    for value in [compact, extended] {
+        assert_eq!(
+            validate_jit_interface_value(&gc, &module, slice_slot0, value as u64),
+            Some(slice_type)
+        );
+    }
+    for slots in [
+        string::DATA_SLOTS,
+        slice::DATA_SLOTS - 1,
+        slice::DATA_SLOTS + 1,
+        slice::EXTENDED_DATA_SLOTS,
+        slice::EXTENDED_DATA_SLOTS + 1,
+    ] {
+        let value = gc.alloc(ValueMeta::new(0, ValueKind::Slice), slots);
+        assert_eq!(
+            validate_jit_interface_value(&gc, &module, slice_slot0, value as u64),
+            None
+        );
+    }
+    // A valid allocation width cannot make an incompatible layout tag valid.
+    unsafe { slice::SliceData::as_mut(compact) }.layout = slice::LAYOUT_EXTENDED_FLAT;
+    unsafe { slice::SliceData::as_mut(extended) }.layout = slice::LAYOUT_CANONICAL_ARRAY;
+    for value in [compact, extended] {
+        assert_eq!(
+            validate_jit_interface_value(&gc, &module, slice_slot0, value as u64),
+            None
+        );
+    }
+}
+
+#[test]
 fn jit_iface_assert_zero_sized_materialization_writes_no_value_slots() {
     for value_kind in [ValueKind::Array, ValueKind::Struct] {
         let slot0 = crate::objects::interface::pack_slot0(0, 0, value_kind);
@@ -295,6 +363,7 @@ fn vm_jit_iface_assert_layout_abi_061_rejects_width_drift_before_out_write() {
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: 0,
+        runtime_trap_origin: 0,
         current_func_id: 0,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),
@@ -416,6 +485,7 @@ fn vm_jit_iface_assert_flags_width_abi_061_rejects_flags_drift_before_out_write(
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: 0,
+        runtime_trap_origin: 0,
         current_func_id: 0,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),
@@ -548,6 +618,7 @@ fn vm_jit_iface_assert_has_ok_does_not_write_ok_before_success_materialization_0
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: 0,
+        runtime_trap_origin: 0,
         current_func_id: 0,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),
@@ -767,6 +838,7 @@ fn vm_jit_map_get_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: 0,
+        runtime_trap_origin: 0,
         current_func_id: 0,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),
@@ -884,6 +956,7 @@ fn vm_jit_map_iter_next_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: 0,
+        runtime_trap_origin: 0,
         current_func_id: 0,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),
@@ -1086,6 +1159,7 @@ fn typed_write_barrier_helper_reports_invalid_struct_meta_as_jit_error() {
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: u32::MAX,
+        runtime_trap_origin: 0,
         current_func_id: u32::MAX,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),
@@ -1187,6 +1261,7 @@ fn slice_append_metadata_drift_returns_sentinel_instead_of_panicking() {
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: u32::MAX,
+        runtime_trap_origin: 0,
         current_func_id: u32::MAX,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),
@@ -1413,6 +1488,7 @@ fn jit_missing_callbacks_and_invalid_call_requests_fail_without_publishing() {
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: u32::MAX,
+        runtime_trap_origin: 0,
         current_func_id: u32::MAX,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),

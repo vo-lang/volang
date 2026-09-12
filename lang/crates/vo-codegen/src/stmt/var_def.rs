@@ -130,23 +130,17 @@ pub fn compile_var_decl(
                 let obj_key = info.get_def(name);
                 let target_type = info.obj_type(obj_key, "local variable must have a checked type");
                 if info.is_array(target_type) {
-                    // A VarSpec is transactional with respect to lexical bindings:
-                    // evaluate and snapshot every RHS before installing any of its
-                    // names. Keeping the canonical representation here also avoids
-                    // forcing an escaped zero-byte array through the flattened ABI.
-                    let value =
-                        crate::array_value::prepare_expr(value, target_type, ctx, func, info)?;
-                    let value = match value {
-                        crate::array_value::ArrayValue::BorrowedRef(_) => {
-                            crate::array_value::ArrayValue::OwnedRef(value.into_owned_ref(
-                                target_type,
-                                ctx,
-                                func,
-                                info,
-                            )?)
-                        }
-                        value => value,
-                    };
+                    // Snapshot every RHS before installing any VarSpec binding.
+                    // Escaped and zero-byte canonical arrays retain their heap
+                    // representation; independent local values use typed slots.
+                    let value = crate::array_value::prepare_initializer(
+                        value,
+                        target_type,
+                        info.needs_boxing(obj_key, target_type),
+                        ctx,
+                        func,
+                        info,
+                    )?;
                     initializers.push(Some(PreparedInitializer::Array {
                         value,
                         type_key: target_type,
@@ -309,17 +303,14 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
             // evaluated before alloc_storage binds the new symbol, which keeps
             // shadowing (`a := a`) and array value-copy semantics intact.
             let value = if let Some(expr) = init {
-                let value = crate::array_value::prepare_expr(
-                    expr, type_key, self.ctx, self.func, self.info,
-                )?;
-                Some(match value {
-                    crate::array_value::ArrayValue::BorrowedRef(_) => {
-                        crate::array_value::ArrayValue::OwnedRef(
-                            value.into_owned_ref(type_key, self.ctx, self.func, self.info)?,
-                        )
-                    }
-                    value => value,
-                })
+                Some(crate::array_value::prepare_initializer(
+                    expr,
+                    type_key,
+                    obj_key.map_or(escapes, |object| self.info.needs_boxing(object, type_key)),
+                    self.ctx,
+                    self.func,
+                    self.info,
+                )?)
             } else {
                 None
             };
@@ -491,6 +482,11 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
             return Ok(storage);
         }
 
+        if let Some(crate::array_value::ArrayValue::OwnedFlatSlots(flat)) = value {
+            // Only an independent initializer interval can become a new local.
+            // Borrowed FlatSlots retain the ordinary value-copy path below.
+            return self.define_local_from_slot_impl(sym, type_key, escapes, flat, obj_key);
+        }
         let slot_types = self
             .info
             .try_type_slot_types(type_key)
