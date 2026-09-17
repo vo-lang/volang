@@ -37,6 +37,12 @@ Each CI run follows the same chain:
    promotable artifact is hashed recursively and must match the exact bytes
    recorded by its producing job.
 
+For tasks with multiple artifacts, `ci verify --artifact-task <task>` requires
+`--artifact-source <declared-path>` to select the exact entry in the certified
+receipt. `--artifact <downloaded-path>` identifies the local copy, which may be
+relocated. Single-artifact tasks retain the default selection. Unknown or
+ambiguous entries and any changed content are rejected.
+
 Impact explanations use shared or unknown inputs directly when they already
 require all eligible tasks; redundant transitive capability paths are omitted.
 Task selection retains the complete impact graph. Plan generation and loading
@@ -135,6 +141,10 @@ lists and consistent limits. These compatibility checks use
 The separate `ui-web-rewrite` task seals `target/ci/artifacts/site` in its own
 execution receipt. Site promotion verifies that producing task's artifact digest;
 no additional task infers success from the presence of a directory.
+Whenever the Web rewrite task runs, pull-request and main CI download its site
+candidate and exercise the same explicit artifact selection and digest check
+before accepting certification. Site deployment still requires a successful main
+push and rechecks those bytes before publishing.
 
 The replacement desktop framework has three independent tasks:
 `ui-desktop-rewrite-linux`, `ui-desktop-rewrite-macos`, and

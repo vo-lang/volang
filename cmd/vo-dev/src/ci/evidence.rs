@@ -313,6 +313,7 @@ pub(crate) fn verify_artifact(
     root: &Path,
     bundle: &CertificationBundle,
     task_id: &str,
+    source: Option<&str>,
     artifact: &Path,
 ) -> Result<()> {
     let evidence = bundle
@@ -320,12 +321,37 @@ pub(crate) fn verify_artifact(
         .iter()
         .find(|evidence| evidence.task_id == task_id)
         .ok_or_else(|| anyhow!("certification bundle has no evidence for task {task_id}"))?;
-    if evidence.artifacts.len() != 1 {
-        bail!("task {task_id} must certify exactly one promotable artifact");
-    }
-    let actual = digest_absolute_path(root, artifact, &evidence.artifacts[0].path)?;
-    if actual != evidence.artifacts[0] {
-        bail!("promoted artifact digest does not match task {task_id} evidence");
+    verify_artifact_digest(root, &evidence.artifacts, source, artifact)
+        .with_context(|| format!("could not verify promoted artifact for task {task_id}"))
+}
+
+fn verify_artifact_digest(
+    root: &Path,
+    artifacts: &[FileDigest],
+    source: Option<&str>,
+    artifact: &Path,
+) -> Result<()> {
+    let expected = if let Some(source) = source {
+        let mut matches = artifacts.iter().filter(|entry| entry.path == source);
+        let expected = matches
+            .next()
+            .ok_or_else(|| anyhow!("no certified artifact has source path {source:?}"))?;
+        if matches.next().is_some() {
+            bail!("multiple certified artifacts have source path {source:?}");
+        }
+        expected
+    } else {
+        let [expected] = artifacts else {
+            bail!("use --artifact-source to select one of the task's certified artifacts");
+        };
+        expected
+    };
+    let actual = digest_absolute_path(root, artifact, &expected.path)?;
+    if actual != *expected {
+        bail!(
+            "promoted artifact digest does not match certified source {}",
+            expected.path
+        );
     }
     Ok(())
 }
@@ -1078,6 +1104,99 @@ mod tests {
             "volang-ci-evidence-{label}-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn promotion_selects_a_relocated_site_from_multiple_outputs_and_checks_all_bytes() {
+        let root = temporary_test_dir("promotion");
+        let base = "target/ci/artifacts";
+        for (name, contents) in [
+            ("reports/result.json", b"report".as_slice()),
+            ("toolchain.tar.gz", b"toolchain".as_slice()),
+            ("studio-static.tar.gz", b"static".as_slice()),
+            ("site/index.html", b"site".as_slice()),
+        ] {
+            let path = root.join(base).join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+        let artifacts = [
+            "reports",
+            "toolchain.tar.gz",
+            "studio-static.tar.gz",
+            "site",
+        ]
+        .iter()
+        .map(|name| digest_path(&root, &format!("{base}/{name}")).unwrap())
+        .collect::<Vec<_>>();
+        let downloaded = root.join("downloaded-site");
+        fs::create_dir_all(&downloaded).unwrap();
+        fs::write(downloaded.join("index.html"), b"site").unwrap();
+        let source = Some("target/ci/artifacts/site");
+
+        verify_artifact_digest(&root, &artifacts, source, &downloaded).unwrap();
+        assert!(verify_artifact_digest(&root, &artifacts, None, &downloaded)
+            .unwrap_err()
+            .to_string()
+            .contains("--artifact-source"));
+        assert!(verify_artifact_digest(
+            &root,
+            &artifacts,
+            Some("target/ci/artifacts/reports"),
+            &downloaded
+        )
+        .is_err());
+
+        fs::write(downloaded.join("index.html"), b"edit").unwrap();
+        assert!(verify_artifact_digest(&root, &artifacts, source, &downloaded).is_err());
+        fs::write(downloaded.join("index.html"), b"site").unwrap();
+        fs::write(downloaded.join("extra.html"), b"extra").unwrap();
+        assert!(verify_artifact_digest(&root, &artifacts, source, &downloaded).is_err());
+        fs::remove_file(downloaded.join("extra.html")).unwrap();
+        fs::remove_file(downloaded.join("index.html")).unwrap();
+        assert!(verify_artifact_digest(&root, &artifacts, source, &downloaded).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn promotion_preserves_single_artifact_selection_and_relocation() {
+        let root = temporary_test_dir("single-promotion");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("original.tar.gz"), b"artifact").unwrap();
+        let artifacts = [digest_path(&root, "original.tar.gz").unwrap()];
+        let downloaded = root.join("downloaded.tar.gz");
+        fs::copy(root.join("original.tar.gz"), &downloaded).unwrap();
+        verify_artifact_digest(&root, &artifacts, None, &downloaded).unwrap();
+        verify_artifact_digest(&root, &artifacts, Some("original.tar.gz"), &downloaded).unwrap();
+        fs::write(&downloaded, b"modified").unwrap();
+        assert!(verify_artifact_digest(&root, &artifacts, None, &downloaded).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn promotion_rejects_unknown_ambiguous_and_missing_entries() {
+        let root = temporary_test_dir("promotion-selection");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("site.html");
+        fs::write(&path, b"site").unwrap();
+        let entry = digest_path(&root, "site.html").unwrap();
+        for (entries, source, message) in [
+            (
+                vec![entry.clone()],
+                Some("missing"),
+                "no certified artifact",
+            ),
+            (
+                vec![entry.clone(), entry],
+                Some("site.html"),
+                "multiple certified artifacts",
+            ),
+            (vec![], None, "--artifact-source"),
+        ] {
+            let error = verify_artifact_digest(&root, &entries, source, &path).unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -238,6 +238,7 @@ fn cmd_verify(root: &Path, args: Vec<String>) -> Result<()> {
     let mut bundle_path = None;
     let mut profile = None;
     let mut artifact_task = None;
+    let mut artifact_source = None;
     let mut artifact = None;
     let mut index = 0;
     while index < args.len() {
@@ -247,6 +248,9 @@ fn cmd_verify(root: &Path, args: Vec<String>) -> Result<()> {
             "--artifact-task" => {
                 artifact_task = Some(next_value(&args, &mut index, "--artifact-task")?)
             }
+            "--artifact-source" => {
+                artifact_source = Some(next_value(&args, &mut index, "--artifact-source")?)
+            }
             "--artifact" => artifact = Some(next_value(&args, &mut index, "--artifact")?),
             argument => bail!("unknown ci verify argument {argument}\n{}", usage()),
         }
@@ -255,6 +259,9 @@ fn cmd_verify(root: &Path, args: Vec<String>) -> Result<()> {
     if artifact_task.is_some() != artifact.is_some() {
         bail!("--artifact-task and --artifact must be supplied together");
     }
+    if artifact_source.is_some() && artifact_task.is_none() {
+        bail!("--artifact-source requires --artifact-task and --artifact");
+    }
     let bundle_path = resolve_repo_input(
         root,
         &bundle_path.ok_or_else(|| anyhow!("ci verify requires --bundle"))?,
@@ -262,7 +269,7 @@ fn cmd_verify(root: &Path, args: Vec<String>) -> Result<()> {
     let bundle = evidence::read_and_verify_bundle(root, &bundle_path, profile.as_deref())?;
     if let (Some(task), Some(artifact)) = (artifact_task, artifact) {
         let artifact = resolve_repo_input(root, &artifact)?;
-        evidence::verify_artifact(root, &bundle, &task, &artifact)?;
+        evidence::verify_artifact(root, &bundle, &task, artifact_source.as_deref(), &artifact)?;
     }
     println!(
         "verified CI certification {} for {} at {}",
@@ -331,5 +338,22 @@ fn resolve_repo_path(root: &Path, value: &str, output: bool) -> Result<PathBuf> 
 }
 
 fn usage() -> &'static str {
-    "usage:\n  vo-dev ci lint\n  vo-dev ci plan --profile <name> [--base <rev> --head <rev> | --changed-file <path>...] [--output target/ci/plan.json]\n  vo-dev ci explain --base <rev> --head <rev>\n  vo-dev ci run --plan <path> --task <id>\n  vo-dev ci record --plan <path> --task <id> --output target/ci/evidence/<id>.evidence.json\n  vo-dev ci summarize --plan <path> --summaries <dir>\n  vo-dev ci certify --plan <path> --evidence-dir <dir> --output target/ci/certification.json\n  vo-dev ci verify --bundle <path> [--profile <name>] [--artifact-task <id> --artifact <path>]"
+    "usage:\n  vo-dev ci lint\n  vo-dev ci plan --profile <name> [--base <rev> --head <rev> | --changed-file <path>...] [--output target/ci/plan.json]\n  vo-dev ci explain --base <rev> --head <rev>\n  vo-dev ci run --plan <path> --task <id>\n  vo-dev ci record --plan <path> --task <id> --output target/ci/evidence/<id>.evidence.json\n  vo-dev ci summarize --plan <path> --summaries <dir>\n  vo-dev ci certify --plan <path> --evidence-dir <dir> --output target/ci/certification.json\n  vo-dev ci verify --bundle <path> [--profile <name>] [--artifact-task <id> [--artifact-source <declared-path>] --artifact <path>]"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_source_requires_a_task_and_downloaded_artifact() {
+        let args = vec![
+            "--artifact-source".to_string(),
+            "target/ci/artifacts/site".to_string(),
+        ];
+        let error = cmd_verify(Path::new("."), args).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("--artifact-source requires --artifact-task and --artifact"));
+    }
 }

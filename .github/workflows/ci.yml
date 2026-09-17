@@ -139,7 +139,7 @@ jobs:
             echo "wasm_task=$wasm_task"
             if has_task ui-web-rewrite; then echo "ui_web_preview=true"; else echo "ui_web_preview=false"; fi
             if has_task rust-quality; then echo "rust_quality=true"; else echo "rust_quality=false"; fi
-            if [ "$profile" = main ] && has_task ui-web-rewrite; then echo "site_candidate=true"; else echo "site_candidate=false"; fi
+            if has_task ui-web-rewrite; then echo "site_candidate=true"; else echo "site_candidate=false"; fi
           } >> "$GITHUB_OUTPUT"
 
       - name: Upload immutable CI plan
@@ -775,6 +775,24 @@ jobs:
       - name: Require complete UI evidence for merge and promotion
         if: needs.plan.outputs.profile != 'pull-request'
         run: ./target/debug/vo-dev ui-certify --evidence target/ci/certification.json
+
+      - name: Download the certified Studio candidate
+        if: needs.plan.outputs.site_candidate == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: site-candidate-${{ github.sha }}
+          path: target/ci/artifacts/site
+
+      - name: Verify Studio promotion before accepting CI
+        if: needs.plan.outputs.site_candidate == 'true'
+        env:
+          PROFILE: ${{ needs.plan.outputs.profile }}
+        run: |
+          ./target/debug/vo-dev ci verify \
+            --bundle target/ci/certification.json --profile "$PROFILE" \
+            --artifact-task ui-web-rewrite \
+            --artifact-source target/ci/artifacts/site \
+            --artifact target/ci/artifacts/site
 
       - name: Upload certification bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
