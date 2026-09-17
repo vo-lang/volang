@@ -1,0 +1,98 @@
+package main
+
+import (
+	"strconv"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func measurementContracts() {
+	var ref *ui.ElementRef
+	var shown, replace *ui.BoolState
+	var result ui.Measurement
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		ref = ui.Ref(scope, "box")
+		shown = ui.Bool(scope, "shown", false)
+		replace = ui.Bool(scope, "replace", false)
+		if !shown.Get() {
+			return ui.Text("empty")
+		}
+		tag := "div"
+		if replace.Get() {
+			tag = "section"
+		}
+		return ui.Element(tag).Ref(ref).Attr("data-name", "box")
+	}))
+	flush(root)
+	receive := func(value ui.Measurement) {
+		result = value
+	}
+	shown.Set(true)
+	ref.Measure(receive)
+	batch := flush(root)
+	initial := target(batch, "box")
+	require(batch.Commands[0].Name == "ui.measure" && batch.Commands[0].Value == strconv.Itoa(initial), "measurement did not resolve a new element after reconciliation")
+	sequence := 0
+	finish := func(id int, value string, failure string) {
+		sequence++
+		require(root.Dispatch(ui.Event{
+			Kind: "@task", Target: id, Sequence: sequence, Value: value, Error: failure,
+		}), "measurement result rejected")
+	}
+	finish(startCommand(batch), `{"found":true,"x":-1.25,"y":20.5,"width":120.75,"height":0}`, "")
+	require(result.Found && result.X == -1.25 && result.Y == 20.5 && result.Width == 120.75 &&
+		result.Height == 0 &&
+		result.Error == "", "measurement lost fractional or negative geometry")
+	replace.Set(true)
+	ref.Measure(receive)
+	batch = flush(root)
+	require(batch.Commands[0].Value == strconv.Itoa(target(batch, "box")) &&
+		batch.Commands[0].Value != strconv.Itoa(initial), "measurement retained a replaced element")
+	finish(startCommand(batch), `{"found":true,"x":0,"y":0,"width":0,"height":0}`, "")
+	require(result.Found && result.Width == 0, "hidden element cannot return an empty rectangle")
+	shown.Set(false)
+	ref.Measure(receive)
+	batch = flush(root)
+	require(batch.Commands[0].Value == "0", "unbound measurement retained a node")
+	finish(startCommand(batch), `{"found":false,"x":0,"y":0,"width":0,"height":0}`, "")
+	require(!result.Found && result.Error == "", "missing element was treated as a host error")
+	for _, malformed := range []string{
+		"", "{}", "null", `{"found":true}`, `{"found":true,"x":null,"y":0,"width":1,"height":1}`,
+		`{"found":true,"x":0,"y":0,"width":-1,"height":1}`,
+		`{"found":false,"x":1,"y":0,"width":0,"height":0}`, strings.Repeat(" ", 2049),
+	} {
+		ref.Measure(receive)
+		batch = flush(root)
+		finish(startCommand(batch), malformed, "")
+		require(!result.Found && result.Error != "", "malformed measurement escaped validation")
+	}
+	ref.Measure(receive)
+	batch = flush(root)
+	finish(startCommand(batch), "", "host unavailable")
+	require(result.Error == "host unavailable", "measurement lost local host failure")
+	count := 0
+	pending := ref.Measure(func(ui.Measurement) {
+		count++
+	})
+	pending.Cancel()
+	batch = flush(root)
+	sequence++
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: startCommand(batch), Sequence: sequence}) &&
+		count == 0, "cancelled measurement delivered a result")
+	ref.Measure(receive)
+	batch = flush(root)
+	root.Close()
+	sequence++
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: startCommand(batch), Sequence: sequence}), "disposed scope received a measurement")
+	var absent *ui.ElementRef
+	require(ref.Measure(receive) == nil && absent.Measure(receive) == nil &&
+		(&ui.ElementRef{}).Measure(receive) == nil, "unowned ref accepted measurement")
+	root = ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		ref = ui.Ref(scope, "box")
+		ref.Measure(receive)
+		return ui.Element("div").Ref(ref)
+	}))
+	expectPanic(func() {
+		root.Flush()
+	}, "tasks must start")
+}

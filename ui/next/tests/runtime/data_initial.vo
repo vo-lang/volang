@@ -1,0 +1,132 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/data"
+)
+
+func initialDataContracts() {
+	request := ui.Request{Service: "server-query", Value: "page=one", TimeoutMilliseconds: 5000}
+	values := []data.InitialValue{
+		{Request: request, Value: "Server says: 中文 & <hello>", UpdatedAtMilliseconds: 900},
+	}
+	encoded, err := data.EncodeInitial(values)
+	require(err == nil, "initial data could not be encoded")
+	decoded, err := data.DecodeInitial(encoded)
+	require(err == nil && len(decoded) == 1 && decoded[0] == values[0], "initial data lost request identity or Unicode")
+	for _, invalid := range []string{
+		`{`, `{"Version":2}`, `{"Version":1,"Values":[{"Request":{"Service":""}}]}`,
+	} {
+		_, failure := data.DecodeInitial(invalid)
+		require(failure != nil, "invalid initial data was accepted")
+	}
+	_, err = data.EncodeInitial(append(values, values[0]))
+	require(err != nil, "duplicate initial request was accepted")
+	_, err = data.EncodeInitial([]data.InitialValue{{Request: request, UpdatedAtMilliseconds: -1}})
+	require(err != nil, "invalid initial timestamp was accepted")
+	_, err = data.EncodeInitial([]data.InitialValue{
+		{Request: request, Value: strings.Repeat("x", 4 * 1024 * 1024)},
+	})
+	require(err != nil, "initial data exceeded its byte budget")
+	now := int64(1000)
+	var client *data.Client
+	var changed *ui.IntState
+	latest := make(map[string]data.Snapshot)
+	view := func(clock func() int64) ui.View {
+		return ui.Component(branchType, func(scope *ui.Scope) ui.View {
+			changed = ui.Int(scope, "changed", 0)
+			changed.Get()
+			client = data.NewClient(scope, "client", data.Options{
+				Initial: decoded, FreshMilliseconds: 1000, Now: clock,
+			})
+			first, second := client, client
+			row := func(name string, owner *data.Client) ui.View {
+				return ui.Component(queryRowType, func(child *ui.Scope) ui.View {
+					snapshot := data.Use(child, "result", owner, request)
+					latest[name] = snapshot
+					return ui.Text(snapshot.Value)
+				}).Key(name)
+			}
+			return ui.Fragment(row("first", first), row("second", second))
+		})
+	}
+	server := ui.NewRoot(view(func() int64 {
+		return 100000
+	}))
+	server.Flush()
+	html := server.HTML()
+	require(!latest["first"].Fetching && !latest["first"].Stale && latest["first"].HasValue, "server seed did not expose a stable first render")
+	server.Close()
+	root := ui.NewRoot(view(func() int64 {
+		return now
+	}))
+	first := root.Flush()
+	require(root.HTML() == html && len(first.Commands) == 0, "client first render disagreed with server time or started pre-commit work")
+	decoded[0].Value = "caller changed its original slice"
+	root.Commit(first.Revision)
+	require(len(settleQueries(root)) == 0 && latest["second"].Value == values[0].Value, "fresh initial data refetched or aliased the caller's records")
+	changed.Set(1)
+	require(len(settleQueries(root)) == 0 && latest["first"].Value == values[0].Value, "rerender reapplied initial options over the live cache")
+	now = 2000
+	client.Invalidate(request)
+	work := onlyStart(settleQueries(root))
+	require(latest["first"].Fetching && latest["second"].Fetching && latest["first"].HasValue, "seed refresh discarded the old value or failed to update both observers")
+	root.Dispatch(ui.Event{Target: work, Kind: "@task", Value: "Fresh client result", Sequence: 1})
+	settleQueries(root)
+	require(latest["second"].Value == "Fresh client result", "client refresh did not replace seeded data")
+	root.Close()
+	// A stale snapshot still produces matching first HTML. Both subscriptions
+	// must observe the one revalidation started after that commit.
+	decoded[0] = values[0]
+	stale := ui.NewRoot(view(func() int64 {
+		return 10000
+	}))
+	first = stale.Flush()
+	require(stale.HTML() == html, "stale seed changed hydration markup before commit")
+	stale.Commit(first.Revision)
+	work = onlyStart(settleQueries(stale))
+	require(latest["first"].Fetching && latest["second"].Fetching && latest["second"].Stale, "later subscriber missed same-commit seed revalidation")
+	stale.Close()
+	require(!stale.Dispatch(ui.Event{Target: work, Kind: "@task", Value: "late", Sequence: 1}), "closed seeded client accepted late work")
+	empty := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		cache := data.NewClient(scope, "empty", data.Options{
+			Initial: []data.InitialValue{{Request: request, Value: "", UpdatedAtMilliseconds: 900}},
+			FreshMilliseconds: 1000,
+			Now: func() int64 {
+				return 1000
+			},
+		})
+		value := data.Use(scope, "value", cache, request)
+		require(value.HasValue && value.Value == "" && !value.Fetching, "empty seed was treated as missing")
+		return ui.Text(value.Value)
+	}))
+	require(len(settleQueries(empty)) == 0, "empty successful seed triggered I/O")
+	empty.Close()
+	// Content-addressed documents keep an old build snapshot without refetching.
+	// Explicit invalidation still starts one shared refresh for active readers.
+	immutable := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		client = data.NewClient(scope, "immutable", data.Options{
+			Initial: values, Immutable: true,
+			Now: func() int64 {
+				return 1000000000000
+			},
+		})
+		value := data.Use(scope, "value", client, request)
+		return ui.Text(value.Value)
+	}))
+	require(len(settleQueries(immutable)) == 0, "immutable initial content refetched because of its age")
+	client.Invalidate(request)
+	work = onlyStart(settleQueries(immutable))
+	immutable.Dispatch(ui.Event{Target: work, Kind: "@task", Value: "Replaced document", Sequence: 1})
+	require(len(settleQueries(immutable)) == 0 &&
+		strings.Contains(immutable.HTML(), "Replaced document"), "immutable cache ignored explicit invalidation or refetched its replacement")
+	immutable.Close()
+	oversized := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		data.NewClient(scope, "small", data.Options{Initial: values, RetainedBytes: 1})
+		return ui.Fragment()
+	}))
+	expectPanic(func() {
+		oversized.Flush()
+	}, "retention budget")
+}

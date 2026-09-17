@@ -1,0 +1,31 @@
+package main
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/wire"
+)
+
+func main() {
+	root := ui.NewRoot(ui.Element("main", ui.DataBlock("application/ld+json", map[string]any{
+		"@context": "https://schema.org", "@type": "Article",
+		"name": "Data </script><!--<script> & 中文\r\n\x00", "count": 1,
+	}).Attr("id", "linked-data"), ui.DataBlock("application/json", []any{true, nil, 1.25, "plain"}).Attr("id", "json-data"), ui.Element("iframe").Attr("title", "Embedded example").Attr("srcdoc", "<p id='embedded'>Native <strong>document</strong> &amp; content</p>"), ui.Element("p", ui.Text("Following content remains visible")).Attr("id", "after-data")))
+	bytes, err := wire.EncodeBatch(root.Flush())
+	if err != nil {
+		panic(err)
+	}
+	result, err := json.Marshal(struct {
+		HTML string `json:"html"`
+		Batch string `json:"batch"`
+	}{
+		HTML: root.HTML(), Batch: base64.StdEncoding.EncodeToString(bytes),
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Print(string(result))
+	root.Close()
+}

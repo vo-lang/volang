@@ -8,7 +8,9 @@ export async function runUikitGallerySmoke(contract, timeoutMilliseconds, projec
   };
   const activateButton = async name => contract.activate('button, [role="button"], [role="menuitem"], [role="menuitemcheckbox"]', name);
   const focusElement = async selector => contract.page.locator(selector).focus();
-  const setNamedInput = async (name, value) => contract.page.getByLabel(name, { exact: true }).fill(value);
+  const setNamedInput = async (name, value) => contract.afterCommit(
+    () => contract.page.getByLabel(name, { exact: true }).fill(value), timeoutMilliseconds,
+  );
   const pressKey = async (key, code, windowsVirtualKeyCode) => {
     await contract.keyEvent({
       type: "keyDown", key, code, windowsVirtualKeyCode,
@@ -289,7 +291,8 @@ export async function runUikitGallerySmoke(contract, timeoutMilliseconds, projec
   );
   await contract.mouseEvent({ type: "mouseMoved", x: 0, y: 0 });
 
-  const searchChanged = await evaluate(`(() => {
+  await contract.afterCommit(async () => {
+    const searchChanged = await evaluate(`(() => {
     const input = document.querySelector('[role="searchbox"][aria-label="Component search"]');
     if (!(input instanceof HTMLInputElement)) return false;
     input.scrollIntoView({ block: "center", inline: "center" });
@@ -299,7 +302,8 @@ export async function runUikitGallerySmoke(contract, timeoutMilliseconds, projec
     input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
     return true;
   })()`);
-  if (searchChanged !== true) throw new Error("UIKit gallery could not edit component search");
+    if (searchChanged !== true) throw new Error("UIKit gallery could not edit component search");
+  }, timeoutMilliseconds);
   await focusElement('[role="searchbox"][aria-label="Component search"]');
   await pressKey("Enter", "Enter", 13);
   checkpoints.search = await pollEvaluation(contract,

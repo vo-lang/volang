@@ -23,6 +23,7 @@ use vo_runtime::ext_loader::NativeExtensionSpec;
 use vo_stdlib::EmbeddedStdlib;
 
 mod cache;
+pub mod editor;
 mod host_input;
 mod native;
 mod pipeline;
@@ -1018,6 +1019,53 @@ fn check_real_path_with_source_overlays(
     options: &ProjectContextOptions,
     overlays: Vec<SourceOverlay>,
 ) -> Result<(), CompileError> {
+    with_real_path_source_overlays(
+        path,
+        options,
+        overlays,
+        pipeline::check_with_project_snapshot,
+    )
+}
+
+fn with_real_path_source_overlays<T>(
+    path: &Path,
+    options: &ProjectContextOptions,
+    overlays: Vec<SourceOverlay>,
+    analyze: impl FnOnce(
+        pipeline::ProjectCompileContext,
+        EmbeddedStdlib,
+        Arc<snapshot::CompileInputSnapshot>,
+    ) -> Result<T, CompileError>,
+) -> Result<T, CompileError> {
+    with_real_path_snapshot(
+        path,
+        options,
+        |context, captured| {
+            for overlay in overlays {
+                captured.apply_source_overlay(
+                    context.project_root.join(overlay.relative_path),
+                    overlay.bytes,
+                )?;
+            }
+            Ok(())
+        },
+        analyze,
+    )
+}
+
+fn with_real_path_snapshot<T>(
+    path: &Path,
+    options: &ProjectContextOptions,
+    overlay: impl FnOnce(
+        &RealPathCompileContext,
+        &mut cache::CapturedCompileInputs,
+    ) -> Result<(), CompileError>,
+    analyze: impl FnOnce(
+        pipeline::ProjectCompileContext,
+        EmbeddedStdlib,
+        Arc<snapshot::CompileInputSnapshot>,
+    ) -> Result<T, CompileError>,
+) -> Result<T, CompileError> {
     let mut context = load_real_path_compile_context_with_options(path, options)?;
     context.mod_cache = context
         .mod_cache
@@ -1029,14 +1077,9 @@ fn check_real_path_with_source_overlays(
     let mut captured =
         cache::capture_compile_inputs(context.compile_input_capture(&stdlib_source_fingerprint))?;
     let live_fingerprint = captured.fingerprint().to_string();
-    for overlay in overlays {
-        captured.apply_source_overlay(
-            context.project_root.join(overlay.relative_path),
-            overlay.bytes,
-        )?;
-    }
+    overlay(&context, &mut captured)?;
     let post_check_context = context.clone();
-    pipeline::check_with_project_snapshot(
+    let result = analyze(
         context.into_pipeline_context(),
         stdlib_snapshot.unwrap_or_default(),
         captured.into_snapshot(),
@@ -1050,7 +1093,8 @@ fn check_real_path_with_source_overlays(
         &post_check_context,
         &stdlib_source_fingerprint,
         &live_fingerprint,
-    )
+    )?;
+    Ok(result)
 }
 
 pub fn compile_with_options(

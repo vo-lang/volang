@@ -1,6 +1,6 @@
 import { expect } from '@playwright/test';
 import { runStudioCanarySmoke } from './studio-canary.mjs';
-import { waitForAotInteractive } from '../page-contract.mjs';
+import { waitForVmInteractive } from '../page-contract.mjs';
 
 // A longer journey runs in one isolated context. Each cycle is new work, with
 // no retry: the first failed contract stops the test and retains its trace.
@@ -71,7 +71,7 @@ export async function runStudioLifecycleSmoke(contract, timeoutMilliseconds) {
   // normal cache population includes the optional compiler and preview assets.
   await expect.poll(() => page.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
   await contract.reload();
-  await waitForAotInteractive(contract, timeoutMilliseconds);
+  await waitForVmInteractive(contract, timeoutMilliseconds);
   await expect(editor).toHaveValue(original);
   await button('Open Preview').click();
   const preview = page.frameLocator('iframe[title="Volang application preview"]');
@@ -83,7 +83,7 @@ export async function runStudioLifecycleSmoke(contract, timeoutMilliseconds) {
   await context.setOffline(true);
   try {
     await contract.reload();
-    await waitForAotInteractive(contract, timeoutMilliseconds);
+    await waitForVmInteractive(contract, timeoutMilliseconds);
     await expect(editor).toHaveValue(original);
     const offlineSource = original.replace('UseIntState(41)', 'UseIntState(73)');
     expect(offlineSource).not.toBe(original);
@@ -96,14 +96,14 @@ export async function runStudioLifecycleSmoke(contract, timeoutMilliseconds) {
     await preview.getByRole('button', { name: 'Count: 73', exact: true }).click();
     await expect(preview.getByRole('button', { name: 'Count: 74', exact: true })).toBeVisible();
     await contract.reload();
-    await waitForAotInteractive(contract, timeoutMilliseconds);
+    await waitForVmInteractive(contract, timeoutMilliseconds);
     await expect(editor).toHaveValue(offlineSource);
     checkpoints.offlineReloadEditPreviewSave = true;
   } finally {
     await context.setOffline(false);
   }
   await contract.reload();
-  await waitForAotInteractive(contract, timeoutMilliseconds);
+  await waitForVmInteractive(contract, timeoutMilliseconds);
   await expect(editor).toHaveValue(/UseIntState\(73\)/);
   await button('Open Preview').click();
   await expect(preview.getByRole('button', { name: 'Count: 73', exact: true })).toBeVisible();

@@ -130,7 +130,7 @@ impl ProjectTemplate {
     }
 }
 
-const RELEASE_APP_JS: &str = r#"import { connectAotUiToDom, runAot, UiBrowserSystemHost } from '/runtime/dist/index.js';
+const RELEASE_APP_JS: &str = r#"import { init, createVmIsland, connectUiVmToDom, UiBrowserSystemHost } from '/runtime/dist/index.js';
 
 const root = document.querySelector('#volang-root');
 const diagnostic = document.querySelector('#volang-diagnostic');
@@ -155,7 +155,7 @@ const activate = () => {
   setPhase('ready', 'Application ready');
   boot.hidden = true;
 };
-mark('volang-aot-bootstrap-start');
+mark('volang-vm-bootstrap-start');
 const showError = (cause) => {
   const error = cause instanceof Error ? cause : new Error(String(cause));
   root.setAttribute('inert', '');
@@ -171,52 +171,57 @@ const showError = (cause) => {
 retry.addEventListener('click', () => location.reload());
 root.setAttribute('inert', '');
 setPhase('loading-host', 'Preparing the application host…');
-const loadAotImage = async () => {
-  const response = await fetch('/app.wasm');
-  if (!response.ok) throw new Error(`failed to load application AOT image: HTTP ${response.status}`);
-  if (typeof WebAssembly.compileStreaming === 'function') {
-    try {
-      return await WebAssembly.compileStreaming(response.clone());
-    } catch {
-      return response.arrayBuffer();
-    }
-  }
-  return response.arrayBuffer();
+const loading = new AbortController();
+const imageResult = fetch('/app.vob', {signal: loading.signal}).then(async response => {
+  if (!response.ok) throw new Error(`failed to load application bytecode: HTTP ${response.status}`);
+  return new Uint8Array(await response.arrayBuffer());
+}).then(image => ({image}), error => ({error}));
+const runtimeResult = init(new URL('/runtime/pkg/vo_web_bg.wasm', location.origin))
+  .then(() => ({}), error => ({error}));
+let session, island, closed = false;
+const close = () => {
+  if (closed) return;
+  closed = true;
+  loading.abort();
+  window.removeEventListener('pagehide', pageExit);
+  try { session?.dispose(); }
+  finally { island?.free(); island = undefined; }
 };
-const imageResult = loadAotImage().then(
-  (image) => ({ image }),
-  (error) => ({ error }),
-);
+const pageExit = event => { if (!event.persisted) close(); };
+window.addEventListener('pagehide', pageExit);
 
 try {
   /*__VOLANG_APPLICATION_HOST__*/
-  mark('volang-aot-host-ready');
-  measure('volang-aot-host-startup', 'volang-aot-bootstrap-start', 'volang-aot-host-ready');
+  mark('volang-vm-host-ready');
+  measure('volang-vm-host-startup', 'volang-vm-bootstrap-start', 'volang-vm-host-ready');
   setPhase('loading-image', 'Loading the compiled application…');
   const loadedImage = await imageResult;
   if (loadedImage.error) throw loadedImage.error;
   const image = loadedImage.image;
-  mark('volang-aot-image-ready');
-  measure('volang-aot-image-fetch', 'volang-aot-bootstrap-start', 'volang-aot-image-ready');
+  const runtime = await runtimeResult;
+  if (runtime.error) throw runtime.error;
+  if (closed) throw new Error('Application startup was cancelled');
+  island = createVmIsland(image);
+  mark('volang-vm-image-ready');
+  measure('volang-vm-image-fetch', 'volang-vm-bootstrap-start', 'volang-vm-image-ready');
   let interactiveMarked = false;
-  const { externs } = connectAotUiToDom(root, {
+  session = connectUiVmToDom(island, root, {
+    onError: showError,
     systemHost,
     onCommit: () => {
       if (interactiveMarked) return;
       interactiveMarked = true;
       activate();
-      mark('volang-aot-interactive');
-      measure('volang-aot-startup', 'volang-aot-bootstrap-start', 'volang-aot-interactive');
+      mark('volang-vm-interactive');
+      measure('volang-vm-startup', 'volang-vm-bootstrap-start', 'volang-vm-interactive');
     },
   });
-  mark('volang-aot-runtime-connected');
+  mark('volang-vm-runtime-connected');
   setPhase('starting-runtime', 'Starting the application…');
-  void runAot(image, { externs, memoryLimitPages: 4096 }).then(({ result }) => {
-    if (result.status === 'error') throw new Error(result.stderr || `application exited with status ${result.exitCode}`);
-    mark('volang-aot-runtime-settled');
-  }).catch(showError);
+  session.start();
+  mark('volang-vm-runtime-settled');
 } catch (error) {
-  showError(error);
+  if (!closed) { close(); showError(error); }
 }
 "#;
 
@@ -354,7 +359,7 @@ struct WebDeploymentManifest<'a> {
     rendering: &'static str,
     routes: &'a [String],
     client_entry: &'static str,
-    aot_image: &'static str,
+    bytecode: &'static str,
     headers: &'static str,
     activation: &'static str,
     server_authority: &'static str,
@@ -1343,12 +1348,12 @@ fn write_web_policy_assets(output: &Path, config: &WebReleaseConfig) -> Result<(
     super::write_file_atomically(&output.join("_headers"), headers.as_bytes())
         .map_err(|error| error.to_string())?;
     let deployment = WebDeploymentManifest {
-        schema: "volang.web-deployment/v1",
+        schema: "volang.web-deployment/v2",
         target: "wasm32-unknown-unknown",
         rendering: "static-ssr-with-client-activation",
         routes: &config.routes,
         client_entry: "/app.js",
-        aot_image: "/app.wasm",
+        bytecode: "/app.vob",
         headers: "/_headers",
         activation: "#volang-activation",
         server_authority: if config.host.module.is_empty() {
@@ -1384,16 +1389,14 @@ fn write_web_policy_assets(output: &Path, config: &WebReleaseConfig) -> Result<(
 
     let mut precache = vec![
         "/app.js".to_string(),
-        "/app.wasm".to_string(),
+        "/app.vob".to_string(),
         "/manifest.webmanifest".to_string(),
         "/runtime/dist/index.js".to_string(),
-        "/runtime/dist/ui_aot.js".to_string(),
+        "/runtime/pkg/vo_web.js".to_string(),
+        "/runtime/pkg/vo_web_bg.wasm".to_string(),
         "/runtime/dist/ui_dom.js".to_string(),
         "/runtime/dist/ui_protocol.js".to_string(),
         "/runtime/dist/ui_system.js".to_string(),
-        "/runtime/dist/ui_system_aot.js".to_string(),
-        "/runtime/aot-support/vo_aot_support_wasm.js".to_string(),
-        "/runtime/aot-support/vo_aot_support_wasm_bg.wasm".to_string(),
     ];
     let cached_routes = if config.pwa.precache_routes {
         config.routes.clone()
@@ -1703,12 +1706,26 @@ fn development_web_assets(project: &Path) -> Result<DevWebAssets, String> {
 }
 
 pub(super) fn cmd_ui(args: &[OsString]) -> i32 {
+    if args.first() == Some(&OsString::from("web")) {
+        return super::ui_web::cmd_ui_web(&args[1..]);
+    }
+    if super::ui_web::is_project_command(args) {
+        return super::ui_web::cmd_ui_web(args);
+    }
     if args.first() == Some(&OsString::from("help"))
         || args.first() == Some(&OsString::from("--help"))
         || args.first() == Some(&OsString::from("-h"))
     {
         print_usage();
         return 0;
+    }
+    if matches!(
+        args.first().and_then(|value| value.to_str()),
+        Some(
+            "new" | "source" | "inspect" | "doctor" | "test" | "build" | "package" | "run" | "dev"
+        )
+    ) {
+        eprintln!("Legacy UI compatibility command. For the replacement framework, use `vo ui create`; migration: ui/next/guides/migration.md in the UI toolchain.");
     }
     if args.first() == Some(&OsString::from("new")) {
         return cmd_new(&args[1..]);
@@ -1771,6 +1788,9 @@ pub(super) fn cmd_ui(args: &[OsString]) -> i32 {
 }
 
 fn print_usage() {
+    super::ui_web::print_usage();
+    println!();
+    println!("Legacy UI compatibility commands (new projects: vo ui create):");
     println!(
         "usage: vo ui new <path> [--module=local/name] [--template=default|dashboard|media|studio]"
     );
@@ -2062,7 +2082,7 @@ fn cmd_build(args: &[OsString]) -> i32 {
     match build_web_release(&project, &output, &runtime_dir) {
         Ok(bytes) => {
             println!(
-                "Built Volang Web UI AOT bundle at {} (app.wasm: {} bytes)",
+                "Built Volang Web UI VM bundle at {} (app.vob: {} bytes)",
                 output.display(),
                 bytes
             );
@@ -2181,10 +2201,16 @@ fn cmd_package(args: &[OsString]) -> i32 {
                 &object.bytes,
                 &layout.executable,
                 &target,
-                runtime,
-                &[],
-                true,
-                vo_engine::native_aot_requires_toolchain_host(compiled.module.module()),
+                super::NativeLinkOptions {
+                    runtime,
+                    extension_archives: &[],
+                    extra_args: &[],
+                    ui: true,
+                    compiler_host: vo_engine::native_aot_requires_toolchain_host(
+                        compiled.module.module(),
+                    ),
+                    windows_gui: false,
+                },
             )
         })
         .and_then(|()| {
@@ -2270,8 +2296,12 @@ fn build_web_release(project: &Path, output: &Path, runtime_dir: &Path) -> Resul
     }
     let target = vo_target::TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN)
         .map_err(|error| error.to_string())?;
-    let artifact = vo_ui_integration::engine()
-        .compile_wasm_aot_image(&compiled, &target)
+    vo_ui_integration::engine()
+        .verify_compile_output_for_target(&compiled, &target)
+        .map_err(|error| error.to_string())?;
+    let bytecode = compiled
+        .module
+        .serialize()
         .map_err(|error| error.to_string())?;
     fs::create_dir_all(output).map_err(|error| {
         format!(
@@ -2295,7 +2325,7 @@ fn build_web_release(project: &Path, output: &Path, runtime_dir: &Path) -> Resul
     if config.host.compiler {
         package_web_compiler_workspace_modules(project, output)?;
     }
-    super::write_file_atomically(&output.join("app.wasm"), &artifact.bytes)
+    super::write_file_atomically(&output.join("app.vob"), &bytecode)
         .map_err(|error| error.to_string())?;
     for route in &config.routes {
         let document = release_ssr_document(compiled.clone(), route, &config)?;
@@ -2308,18 +2338,12 @@ fn build_web_release(project: &Path, output: &Path, runtime_dir: &Path) -> Resul
     let application_script = release_app_javascript(&config);
     super::write_file_atomically(&output.join("app.js"), application_script.as_bytes())
         .map_err(|error| error.to_string())?;
-    super::write_file_atomically(&output.join(".volang-ui-build"), b"volang.ui.web-aot.v1\n")
+    super::write_file_atomically(&output.join(".volang-ui-build"), b"volang.ui.web-vm.v1\n")
         .map_err(|error| error.to_string())?;
     copy_runtime_tree(&runtime_dir.join("dist"), &output.join("runtime/dist"))?;
-    copy_runtime_tree(
-        &runtime_dir.join("aot-support"),
-        &output.join("runtime/aot-support"),
-    )?;
-    if config.host.compiler {
-        copy_runtime_tree(&runtime_dir.join("pkg"), &output.join("runtime/pkg"))?;
-    }
+    copy_runtime_tree(&runtime_dir.join("pkg"), &output.join("runtime/pkg"))?;
     write_web_policy_assets(output, &config)?;
-    Ok(artifact.bytes.len())
+    Ok(bytecode.len())
 }
 
 #[derive(Default)]
@@ -2502,17 +2526,15 @@ fn package_web_compiler_workspace_modules(project: &Path, output: &Path) -> Resu
 fn validate_release_runtime(root: &Path) -> Result<(), String> {
     for relative in [
         "dist/index.js",
-        "dist/ui_aot.js",
+        "pkg/vo_web.js",
+        "pkg/vo_web_bg.wasm",
         "dist/ui_dom.js",
         "dist/ui_protocol.js",
         "dist/ui_system.js",
-        "dist/ui_system_aot.js",
-        "aot-support/vo_aot_support_wasm.js",
-        "aot-support/vo_aot_support_wasm_bg.wasm",
     ] {
         if !root.join(relative).is_file() {
             return Err(format!(
-                "Web AOT runtime is missing {}; run `npm --prefix lang/crates/vo-web run build`",
+                "Web VM runtime is missing {}; run `npm --prefix lang/crates/vo-web run build`",
                 root.join(relative).display()
             ));
         }
@@ -3911,13 +3933,13 @@ fn inspect_project(
         InspectionTarget::Web => {
             let target = vo_target::TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN)
                 .map_err(|error| error.to_string())?;
-            let artifact = vo_ui_integration::engine()
-                .compile_wasm_aot_image(&output, &target)
+            vo_ui_integration::engine()
+                .verify_compile_output_for_target(&output, &target)
                 .map_err(|error| error.to_string())?;
             (
                 target.triple().to_string(),
-                "core-wasm-aot",
-                artifact.bytes.len(),
+                "wasm-vm-bytecode",
+                bytecode_bytes,
             )
         }
         InspectionTarget::Native => {
@@ -4514,6 +4536,8 @@ fn compile_state(compiler: &mut UiCompilerSession, project: &Path) -> DevState {
 fn validate_runtime(root: &Path) -> Result<(), String> {
     for relative in [
         "dist/index.js",
+        "pkg/vo_web.js",
+        "pkg/vo_web_bg.wasm",
         "dist/ui_dom.js",
         "dist/ui_system.js",
         "pkg/vo_web.js",
@@ -5347,18 +5371,16 @@ mod tests {
     }
 
     #[test]
-    fn web_aot_release_assets_are_validated_and_copied() {
+    fn web_vm_release_assets_are_validated_and_copied() {
         let runtime = temporary_project("release-runtime");
         let output = temporary_project("release-output");
         for relative in [
             "dist/index.js",
-            "dist/ui_aot.js",
+            "pkg/vo_web.js",
+            "pkg/vo_web_bg.wasm",
             "dist/ui_dom.js",
             "dist/ui_protocol.js",
             "dist/ui_system.js",
-            "dist/ui_system_aot.js",
-            "aot-support/vo_aot_support_wasm.js",
-            "aot-support/vo_aot_support_wasm_bg.wasm",
         ] {
             let path = runtime.join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -5366,27 +5388,23 @@ mod tests {
         }
         validate_release_runtime(&runtime).unwrap();
         copy_runtime_tree(&runtime.join("dist"), &output.join("runtime/dist")).unwrap();
-        copy_runtime_tree(
-            &runtime.join("aot-support"),
-            &output.join("runtime/aot-support"),
-        )
-        .unwrap();
+        copy_runtime_tree(&runtime.join("pkg"), &output.join("runtime/pkg")).unwrap();
         assert_eq!(
-            fs::read_to_string(output.join("runtime/dist/ui_aot.js")).unwrap(),
-            "dist/ui_aot.js"
+            fs::read_to_string(output.join("runtime/pkg/vo_web.js")).unwrap(),
+            "pkg/vo_web.js"
         );
-        assert!(RELEASE_APP_JS.contains("connectAotUiToDom"));
-        assert!(RELEASE_APP_JS.contains("runAot"));
-        assert!(RELEASE_APP_JS.contains("WebAssembly.compileStreaming(response.clone())"));
-        assert!(RELEASE_APP_JS.contains("volang-aot-host-startup"));
-        assert!(RELEASE_APP_JS.contains("volang-aot-image-fetch"));
-        assert!(RELEASE_APP_JS.contains("volang-aot-startup"));
+        assert!(RELEASE_APP_JS.contains("connectUiVmToDom"));
+        assert!(RELEASE_APP_JS.contains("session.start()"));
+        assert!(RELEASE_APP_JS.contains("const runtimeResult = init("));
+        assert!(RELEASE_APP_JS.contains("volang-vm-host-startup"));
+        assert!(RELEASE_APP_JS.contains("volang-vm-image-fetch"));
+        assert!(RELEASE_APP_JS.contains("volang-vm-startup"));
         assert!(RELEASE_APP_JS.contains("root.setAttribute('inert', '')"));
         assert!(RELEASE_APP_JS.contains("root.removeAttribute('inert')"));
         assert!(RELEASE_APP_JS.contains("dataset.volangActivation"));
         assert!(RELEASE_APP_JS.contains("activate();"));
         assert!(RELEASE_SSR_HEAD.contains("#volang-boot"));
-        assert!(!RELEASE_APP_JS.contains("createVmIsland"));
+        assert!(RELEASE_APP_JS.contains("createVmIsland"));
         fs::remove_dir_all(runtime).unwrap();
         fs::remove_dir_all(output).unwrap();
     }
@@ -5551,9 +5569,9 @@ compiler = true
         let script = release_app_javascript(&config);
         assert!(script.contains("createStudioHost"));
         assert!(script.contains("new UiBrowserSystemHost"));
-        assert!(script.contains("WebAssembly.compileStreaming(response.clone())"));
+        assert!(script.contains("island = createVmIsland(image)"));
         assert!(script.contains(
-            "measure('volang-aot-image-fetch', 'volang-aot-bootstrap-start', 'volang-aot-image-ready')"
+            "measure('volang-vm-image-fetch', 'volang-vm-bootstrap-start', 'volang-vm-image-ready')"
         ));
         assert!(!script.contains("/*__VOLANG_APPLICATION_HOST__*/"));
         let development = development_index_html(&config);
@@ -5571,7 +5589,7 @@ compiler = true
         config.pwa.precache_routes = false;
         write_web_policy_assets(&output, &config).unwrap();
         let lazy_worker = fs::read_to_string(output.join("service-worker.js")).unwrap();
-        assert!(!lazy_worker.contains("/runtime/pkg/vo_web_bg.wasm"));
+        assert!(lazy_worker.contains("/runtime/pkg/vo_web_bg.wasm"));
         assert!(!lazy_worker.contains("/articles/aot/"));
         assert!(lazy_worker.contains("/offline/"));
         fs::remove_dir_all(output).unwrap();

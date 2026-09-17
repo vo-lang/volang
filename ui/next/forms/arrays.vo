@@ -1,0 +1,178 @@
+package forms
+
+import (
+	"slices"
+	"strconv"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type FieldArray struct {
+	form *Form
+	name string
+}
+
+func (form *Form) Array(name string) *FieldArray {
+	form.requireField(name)
+	if !arrayOwned(form.read().arrays, name) {
+		panic("forms: array requires an Options.Arrays declaration")
+	}
+	array := &FieldArray{form: form, name: name}
+	array.Items()
+	if form.arrayFields == nil {
+		form.arrayFields = make(map[string]bool)
+	}
+	form.arrayFields[name] = true
+	return array
+}
+
+func (array *FieldArray) Items() []Row {
+	array.form.requireField(array.name)
+	rows, err := ArrayRows(array.form.read().values, array.name)
+	if err != nil {
+		panic(err.Error())
+	}
+	return rows
+}
+
+// OrderInputs supplies native repeated controls for row order. Render it once
+// inside the owning form, including for each nested array sent to a server.
+func (array *FieldArray) OrderInputs() ui.View {
+	controls := []ui.View{
+		ui.Element("input").Attr("type", "hidden").Attr("name", array.name).Attr("value", ""),
+	}
+	for _, row := range array.Items() {
+		controls = append(controls, ui.Element("input").Attr("type", "hidden").Attr("name", array.name).Attr("value", row.Key).Key(row.Key))
+	}
+	return ui.Fragment(controls...)
+}
+
+func (array *FieldArray) Append(values Values) Row {
+	return array.Insert(len(array.Items()), values)
+}
+
+func (array *FieldArray) Insert(index int, values Values) Row {
+	array.form.requireLive()
+	rows := array.Items()
+	if index < 0 || index > len(rows) {
+		panic("forms: array insertion index is out of range")
+	}
+	current := array.form.read()
+	count := current.nextRow
+	id := ""
+	for {
+		if count <= 0 || count >= 2147483647 {
+			panic("forms: array row identity limit reached")
+		}
+		id = "row-" + strconv.Itoa(count)
+		count++
+		if !slices.ContainsString(current.values[array.name], id) &&
+			!slices.ContainsString(current.initial[array.name], id) &&
+			!slices.ContainsString(current.baseline[array.name], id) {
+			break
+		}
+	}
+	row := Row{Key: id, prefix: array.name + "[" + id + "]."}
+	next := copyValueMap(current.values)
+	order := slices.CloneString(next[array.name])
+	index++ // The first native value is the empty-array marker.
+	order = append(order, "")
+	copy(order[index + 1:], order[index:len(order) - 1])
+	order[index] = id
+	next[array.name] = order
+	for field, value := range values {
+		next[row.Field(field)] = slices.CloneString(value)
+	}
+	array.form.changeStructure(next, count)
+	return row
+}
+
+func (array *FieldArray) Remove(key string) bool {
+	array.form.requireLive()
+	rows := array.Items()
+	index := -1
+	for position, row := range rows {
+		if row.Key == key {
+			index = position
+		}
+	}
+	if index < 0 {
+		return false
+	}
+	current := array.form.read()
+	next := copyValueMap(current.values)
+	order := slices.CloneString(next[array.name])
+	index++
+	next[array.name] = append(order[:index], order[index + 1:]...)
+	for field := range next {
+		if strings.HasPrefix(field, rows[index - 1].prefix) {
+			delete(next, field)
+		}
+	}
+	array.form.changeStructure(next, current.nextRow)
+	return true
+}
+
+// Move retains the row's fields, errors, touched state and component key.
+func (array *FieldArray) Move(key string, index int) {
+	array.form.requireLive()
+	rows := array.Items()
+	if index < 0 || index >= len(rows) {
+		panic("forms: array destination index is out of range")
+	}
+	before := -1
+	for position, row := range rows {
+		if row.Key == key {
+			before = position
+		}
+	}
+	if before < 0 {
+		panic("forms: array row no longer exists")
+	}
+	if before == index {
+		return
+	}
+	current := array.form.read()
+	next := copyValueMap(current.values)
+	order := slices.CloneString(next[array.name])
+	before++
+	index++
+	if before < index {
+		copy(order[before:index], order[before + 1:index + 1])
+	} else {
+		copy(order[index + 1:before + 1], order[index:before])
+	}
+	order[index] = key
+	next[array.name] = order
+	array.form.changeStructure(next, current.nextRow)
+}
+
+func (form *Form) changeStructure(values Values, nextRow int) {
+	if err := validateArrays(values, form.read().arrays); err != nil {
+		panic(err.Error())
+	}
+	form.state.Update(func(old any) any {
+		next := old.(snapshot)
+		next.values, next.nextRow = values, nextRow
+		next.touched = cloneTouched(next.touched)
+		data := form.data(next)
+		for name := range next.touched {
+			_, file := next.files[name]
+			if _, exists := values[name]; !exists && !file {
+				delete(next.touched, name)
+			}
+		}
+		remaining := make(Errors)
+		for name, message := range next.serverErrors {
+			if data.has(name) && name != "" {
+				remaining[name] = message
+			}
+		}
+		next.serverErrors = remaining
+		next.errors = includeServerErrors(form.check(data), remaining)
+		next.work.cancel()
+		next.validating, next.submitting, next.submitRequested = false, false, false
+		next.message = ""
+		return next
+	})
+}

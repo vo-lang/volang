@@ -1,0 +1,64 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/wire"
+)
+
+// Published batches can outlive the next render, a failed partial render,
+// boundary retry and root disposal. Their exact wire bytes remain unchanged.
+func mutationBatchOwnership() {
+	var count *ui.IntState
+	var failure *ui.RenderError
+	content := ui.ErrorBoundary(func() ui.View {
+		return ui.Component(branchType, func(scope *ui.Scope) ui.View {
+			count = ui.Int(scope, "rows", 257)
+			size := count.Get()
+			if size < 0 {
+				size = 513
+			}
+			children := make([]ui.View, size)
+			for index := range children {
+				children[index] = ui.Text("x")
+			}
+			if count.Get() < 0 {
+				children = append(children, ui.Component(fragileType, func(scope *ui.Scope) ui.View {
+					panic("discard large partial batch")
+				}))
+			}
+			return ui.Fragment(children...)
+		})
+	}, func(value *ui.RenderError) ui.View {
+		failure = value
+		return ui.Text("recovered")
+	})
+	root := ui.NewRoot(ui.Fragment(ui.Text("before"), content, ui.Text("after")))
+	model := map[int]*modelNode{0: &modelNode{parent: -1}}
+	batches := []ui.Batch{}
+	snapshots := []string{}
+	accept := func(batch ui.Batch, expected string) {
+		applyModel(model, batch)
+		require(modelText(model, 0) == expected, "mutation batch lost order or published discarded records")
+		bytes, err := wire.EncodeBatch(batch)
+		require(err == nil, "mutation batch failed encoding")
+		batches = append(batches, batch)
+		snapshots = append(snapshots, string(bytes))
+	}
+	accept(flush(root), "before" + strings.Repeat("x", 257) + "after")
+	require(len(flush(root).Mutations) == 0, "unchanged root published spare buffer capacity")
+	count.Set(1)
+	accept(flush(root), "beforexafter")
+	count.Set(-1)
+	accept(flush(root), "beforerecoveredafter")
+	require(failure != nil && failure.Retry(), "large boundary could not retry")
+	accept(flush(root), "before" + strings.Repeat("x", 257) + "after")
+	count.Set(0)
+	accept(flush(root), "beforeafter")
+	accept(root.Close(), "")
+	require(len(root.Close().Mutations) == 0, "repeated close published spare buffer capacity")
+	for index, batch := range batches {
+		bytes, err := wire.EncodeBatch(batch)
+		require(err == nil && string(bytes) == snapshots[index], "later render mutated a published batch")
+	}
+}

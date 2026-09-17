@@ -1,0 +1,47 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func viewportContracts() {
+	var width *ui.IntState
+	var visible *ui.BoolState
+	updates := 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		width = ui.Int(scope, "width", 0)
+		visible = ui.Bool(scope, "visible", true)
+		if !visible.Get() {
+			return ui.Text("Removed")
+		}
+		return ui.Element("div").Attr("data-name", "viewport").OnViewport(func(viewport ui.Viewport) {
+			updates++
+			width.Set(viewport.Width)
+			require(viewport.Height == 200 && viewport.Top == 1.25 && viewport.Left == -12.5, "viewport lost native geometry")
+		})
+	}))
+	first := flush(root)
+	id := target(first, "viewport")
+	require(updates == 0 && strings.Contains(root.HTML(), "viewport=0"), "SSR started layout observation")
+	root.Dispatch(ui.Event{
+		Target: id, Kind: "viewport", Sequence: 1,
+		Value: `{"width":320,"height":200,"top":1.25,"left":-12.5}`,
+	})
+	require(width.Get() == 320 && updates == 1, "viewport callback was not delivered")
+	flush(root)
+	visible.Set(false)
+	flush(root)
+	require(!root.Dispatch(ui.Event{Target: id, Kind: "viewport", Sequence: 2, Value: `{}`}), "removed viewport accepted a callback")
+	root.Close()
+	expectPanic(func() {
+		ui.Element("div").OnWith("viewport", ui.EventOptions{Passive: true}, func(ui.Event) {})
+	}, "do not support native event options")
+	expectPanic(func() {
+		invalid := ui.NewRoot(ui.Element("svg", ui.Element("rect").OnViewport(func(ui.Viewport) {})))
+		invalid.Flush()
+	}, "require an HTML element")
+	valid := ui.NewRoot(ui.Element("svg", ui.Element("foreignObject", ui.Element("div").OnViewport(func(ui.Viewport) {}))))
+	flush(valid)
+	valid.Close()
+}

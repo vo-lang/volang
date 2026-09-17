@@ -4,7 +4,7 @@ delivery = "E3"
 status = "complete"
 
 families = ["content", "form", "feedback", "overlay", "navigation", "data"]
-targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+targets = ["headless", "web-vm", "desktop-vm", "desktop-jit", "desktop-native-aot"]
 themes = ["light", "dark", "high-contrast"]
 densities = ["compact", "comfortable", "spacious"]
 directions = ["ltr", "rtl"]

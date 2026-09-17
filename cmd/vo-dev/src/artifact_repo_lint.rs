@@ -5,23 +5,26 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-fn git_lines(root: &Path, args: &[&str]) -> Result<Vec<String>> {
+fn git_paths(root: &Path, args: &[&str]) -> Result<Vec<String>> {
     let output = Command::new("git")
+        .args(["ls-files", "-z"])
         .args(args)
         .current_dir(root)
         .output()
-        .with_context(|| format!("could not run git {}", args.join(" ")))?;
+        .with_context(|| format!("could not list Git paths: {}", args.join(" ")))?;
     if !output.status.success() {
         bail!(
-            "git {} failed: {}",
+            "git ls-files {} failed: {}",
             args.join(" "),
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::to_owned)
-        .collect())
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8(path.to_vec()).context("repository paths must be UTF-8"))
+        .collect()
 }
 
 pub(crate) fn lint_tracked_artifacts(root: &Path, artifacts: &ArtifactFile) -> Result<()> {
@@ -107,22 +110,21 @@ enum GitPathState {
 
 fn artifact_policy_paths(root: &Path) -> Result<BTreeMap<String, GitPathState>> {
     let mut paths = BTreeMap::new();
-    for path in git_lines(root, &["ls-files"])? {
+    for path in git_paths(root, &[])? {
         if root.join(&path).exists() {
             paths.insert(path, GitPathState::Tracked);
         }
     }
-    for args in [["ls-files", "--others", "--exclude-standard"].as_slice()] {
-        for path in git_lines(root, args)? {
+    for args in [["--others", "--exclude-standard"].as_slice()] {
+        for path in git_paths(root, args)? {
             paths
                 .entry(path)
                 .or_insert(GitPathState::UntrackedOrIgnored);
         }
     }
-    for path in git_lines(
+    for path in git_paths(
         root,
         &[
-            "ls-files",
             "--others",
             "--ignored",
             "--exclude-standard",
@@ -139,16 +141,9 @@ fn artifact_policy_paths(root: &Path) -> Result<BTreeMap<String, GitPathState>> 
 }
 
 fn ignored_paths_under(root: &Path, path: &str) -> Result<Vec<String>> {
-    git_lines(
+    git_paths(
         root,
-        &[
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--",
-            path,
-        ],
+        &["--others", "--ignored", "--exclude-standard", "--", path],
     )
 }
 
@@ -236,6 +231,29 @@ fn suspicious_generated_path(root: &Path, path: &str) -> Result<bool> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn git_paths_preserve_unicode_quotes_and_line_breaks() {
+        let root = temp_root("literal-paths");
+        fs::create_dir_all(&root).unwrap();
+        run_git(&root, &["init", "-q"]);
+        let names = vec!["中文 file.vo"];
+        #[cfg(unix)]
+        let names = [names, vec!["quoted\"file.vo", "two\nlines.vo"]].concat();
+        for name in &names {
+            fs::write(root.join(name), "package main\n").unwrap();
+        }
+        let mut expected = names.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        expected.sort();
+        let mut actual = git_paths(&root, &["--others", "--exclude-standard"]).unwrap();
+        actual.sort();
+        assert_eq!(actual, expected);
+        run_git(&root, &["add", "."]);
+        let mut tracked = git_paths(&root, &[]).unwrap();
+        tracked.sort();
+        assert_eq!(tracked, expected);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn temp_root(name: &str) -> std::path::PathBuf {
         let stamp = SystemTime::now()

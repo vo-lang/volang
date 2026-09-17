@@ -1,0 +1,19 @@
+* { box-sizing: border-box; }
+body { margin: 0; background: #f5f4ee; color: #253d32; font: 16px/1.55 ui-sans-serif, system-ui, sans-serif; }
+.portal-example { width: min(100%, 1060px); margin: auto; padding: 64px 28px; }
+h1 { font-size: clamp(32px, 5vw, 52px); line-height: 1.12; letter-spacing: -.04em; max-width: 650px; margin: 16px 0; }
+h2 { font-size: 17px; font-weight: 550; }
+.eyebrow { font-size: 11px; letter-spacing: .16em; font-weight: 700; color: #567460; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; margin: 32px 0; }
+.source { border-inline-start: 2px solid #b9c7bd; padding: 0 20px; margin: 30px 0; }
+.destinations { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.destination { min-width: 0; border: 1px solid #d1d9cc; border-radius: 16px; padding: 20px; background: #eaf0e4; }
+.destination-content { min-height: 100px; }
+.note { padding: 20px; display: grid; gap: 14px; }
+.note p { margin: 0; overflow-wrap: anywhere; }
+.note .vui-button { justify-self: start; }
+.note output { font-size: 13px; color: #567460; }
+dialog { width: min(560px, calc(100% - 32px)); border: 1px solid #d1d9cc; border-radius: 16px; padding: 24px; }
+dialog > button { margin-top: 18px; }
+dialog::backdrop { background: rgb(22 43 32 / .3); }
+@media (max-width: 640px) { .portal-example { padding: 32px 20px; } .destinations { grid-template-columns: 1fr; } }

@@ -1,0 +1,67 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func sizeContracts() {
+	var shown *ui.BoolState
+	observed := ui.Size{}
+	calls := 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		shown = ui.Bool(scope, "shown", true)
+		if !shown.Get() {
+			return ui.Text("Removed")
+		}
+		return ui.Element("div").Attr("data-name", "size").OnSize(func(size ui.Size) {
+			observed = size
+			calls++
+		})
+	}))
+	first := flush(root)
+	id := target(first, "size")
+	require(calls == 0 && strings.Contains(root.HTML(), "size=0"), "SSR started size observation")
+	require(root.Dispatch(ui.Event{
+		Target: id, Kind: "size", Sequence: 1, Value: `{"inline":101.25,"block":53.5}`,
+	}), "size event was not dispatched")
+	require(calls == 1 && observed.Inline == 101.25 && observed.Block == 53.5, "fractional logical size was lost")
+	flush(root)
+	require(root.Dispatch(ui.Event{
+		Target: id, Kind: "size", Sequence: 2, Value: `{"inline":0,"block":0}`,
+	}), "hidden size event was not dispatched")
+	require(calls == 2 && observed == ui.Size{}, "hidden size was not zero")
+	flush(root)
+	shown.Set(false)
+	flush(root)
+	require(!root.Dispatch(ui.Event{Target: id, Kind: "size", Sequence: 3, Value: `{}`}), "removed size observer accepted an event")
+	root.Close()
+	expectPanic(func() {
+		ui.Element("div").OnSize(nil)
+	}, "requires a handler")
+	for _, value := range []string{
+		`{}`, `{"inline":1}`, `{"inline":null,"block":1}`, `{"inline":"1","block":1}`,
+		`{"inline":1,"block":-1}`, `{"inline":1e999,"block":1}`, strings.Repeat(" ", 257),
+	} {
+		expectPanic(func() {
+			invalid := ui.NewRoot(ui.Element("div").Attr("data-name", "bad-size").OnSize(func(ui.Size) {
+				panic("invalid size reached callback")
+			}))
+			defer invalid.Close()
+			batch := flush(invalid)
+			invalid.Dispatch(ui.Event{
+				Target: target(batch, "bad-size"), Kind: "size", Sequence: 1, Value: value,
+			})
+		}, "ui: invalid size")
+	}
+	expectPanic(func() {
+		ui.Element("div").OnWith("size", ui.EventOptions{Passive: true}, func(ui.Event) {})
+	}, "do not support native event options")
+	expectPanic(func() {
+		invalid := ui.NewRoot(ui.Element("svg", ui.Element("rect").OnSize(func(ui.Size) {})))
+		invalid.Flush()
+	}, "require an HTML element")
+	valid := ui.NewRoot(ui.Element("svg", ui.Element("foreignObject", ui.Element("div").OnSize(func(ui.Size) {}))))
+	flush(valid)
+	valid.Close()
+}

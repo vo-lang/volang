@@ -1,0 +1,118 @@
+package ui
+
+import (
+	"strings"
+)
+
+// Namespace follows the rendered ancestry through components and fragments.
+// SVG integration points give their children HTML semantics again.
+func (node *mounted) svgChildren() bool {
+	return node.svg && node.view.kind != "foreignObject" && node.view.kind != "desc" &&
+		node.view.kind != "title"
+}
+
+func (view View) validateNamespace(svg bool) {
+	if !strings.HasPrefix(view.kind, "#") && !validElementName(view.kind, svg) {
+		panic("ui: invalid element name for its namespace; HTML names require lowercase ASCII")
+	}
+	if !svg {
+		return
+	}
+	if view.control != nil {
+		panic("ui: native control properties require HTML controls")
+	}
+	for _, entry := range view.events {
+		if layoutObservation(entry.kind) {
+			panic("ui: " + entry.kind + " observations require an HTML element")
+		}
+	}
+}
+
+// Match native creation names before emitting a frame or server HTML.
+func validElementName(name string, svg bool) bool {
+	if name == "" {
+		return false
+	}
+	for index := 0; index < len(name); index++ {
+		letter := name[index] >= 'a' && name[index] <= 'z' ||
+			svg && name[index] >= 'A' && name[index] <= 'Z'
+		if letter || index > 0 && (name[index] >= '0' && name[index] <= '9' || name[index] == '-') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// Resolve HTML aliases only once the element's namespace is known. Most views
+// already use lowercase names and retain their immutable attribute slice.
+func (view View) htmlAttributes() View {
+	for _, attr := range view.attrs {
+		if hasUppercaseASCII(attr.name) {
+			attributes := make([]attribute, 0, len(view.attrs))
+			for _, source := range view.attrs {
+				name := strings.ToLower(source.name)
+				index := -1
+				for candidate, current := range attributes {
+					if current.name == name {
+						index = candidate
+						break
+					}
+				}
+				if index >= 0 {
+					attributes[index].value = source.value
+				} else {
+					attributes = append(attributes, attribute{name: name, value: source.value})
+				}
+			}
+			view.attrs = attributes
+			return view
+		}
+	}
+	return view
+}
+
+func hasUppercaseASCII(name string) bool {
+	for index := 0; index < len(name); index++ {
+		if name[index] >= 'A' && name[index] <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
+// Class adds class tokens while preserving the caller's existing classes.
+func (view View) Class(names ...string) View {
+	return view.tokens("class", names)
+}
+
+// DescribedBy adds description IDs without replacing an existing relationship.
+func (view View) DescribedBy(ids ...string) View {
+	return view.tokens("aria-describedby", ids)
+}
+
+func (view View) tokens(name string, values []string) View {
+	joined := ""
+	for _, attr := range view.attrs {
+		if attr.name == name {
+			joined = attr.value
+			break
+		}
+	}
+	tokens := strings.Fields(joined)
+	for _, value := range values {
+		for _, token := range strings.Fields(value) {
+			found := false
+			for _, current := range tokens {
+				if current == token {
+					found = true
+					break
+				}
+			}
+			if !found {
+				tokens = append(tokens, token)
+			}
+		}
+	}
+	return view.Attr(name, strings.Join(tokens, " "))
+}

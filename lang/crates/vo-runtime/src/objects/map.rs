@@ -1278,8 +1278,8 @@ mod tests {
         let mut retired = unsafe { iter_init(m) };
         let successor = unsafe { resize(&mut gc, m, MIN_CAPACITY * 2, None) }.unwrap();
         assert_eq!(unsafe { backing_len(successor) }, hashes.len());
-        for key in 0..hashes.len() {
-            let found = unsafe { find_bucket(m, successor, &[key as u64], hashes[key], None) }
+        for (key, &hash) in hashes.iter().enumerate() {
+            let found = unsafe { find_bucket(m, successor, &[key as u64], hash, None) }
                 .0
                 .unwrap();
             assert_eq!(

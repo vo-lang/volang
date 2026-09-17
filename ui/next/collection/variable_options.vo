@@ -1,0 +1,34 @@
+package collection
+
+import (
+	"math"
+	ui "github.com/vo-lang/ui/next"
+)
+
+// VariableOptions describes a horizontal-writing-mode vertical scroll area.
+// Items and Estimate determine unmeasured heights. Height supplies the initial
+// SSR fallback. The container has no padding and disables native scroll anchoring.
+// A stable PinnedKey may retain one additional row for a caller-owned focus model.
+type VariableOptions struct {
+	Items *Items
+	Estimate float64
+	Height int
+	Overscan int
+	Ref *ui.ElementRef
+	PinnedKey string
+}
+
+func (options VariableOptions) validate() {
+	if options.Items == nil || options.Ref == nil {
+		panic("collection: variable window requires items and a scroll ref")
+	}
+	if math.IsNaN(options.Estimate) || math.IsInf(options.Estimate, 0) || options.Estimate < 1 ||
+		options.Estimate > maxWindowExtent ||
+		float64(options.Items.Len()) > maxWindowExtent / options.Estimate ||
+		options.Height < 1 ||
+		options.Height > maxWindowExtent ||
+		options.Overscan < 0 ||
+		options.Overscan > 64 {
+		panic("collection: invalid variable-row window dimensions or extent")
+	}
+}

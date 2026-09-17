@@ -7,6 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
+mod document;
+mod next;
+
 const CATALOG_PATH: &str = "lang/docs/catalog.toml";
 const GENERATOR_PATH: &str = "cmd/vo-dev/src/generate_docs.rs";
 const STUDIO_WEB_MANIFEST: &str = "apps/studio/ui.web.toml";
@@ -52,6 +55,7 @@ struct LoadedPage<'a> {
 struct GeneratedDocs {
     catalog_vo: Vec<u8>,
     provenance: Vec<u8>,
+    next: BTreeMap<String, Vec<u8>>,
 }
 
 pub(crate) fn generate_studio_docs(root: &Path, write: bool) -> Result<()> {
@@ -70,6 +74,7 @@ pub(crate) fn generate_studio_docs(root: &Path, write: bool) -> Result<()> {
         compare(root, PROVENANCE_PATH, &generated.provenance)?;
         reject_unexpected_outputs(&root.join(OUTPUT_DIRECTORY))?;
     }
+    next::synchronize(root, &generated.next, write)?;
     let mode = if write { "--write" } else { "--check" };
     println!("vo-dev generate studio-docs {mode}: ok");
     Ok(())
@@ -79,7 +84,8 @@ pub(crate) fn check_studio_docs(root: &Path) -> Result<()> {
     let generated = materialize(root)?;
     compare(root, OUTPUT_PATH, &generated.catalog_vo)?;
     compare(root, PROVENANCE_PATH, &generated.provenance)?;
-    reject_unexpected_outputs(&root.join(OUTPUT_DIRECTORY))
+    reject_unexpected_outputs(&root.join(OUTPUT_DIRECTORY))?;
+    next::synchronize(root, &generated.next, false)
 }
 
 fn materialize(root: &Path) -> Result<GeneratedDocs> {
@@ -128,14 +134,35 @@ fn materialize(root: &Path) -> Result<GeneratedDocs> {
     validate_studio_routes(root, &catalog)?;
     inputs.push(STUDIO_WEB_MANIFEST.to_string());
     inputs.push(GENERATOR_PATH.to_string());
+    inputs.extend(
+        [
+            "cmd/vo-dev/src/generate_docs/document.rs",
+            "cmd/vo-dev/src/generate_docs/next.rs",
+            "cmd/vo-dev/Cargo.toml",
+            "Cargo.lock",
+        ]
+        .map(str::to_owned),
+    );
 
     let catalog_vo = vo_syntax::format_source(&render_vo(&catalog, &loaded))
         .map_err(anyhow::Error::msg)?
         .into_bytes();
-    let provenance = render_provenance(root, &inputs, &catalog_vo)?.into_bytes();
+    let provenance = render_provenance(
+        root,
+        &inputs,
+        &BTreeMap::from([("catalog.vo".to_string(), catalog_vo.clone())]),
+        "studio-documentation.generated",
+        OUTPUT_DIRECTORY,
+    )?
+    .into_bytes();
+    let mut next = next::materialize(&catalog, &loaded)?;
+    let next_provenance =
+        render_provenance(root, &inputs, &next, next::ARTIFACT, next::DIRECTORY)?.into_bytes();
+    next.insert("provenance.json".into(), next_provenance);
     Ok(GeneratedDocs {
         catalog_vo,
         provenance,
+        next,
     })
 }
 
@@ -213,9 +240,12 @@ fn validate_catalog(catalog: &Catalog) -> Result<()> {
             if !page.file.ends_with(".md") {
                 bail!("documentation page {} must reference Markdown", page.id);
             }
-            if !page.file.starts_with("lang/docs/") && !page.file.starts_with("ui/docs/") {
+            if !page.file.starts_with("lang/docs/")
+                && !page.file.starts_with("ui/docs/")
+                && !page.file.starts_with("ui/next/guides/")
+            {
                 bail!(
-                    "documentation page {} must live under lang/docs or ui/docs",
+                    "documentation page {} must live under lang/docs, ui/docs or ui/next/guides",
                     page.id
                 );
             }
@@ -315,7 +345,13 @@ fn render_vo(catalog: &Catalog, pages: &[LoadedPage<'_>]) -> String {
     output
 }
 
-fn render_provenance(root: &Path, inputs: &[String], output: &[u8]) -> Result<String> {
+fn render_provenance(
+    root: &Path,
+    inputs: &[String],
+    outputs: &BTreeMap<String, Vec<u8>>,
+    artifact: &str,
+    directory: &str,
+) -> Result<String> {
     let mut source_digests = BTreeMap::new();
     for input in inputs {
         let bytes = fs::read(root.join(input))
@@ -324,20 +360,18 @@ fn render_provenance(root: &Path, inputs: &[String], output: &[u8]) -> Result<St
     }
     Ok(serde_json::to_string_pretty(&json!({
         "schemaVersion": 2,
-        "artifact": "studio-documentation.generated",
-        "path": OUTPUT_DIRECTORY,
+        "artifact": artifact,
+        "path": directory,
         "generator": {
-            "version": 1,
+            "version": 2,
             "command": ["cargo", "run", "-q", "-p", "vo-dev", "--locked", "--", "generate", "studio-docs", "--write"]
         },
         "toolchain": { "rust": "workspace-1.94.0" },
         "sourceDigests": source_digests,
         "inputs": inputs,
-        "outputs": [{
-            "path": "catalog.vo",
-            "digest": digest(output),
-            "size": output.len(),
-        }],
+        "outputs": outputs.iter().map(|(name, bytes)| json!({
+            "path": name, "digest": digest(bytes), "size": bytes.len(),
+        })).collect::<Vec<_>>(),
     }))? + "\n")
 }
 

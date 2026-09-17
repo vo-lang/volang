@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Volang · A place for everything</title>
+  <link rel="stylesheet" href="/vendor/uplot/uPlot.min.css">
+  <link rel="stylesheet" href="/ui-kit/theme.css">
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #233e32; background: #f4f5ee; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 1040px; margin: 52px auto; padding: 0 24px; }
+    header { margin-bottom: 32px; }
+    h1 { font-size: clamp(2rem, 5vw, 3.3rem); line-height: 1.1; letter-spacing: -.045em; margin: 20px 0; }
+    h2 { font-size: 1.1rem; margin: 0 0 20px; }
+    .eyebrow { font-size: .7rem; letter-spacing: .16em; font-weight: 750; }
+    p { color: #607265; line-height: 1.55; }
+    .grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 20px; align-items: start; }
+    .card { background: #fff; border: 1px solid #d6dfce; border-radius: 18px; padding: 24px; min-width: 0; }
+    .wide { grid-column: 1 / -1; }
+    [data-chart] { min-height: 210px; }
+    label { display: block; font-size: .8rem; font-weight: 650; margin: 14px 0 8px; }
+    input, select, button { font: inherit; border: 1px solid #b7c9ae; border-radius: 8px; padding: 10px 12px; color: inherit; background: #fff; }
+    input:not([type=checkbox]), select { width: 100%; min-width: 0; }
+    input[type=checkbox] { accent-color: #35674c; width: 18px; height: 18px; }
+    .check { display: flex; gap: 10px; align-items: center; }
+    .vui-checkbox-group .vui-check { display: flex; margin: 8px 0; font-weight: 400; }
+    .vui-checkbox-group input { padding: 0; }
+    button { cursor: pointer; background: #ecf1e5; font-size: .85rem; }
+    button:hover { background: #dce8d3; }
+    button:disabled { opacity: .55; cursor: default; }
+    button[type=submit] { background: #35674c; color: #fff; }
+    :focus-visible { outline: 3px solid #90af64; outline-offset: 3px; }
+    [aria-invalid=true] { border-color: #b65343; }
+    [role=alert] { font-size: .85rem; color: #a24836; }
+    [role=alert]:empty { display: none; }
+    [data-reorder] { margin-top: 12px; }
+    ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 14px; }
+    li { display: grid; grid-template-columns: 1fr 1.1fr; gap: 12px; align-items: center; padding-top: 14px; border-top: 1px solid #edf0e8; }
+    small { display: block; color: #6c7d70; font-size: .75rem; margin-top: 4px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0; }
+    output { display: block; min-height: 1.5em; font-size: .9rem; margin: 16px 0; }
+    #status { max-width: 1040px; padding: 0 24px; margin: 24px auto; font-size: .75rem; color: #68796c; }
+    #status[data-error] { color: #a24836; white-space: pre-wrap; }
+    @media(max-width: 680px) { main { margin: 28px auto; padding: 0 16px; } .grid { grid-template-columns: minmax(0,1fr); } .card { padding: 20px; } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <p id="status" role="status">Opening your workspace…</p>
+  <script id="ui-initial-data" type="application/json">""</script>
+  <script type="module" src="/host/ui_next/lab.js"></script>
+</body>
+</html>

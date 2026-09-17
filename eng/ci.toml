@@ -5,13 +5,13 @@ version = 1
 [[component]]
 id = "language-library"
 paths = ["lang/stdlib/*"]
-capabilities = ["rust", "vm", "jit", "gc", "compile", "embed", "native-aot", "wasm-vm", "wasm-aot"]
+capabilities = ["rust", "vm", "jit", "gc", "compile", "embed", "native-aot", "wasm-vm"]
 
 [[component]]
 id = "language-tests"
 paths = ["tests/lang/*", "examples/*", "benchmarks/*"]
 depends_on = ["language-library", "cargo:cmd/vo", "cargo:cmd/vo-test", "cargo:cmd/vo-embed"]
-capabilities = ["vm", "jit", "gc", "compile", "embed", "native-aot", "wasm-vm", "wasm-aot"]
+capabilities = ["vm", "jit", "gc", "compile", "embed", "native-aot", "wasm-vm"]
 
 [[component]]
 id = "ui-library"
@@ -28,8 +28,8 @@ capabilities = ["headless", "desktop-vm", "desktop-jit", "desktop-native-aot", "
 [[component]]
 id = "web-runtime"
 paths = ["lang/crates/vo-web/js/*", "lang/crates/vo-web/tests/*", "lang/crates/vo-web/*.mjs", "lang/crates/vo-web/*.json", "lang/crates/vo-web/*.html"]
-depends_on = ["cargo:lang/crates/vo-web", "cargo:lang/crates/vo-aot-support-wasm", "ui-library"]
-capabilities = ["browser", "wasm-vm", "wasm-aot"]
+depends_on = ["cargo:lang/crates/vo-web", "ui-library"]
+capabilities = ["browser", "wasm-vm"]
 
 [[component]]
 id = "studio"
@@ -41,7 +41,7 @@ capabilities = ["rust", "browser", "studio", "pages", "offline", "headless", "de
 id = "app-protocol"
 paths = ["lang/protocol/*", "fuzz/app-protocol/*"]
 depends_on = ["cargo:lang/crates/vo-app-protocol"]
-capabilities = ["rust", "vm", "jit", "wasm-vm", "wasm-aot", "browser", "headless", "desktop-vm", "desktop-jit", "desktop-native-aot", "app-protocol"]
+capabilities = ["rust", "vm", "jit", "wasm-vm", "browser", "headless", "desktop-vm", "desktop-jit", "desktop-native-aot", "app-protocol"]
 
 [[component]]
 id = "ui-artifact-fuzz"
@@ -67,9 +67,13 @@ tasks = [
   "rust-quality",
   "language-native-smoke",
   "wasm-web-smoke",
+  "ui-web-rewrite",
   "ui-platform-linux-smoke",
   "ui-platform-macos-full",
   "ui-platform-windows-full",
+  "ui-desktop-rewrite-linux",
+  "ui-desktop-rewrite-macos",
+  "ui-desktop-rewrite-windows",
 ]
 
 [[profile]]
@@ -81,9 +85,13 @@ tasks = [
   "language-native-1",
   "language-native-2",
   "wasm-web-full",
+  "ui-web-rewrite",
   "ui-platform-linux-full",
   "ui-platform-macos-full",
   "ui-platform-windows-full",
+  "ui-desktop-rewrite-linux",
+  "ui-desktop-rewrite-macos",
+  "ui-desktop-rewrite-windows",
 ]
 
 [[profile]]
@@ -95,9 +103,13 @@ tasks = [
   "language-native-1",
   "language-native-2",
   "wasm-web-full",
+  "ui-web-rewrite",
   "ui-platform-linux-full",
   "ui-platform-macos-full",
   "ui-platform-windows-full",
+  "ui-desktop-rewrite-linux",
+  "ui-desktop-rewrite-macos",
+  "ui-desktop-rewrite-windows",
 ]
 
 [[profile]]
@@ -137,7 +149,7 @@ evidence_kind = "contract"
 
 [[task]]
 id = "rust-quality"
-commands = ["rust-format", "rust-feature-boundaries", "rust-clippy", "rust-tests"]
+commands = ["rust-format", "rust-feature-boundaries", "rust-clippy", "rust-tests", "rust-native-ui-session"]
 inputs = ["*"]
 resource_group = "cargo"
 tier = "feedback"
@@ -229,12 +241,33 @@ budget_minutes = 22
 evidence_kind = "language-test"
 results = ["target/ci/results/language-native-2.json"]
 
+# The rewritten Web framework owns the default Studio candidate. Legacy Web
+# checks retain a separate compatibility artifact through the desktop migration.
 [[task]]
-id = "wasm-web-smoke"
-commands = ["browser-harness-tests", "browser-tooling", "web-hello-aot", "browser-node-dependencies", "browser-aot-support", "browser-wasm-compiler", "browser-javascript", "web-component-build", "web-studio-build", "web-native-tooling", "web-language-smoke", "web-vfs", "web-ui", "web-runner", "web-ui-browser", "web-ui-component-browser", "web-runtime-aot", "web-studio-bootstrap", "web-studio-canary"]
+id = "ui-web-rewrite"
+commands = ["ui-web-rewrite-tooling", "browser-node-dependencies", "ui-web-rewrite-dependencies", "ui-web-authoring-dependencies", "browser-wasm-compiler", "ui-web-rewrite-runtime", "ui-web-rewrite-compiler", "ui-web-rewrite-core", "ui-web-rewrite-site-stage", "ui-web-rewrite-site-check"]
 inputs = ["*"]
 resource_group = "cargo"
-artifacts = ["target/ci/artifacts/site"]
+artifacts = ["target/ci/artifacts/ui-web-rewrite/reports", "target/ci/artifacts/ui-web-rewrite-toolchain.tar.gz", "target/ci/artifacts/ui-web-rewrite-studio-static.tar.gz", "target/ci/artifacts/site"]
+tier = "feedback"
+workflow_job = "ui_web_preview"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["language", "ui", "web"]
+impact = ["Cargo.*", "rust-toolchain.toml", "cmd/vo/*", "cmd/vo-dev/*", "lang/*", "ui/*", "apps/studio/*", "eng/ui-next/*", "eng/browser/*", "eng/ci.toml", "eng/toolchains.toml", ".github/*"]
+platforms = ["web"]
+capabilities = ["vm", "jit", "wasm-vm", "browser", "ui", "studio", "offline"]
+timeout_minutes = 70
+budget_minutes = 40
+evidence_kind = "web-test"
+results = ["target/ci/results/ui-web-rewrite.json", "target/ci/results/ui-web-site/report.json"]
+
+[[task]]
+id = "wasm-web-smoke"
+commands = ["browser-harness-tests", "browser-tooling", "browser-node-dependencies", "browser-wasm-compiler", "browser-javascript", "web-component-build", "web-studio-build", "web-native-tooling", "web-language-smoke", "web-vfs", "web-ui", "web-runner", "web-ui-browser", "web-ui-component-browser", "web-runtime", "web-studio-bootstrap", "web-studio-canary"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/artifacts/legacy-studio"]
 tier = "feedback"
 workflow_job = "wasm_web"
 runner = "ubuntu-24.04"
@@ -253,7 +286,7 @@ impact = [
   "eng/report-ui-web-*",
 ]
 platforms = ["web"]
-capabilities = ["wasm-vm", "wasm-aot", "browser", "ui"]
+capabilities = ["wasm-vm", "browser", "ui"]
 timeout_minutes = 25
 budget_minutes = 15
 evidence_kind = "web-test"
@@ -262,15 +295,15 @@ results = [
   "target/ci/results/ui/volang-studio-canary-browser.json",
   "target/ci/results/wasm-web-smoke.json",
   "target/ci/results/ui/volang-ui-browser-conformance.json",
-  "target/ci/results/ui/volang-ui-aot-component-browser.json",
+  "target/ci/results/ui/volang-ui-vm-component-browser.json",
 ]
 
 [[task]]
 id = "wasm-web-full"
-commands = ["browser-harness-tests", "browser-tooling", "web-hello-aot", "browser-node-dependencies", "browser-aot-support", "browser-wasm-compiler", "browser-javascript", "web-component-build", "web-gallery-build", "web-data-build", "web-content-build", "web-media-build", "web-workbench-build", "web-studio-build", "web-artifact-budgets", "web-native-tooling", "web-native-interactions", "web-aot-semantic-probes", "web-language-full", "web-no-std-closure", "web-vfs", "web-ui", "web-runner", "web-ui-browser", "web-ui-component-browser", "web-uikit-gallery-browser", "web-data-application-browser", "web-content-site-browser", "web-media-application-browser", "web-studio-workbench-browser", "web-studio-aot-browser", "web-runtime-aot", "web-studio-bootstrap", "web-studio-canary", "web-studio-lifecycle"]
+commands = ["browser-harness-tests", "browser-tooling", "browser-node-dependencies", "browser-wasm-compiler", "browser-javascript", "web-component-build", "web-gallery-build", "web-data-build", "web-content-build", "web-media-build", "web-workbench-build", "web-studio-build", "web-artifact-budgets", "web-native-tooling", "web-native-interactions", "web-language-full", "web-no-std-closure", "web-vfs", "web-ui", "web-runner", "web-ui-browser", "web-ui-component-browser", "web-uikit-gallery-browser", "web-data-application-browser", "web-content-site-browser", "web-media-application-browser", "web-studio-workbench-browser", "web-studio-vm-browser", "web-runtime", "web-studio-bootstrap", "web-studio-canary", "web-studio-lifecycle"]
 inputs = ["*"]
 resource_group = "cargo"
-artifacts = ["target/ci/artifacts/site"]
+artifacts = ["target/ci/artifacts/legacy-studio"]
 tier = "certification"
 workflow_job = "wasm_web"
 runner = "ubuntu-24.04"
@@ -278,7 +311,7 @@ depends_on = ["contracts"]
 owners = ["language", "ui", "web"]
 impact = ["*"]
 platforms = ["web"]
-capabilities = ["wasm-vm", "wasm-aot", "browser", "ui", "no-std", "studio", "pages", "offline", "recovery", "resource-cleanup"]
+capabilities = ["wasm-vm", "browser", "ui", "no-std", "studio", "pages", "offline", "recovery", "resource-cleanup"]
 timeout_minutes = 45
 budget_minutes = 30
 evidence_kind = "web-test"
@@ -294,15 +327,75 @@ results = [
   "target/ci/results/ui/volang-studio-canary-browser.json",
   "target/ci/results/wasm-web-full.json",
   "target/ci/results/ui/volang-ui-browser-conformance.json",
-  "target/ci/results/ui/volang-ui-aot-component-browser.json",
+  "target/ci/results/ui/volang-ui-vm-component-browser.json",
   "target/ci/results/ui/volang-uikit-gallery-browser.json",
   "target/ci/results/ui/volang-data-application-browser.json",
   "target/ci/results/ui/volang-content-site-browser.json",
   "target/ci/results/ui/volang-media-application-browser.json",
   "target/ci/results/ui/volang-studio-workbench-browser.json",
-  "target/ci/results/ui/volang-studio-aot-browser.json",
+  "target/ci/results/ui/volang-studio-vm-browser.json",
   "target/ci/results/ui/volang-studio-lifecycle-browser.json",
 ]
+
+# Replacement desktop acceptance uses the system WebView and an independent SDK.
+[[task]]
+id = "ui-desktop-rewrite-linux"
+commands = ["ui-web-rewrite-tooling", "ui-web-rewrite-dependencies", "ui-web-authoring-dependencies", "ui-desktop-browser-dependencies", "ui-desktop-rewrite-runtime", "ui-web-rewrite-compiler", "ui-next-webview-contracts", "ui-desktop-sdk-dependencies", "ui-desktop-rewrite-sdk", "ui-desktop-link-contracts", "ui-desktop-rewrite-packages-linux", "ui-desktop-rewrite-studio-linux", "ui-desktop-rewrite-evidence", "ui-desktop-rewrite-archive"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/artifacts/ui-desktop-rewrite"]
+tier = "feedback"
+workflow_job = "ui_platform"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["ui", "language"]
+impact = ["Cargo.*", "rust-toolchain.toml", "cmd/vo/*", "lang/crates/vo-ui-*", "ui/*", "apps/studio/*", "eng/ui-next/*", "eng/browser/*", ".github/*"]
+platforms = ["linux"]
+capabilities = ["desktop-vm", "desktop-jit", "desktop-native-aot", "real-window"]
+timeout_minutes = 70
+budget_minutes = 45
+evidence_kind = "platform-test"
+results = ["target/ci/results/ui-desktop-rewrite.json"]
+
+# Replacement desktop acceptance uses the system WebView and an independent SDK.
+[[task]]
+id = "ui-desktop-rewrite-macos"
+commands = ["ui-web-rewrite-tooling", "ui-web-rewrite-dependencies", "ui-web-authoring-dependencies", "ui-desktop-browser-dependencies", "ui-desktop-rewrite-runtime", "ui-web-rewrite-compiler", "ui-next-webview-contracts", "ui-desktop-sdk-dependencies", "ui-desktop-rewrite-sdk", "ui-desktop-link-contracts", "ui-desktop-rewrite-packages", "ui-desktop-rewrite-studio", "ui-desktop-rewrite-evidence", "ui-desktop-rewrite-archive"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/artifacts/ui-desktop-rewrite"]
+tier = "feedback"
+workflow_job = "ui_platform"
+runner = "macos-15"
+depends_on = ["contracts"]
+owners = ["ui", "language"]
+impact = ["Cargo.*", "rust-toolchain.toml", "cmd/vo/*", "lang/crates/vo-ui-*", "ui/*", "apps/studio/*", "eng/ui-next/*", "eng/browser/*", ".github/*"]
+platforms = ["macos"]
+capabilities = ["desktop-vm", "desktop-jit", "desktop-native-aot", "real-window"]
+timeout_minutes = 70
+budget_minutes = 45
+evidence_kind = "platform-test"
+results = ["target/ci/results/ui-desktop-rewrite.json"]
+
+# Replacement desktop acceptance uses the system WebView and an independent SDK.
+[[task]]
+id = "ui-desktop-rewrite-windows"
+commands = ["ui-web-rewrite-tooling", "ui-web-rewrite-dependencies", "ui-web-authoring-dependencies", "ui-desktop-browser-dependencies", "ui-desktop-rewrite-runtime", "ui-web-rewrite-compiler", "ui-next-webview-contracts", "ui-desktop-sdk-dependencies", "ui-desktop-rewrite-sdk", "ui-desktop-link-contracts", "ui-desktop-rewrite-packages", "ui-desktop-rewrite-studio", "ui-desktop-rewrite-evidence", "ui-desktop-rewrite-archive"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/artifacts/ui-desktop-rewrite"]
+tier = "feedback"
+workflow_job = "ui_platform"
+runner = "windows-2025"
+depends_on = ["contracts"]
+owners = ["ui", "language"]
+impact = ["Cargo.*", "rust-toolchain.toml", "cmd/vo/*", "lang/crates/vo-ui-*", "ui/*", "apps/studio/*", "eng/ui-next/*", "eng/browser/*", ".github/*"]
+platforms = ["windows"]
+capabilities = ["desktop-vm", "desktop-jit", "desktop-native-aot", "real-window"]
+timeout_minutes = 70
+budget_minutes = 45
+evidence_kind = "platform-test"
+results = ["target/ci/results/ui-desktop-rewrite.json"]
 
 [[task]]
 id = "ui-platform-linux-smoke"
@@ -414,7 +507,7 @@ runner = "ubuntu-24.04"
 owners = ["language", "web"]
 impact = ["*"]
 platforms = ["web"]
-capabilities = ["release", "wasm-vm", "wasm-aot"]
+capabilities = ["release", "wasm-vm"]
 timeout_minutes = 90
 budget_minutes = 50
 evidence_kind = "nightly-test"
@@ -626,7 +719,7 @@ if printf '%s\n' "$codegen_closure" | grep -Eq '^vo-(runtime|stdlib|vm|jit|ui-[^
   echo "portable codegen depends on a runtime or UI implementation" >&2
   exit 1
 fi
-if printf '%s\n' "$engine_closure" | grep -Eq '^vo-(jit|wasm-aot|ui-[^ ]+) v'; then
+if printf '%s\n' "$engine_closure" | grep -Eq '^vo-(jit|ui-[^ ]+) v'; then
   echo "core engine depends on an optional backend or UI adapter" >&2
   exit 1
 fi
@@ -637,7 +730,7 @@ if printf '%s\n' "$engine_all_closure" | grep -Eq '^vo-ui-[^ ]+ v'; then
 fi
 cargo check --locked -p vo-ui-integration --no-default-features
 cargo check --locked -p vo-engine --no-default-features
-for feature in jit aot-native aot-wasm; do
+for feature in jit aot-native; do
   cargo check --locked -p vo-engine --no-default-features --features "$feature"
 done
 ''',
@@ -659,6 +752,20 @@ failure_kind = "product"
 report = "cargo-test"
 
 [[command]]
+id = "rust-native-ui-session"
+argv = ["cargo", "test", "-p", "vo-ui-native", "--features", "jit", "--locked"]
+timeout_seconds = 300
+failure_kind = "product"
+report = "cargo-test"
+
+[[command]]
+id = "ui-next-webview-contracts"
+argv = ["cargo", "test", "-p", "vo-ui-webview", "-p", "vo-ui-native", "-p", "vo-ui-desktop-runtime", "--features", "vo-ui-desktop-runtime/jit", "--locked"]
+timeout_seconds = 900
+failure_kind = "product"
+report = "cargo-test"
+
+[[command]]
 id = "dependency-audit"
 argv = ["node", "eng/run-dependency-audit.mjs"]
 timeout_seconds = 1500
@@ -673,7 +780,7 @@ stdout_result = "target/ci/results/nightly-language-native.json"
 
 [[command]]
 id = "nightly-language-wasm-run"
-argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "wasm,wasm-aot", "--release", "--format", "json"]
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "wasm", "--release", "--format", "json"]
 timeout_seconds = 5100
 failure_kind = "product"
 stdout_result = "target/ci/results/nightly-language-wasm.json"
@@ -798,7 +905,7 @@ report = "libfuzzer"
 
 [[task]]
 id = "nightly-browser"
-commands = ["browser-harness-tests", "browser-tooling", "browser-node-dependencies", "browser-aot-support", "browser-wasm-compiler", "browser-javascript", "nightly-studio-build", "nightly-gallery-build", "nightly-studio-journey", "nightly-gallery-journey", "nightly-studio-lifecycle"]
+commands = ["browser-harness-tests", "browser-tooling", "browser-node-dependencies", "browser-wasm-compiler", "browser-javascript", "nightly-studio-build", "nightly-gallery-build", "nightly-studio-journey", "nightly-gallery-journey", "nightly-studio-lifecycle"]
 inputs = ["*"]
 resource_group = "cargo"
 tier = "exhaustive"
@@ -834,13 +941,6 @@ failure_kind = "dependency-policy"
 cwd = "lang/crates/vo-web"
 
 [[command]]
-id = "browser-aot-support"
-argv = ["npm", "run", "build:aot-support"]
-timeout_seconds = 900
-failure_kind = "product"
-cwd = "lang/crates/vo-web"
-
-[[command]]
 id = "browser-wasm-compiler"
 argv = ["npm", "run", "build:wasm:release"]
 timeout_seconds = 900
@@ -869,7 +969,7 @@ failure_kind = "product"
 
 [[command]]
 id = "nightly-studio-journey"
-argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/nightly-studio", "--studio-aot-smoke", "--timeout-ms", "120000", "--output", "target/ci/results/nightly-studio-journey.json"]
+argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/nightly-studio", "--studio-vm-smoke", "--timeout-ms", "120000", "--output", "target/ci/results/nightly-studio-journey.json"]
 timeout_seconds = 900
 failure_kind = "product"
 
@@ -908,7 +1008,7 @@ stdout_result = "target/ci/results/language-native-2.json"
 
 [[command]]
 id = "language-native-aot-smoke-run"
-argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "vm,native-aot", "--tags", "smoke", "--format", "json"]
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "vm,native-aot", "--tags", "smoke", "--release", "--format", "json"]
 timeout_seconds = 900
 failure_kind = "product"
 stdout_result = "target/ci/results/language-native-aot-smoke.json"
@@ -927,50 +1027,44 @@ timeout_seconds = 1800
 failure_kind = "product"
 
 [[command]]
-id = "web-hello-aot"
-argv = ["target/debug/vo", "build", "examples/basics/hello.vo", "--kind=wasm", "--no-cache", "-o", "target/hello-aot.wasm"]
-timeout_seconds = 900
-failure_kind = "product"
-
-[[command]]
 id = "web-component-build"
-argv = ["target/debug/vo", "ui", "build", "ui/tests/nested-component-list", "-o", "target/ui-nested-component-aot", "--runtime-dir=lang/crates/vo-web"]
+argv = ["target/debug/vo", "ui", "build", "ui/tests/nested-component-list", "-o", "target/ui-nested-component-vm", "--runtime-dir=lang/crates/vo-web"]
 timeout_seconds = 900
 failure_kind = "product"
 
 [[command]]
 id = "web-gallery-build"
-argv = ["target/debug/vo", "ui", "build", "ui/showcases/component-gallery", "-o", "target/ui-component-gallery-aot", "--runtime-dir=lang/crates/vo-web"]
+argv = ["target/debug/vo", "ui", "build", "ui/showcases/component-gallery", "-o", "target/ui-component-gallery-vm", "--runtime-dir=lang/crates/vo-web"]
 timeout_seconds = 900
 failure_kind = "product"
 
 [[command]]
 id = "web-data-build"
-argv = ["target/debug/vo", "ui", "build", "ui/showcases/data-application", "-o", "target/data-application-aot", "--runtime-dir=lang/crates/vo-web"]
+argv = ["target/debug/vo", "ui", "build", "ui/showcases/data-application", "-o", "target/data-application-vm", "--runtime-dir=lang/crates/vo-web"]
 timeout_seconds = 900
 failure_kind = "product"
 
 [[command]]
 id = "web-content-build"
-argv = ["target/debug/vo", "ui", "build", "ui/showcases/content-site", "-o", "target/content-site-aot", "--runtime-dir=lang/crates/vo-web"]
+argv = ["target/debug/vo", "ui", "build", "ui/showcases/content-site", "-o", "target/content-site-vm", "--runtime-dir=lang/crates/vo-web"]
 timeout_seconds = 900
 failure_kind = "product"
 
 [[command]]
 id = "web-media-build"
-argv = ["target/debug/vo", "ui", "build", "ui/showcases/media-application", "-o", "target/media-application-aot", "--runtime-dir=lang/crates/vo-web"]
+argv = ["target/debug/vo", "ui", "build", "ui/showcases/media-application", "-o", "target/media-application-vm", "--runtime-dir=lang/crates/vo-web"]
 timeout_seconds = 900
 failure_kind = "product"
 
 [[command]]
 id = "web-workbench-build"
-argv = ["target/debug/vo", "ui", "build", "ui/showcases/studio-workbench", "-o", "target/studio-workbench-aot", "--runtime-dir=lang/crates/vo-web"]
+argv = ["target/debug/vo", "ui", "build", "ui/showcases/studio-workbench", "-o", "target/studio-workbench-vm", "--runtime-dir=lang/crates/vo-web"]
 timeout_seconds = 900
 failure_kind = "product"
 
 [[command]]
 id = "web-studio-build"
-argv = ["target/debug/vo", "ui", "build", "apps/studio", "-o", "target/ci/artifacts/site", "--runtime-dir=lang/crates/vo-web"]
+argv = ["target/debug/vo", "ui", "build", "apps/studio", "-o", "target/ci/artifacts/legacy-studio", "--runtime-dir=lang/crates/vo-web"]
 timeout_seconds = 900
 failure_kind = "product"
 repo_env = {"VOWORK" = "vo.work"}
@@ -984,13 +1078,13 @@ argv = [
   "-c",
   '''
 mkdir -p target/ci/results/ui-size
-node eng/report-ui-web-artifact-size.mjs --label component-gallery --artifact target/ui-component-gallery-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/component-gallery.json
-node eng/report-ui-web-artifact-size.mjs --label data-application --artifact target/data-application-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/data-application.json
-node eng/report-ui-web-artifact-size.mjs --label content-site --artifact target/content-site-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/content-site.json
-node eng/report-ui-web-artifact-size.mjs --label media-application --artifact target/media-application-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/media-application.json
-node eng/report-ui-web-artifact-size.mjs --label studio-workbench --artifact target/studio-workbench-aot/app.wasm --brotli-limit 655360 --output target/ci/results/ui-size/studio-workbench.json
-node eng/report-ui-web-artifact-size.mjs --label studio --artifact target/ci/artifacts/site/app.wasm --raw-limit 34000000 --brotli-limit 972800 --gzip-limit 2500000 --output target/ci/results/ui-size/studio.json
-node eng/report-ui-web-precache-size.mjs --label studio --root target/ci/artifacts/site --gzip-limit 3670016 --output target/ci/results/ui-size/studio-precache.json
+node eng/report-ui-web-artifact-size.mjs --label component-gallery --artifact target/ui-component-gallery-vm/app.vob --brotli-limit 614400 --output target/ci/results/ui-size/component-gallery.json
+node eng/report-ui-web-artifact-size.mjs --label data-application --artifact target/data-application-vm/app.vob --brotli-limit 614400 --output target/ci/results/ui-size/data-application.json
+node eng/report-ui-web-artifact-size.mjs --label content-site --artifact target/content-site-vm/app.vob --brotli-limit 614400 --output target/ci/results/ui-size/content-site.json
+node eng/report-ui-web-artifact-size.mjs --label media-application --artifact target/media-application-vm/app.vob --brotli-limit 614400 --output target/ci/results/ui-size/media-application.json
+node eng/report-ui-web-artifact-size.mjs --label studio-workbench --artifact target/studio-workbench-vm/app.vob --brotli-limit 655360 --output target/ci/results/ui-size/studio-workbench.json
+node eng/report-ui-web-artifact-size.mjs --label studio --artifact target/ci/artifacts/legacy-studio/app.vob --raw-limit 34000000 --brotli-limit 972800 --gzip-limit 2500000 --output target/ci/results/ui-size/studio.json
+node eng/report-ui-web-precache-size.mjs --label studio --root target/ci/artifacts/legacy-studio --gzip-limit 3670016 --output target/ci/results/ui-size/studio-precache.json
 ''',
 ]
 timeout_seconds = 900
@@ -1015,58 +1109,6 @@ argv = [
 ./eng/run-content-site-contracts.sh
 ./eng/run-media-application-contracts.sh
 ./eng/run-studio-workbench-contracts.sh
-''',
-]
-timeout_seconds = 900
-failure_kind = "product"
-
-[[command]]
-id = "web-aot-semantic-probes"
-argv = [
-  "bash",
-  "-euo",
-  "pipefail",
-  "-c",
-  '''
-set -euo pipefail
-cases=(
-  tests/lang/cases/runtime/defer/defer_repanic_chain.vo
-  tests/lang/cases/runtime/defer/nested_unwind_state_stack.vo
-  tests/lang/cases/runtime/defer/bug_defer_recover_mixed_named_return.vo
-  tests/lang/cases/runtime/defer/closure_defer_interact.vo
-  tests/lang/cases/runtime/defer/bug_defer_closure_iface_arg.vo
-  tests/lang/cases/runtime/panic/nil_pointer_method_panic.vo
-  tests/lang/cases/runtime/panic/closure_panic_recover.vo
-  tests/lang/cases/jit/runtime_traps.vo
-  tests/lang/cases/runtime/numeric/integer_div_mod_edge.vo
-  tests/lang/cases/bugs/2026_05_28_jit_slice_addr_nil_panic.vo
-  tests/lang/cases/bugs/2026_05_28_jit_slice_addr_oob_panic.vo
-  tests/lang/cases/bugs/2026_05_28_jit_array_addr_oob_panic.vo
-  tests/lang/cases/runtime/interface/iface_to_iface_assign.vo
-  tests/lang/cases/runtime/map/array_as_map_key.vo
-  tests/lang/cases/runtime/slice/slice_append_semantics.vo
-  tests/lang/cases/runtime/slice/slice_func_elem_call.vo
-  tests/lang/cases/runtime/scheduler/select_multi_ready.vo
-  tests/lang/cases/runtime/scheduler/closure_goroutine_immediate.vo
-  tests/lang/cases/runtime/scheduler/direct_method_value_cross_island_multi_slot.vo
-  tests/lang/cases/runtime/scheduler/island_deep_graph_transfer.vo
-  tests/lang/cases/runtime/scheduler/island_transfer_source_isolation.vo
-  tests/lang/cases/gc/gc_deep_pointer_graph.vo
-  tests/lang/cases/gc/gc_spread_append_layout.vo
-  tests/lang/cases/gc/wasm_aot_shadow_root_stack.vo
-  tests/lang/cases/stdlib/fmt_scan.vo
-  tests/lang/cases/stdlib/filepath_basic.vo
-  tests/lang/cases/stdlib/log_semantics.vo
-  tests/lang/cases/stdlib/regexp.vo
-  tests/lang/cases/net/net_basic.vo
-  benchmarks/binary-trees/trees.vo
-  benchmarks/channel-block-wake/block_wake.vo
-)
-for source in "${cases[@]}"; do
-  image="target/aot-$(basename "${source%.vo}").wasm"
-  ./target/debug/vo build "$source" --kind=wasm --no-cache -o "$image"
-  node cmd/vo-dev/src/bench_wasm_aot_runner.mjs "$image"
-done
 ''',
 ]
 timeout_seconds = 900
@@ -1108,14 +1150,14 @@ failure_kind = "product"
 
 [[command]]
 id = "web-language-smoke"
-argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "wasm,wasm-aot", "--format", "json", "--tags", "smoke"]
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "wasm", "--format", "json", "--tags", "smoke"]
 timeout_seconds = 1500
 failure_kind = "product"
 stdout_result = "target/ci/results/wasm-web-smoke.json"
 
 [[command]]
 id = "web-language-full"
-argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "wasm,wasm-aot", "--format", "json"]
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "wasm", "--format", "json"]
 timeout_seconds = 1500
 failure_kind = "product"
 stdout_result = "target/ci/results/wasm-web-full.json"
@@ -1191,35 +1233,34 @@ failure_kind = "product"
 cwd = "lang/crates/vo-web"
 
 [[command]]
-id = "web-studio-aot-browser"
-argv = ["npm", "run", "test:studio-aot-browser"]
+id = "web-studio-vm-browser"
+argv = ["npm", "run", "test:studio-vm-browser"]
 timeout_seconds = 900
 failure_kind = "product"
 cwd = "lang/crates/vo-web"
 
 [[command]]
-id = "web-runtime-aot"
-argv = ["npm", "run", "test:aot"]
+id = "web-runtime"
+argv = ["npm", "run", "test:runtime"]
 timeout_seconds = 900
 failure_kind = "product"
 cwd = "lang/crates/vo-web"
-repo_env = {"VO_AOT_IMAGE" = "target/hello-aot.wasm"}
 
 [[command]]
 id = "web-studio-bootstrap"
-argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/site", "--studio-bootstrap-smoke", "--output", "target/ci/results/ui/volang-studio-bootstrap-browser.json"]
+argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/legacy-studio", "--studio-bootstrap-smoke", "--output", "target/ci/results/ui/volang-studio-bootstrap-browser.json"]
 timeout_seconds = 900
 failure_kind = "product"
 
 [[command]]
 id = "web-studio-canary"
-argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/site", "--studio-canary-smoke", "--output", "target/ci/results/ui/volang-studio-canary-browser.json"]
+argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/legacy-studio", "--studio-canary-smoke", "--output", "target/ci/results/ui/volang-studio-canary-browser.json"]
 timeout_seconds = 900
 failure_kind = "product"
 
 [[command]]
 id = "web-studio-lifecycle"
-argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/site", "--studio-lifecycle-smoke", "--timeout-ms", "30000", "--output", "target/ci/results/ui/volang-studio-lifecycle-browser.json"]
+argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/legacy-studio", "--studio-lifecycle-smoke", "--timeout-ms", "30000", "--output", "target/ci/results/ui/volang-studio-lifecycle-browser.json"]
 timeout_seconds = 900
 failure_kind = "product"
 
@@ -1395,7 +1436,7 @@ xvfb-run --auto-servernum "$workbench_executable"
 ''']
 timeout_seconds = 180
 failure_kind = "product"
-env = {"WGPU_BACKEND" = "vulkan", "VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "vo.mod|main.vo|Wasm AOT release|Run project|Show Console|Show Documentation", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Build once, run everywhere|Structured concurrency"}
+env = {"WGPU_BACKEND" = "vulkan", "VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "vo.mod|main.vo|Wasm VM release|Run project|Show Console|Show Documentation", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Build once, run everywhere|Structured concurrency"}
 report = "native-window"
 
 [[command]]
@@ -1523,7 +1564,7 @@ test -n "$workbench_executable"
 ''']
 timeout_seconds = 180
 failure_kind = "product"
-env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "vo.mod|main.vo|Wasm AOT release|Run project|Show Console|Show Documentation", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Build once, run everywhere|Structured concurrency"}
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "vo.mod|main.vo|Wasm VM release|Run project|Show Console|Show Documentation", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Build once, run everywhere|Structured concurrency"}
 report = "native-window"
 
 [[command]]
@@ -1687,7 +1728,7 @@ if ($null -eq $workbenchExecutable) { throw "Studio Workbench Native AOT executa
 ''']
 timeout_seconds = 180
 failure_kind = "product"
-env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "vo.mod|main.vo|Wasm AOT release|Run project|Show Console|Show Documentation", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Build once, run everywhere|Structured concurrency"}
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "vo.mod|main.vo|Wasm VM release|Run project|Show Console|Show Documentation", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Build once, run everywhere|Structured concurrency"}
 report = "native-window"
 
 [[command]]
@@ -1696,3 +1737,127 @@ argv = ["cargo", "run", "--locked", "-p", "vo-app-host-native", "--example", "ma
 timeout_seconds = 600
 failure_kind = "product"
 stdout_result = "target/ci/results/appkit-lifecycle.json"
+
+[[command]]
+id = "ui-web-rewrite-tooling"
+argv = ["cargo", "build", "--locked", "-p", "vo", "--release", "--no-default-features", "--features", "jit", "--timings"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "ui-web-rewrite-dependencies"
+argv = ["npm", "ci", "--ignore-scripts"]
+cwd = "eng/ui-next"
+timeout_seconds = 300
+failure_kind = "dependency-policy"
+
+[[command]]
+id = "ui-web-rewrite-runtime"
+argv = ["node", "eng/ui-next/build-runtime.mjs"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "ui-web-authoring-dependencies"
+argv = ["npm", "ci", "--ignore-scripts"]
+cwd = "ui/editors/vscode"
+timeout_seconds = 300
+failure_kind = "dependency-policy"
+
+[[command]]
+id = "ui-web-rewrite-compiler"
+argv = ["node", "eng/ui-next/build-runtime.mjs", "--compiler"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "ui-web-rewrite-core"
+argv = ["node", "eng/ui-next/ci.mjs"]
+env = {"VO_TEST_PROFILE" = "release"}
+timeout_seconds = 2400
+failure_kind = "product"
+
+
+[[command]]
+id = "ui-web-rewrite-site-stage"
+argv = ["node", "eng/ui-next/studio-site-cli.mjs", "stage", "--source", "target/ui-next/studio-static", "--output", "target/ci/artifacts/site", "--domain", "volang.dev"]
+timeout_seconds = 120
+failure_kind = "product"
+
+[[command]]
+id = "ui-web-rewrite-site-check"
+argv = ["node", "eng/ui-next/studio-site-cli.mjs", "check", "--directory", "target/ci/artifacts/site", "--output", "target/ci/results/ui-web-site"]
+timeout_seconds = 600
+failure_kind = "product"
+
+[[command]]
+id = "ui-desktop-browser-dependencies"
+argv = ["npm", "ci", "--ignore-scripts"]
+cwd = "eng/browser"
+timeout_seconds = 300
+failure_kind = "dependency-policy"
+
+[[command]]
+id = "ui-desktop-sdk-dependencies"
+argv = ["cargo", "fetch", "--locked"]
+timeout_seconds = 300
+failure_kind = "dependency-policy"
+
+[[command]]
+id = "ui-desktop-rewrite-sdk"
+argv = ["node", "eng/ui-next/desktop-sdk.mjs", "target/ci/artifacts/ui-desktop-rewrite/sdk"]
+timeout_seconds = 1800
+failure_kind = "product"
+
+[[command]]
+id = "ui-desktop-link-contracts"
+argv = ["node", "--test", "eng/ui-next/desktop-link.test.mjs", "eng/ui-next/desktop-ci-report.test.mjs", "eng/ui-next/project-desktop.test.mjs", "eng/ui-next/publish-directory.test.mjs"]
+timeout_seconds = 120
+failure_kind = "product"
+
+[[command]]
+id = "ui-desktop-rewrite-packages"
+argv = ["node", "eng/ui-next/desktop-package-contracts.mjs"]
+env = {"VO_TEST_PROFILE" = "release", "VO_UI_DESKTOP_SDK" = "target/ci/artifacts/ui-desktop-rewrite/sdk"}
+timeout_seconds = 1200
+failure_kind = "product"
+
+[[command]]
+id = "ui-desktop-rewrite-packages-linux"
+argv = ["xvfb-run", "-a", "node", "eng/ui-next/desktop-package-contracts.mjs"]
+env = {"VO_TEST_PROFILE" = "release", "VO_UI_DESKTOP_SDK" = "target/ci/artifacts/ui-desktop-rewrite/sdk"}
+timeout_seconds = 1200
+failure_kind = "product"
+
+[[command]]
+id = "ui-desktop-rewrite-studio"
+argv = ["node", "eng/ui-next/studio-desktop-contracts.mjs"]
+env = {"VO_TEST_PROFILE" = "release", "VO_UI_DESKTOP_SDK" = "target/ci/artifacts/ui-desktop-rewrite/sdk"}
+timeout_seconds = 1200
+failure_kind = "product"
+
+[[command]]
+id = "ui-desktop-rewrite-studio-linux"
+argv = ["xvfb-run", "-a", "node", "eng/ui-next/studio-desktop-contracts.mjs"]
+env = {"VO_TEST_PROFILE" = "release", "VO_UI_DESKTOP_SDK" = "target/ci/artifacts/ui-desktop-rewrite/sdk"}
+timeout_seconds = 1200
+failure_kind = "product"
+
+[[command]]
+id = "ui-desktop-rewrite-evidence"
+argv = ["node", "eng/ui-next/desktop-ci-report.mjs"]
+env = {"VO_TEST_PROFILE" = "release", "VO_UI_DESKTOP_SDK" = "target/ci/artifacts/ui-desktop-rewrite/sdk"}
+timeout_seconds = 120
+failure_kind = "product"
+
+[[command]]
+id = "ui-desktop-rewrite-runtime"
+argv = ["node", "eng/ui-next/build-runtime.mjs", "--install-tools"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "ui-desktop-rewrite-archive"
+argv = ["tar", "-czf", "target/ci/artifacts/ui-desktop-rewrite/desktop-sdk.tar.gz", "-C", "target/ci/artifacts/ui-desktop-rewrite", "sdk"]
+timeout_seconds = 180
+failure_kind = "product"

@@ -1,0 +1,342 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+)
+
+var reloadPageType = ui.Define("reload.Page")
+
+var reloadItemType = ui.Define("reload.Item")
+
+type reloadableCount struct {
+	value int
+	schema string
+	reject bool
+}
+
+func (value reloadableCount) ReloadSchema() string {
+	return value.schema
+}
+
+func (value reloadableCount) SaveReload() (string, error) {
+	return strconv.Itoa(value.value), nil
+}
+
+func (value reloadableCount) RestoreReload(encoded string) (any, error) {
+	if value.reject {
+		return nil, fmt.Errorf("reload decoder rejected the old value")
+	}
+	count, err := strconv.Atoi(encoded)
+	if err != nil {
+		return nil, err
+	}
+	value.value = count
+	return value, nil
+}
+
+func reloadStateContracts() {
+	var count *ui.IntState
+	var name *ui.StringState
+	var flag *ui.BoolState
+	var custom *ui.Store
+	var opaque *ui.Store
+	starts, stops, computes := 0, 0, 0
+	view := func(initial int, schema string, reject bool) ui.View {
+		return ui.Component(reloadPageType, func(scope *ui.Scope) ui.View {
+			count = ui.Int(scope, "count", initial)
+			name = ui.String(scope, "name", "fresh")
+			flag = ui.Bool(scope, "flag", false)
+			custom = ui.State(scope, "custom", func() any {
+				return reloadableCount{value: initial, schema: schema, reject: reject}
+			})
+			opaque = ui.State(scope, "opaque", func() any {
+				return []int{initial}
+			})
+			derived := ui.Derived(scope, "derived", func() any {
+				computes++
+				return count.Get() + 1
+			})
+			ui.Effect(scope, "lifetime", func() func() {
+				starts++
+				return func() {
+					stops++
+				}
+			})
+			return ui.Text(fmt.Sprint(derived.Get()) + name.Get() + fmt.Sprint(flag.Get()) +
+				fmt.Sprint(custom.Get().(reloadableCount).value))
+		})
+	}
+	root := ui.NewRoot(view(0, "counter/1", false))
+	flush(root)
+	count.Set(42)
+	name.Set(strings.Repeat("中文<&\"", 200))
+	flag.Set(true)
+	custom.Update(func(any) any {
+		return reloadableCount{value: 37, schema: "counter/1"}
+	})
+	opaque.Update(func(any) any {
+		return []int{99}
+	})
+	_, err := root.SaveReload()
+	require(err != nil, "reload captured unpublished edits")
+	flush(root)
+	beforeComputes := computes
+	encoded, err := root.SaveReload()
+	require(err == nil && computes == beforeComputes && starts == 1 && stops == 0, "reload capture evaluated derived values or changed effects")
+	oldCount := count
+	fresh := ui.NewRoot(view(9, "counter/1", false))
+	report, err := fresh.RestoreReload(encoded)
+	require(err == nil, "valid reload state rejected")
+	batch := fresh.Flush()
+	require(count.Get() == 42 && len(name.Get()) > 1000 && flag.Get() &&
+		custom.Get().(reloadableCount).value == 37, "reload discarded ordinary or explicitly encoded state")
+	require(opaque.Get().([]int)[0] == 9 && report.Restored == 4 && report.Reset == 1, "opaque state crossed runtime ownership")
+	require(starts == 1 && stops == 0, "restoration started effects before commit")
+	root.Close()
+	require(stops == 1, "old reload owner retained its effect")
+	expectPanic(func() {
+		oldCount.Set(100)
+	}, "disposed")
+	fresh.Commit(batch.Revision)
+	require(starts == 2 && stops == 1, "new effects were not established after old cleanup")
+	fresh.Close()
+	for _, invalid := range []string{
+		"", `{}`, `{"version":2}`,
+		`{"version":1,"states":[{"path":"p","key":"x","kind":"int","value":"01"}]}`,
+		`{"version":1,"states":[{"path":"p","key":"x","kind":"bool","value":"1"}]}`,
+		`{"version":1,"states":[{"path":"p","key":"x","kind":"other","value":""}]}`,
+		`{"version":1,"states":[{"path":"p","key":"x","kind":"string","value":""},{"path":"p","key":"x","kind":"string","value":""}]}`,
+	} {
+		fresh = ui.NewRoot(view(5, "counter/2", false))
+		_, err = fresh.RestoreReload(invalid)
+		require(err != nil, "invalid reload envelope accepted")
+		report, err = fresh.RestoreReload(encoded)
+		require(err == nil, "failed validation changed fresh root")
+		flush(fresh)
+		require(count.Get() == 42 && custom.Get().(reloadableCount).value == 5 && report.Restored == 3 &&
+			report.Reset == 2, "schema change did not reset its store independently")
+		fresh.Close()
+	}
+	fresh = ui.NewRoot(view(5, "counter/1", true))
+	report, err = fresh.RestoreReload(encoded)
+	require(err == nil, "reload setup rejected a valid envelope")
+	flush(fresh)
+	require(custom.Get().(reloadableCount).value == 5 && report.Restored == 3 && report.Reset == 2 &&
+		len(report.Messages) == 1, "decoder failure lost fallback state or diagnostics")
+	fresh.Close()
+}
+
+func reloadIdentityContracts() {
+	counts := make(map[string]*ui.IntState)
+	var show *ui.BoolState
+	item := func(name string) ui.View {
+		return ui.Component(reloadItemType, func(scope *ui.Scope) ui.View {
+			count := ui.Int(scope, "count", 0)
+			counts[name] = count
+			return ui.Text(fmt.Sprint(count.Get()))
+		})
+	}
+	view := func(reverse bool, renamed bool) ui.View {
+		return ui.Component(reloadPageType, func(scope *ui.Scope) ui.View {
+			show = ui.Bool(scope, "show", true)
+			children := []ui.View{item("a").Key("a"), item("b").Key("b")}
+			if reverse {
+				children[0], children[1] = children[1], children[0]
+			}
+			if renamed {
+				children[0] = children[0].Key("renamed")
+			}
+			if show.Get() {
+				children = append(children, item("conditional").Key("conditional"))
+			}
+			return ui.Element("div", children...)
+		})
+	}
+	root := ui.NewRoot(view(false, false))
+	flush(root)
+	counts["a"].Set(10)
+	counts["b"].Set(20)
+	counts["conditional"].Set(30)
+	flush(root)
+	encoded, err := root.SaveReload()
+	require(err == nil, "keyed reload capture failed")
+	root.Close()
+	root = ui.NewRoot(view(true, false))
+	report, err := root.RestoreReload(encoded)
+	require(err == nil, "keyed reload setup failed")
+	flush(root)
+	require(counts["a"].Get() == 10 && counts["b"].Get() == 20 && report.Restored == 4, "reordered sibling keys exchanged reload state")
+	show.Set(false)
+	flush(root)
+	show.Set(true)
+	flush(root)
+	require(counts["conditional"].Get() == 0, "a later conditional mount revived consumed reload state")
+	root.Close()
+	root = ui.NewRoot(view(true, true))
+	report, err = root.RestoreReload(encoded)
+	require(err == nil, "renamed reload setup failed")
+	flush(root)
+	require(counts["b"].Get() == 0 && counts["a"].Get() == 10 && report.Reset == 1, "renamed key retained unrelated state")
+	root.Close()
+	root = ui.NewRoot(ui.Component(reloadPageType, func(scope *ui.Scope) ui.View {
+		ui.String(scope, "show", "changed type")
+		return ui.Text("fresh")
+	}))
+	report, err = root.RestoreReload(encoded)
+	require(err == nil, "type change setup failed")
+	flush(root)
+	require(report.Restored == 0 && report.Reset == 4, "changed state type or removed subtree retained old state")
+	root.Close()
+	first, second := ui.Define("ambiguous.Reload"), ui.Define("ambiguous.Reload")
+	root = ui.NewRoot(ui.Fragment(ui.Component(first, func(*ui.Scope) ui.View {
+		return ui.Text("a")
+	}), ui.Component(second, func(*ui.Scope) ui.View {
+		return ui.Text("b")
+	})))
+	flush(root)
+	_, err = root.SaveReload()
+	require(err != nil && strings.Contains(err.Error(), "unique component"), "ambiguous definitions acquired reload identity")
+	root.Close()
+	// The transport envelope is ordinary JSON, with a bounded stable format.
+	var probe struct {
+		Version int
+		States []struct {
+			Path string
+			Key string
+			Kind string
+			Value string
+		}
+	}
+	err = json.Unmarshal([]byte(encoded), &probe)
+	require(err == nil && probe.Version == 1 && len(probe.States) == 4, "reload envelope is not independently readable")
+}
+
+type reloadMutation struct {
+	change func()
+}
+
+func (value reloadMutation) ReloadSchema() string {
+	return "mutation/1"
+}
+
+func (value reloadMutation) SaveReload() (string, error) {
+	value.change()
+	return "", nil
+}
+
+func (value reloadMutation) RestoreReload(string) (any, error) {
+	return value, nil
+}
+
+func reloadCaptureGuards() {
+	var count *ui.IntState
+	var root *ui.Root
+	var change func()
+	view := ui.Component(reloadPageType, func(scope *ui.Scope) ui.View {
+		count = ui.Int(scope, "count", 0)
+		ui.State(scope, "codec", func() any {
+			return reloadMutation{
+				change: func() {
+					change()
+				},
+			}
+		})
+		return ui.Text(fmt.Sprint(count.Get()))
+	})
+	root = ui.NewRoot(view)
+	flush(root)
+	for index, action := range []func(){
+		func() {
+			count.Set(1)
+		},
+		func() {
+			root.Close()
+		},
+		func() {
+			root.Flush()
+		},
+	} {
+		change = action
+		_, err := root.SaveReload()
+		require(err != nil && count.Get() == 0, fmt.Sprintf("reload encoder guard %d failed: error=%v count=%d", index, err, count.Get()))
+	}
+	change = func() {}
+	_, err := root.SaveReload()
+	require(err == nil, "failed encoder left the root in capture mode")
+	root.Close()
+	for _, oversized := range []string{strings.Repeat("x", 4 * 1024 * 1024 + 1), string([]byte{255})} {
+		root = ui.NewRoot(ui.Component(reloadPageType, func(scope *ui.Scope) ui.View {
+			ui.String(scope, "large", oversized)
+			return ui.Text("bounded")
+		}))
+		flush(root)
+		_, err = root.SaveReload()
+		require(err != nil, "reload accepted oversized or invalid state text")
+		root.Close()
+	}
+}
+
+func reloadFormContracts() {
+	var form *forms.Form
+	view := func(changed bool) ui.View {
+		return ui.Component(reloadPageType, func(scope *ui.Scope) ui.View {
+			initial := forms.Values{
+				"name": []string{"Ada"}, "choices": []string{"a"}, "removed": []string{"old"},
+			}
+			if changed {
+				delete(initial, "removed")
+				initial["added"] = []string{"new"}
+				initial["name"] = []string{"New default"}
+			}
+			form = forms.Use(scope, "form", forms.Options{Initial: initial})
+			return ui.Text(form.Value("name") + strings.Join(form.All("choices"), ","))
+		})
+	}
+	root := ui.NewRoot(view(false))
+	flush(root)
+	form.Change("name", "Before saving")
+	form.Submit(func(forms.Data) ui.Request {
+		return ui.Request{Service: "save"}
+	}, func(ui.Result) forms.Outcome {
+		return forms.Outcome{}
+	})
+	flush(root)
+	form.Change("name", "Edited during save")
+	form.ChangeAll("choices", []string{"a", "b"})
+	flush(root)
+	encoded, err := root.SaveReload()
+	require(err == nil && form.Pending(), "pending form could not capture data")
+	oldForm := form
+	fresh := ui.NewRoot(view(true))
+	report, err := fresh.RestoreReload(encoded)
+	require(err == nil, "form reload setup failed")
+	batch := fresh.Flush()
+	require(report.Restored == 1 && report.Reset == 0, "form did not use its explicit reload codec")
+	closed := root.Close()
+	cancelled := false
+	for _, command := range closed.Commands {
+		if command.Op == "cancel" {
+			cancelled = true
+		}
+	}
+	require(cancelled, "reload left the old submission running")
+	expectPanic(func() {
+		oldForm.Change("name", "stale")
+	}, "disposed")
+	fresh.Commit(batch.Revision)
+	require(form.Value("name") == "Edited during save" &&
+		strings.Join(form.All("choices"), ",") == "a,b" &&
+		form.Dirty() &&
+		!form.Pending(), "form reload lost edits or resumed stale pending work")
+	require(form.Value("added") == "new", "new field did not use the current declaration")
+	_, exists := form.Values()["removed"]
+	require(!exists, "removed field survived the new form declaration")
+	form.Reset()
+	require(form.Value("name") == "New default" && !form.Dirty(), "reset did not use the new source defaults")
+	fresh.Close()
+}

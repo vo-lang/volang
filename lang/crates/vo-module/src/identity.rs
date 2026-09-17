@@ -130,15 +130,7 @@ impl ModulePath {
     /// Returns the sub-path within the module (empty string for exact match),
     /// or `None` if this module does not own the import.
     pub fn owns_import<'a>(&self, import_path: &'a str) -> Option<&'a str> {
-        let mp = self.as_str();
-        if import_path == mp {
-            Some("")
-        } else if import_path.starts_with(mp) && import_path.as_bytes().get(mp.len()) == Some(&b'/')
-        {
-            Some(&import_path[mp.len() + 1..])
-        } else {
-            None
-        }
+        owned_package_path(self.as_str(), import_path)
     }
 
     /// Check if a version is compatible with this module path's major version rule.
@@ -481,12 +473,27 @@ impl ModIdentity {
         matches!(self, ModIdentity::Local(_))
     }
 
+    /// Resolve packages owned by this root, including unpublished local roots.
+    /// Ownership always ends at a complete path segment.
+    pub fn owns_import<'a>(&self, import_path: &'a str) -> Option<&'a str> {
+        owned_package_path(self.as_str(), import_path)
+    }
+
     /// Borrow the underlying public ModuleId, if any.
     pub fn as_public(&self) -> Option<&ModulePath> {
         match self {
             ModIdentity::Public(mp) => Some(mp),
             ModIdentity::Local(_) => None,
         }
+    }
+}
+
+fn owned_package_path<'a>(module: &str, import_path: &'a str) -> Option<&'a str> {
+    let suffix = import_path.strip_prefix(module)?;
+    if suffix.is_empty() {
+        Some(suffix)
+    } else {
+        suffix.strip_prefix('/')
     }
 }
 

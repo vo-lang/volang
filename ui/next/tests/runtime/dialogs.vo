@@ -1,0 +1,77 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/host"
+)
+
+func modalDialogs() {
+	var open *ui.BoolState
+	var locked *ui.BoolState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		open = ui.Bool(scope, "open", false)
+		locked = ui.Bool(scope, "locked", false)
+		trigger := ui.Ref(scope, "trigger")
+		return ui.Fragment(ui.Element("button").Ref(trigger).Attr("data-name", "trigger"), kit.Dialog(kit.DialogProps{
+			ID: "contract-dialog", Title: "Dialog contract",
+			Open: func() bool {
+				return open.Get()
+			},
+			PreventClose: func() bool {
+				return locked.Get()
+			},
+			ReturnFocus: trigger,
+			OnOpenChange: func(value bool) {
+				open.Set(value)
+			},
+		}, ui.Element("input").Attr("value", "kept")))
+	}))
+	first := flush(root)
+	dialog := 0
+	for _, mutation := range first.Mutations {
+		if mutation.Op == "modal" {
+			dialog = mutation.ID
+			require(mutation.Value == "false", "closed dialog started open")
+		}
+	}
+	require(dialog > 0 && !strings.Contains(root.HTML(), " open="), "SSR presented a nonmodal dialog")
+	open.Set(true)
+	batch := flush(root)
+	require(len(batch.Mutations) > 0, "dialog opening emitted no changes")
+	for _, mutation := range batch.Mutations {
+		require(mutation.Op != "create", "dialog opening remounted its content")
+	}
+	root.Dispatch(ui.Event{Kind: "cancel", Target: dialog, Sequence: 1})
+	require(!open.Get(), "escape did not request closing")
+	require(focusTarget(flush(root)) == target(first, "trigger"), "controlled close did not return focus in its own commit")
+	root.Dispatch(ui.Event{Kind: "close", Target: dialog, Sequence: 2})
+	require(focusTarget(flush(root)) == 0, "queued native close repeated the focus request")
+	open.Set(true)
+	locked.Set(true)
+	flush(root)
+	root.Dispatch(ui.Event{Kind: "cancel", Target: dialog, Sequence: 3})
+	require(open.Get(), "prevent-close ignored")
+	flush(root)
+	root.Dispatch(ui.Event{Kind: "close", Target: dialog, Sequence: 4})
+	require(!open.Get(), "native close did not synchronize its owner")
+	require(focusTarget(flush(root)) == target(first, "trigger"), "dialog did not return focus to its declared target")
+	root.Close()
+	expectPanic(func() {
+		ui.Element("div").Modal(true)
+	}, "requires a dialog")
+	expectPanic(func() {
+		ui.Element("dialog").Modal(true).Attr("open", "true")
+	}, "owns the dialog open")
+	expectPanic(func() {
+		ui.Element("dialog").Attr("open", "true").Modal(true)
+	}, "owns the dialog open")
+	expectPanic(func() {
+		host.HTML(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+			ui.String(scope, "same", "value")
+			ui.Ref(scope, "same")
+			return ui.Text("unreachable")
+		}))
+	}, "state key changed type: same\n  in contract.Branch")
+}

@@ -1,0 +1,281 @@
+package collection
+
+import (
+	"math"
+	"encoding/json"
+	ui "github.com/vo-lang/ui/next"
+)
+
+// Each component owns its private layout cache. Only handlers update it, through
+// Store.Update's phase/disposal guard. Render receives immutable row positions.
+type variableModel struct {
+	estimate float64
+	items *Items
+	index *heightIndex
+	measured map[string]ui.Size
+	width float64
+	height int
+	observed ui.ScrollPosition
+	top float64
+	resume *rowBookmark
+}
+
+// VariableRow is an immutable rendered position. Index refers to the current Items snapshot.
+type VariableRow struct {
+	Index int
+	Key string
+	Top float64
+}
+
+type VariableWindow struct {
+	Rows []VariableRow
+	Total float64
+	measure func(string, ui.Size)
+}
+
+func modelFor(items *Items, estimate float64, width float64, height int, previous *variableModel) *variableModel {
+	result := &variableModel{
+		items: items, estimate: estimate, index: newHeightIndex(items.Len(), estimate),
+		measured: make(map[string]ui.Size), width: width, height: height,
+	}
+	if previous == nil {
+		return result
+	}
+	result.observed = previous.observed
+	result.resume = previous.resume
+	result.top = previous.top
+	for position := 0; position < items.Len(); position++ {
+		key := items.At(position).Key
+		if size, ok := previous.measured[key]; ok {
+			result.measured[key] = size
+			if size.Inline == float64(result.width) && size.Block >= 1 {
+				result.index.Set(position, size.Block)
+			}
+		}
+	}
+	result.preserveAnchor(previous)
+	return result
+}
+
+type rowBookmark struct {
+	Key string
+	Inset float64
+	Left float64
+	Top float64
+	Width float64
+	Height float64
+}
+
+func remember(model *variableModel, state *ui.StringState) {
+	if model.resume != nil {
+		return
+	}
+	row := model.index.RowAt(model.top)
+	if row >= model.items.Len() {
+		state.Set("")
+		return
+	}
+	snapshot := rowBookmark{
+		Key: model.items.At(row).Key, Inset: model.top - model.index.Offset(row),
+		Left: model.observed.Left, Top: model.observed.Top, Width: model.width,
+		Height: model.index.heights[row],
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		panic(err)
+	}
+	state.Set(string(encoded))
+}
+
+func resumedModel(items *Items, height int, estimate float64, state *ui.StringState) *variableModel {
+	model := modelFor(items, estimate, 0, height, nil)
+	if state.Get() == "" {
+		return model
+	}
+	var bookmark rowBookmark
+	if json.Unmarshal([]byte(state.Get()), &bookmark) != nil {
+		return model
+	}
+	row := items.Index(bookmark.Key)
+	if row < 0 || bookmark.Width <= 0 || bookmark.Height < 1 || bookmark.Height > maxWindowExtent ||
+		bookmark.Inset < 0 ||
+		bookmark.Inset >= bookmark.Height {
+		return model
+	}
+	for _, value := range []float64{
+		bookmark.Left, bookmark.Top, bookmark.Height, bookmark.Inset, bookmark.Width,
+	} {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return model
+		}
+	}
+	model.index.Set(row, bookmark.Height)
+	model.measured[bookmark.Key] = ui.Size{Inline: float64(bookmark.Width), Block: bookmark.Height}
+	model.width = bookmark.Width
+	model.observed = ui.ScrollPosition{Left: bookmark.Left, Top: bookmark.Top}
+	model.top = model.index.Offset(row) + bookmark.Inset
+	model.resume = &bookmark
+	return model
+}
+
+func (model *variableModel) preserveAnchor(previous *variableModel) {
+	anchor := previous.index.RowAt(previous.top)
+	if anchor >= previous.items.Len() {
+		return
+	}
+	next := model.items.Index(previous.items.At(anchor).Key)
+	if next < 0 {
+		return
+	}
+	// Retain the anchor's previous height as an estimate until it is measured
+	// at the new width. Clamping against the generic estimate would lose its inset.
+	if size, ok := model.measured[model.items.At(next).Key]; !ok || size.Inline != float64(model.width) {
+		model.index.Set(next, previous.index.heights[anchor])
+	}
+	inset := previous.top - previous.index.Offset(anchor)
+	if inset > model.index.heights[next] - 1 {
+		inset = model.index.heights[next] - 1
+	}
+	model.top = model.index.Offset(next) + inset
+}
+
+func (model *variableModel) correct(ref *ui.ElementRef) {
+	if model.resume == nil && model.top != model.observed.Top {
+		ref.ScrollToIfUnchanged(model.observed, ui.ScrollPosition{
+			Left: model.observed.Left, Top: model.top,
+		})
+	}
+}
+
+// Variable owns measured vertical windowing. Bind options.Ref and the returned
+// callback to the scroll container, and each row wrapper's OnSize to Measure.
+// A matching visible key anchors size/collection changes; newer native scrolling
+// wins. At most one PinnedKey stays mounted outside the visible window for focus.
+func Variable(scope *ui.Scope, key string, options VariableOptions) (VariableWindow, func(ui.Viewport)) {
+	options.validate()
+	items, ref, height, pinnedKey := options.Items, options.Ref, options.Height, options.PinnedKey
+	bookmark := ui.String(scope, key + "/bookmark", "")
+	stored := ui.State(scope, key, func() any {
+		return resumedModel(items, height, options.Estimate, bookmark)
+	})
+	model := stored.Get().(*variableModel)
+	if model.items != items || model.estimate != options.Estimate {
+		model = modelFor(items, options.Estimate, model.width, model.height, model)
+		prepared := model
+		ui.Effect(scope, key + "/replace", func() func() {
+			stored.Update(func(any) any {
+				return prepared
+			})
+			prepared.correct(ref)
+			remember(prepared, bookmark)
+			return nil
+		}, prepared)
+	}
+	start, end := model.index.Range(model.top, model.height, options.Overscan)
+	rows := make([]VariableRow, 0, end - start + 1)
+	pinned := items.Index(pinnedKey)
+	if pinned >= 0 && pinned < start {
+		rows = append(rows, VariableRow{Index: pinned, Key: pinnedKey, Top: model.index.Offset(pinned)})
+	}
+	for row := start; row < end; row++ {
+		rows = append(rows, VariableRow{Index: row, Key: items.At(row).Key, Top: model.index.Offset(row)})
+	}
+	if pinned >= end && pinned < items.Len() {
+		rows = append(rows, VariableRow{Index: pinned, Key: pinnedKey, Top: model.index.Offset(pinned)})
+	}
+	result := VariableWindow{Rows: rows, Total: model.index.total}
+	observe := func(viewport ui.Viewport) {
+		if math.IsNaN(viewport.Top) || math.IsInf(viewport.Top, 0) || math.IsNaN(viewport.Left) ||
+			math.IsInf(viewport.Left, 0) ||
+			viewport.Height < 0 ||
+			viewport.Height > maxWindowExtent ||
+			viewport.Width < 0 {
+			panic("collection: invalid viewport")
+		}
+		if viewport.Height < 1 || viewport.Width < 1 {
+			return
+		}
+		current := stored.Get().(*variableModel)
+		if current.resume == nil && current.height == viewport.Height &&
+			current.observed.Top == viewport.Top &&
+			current.observed.Left == viewport.Left {
+			return
+		}
+		stored.Update(func(value any) any {
+			valueModel := value.(*variableModel)
+			valueModel.observed = ui.ScrollPosition{Left: viewport.Left, Top: viewport.Top}
+			if valueModel.resume != nil && viewport.Left == valueModel.resume.Left &&
+				viewport.Top == valueModel.resume.Top {
+				valueModel.resume = nil
+			} else {
+				valueModel.resume = nil
+				valueModel.top = viewport.Top
+			}
+			valueModel.height = viewport.Height
+			valueModel.correct(ref)
+			remember(valueModel, bookmark)
+			return valueModel
+		})
+	}
+	result.measure = func(rowKey string, size ui.Size) {
+		for _, value := range []float64{size.Inline, size.Block} {
+			if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+				panic("collection: invalid measured row size")
+			}
+		}
+		if size.Inline == 0 || size.Block == 0 {
+			return
+		}
+		if size.Block < 1 || size.Block > maxWindowExtent {
+			panic("collection: row height must be at least one pixel and within the supported extent")
+		}
+		current := stored.Get().(*variableModel)
+		row := current.items.Index(rowKey)
+		if row < 0 {
+			return
+		}
+		if previous, ok := current.measured[rowKey]; ok && previous == size &&
+			current.width == size.Inline {
+			return
+		}
+		stored.Update(func(value any) any {
+			valueModel := value.(*variableModel)
+			// Rows share a native inline size. Keep its fractional precision and let
+			// the first changed row rebase the cache; clientWidth is integer-rounded.
+			if size.Inline != valueModel.width {
+				valueModel = modelFor(valueModel.items, valueModel.estimate, size.Inline, valueModel.height, valueModel)
+			}
+			anchor := valueModel.index.RowAt(valueModel.top)
+			old := valueModel.index.heights[row]
+			changed := valueModel.index.Set(row, size.Block)
+			// Publish the cached measurement only after its extent has been admitted.
+			valueModel.measured[rowKey] = size
+			if !changed {
+				return valueModel
+			}
+			if row < anchor {
+				valueModel.top += size.Block - old
+			}
+			if row == anchor {
+				inset := valueModel.top - valueModel.index.Offset(row)
+				if inset > size.Block - 1 {
+					valueModel.top -= inset - (size.Block - 1)
+				}
+			}
+			valueModel.correct(ref)
+			remember(valueModel, bookmark)
+			return valueModel
+		})
+	}
+	return result, observe
+}
+
+// Measure accepts a logical border-box observation for a stable row key. Zero
+// hidden sizes and removed keys are ignored. Horizontal row wrappers must have
+// min-block-size:1px and include their own spacing within the measured box.
+func (window VariableWindow) Measure(key string, size ui.Size) {
+	if window.measure == nil {
+		panic("collection: an initialized variable window is required")
+	}
+	window.measure(key, size)
+}

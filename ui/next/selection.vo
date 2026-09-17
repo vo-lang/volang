@@ -1,0 +1,40 @@
+package ui
+
+import (
+	"encoding/json"
+	"strings"
+	"unicode/utf8"
+	"github.com/vo-lang/ui/next/wire"
+)
+
+// SelectedValues controls a native multiple select. Membership selects every
+// matching option; input/change events report selected values in option order.
+// The view copies the list and owns the multiple attribute. Omitting this
+// binding on a later view returns selection ownership to the browser.
+func (view View) SelectedValues(values []string) View {
+	if view.kind != "select" || len(values) > wire.MaxSelectedValues {
+		panic("ui: SelectedValues requires a select and at most 4096 values")
+	}
+	for _, attr := range view.attrs {
+		if strings.EqualFold(attr.name, "value") {
+			panic("ui: value and SelectedValues cannot be combined")
+		}
+	}
+	for _, value := range values {
+		if !utf8.ValidString(value) {
+			panic("ui: selected values require valid UTF-8")
+		}
+	}
+	values = append([]string{}, values...)
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		panic(err)
+	}
+	if len(encoded) > wire.MaxFrameBytes {
+		panic("ui: selected values exceed the frame limit")
+	}
+	view = view.Attr("multiple", "true")
+	view.control = view.copyControl()
+	view.control.selected, view.control.selection, view.control.hasSelection = values, string(encoded), true
+	return view
+}

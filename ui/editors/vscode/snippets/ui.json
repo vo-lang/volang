@@ -8,12 +8,16 @@
       "",
       "func main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }"
     ],
-    "description": "Create a typed Volang UI application root"
+    "description": "Legacy UI compatibility: Create a typed Volang UI application root"
   },
   "Volang UI component": {
     "prefix": "vui-component",
-    "body": ["func ${1:Card}(${2:title string}) ui.View {", "\treturn ${3:ui.Text(title)}", "}"],
-    "description": "Create a separately compilable UI component"
+    "body": [
+      "func ${1:Card}(${2:title string}) ui.View {",
+      "\treturn ${3:ui.Text(title)}",
+      "}"
+    ],
+    "description": "Legacy UI compatibility: Create a separately compilable UI component"
   },
   "Scoped string task": {
     "prefix": "vui-task",
@@ -22,6 +26,6 @@
       "\t${2:return \"\", nil}",
       "})"
     ],
-    "description": "Create a component-owned cancellable goroutine task"
+    "description": "Legacy UI compatibility: Create a component-owned cancellable goroutine task"
   }
 }

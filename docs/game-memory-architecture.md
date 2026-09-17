@@ -423,9 +423,9 @@ Voplay 的 stage 执行由 `GameEngine` 持有并复用：
 
 这些能力会显著增加语言表面、同步协议或后端差异。当前需求已经由稳定地址 span heap、可恢复 GC、直接宿主控制和领域缓冲区覆盖。
 
-## Core Wasm AOT 的当前边界
+## Wasm VM 的当前边界
 
-Core Wasm AOT 使用生成的 Wasm 执行代码和独立的 JavaScript 内存实现，声明
+Wasm VM 使用生成的 Wasm 执行代码和独立的 JavaScript 内存实现，声明
 `island-span-heap` 能力。每个 Island 拥有独立 span、根、collector 游标、准入策略、
 统计和终止错误；共享线性内存只承担物理页提供者职责。所有 GC 阶段按工作单元推进，
 活动栈帧按 Island 登记，避免递归增长导致反复重扫整条帧链。

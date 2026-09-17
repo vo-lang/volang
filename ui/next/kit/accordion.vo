@@ -1,0 +1,143 @@
+package kit
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+var accordionType = ui.Define("kit.Accordion")
+
+var accordionItemType = ui.Define("kit.AccordionItem")
+
+type AccordionItem struct {
+	Key string
+	Label string
+	Disabled bool
+	Content ui.View
+	// TriggerRef lets the owner focus a heading after a programmatic collapse.
+	TriggerRef *ui.ElementRef
+}
+
+type AccordionHeading struct {
+	Key string
+	Label string
+	Expanded bool
+	Disabled bool
+}
+
+type AccordionProps struct {
+	ID string
+	Items []AccordionItem
+	// Expanded reads the current controlled state during render and each action.
+	Expanded func() []string
+	Multiple bool
+	Required bool
+	HeadingLevel int
+	Regions bool
+	Class string
+	// Title supplies content inside the native heading button; keep it noninteractive.
+	Title func(AccordionHeading) ui.View
+	OnChange func([]string)
+}
+
+// Accordion keeps collapsed content mounted. Control Expanded with stable item
+// keys; Required prevents closing the last open item, including in Multiple mode.
+func Accordion(props AccordionProps) ui.View {
+	props.Items = append([]AccordionItem{}, props.Items...)
+	return ui.Component(accordionType, func(scope *ui.Scope) ui.View {
+		if props.ID == "" || props.Expanded == nil || props.OnChange == nil {
+			panic("kit: accordion requires an ID, state reader and change handler")
+		}
+		level := props.HeadingLevel
+		if level == 0 {
+			level = 3
+		}
+		if level < 1 || level > 6 {
+			panic("kit: accordion heading level must be between 1 and 6")
+		}
+		keys := make(map[string]bool)
+		for _, item := range props.Items {
+			if item.Key == "" || item.Label == "" || keys[item.Key] {
+				panic("kit: accordion items require unique nonempty keys and labels")
+			}
+			keys[item.Key] = true
+		}
+		expanded := make(map[string]bool)
+		for _, key := range props.Expanded() {
+			if !keys[key] || expanded[key] {
+				panic("kit: accordion expanded keys must be unique existing items")
+			}
+			expanded[key] = true
+		}
+		if (!props.Multiple && len(expanded) > 1) || (props.Required && len(expanded) == 0) {
+			panic("kit: accordion expanded keys disagree with its selection mode")
+		}
+		children := []ui.View{}
+		for index, item := range props.Items {
+			children = append(children, accordionItem(props, item, index, level, expanded[item.Key], len(expanded)))
+		}
+		return ui.Element("div", children...).Class("vui-accordion", props.Class)
+	})
+}
+
+// Each retained item owns its default ref. Removing a key releases that owner;
+// dynamic item lists do not leave historical refs in the accordion scope.
+func accordionItem(props AccordionProps, item AccordionItem, index int, level int, expanded bool, expandedCount int) ui.View {
+	return ui.Component(accordionItemType, func(scope *ui.Scope) ui.View {
+		ref := item.TriggerRef
+		if ref == nil {
+			ref = ui.Ref(scope, "trigger")
+		}
+		return accordionSection(props, item, index, level, expanded, expandedCount, ref)
+	}).Key(item.Key)
+}
+
+func accordionSection(props AccordionProps, item AccordionItem, index int, level int, expanded bool, expandedCount int, ref *ui.ElementRef) ui.View {
+	triggerID := props.ID + "-trigger-" + fmt.Sprint(index)
+	panelID := props.ID + "-panel-" + fmt.Sprint(index)
+	locked := item.Disabled || (expanded && props.Required && expandedCount == 1)
+	heading := AccordionHeading{Key: item.Key, Label: item.Label, Expanded: expanded, Disabled: locked}
+	marker := "+"
+	if expanded {
+		marker = "−"
+	}
+	title := ui.Fragment(ui.Element("span", ui.Text(item.Label)), ui.Element("span", ui.Text(marker)).Attr("aria-hidden", "true"))
+	if props.Title != nil {
+		title = props.Title(heading)
+	}
+	trigger := ui.Element("button", title).Ref(ref).Attr("type", "button").Attr("id", triggerID).Attr("aria-controls", panelID).Attr("aria-expanded", fmt.Sprint(expanded)).Attr("aria-disabled", fmt.Sprint(locked)).Attr("disabled", fmt.Sprint(item.Disabled)).Class("vui-accordion-trigger").OnWith("mousedown", ui.EventOptions{
+		PreventDefault: true,
+	}, func(ui.Event) {}).On("click", func(ui.Event) {
+		if item.Disabled {
+			return
+		}
+		ref.Focus()
+		current := props.Expanded()
+		isExpanded := false
+		for _, key := range current {
+			if key == item.Key {
+				isExpanded = true
+			}
+		}
+		if isExpanded && props.Required && len(current) == 1 {
+			return
+		}
+		next := []string{}
+		if isExpanded || props.Multiple {
+			for _, key := range current {
+				if key != item.Key {
+					next = append(next, key)
+				}
+			}
+		}
+		if !isExpanded {
+			next = append(next, item.Key)
+		}
+		props.OnChange(next)
+	})
+	panel := ui.Element("div", item.Content).Attr("id", panelID).Attr("hidden", fmt.Sprint(!expanded)).Class("vui-accordion-panel")
+	if props.Regions {
+		panel = panel.Attr("role", "region").Attr("aria-labelledby", triggerID)
+	}
+	return ui.Element("section", ui.Element("h" + fmt.Sprint(level), trigger).Class("vui-accordion-heading"), panel).Attr("data-expanded", fmt.Sprint(expanded)).Class("vui-accordion-item")
+}

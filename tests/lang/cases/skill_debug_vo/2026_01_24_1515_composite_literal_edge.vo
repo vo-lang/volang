@@ -134,12 +134,16 @@ type Calculator struct {
 }
 
 func testCompositeLiteralFuncField() {
-	add := Calculator{op: func(a, b int) int {
-		return a + b
-	}}
-	mul := Calculator{op: func(a, b int) int {
-		return a * b
-	}}
+	add := Calculator{
+		op: func(a, b int) int {
+			return a + b
+		},
+	}
+	mul := Calculator{
+		op: func(a, b int) int {
+			return a * b
+		},
+	}
 	r1 := add.op(3, 4)
 	r2 := mul.op(3, 4)
 	println("add:", r1, "mul:", r2)

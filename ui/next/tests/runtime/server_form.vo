@@ -1,0 +1,49 @@
+package main
+
+import (
+	"strings"
+	"github.com/vo-lang/ui/next/server"
+)
+
+func serverFormContracts() {
+	request := server.Request{
+		Method: "POST", URL: "/?name=query",
+		Body: "name=%E4%B8%AD%E6%96%87&tag=first&empty=&tag=last&flag&name=second+name",
+		Headers: map[string][]string{
+			"content-type": {"Application/X-Www-Form-Urlencoded; charset=\"UTF-8\""},
+		},
+	}
+	values, err := request.PostForm()
+	require(err == nil, "standard form decode failed")
+	require(len(values["name"]) == 2 && values["name"][0] == "中文" && values["name"][1] == "second name", "form order or query isolation failed")
+	require(len(values["tag"]) == 2 && values["tag"][0] == "first" && values["tag"][1] == "last", "repeated form fields lost")
+	require(len(values["empty"]) == 1 && values.Get("empty") == "" && len(values["flag"]) == 1, "empty fields lost")
+	for _, body := range []string{
+		"name=%", "name=%ff", "%ff=value", "ok=yes&broken=%", "name=a;b",
+		strings.Repeat("x", 1024 * 1024 + 1), strings.Repeat("x=&", 4096),
+	} {
+		request.Body = body
+		partial, err := request.PostForm()
+		require(err != nil && partial == nil, "malformed form returned partial values")
+	}
+	request.Body = ""
+	values, err = request.PostForm()
+	require(err == nil && len(values) == 0, "empty form rejected")
+	request.Body = "x=" + strings.Repeat("a", 1024 * 1024 - 2)
+	values, err = request.PostForm()
+	require(err == nil && len(values.Get("x")) == 1024 * 1024 - 2, "exact body limit rejected")
+	request.Body = "x=y"
+	for _, types := range [][]string{
+		nil, {"application/json"}, {"text/plain"}, {"application/x-www-form-urlencoded; charset=latin1"},
+		{"application/x-www-form-urlencoded; charset=utf-8; charset=utf-8"},
+		{"application/x-www-form-urlencoded", "application/x-www-form-urlencoded"},
+	} {
+		request.Headers["content-type"] = types
+		_, err = request.PostForm()
+		require(err != nil, "invalid form content type accepted")
+	}
+	request.Headers["content-type"] = []string{"application/x-www-form-urlencoded"}
+	request.Method = "GET"
+	_, err = request.PostForm()
+	require(err != nil, "GET accepted by PostForm")
+}

@@ -1,0 +1,64 @@
+{
+  "Web UI application": {
+    "prefix": "vui-web-app",
+    "body": [
+      "package main",
+      "",
+      "import (",
+      "\tui \"github.com/vo-lang/ui/next\"",
+      "\t\"github.com/vo-lang/ui/next/host\"",
+      ")",
+      "",
+      "var appType = ui.Define(\"${1:app.App}\")",
+      "",
+      "func App(scope *ui.Scope) ui.View {",
+      "\treturn ui.Element(\"main\", ui.Element(\"h1\", ui.Text(\"${2:Hello, Volang UI}\")))",
+      "}",
+      "",
+      "func main() {",
+      "\thost.Run(ui.Component(appType, App))",
+      "}",
+      "$0"
+    ],
+    "description": "New Web UI preview: complete source with a scoped application root"
+  },
+  "Web UI component": {
+    "prefix": "vui-web-component",
+    "body": [
+      "var ${1:cardType} = ui.Define(\"${2:app.Card}\")",
+      "",
+      "func ${3:Card}(title string) ui.View {",
+      "\treturn ui.Component($1, func(scope *ui.Scope) ui.View {",
+      "\t\tui.InspectProp(scope, \"title\", title)",
+      "\t\treturn ui.Element(\"section\", ui.Element(\"h2\", ui.Text(title)))",
+      "\t})",
+      "}",
+      "$0"
+    ],
+    "description": "New Web UI preview: typed props and an instance scope; import ui/next as ui"
+  },
+  "Web UI state": {
+    "prefix": "vui-web-state",
+    "body": [
+      "${1:count} := ui.Int(scope, \"${2:count}\", ${3:0})",
+      "$0"
+    ],
+    "description": "New Web UI preview: named integer state inside a component render; read Get and update Set"
+  },
+  "Web UI text resource": {
+    "prefix": "vui-web-resource",
+    "body": [
+      "${1:message} := ui.Resource(scope, \"${2:message}\", web.FetchText(\"${3:/api/message}\").WithTimeout(10000))",
+      "${4:loaded} := $1.Get()",
+      "if $4.Pending {",
+      "\treturn ui.Element(\"p\", ui.Text(\"Loading…\")).Attr(\"role\", \"status\")",
+      "}",
+      "if $4.Error != \"\" {",
+      "\treturn ui.Element(\"button\", ui.Text(\"Try again\")).Attr(\"type\", \"button\").On(\"click\", func(ui.Event) { $1.Reload() })",
+      "}",
+      "return ui.Element(\"p\", ui.Text($4.Value))",
+      "$0"
+    ],
+    "description": "New Web UI preview: scoped text loading, timeout and retry; import ui/next/web"
+  }
+}

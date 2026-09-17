@@ -1,0 +1,70 @@
+package ui
+
+import (
+	"strconv"
+	"strings"
+)
+
+// ComponentFrame identifies a mounted component and its definition site.
+// File/Line may be empty/zero when source metadata is unavailable.
+type ComponentFrame struct {
+	Name string `json:"name"`
+	Key string `json:"key"`
+	File string `json:"file"`
+	Line int `json:"line"`
+}
+
+// RenderFailure is the panic value for an uncaught component render failure.
+// Value retains the original application panic. Frames are innermost first.
+type RenderFailure struct {
+	Value any
+	frames []ComponentFrame
+}
+
+func (failure *RenderFailure) Components() []ComponentFrame {
+	if failure == nil {
+		return nil
+	}
+	return append([]ComponentFrame{}, failure.frames...)
+}
+
+func (failure *RenderFailure) Error() string {
+	if failure == nil {
+		return "ui: render failed"
+	}
+	message := "ui: render failed"
+	switch value := failure.Value.(type) {
+		case string:
+			message = value
+		case error:
+			message = value.Error()
+	}
+	var out strings.Builder
+	out.WriteString(message)
+	for _, frame := range failure.frames {
+		out.WriteString("\n  in " + frame.Name)
+		if frame.Key != "" {
+			out.WriteString(" [key=" + strconv.Quote(frame.Key) + "]")
+		}
+		if frame.File != "" {
+			out.WriteString(" (" + frame.File + ":" + strconv.Itoa(frame.Line) + ")")
+		}
+	}
+	return out.String()
+}
+
+// Snapshot only when unwinding. Normal renders allocate no diagnostic frames.
+func captureRenderFailure(value any, scope *Scope) *RenderFailure {
+	if failure, ok := value.(*RenderFailure); ok && failure != nil {
+		return failure
+	}
+	frames := []ComponentFrame{}
+	for current := scope; current != nil; current = current.parent {
+		view := current.node.view
+		definition := view.component
+		frames = append(frames, ComponentFrame{
+			Name: definition.name, Key: view.key, File: definition.file, Line: definition.line,
+		})
+	}
+	return &RenderFailure{Value: value, frames: frames}
+}

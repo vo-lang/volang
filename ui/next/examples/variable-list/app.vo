@@ -1,0 +1,120 @@
+package app
+
+import (
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/collection"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var appType = ui.Define("variable.App")
+
+var listType = ui.Define("variable.List")
+
+func records(count int, reversed bool) *collection.Items {
+	items := make([]collection.Item, count)
+	for index := 0; index < count; index++ {
+		number := index
+		if reversed {
+			number = count - index - 1
+		}
+		items[index] = collection.Item{Key: fmt.Sprint(number), Label: fmt.Sprint("Note ", number)}
+	}
+	return collection.New(items)
+}
+
+func listing(items *collection.Items, expanded bool, narrow bool) ui.View {
+	return ui.Component(listType, func(scope *ui.Scope) ui.View {
+		ref := ui.Ref(scope, "viewport")
+		editing := ui.String(scope, "editing", "")
+		draft := ui.String(scope, "draft", "A thought worth keeping.")
+		window, observe := collection.Variable(scope, "layout", collection.VariableOptions{
+			Items: items, Estimate: 48, Height: 300, Overscan: 3, Ref: ref, PinnedKey: editing.Get(),
+		})
+		rows := []ui.View{}
+		for _, position := range window.Rows {
+			item := items.At(position.Index)
+			text := strings.Repeat("A little space for a longer thought. ", len(item.Key) + 1)
+			if expanded {
+				text = strings.Repeat(text, 2)
+			}
+			rowKey := position.Key
+			content := []ui.View{ui.Element("h2", ui.Text(item.Label)), ui.Element("p", ui.Text(text))}
+			if rowKey == "0" {
+				content = append(content, kit.Field("first-note-draft", "First note draft", "", ui.Element("input").Attr("type", "text").Attr("value", draft.Get()).On("input", func(event ui.Event) {
+					draft.Set(event.Value)
+				}).On("focus", func(ui.Event) {
+					editing.Set("0")
+				})))
+			}
+			row := ui.Element("div", ui.Element("article", content...)).Key(rowKey).Attr("data-row", rowKey).Attr("role", "listitem").Attr("aria-posinset", fmt.Sprint(position.Index +
+				1)).Attr("aria-setsize", fmt.Sprint(items.Len())).Attr("style", fmt.Sprint("position:absolute;inset-inline:0;top:", position.Top, "px;display:flow-root;min-block-size:1px")).OnSize(func(size ui.Size) {
+				window.Measure(rowKey, size)
+			})
+			rows = append(rows, row)
+		}
+		width := "100%"
+		if narrow {
+			width = "260.25px"
+		}
+		return ui.Element("section", kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				ref.ScrollTo(0, 4800)
+			},
+		}, ui.Text("Jump ahead")), ui.Element("div", ui.Element("div", rows...).Attr("data-spacer", "").Attr("style", fmt.Sprint("position:relative;height:", window.Total, "px"))).Attr("id", "variable-list").Attr("role", "list").Attr("aria-label", "Notes").Attr("tabindex", "0").Ref(ref).Attr("style", fmt.Sprint("height:300px;width:", width, ";max-width:100%;overflow:auto;overflow-anchor:none;position:relative;scroll-behavior:smooth")).OnViewport(observe), ui.Element("output", ui.Text(fmt.Sprint(len(rows), " mounted of ", items.Len()))).Attr("data-range", ""))
+	})
+}
+
+func App(scope *ui.Scope) ui.View {
+	count := ui.Int(scope, "count", 1000)
+	reversed := ui.Bool(scope, "reversed", false)
+	expanded := ui.Bool(scope, "expanded", false)
+	narrow := ui.Bool(scope, "narrow", false)
+	visible := ui.Bool(scope, "visible", true)
+	store := ui.State(scope, "items", func() any {
+		return records(count.Get(), reversed.Get())
+	})
+	content := ui.Element("p", ui.Text("The notes are resting."))
+	if visible.Get() {
+		content = listing(store.Get().(*collection.Items), expanded.Get(), narrow.Get())
+	}
+	return ui.Element("main", ui.Element("h1", ui.Text("Room for every thought.")), ui.Element("p", ui.Text("Long notes and short ones, with a little space between.")), ui.Element("nav", kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			expanded.Set(!expanded.Get())
+		},
+	}, ui.Text("Expand notes")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			narrow.Set(!narrow.Get())
+		},
+	}, ui.Text("Change width")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			reversed.Set(!reversed.Get())
+			store.Update(func(any) any {
+				return records(count.Get(), reversed.Get())
+			})
+		},
+	}, ui.Text("Reverse notes")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			count.Set(100000)
+			store.Update(func(any) any {
+				return records(count.Get(), reversed.Get())
+			})
+		},
+	}, ui.Text("100,000 notes")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			count.Set(5)
+			store.Update(func(any) any {
+				return records(count.Get(), reversed.Get())
+			})
+		},
+	}, ui.Text("Five notes")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			visible.Set(!visible.Get())
+		},
+	}, ui.Text("Show or hide"))), content).Class("vui", "variable-app")
+}
+
+func View(initial string) ui.View {
+	return ui.Component(appType, App)
+}

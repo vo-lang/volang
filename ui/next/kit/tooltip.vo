@@ -1,0 +1,128 @@
+package kit
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/web"
+)
+
+type TooltipDelay struct {
+	Open int
+	Close int
+}
+
+type TooltipProps struct {
+	ID string
+	Text string
+	Placement string
+	Disabled bool
+	// Nil uses 300ms on hover and a 150ms pointer-transfer grace period. Focus
+	// opens immediately. Explicit zero durations are supported.
+	Delay *TooltipDelay
+	Class string
+	TriggerClass string
+}
+
+var tooltipType = ui.Define("kit.Tooltip")
+
+// Tooltip adds a description to one element trigger while retaining its refs,
+// listeners and focus. It wraps the trigger for hover/focus observation. The
+// text is noninteractive, hoverable and dismissible through the native hint
+// layer. Touch hover is ignored; essential information belongs in visible text.
+func Tooltip(props TooltipProps, trigger ui.View) ui.View {
+	if props.ID == "" || props.Text == "" {
+		panic("kit: tooltip requires an ID and text")
+	}
+	delay := TooltipDelay{Open: 300, Close: 150}
+	if props.Delay != nil {
+		delay = *props.Delay
+	}
+	if delay.Open < 0 || delay.Close < 0 || delay.Open > 60000 || delay.Close > 60000 {
+		panic("kit: tooltip delays must be within 0..60000 milliseconds")
+	}
+	trigger = trigger.DescribedBy(props.ID)
+	return ui.Component(tooltipType, func(scope *ui.Scope) ui.View {
+		anchor := ui.Ref(scope, "anchor")
+		hovered := ui.Bool(scope, "hovered", false)
+		tipHovered := ui.Bool(scope, "tip-hovered", false)
+		focused := ui.Bool(scope, "focused", false)
+		open := ui.Bool(scope, "open", false)
+		suppressed := ui.Bool(scope, "suppressed", false)
+		wanted := hovered.Get() || tipHovered.Get() || focused.Get()
+		ui.Effect(scope, "visibility", func() func() {
+			if props.Disabled {
+				open.Set(false)
+				suppressed.Set(false)
+				return nil
+			}
+			if !wanted {
+				suppressed.Set(false)
+			}
+			if suppressed.Get() {
+				open.Set(false)
+				return nil
+			}
+			if wanted == open.Get() {
+				return nil
+			}
+			milliseconds := delay.Close
+			if wanted {
+				milliseconds = delay.Open
+			}
+			if wanted && focused.Get() || milliseconds == 0 {
+				open.Set(wanted)
+				return nil
+			}
+			task := ui.Start(scope, web.After(milliseconds, "visibility"), func(ui.Result) {
+				open.Set(wanted)
+			})
+			return func() {
+				task.Cancel()
+			}
+		}, wanted, focused.Get(), suppressed.Get(), props.Disabled, delay.Open, delay.Close)
+		dismiss := func() {
+			open.Set(false)
+			suppressed.Set(true)
+			tipHovered.Set(false)
+		}
+		wrapper := ui.Element("span", trigger).Ref(anchor).Class("vui-tooltip-trigger").Class(props.TriggerClass)
+		wrapper = wrapper.On("pointerenter", func(event ui.Event) {
+			if !props.Disabled && event.PointerType != "touch" {
+				hovered.Set(true)
+			}
+		}).On("pointerleave", func(event ui.Event) {
+			if event.PointerType != "touch" {
+				hovered.Set(false)
+			}
+		}).On("focusin", func(ui.Event) {
+			if !props.Disabled {
+				focused.Set(true)
+				if !suppressed.Get() {
+					open.Set(true)
+				}
+			}
+		}).On("focusout", func(ui.Event) {
+			focused.Set(false)
+		}).On("click", func(ui.Event) {
+			dismiss()
+		})
+		visible := open.Get() && !props.Disabled
+		tip := ui.Element("div", ui.Text(props.Text)).Popover(ui.PopoverOptions{
+			Open: visible, Anchor: anchor, Placement: props.Placement, Mode: "hint",
+		})
+		tip = tip.Attr("id", props.ID).Attr("role", "tooltip").Class("vui-tooltip").Class(props.Class)
+		tip = tip.On("pointerenter", func(event ui.Event) {
+			if event.PointerType != "touch" && visible {
+				tipHovered.Set(true)
+			}
+		}).On("pointerleave", func(event ui.Event) {
+			if event.PointerType != "touch" {
+				tipHovered.Set(false)
+			}
+		}).On("toggle", func(event ui.Event) {
+			if event.Value == "closed" && visible && open.Get() {
+				dismiss()
+			}
+		})
+		return ui.Fragment(wrapper, tip)
+	})
+}

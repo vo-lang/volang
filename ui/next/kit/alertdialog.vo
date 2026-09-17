@@ -1,0 +1,75 @@
+package kit
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type AlertDialogProps struct {
+	ID string
+	Title string
+	Description string
+	Open func() bool
+	// Busy disables both decisions and Escape while the owner completes work.
+	Busy func() bool
+	ConfirmLabel string
+	CancelLabel string
+	ConfirmVariant string
+	Class string
+	Motion bool
+	MotionTimeoutMilliseconds int
+	ReturnFocus *ui.ElementRef
+	OnOpenChange func(bool)
+	// The owner closes Open or sets Busy synchronously before starting work.
+	// Keeping ownership explicit permits an error message and a later retry.
+	OnConfirm func()
+}
+
+func AlertDialog(props AlertDialogProps, content ...ui.View) ui.View {
+	if props.Description == "" || props.ConfirmLabel == "" || props.OnConfirm == nil {
+		panic("kit: alert dialog requires a description, confirmation label and handler")
+	}
+	if props.Open == nil || props.OnOpenChange == nil {
+		panic("kit: alert dialog requires an open reader and change handler")
+	}
+	busy := func() bool {
+		return props.Busy != nil && props.Busy()
+	}
+	cancelLabel := props.CancelLabel
+	if cancelLabel == "" {
+		cancelLabel = "Cancel"
+	}
+	cancel := Button(ButtonProps{
+		Variant: "secondary", Disabled: busy(),
+		OnPress: func() {
+			if props.Open() && !busy() {
+				props.OnOpenChange(false)
+				if !props.Motion {
+					props.ReturnFocus.Focus()
+				}
+			}
+		},
+	}, ui.Text(cancelLabel)).Attr("autofocus", "true").Class("vui-alertdialog-cancel")
+	confirm := Button(ButtonProps{
+		Variant: props.ConfirmVariant, Disabled: busy(),
+		OnPress: func() {
+			if props.Open() && !busy() {
+				props.OnConfirm()
+				if !props.Open() && !props.Motion {
+					props.ReturnFocus.Focus()
+				}
+			}
+		},
+	}, ui.Text(props.ConfirmLabel)).Class("vui-alertdialog-confirm")
+	children := append([]ui.View{}, content...)
+	children = append(children, ui.Element("div", cancel, confirm).Class("vui-dialog-actions"))
+	dialog := DialogProps{
+		ID: props.ID, Title: props.Title, Description: props.Description, Open: props.Open,
+		PreventClose: props.Busy, ReturnFocus: props.ReturnFocus, OnOpenChange: props.OnOpenChange,
+		Class: props.Class, Motion: props.Motion,
+		MotionTimeoutMilliseconds: props.MotionTimeoutMilliseconds,
+	}
+	return dialogPresentation(dialog, func(presented bool) ui.View {
+		return dialogFrame(dialog, "alertdialog", false, presented, children...).Attr("aria-busy", fmt.Sprint(busy()))
+	})
+}

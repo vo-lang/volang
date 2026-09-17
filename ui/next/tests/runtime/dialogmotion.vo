@@ -1,0 +1,98 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+func dialogMotionContracts() {
+	var open, attached *ui.BoolState
+	var edits *ui.IntState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		open = ui.Bool(scope, "open", false)
+		attached = ui.Bool(scope, "attached", true)
+		trigger := ui.Ref(scope, "trigger")
+		view := ui.Fragment()
+		if attached.Get() {
+			view = kit.Dialog(kit.DialogProps{
+				ID: "animated-dialog", Title: "A considered exit", Motion: true,
+				MotionTimeoutMilliseconds: 1234,
+				Open: func() bool {
+					return open.Get()
+				},
+				OnOpenChange: func(value bool) {
+					open.Set(value)
+				},
+				ReturnFocus: trigger,
+			}, ui.Component(counterType, func(child *ui.Scope) ui.View {
+				edits = ui.Int(child, "edits", 0)
+				return ui.Element("input").Attr("data-name", "editor")
+			}))
+		}
+		return ui.Fragment(ui.Element("button").Ref(trigger).Attr("data-name", "trigger"), view)
+	}))
+	first := drainUi(root)
+	dialog, editor := 0, target(first, "editor")
+	for _, mutation := range first.Mutations {
+		if mutation.Op == "modal" {
+			dialog = mutation.ID
+		}
+	}
+	require(dialog > 0 && len(first.Commands) == 0, "hidden animated dialog started work")
+	open.Set(true)
+	drainUi(root)
+	edits.Set(7)
+	drainUi(root)
+	root.Dispatch(ui.Event{Kind: "cancel", Target: dialog, Sequence: 1})
+	exit := drainUi(root)
+	work := startCommand(exit)
+	require(!open.Get() && focusTarget(exit) == 0, "exit returned focus before releasing native modality")
+	for _, mutation := range exit.Mutations {
+		require(mutation.Op != "modal" && mutation.Op != "remove", "exit released native presentation before motion")
+	}
+	require(exit.Commands[0].Name == "web.motion-finished" &&
+		exit.Commands[0].TimeoutMilliseconds == 1234, "dialog exit lost its bounded motion request")
+	require(strings.Contains(root.HTML(), `inert="true"`) &&
+		strings.Contains(root.HTML(), `aria-hidden="true"`), "closing dialog remained interactive")
+	open.Set(true)
+	reopened := drainUi(root)
+	require(focusTarget(reopened) == dialog && edits.Get() == 7, "reopening lost its focus target or child state")
+	for _, mutation := range reopened.Mutations {
+		require(mutation.Op != "create", "reopening replaced dialog content")
+	}
+	cancelled := false
+	for _, command := range reopened.Commands {
+		if command.Op == "cancel" && command.ID == work {
+			cancelled = true
+		}
+	}
+	require(cancelled && !root.Dispatch(ui.Event{Kind: "@task", Target: work, Sequence: 2}), "reopening accepted obsolete exit")
+	open.Set(false)
+	work = startCommand(drainUi(root))
+	require(root.Dispatch(ui.Event{Kind: "@task", Target: work, Sequence: 3, Error: "timed out"}), "current exit rejected completion")
+	closed := drainUi(root)
+	released := false
+	for _, mutation := range closed.Mutations {
+		if mutation.Op == "modal" && mutation.ID == dialog && mutation.Value == "false" {
+			released = true
+		}
+		require(mutation.Op != "remove", "finished dialog exit discarded preserved content")
+	}
+	require(released && focusTarget(closed) == target(first, "trigger"), "completed exit did not release modality and focus together")
+	open.Set(true)
+	drainUi(root)
+	require(edits.Get() == 7 && editor > 0, "completed exit reset persistent dialog state")
+	open.Set(false)
+	work = startCommand(drainUi(root))
+	attached.Set(false)
+	removed := drainUi(root)
+	cancelled = false
+	for _, command := range removed.Commands {
+		if command.Op == "cancel" && command.ID == work {
+			cancelled = true
+		}
+	}
+	require(cancelled && !root.Dispatch(ui.Event{Kind: "@task", Target: work, Sequence: 4}), "removed dialog retained exit work")
+	root.Close()
+}

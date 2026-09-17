@@ -185,7 +185,7 @@ pub extern "C" fn jit_select_send(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
         u64::from(queue_reg),
-        elem_layout.as_deref(),
+        elem_layout,
         usize::from(elem_slots),
     ) {
         return result;
@@ -306,7 +306,7 @@ pub extern "C" fn jit_select_recv(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
         u64::from(queue_reg),
-        elem_layout.as_deref(),
+        elem_layout,
         usize::from(elem_slots),
     ) {
         return result;

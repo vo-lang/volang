@@ -1,0 +1,79 @@
+package main
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+var pointerExampleType = ui.Define("interaction.PointerExample")
+
+// A gesture belongs to the current native root. Keeping it in an opaque Store
+// gives a replacement root fresh ownership while scalar width survives reload.
+type pointerDrag struct {
+	Active bool
+	ID int
+	StartX float64
+	StartWidth int
+}
+
+func PointerExample() ui.View {
+	return ui.Component(pointerExampleType, func(scope *ui.Scope) ui.View {
+		width := ui.Int(scope, "width", 240)
+		drag := ui.State(scope, "drag", func() any {
+			return pointerDrag{}
+		})
+		setDrag := func(value pointerDrag) {
+			drag.Update(func(any) any {
+				return value
+			})
+		}
+		resize := func(value int) {
+			if value < 160 {
+				value = 160
+			} else if value > 420 {
+				value = 420
+			}
+			width.Set(value)
+		}
+		finish := func(event ui.Event) {
+			current := drag.Get().(pointerDrag)
+			if current.Active && event.Pointer != nil && event.Pointer.ID == current.ID {
+				setDrag(pointerDrag{})
+			}
+		}
+		handle := ui.Element("div").Attr("role", "separator").Attr("tabindex", "0").Attr("aria-label", "Preview width").Attr("aria-orientation", "vertical").Attr("aria-valuemin", "160").Attr("aria-valuemax", "420").Attr("aria-valuenow", fmt.Sprint(width.Get())).Attr("data-resize-handle", "").Attr("data-resizing", fmt.Sprint(drag.Get().(pointerDrag).Active)).Attr("style", "width:16px;flex:none;cursor:col-resize;touch-action:none;user-select:none;background:var(--vui-border, #c7d2cc)").OnWith("pointerdown", ui.EventOptions{
+			CapturePointer: true,
+		}, func(event ui.Event) {
+			if event.Pointer == nil || !event.Pointer.IsPrimary || event.Button != 0 ||
+				drag.Get().(pointerDrag).Active {
+				return
+			}
+			setDrag(pointerDrag{
+				Active: true, ID: event.Pointer.ID, StartX: event.Pointer.ClientX, StartWidth: width.Get(),
+			})
+		}).OnWith("pointermove", ui.EventOptions{Latest: true}, func(event ui.Event) {
+			current := drag.Get().(pointerDrag)
+			if current.Active && event.Pointer != nil && event.Pointer.ID == current.ID {
+				resize(current.StartWidth + int(event.Pointer.ClientX - current.StartX))
+			}
+		}).On("pointerup", finish).On("pointercancel", finish).On("lostpointercapture", finish).OnWith("keydown", ui.EventOptions{
+			Keys: []string{"ArrowLeft", "ArrowRight", "Home", "End"}, PreventDefault: true,
+		}, func(event ui.Event) {
+			switch event.Key {
+				case "ArrowLeft":
+					resize(width.Get() - 10)
+				case "ArrowRight":
+					resize(width.Get() + 10)
+				case "Home":
+					resize(160)
+				case "End":
+					resize(420)
+			}
+		})
+		preview := ui.Element("div", ui.Element("p", ui.Text("Make room for your ideas."))).Attr("style", "flex:none;width:" +
+			fmt.Sprint(width.Get()) +
+			"px;padding:16px;box-sizing:border-box;background:var(--vui-muted, #edf2ef)")
+		return ui.Element("section", ui.Element("h2", ui.Text("A little more room")), ui.Element("p", ui.Text("Drag the divider, or focus it and use the arrow keys, Home and End.")), ui.Element("div", preview, handle).Attr("style", "display:flex;min-height:100px;max-width:100%;overflow:auto"), ui.Element("output", ui.Text(fmt.Sprint(width.Get()) +
+			" px")).Attr("data-resize-width", "")).Attr("class", "card")
+	})
+}

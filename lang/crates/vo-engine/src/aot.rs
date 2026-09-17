@@ -1,6 +1,6 @@
 //! Target-aware orchestration for ahead-of-time backends.
 
-#[cfg(any(feature = "aot-native", feature = "aot-wasm"))]
+#[cfg(feature = "aot-native")]
 use crate::{CompileError, CompileOutput};
 #[cfg(feature = "aot-native")]
 use vo_target::{HostSurface, TargetSpec};
@@ -22,16 +22,6 @@ pub fn compile_native_aot_object(
     debug_ir: bool,
 ) -> Result<vo_jit::NativeAotObject, CompileError> {
     crate::Engine::default().compile_native_aot_object(output, target, debug_ir)
-}
-
-/// Lower every verified Volang function to executable Core Wasm and bind the
-/// generated code to the versioned runtime ABI.
-#[cfg(feature = "aot-wasm")]
-pub fn compile_wasm_aot_image(
-    output: &CompileOutput,
-    target: &vo_target::TargetSpec,
-) -> Result<vo_wasm_aot::WasmAotArtifact, CompileError> {
-    crate::Engine::default().compile_wasm_aot_image(output, target)
 }
 
 impl crate::Engine {
@@ -82,40 +72,5 @@ impl crate::Engine {
             native_aot_requires_toolchain_host(output.module.module());
         vo_jit::compile_native_object(output.module.clone(), &externs, &options)
             .map_err(|error| CompileError::Codegen(format!("native AOT lowering failed: {error}")))
-    }
-
-    /// Lower every verified Volang function to executable Core Wasm and bind the
-    /// generated code to the versioned runtime ABI.
-    #[cfg(feature = "aot-wasm")]
-    pub fn compile_wasm_aot_image(
-        &self,
-        output: &CompileOutput,
-        target: &vo_target::TargetSpec,
-    ) -> Result<vo_wasm_aot::WasmAotArtifact, CompileError> {
-        self.verify_compile_output_for_target(output, target)?;
-        if !output.extensions.is_empty() {
-            return Err(CompileError::Target(
-            "WebAssembly AOT requires extensions to be supplied through the authenticated host runtime contract"
-                .to_string(),
-        ));
-        }
-        let mut resolver = vo_vm::vm::Vm::try_new().map_err(|error| {
-            CompileError::Target(format!("failed to initialize extern resolver: {error}"))
-        })?;
-        self.register_externs(&mut resolver, &output.module)
-            .map_err(CompileError::Target)?;
-        resolver
-            .load_verified_with_extensions(output.module.clone(), None)
-            .map_err(|error| {
-                CompileError::Target(format!(
-                    "failed to resolve WebAssembly AOT externs: {error:?}"
-                ))
-            })?;
-        vo_wasm_aot::compile_wasm_aot_with_externs(
-            &output.module,
-            resolver.resolved_externs(),
-            target,
-        )
-        .map_err(|error| CompileError::Codegen(error.to_string()))
     }
 }

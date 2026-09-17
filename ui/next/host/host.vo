@@ -1,0 +1,120 @@
+// Package host connects an experimental UI root to a renderer transport.
+package host
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/wire"
+)
+
+// Exchange publishes a nonempty batch and returns its commit acknowledgement.
+// With an empty batch it waits for input. Empty output closes either operation.
+// The transport owns no component state or guest closures.
+func Exchange(batch []byte) []byte
+
+// Convert component diagnostics at the transport boundary. The core Root API
+// retains the typed panic; backend panic displays accept a readable string.
+func reportFailure() {
+	if value := recover(); value != nil {
+		if failure, ok := value.(*ui.RenderFailure); ok {
+			panic(failure.Error())
+		}
+		panic(value)
+	}
+}
+
+// HTML creates an isolated server root and never runs client effects.
+func HTML(view ui.View) string {
+	defer reportFailure()
+	root := ui.NewRoot(view)
+	defer func() {
+		root.Close()
+	}()
+	root.Flush()
+	return root.HTML()
+}
+
+// RunWithData obtains bounded, host-supplied application data before rendering.
+// SSR uses the same data to construct its view. Input already captured during
+// hydration stays queued until the first render is committed.
+func RunWithData(render func(string) ui.View) {
+	initial, available := Bootstrap()
+	if available {
+		Run(render(initial))
+	}
+}
+
+// Bootstrap reads the host's initial data once, before any root is published.
+// False means that the host closed before startup completed.
+func Bootstrap() (string, bool) {
+	request, err := wire.EncodeBootstrap(wire.Bootstrap{})
+	if err != nil {
+		panic(err)
+	}
+	response := Exchange(request)
+	if len(response) == 0 {
+		return "", false
+	}
+	initial, err := wire.DecodeBootstrap(response)
+	if err != nil {
+		panic(err)
+	}
+	return initial.Data, true
+}
+
+func Run(view ui.View) {
+	RunRoot(ui.NewRoot(view))
+}
+
+// RunRoot transfers an unmounted root to the host loop. Optional development
+// tools may attach an observer before handing over its lifetime.
+func RunRoot(root *ui.Root) {
+	RunRootWithIdle(root, nil)
+}
+
+// RunRootWithIdle lets optional development tooling capture committed state
+// after all queued events/effects have settled. The callback may publish owned
+// tasks; it must only do work for a pending request, so the loop can become idle.
+func RunRootWithIdle(root *ui.Root, idle func()) {
+	defer reportFailure()
+	defer func() {
+		root.Close()
+	}()
+	for {
+		pending := root.Flush()
+		batch, err := wire.EncodeBatch(pending)
+		if err != nil {
+			panic(err)
+		}
+		incoming := Exchange(batch)
+		if len(incoming) == 0 {
+			return
+		}
+		acknowledgement, err := wire.DecodeCommitAck(incoming)
+		if err != nil {
+			panic(err)
+		}
+		root.Commit(acknowledgement.Revision)
+		if root.Pending() {
+			continue
+		}
+		if idle != nil {
+			idle()
+			if root.Pending() {
+				continue
+			}
+		}
+		incoming = Exchange(nil)
+		if len(incoming) == 0 {
+			return
+		}
+		events, err := wire.DecodeInputBatch(incoming)
+		if err != nil {
+			panic(err)
+		}
+		for _, event := range events.Events {
+			root.Dispatch(event)
+		}
+		// Publish even a no-op input acknowledgement: it settles controlled
+		// values after native editing or composition without another event.
+	}
+}

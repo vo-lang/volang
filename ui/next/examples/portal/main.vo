@@ -1,0 +1,16 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"github.com/vo-lang/ui/next/examples/portal/app"
+	"github.com/vo-lang/ui/next/host"
+)
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--ssr" {
+		fmt.Print(host.HTML(app.View("")))
+		return
+	}
+	host.RunWithData(app.View)
+}

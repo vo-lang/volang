@@ -1,0 +1,190 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/data"
+)
+
+var queryRowType = ui.Define("contract.QueryRow")
+
+func queryRenderMutationIsolation() {
+	for _, all := range []bool{false, true} {
+		var client *data.Client
+		var invalid *ui.BoolState
+		request := ui.Request{Service: "query", Value: "parent"}
+		root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+			client = data.NewClient(scope, "client", data.Options{})
+			invalid = ui.Bool(scope, "invalid", false)
+			result := data.Use(scope, "query", client, request)
+			return ui.Fragment(ui.Text(result.Value), ui.ErrorBoundary(func() ui.View {
+				return ui.Component(queryRowType, func(child *ui.Scope) ui.View {
+					if invalid.Get() {
+						if all {
+							client.InvalidateAll()
+						} else {
+							client.Invalidate(request)
+						}
+					}
+					return ui.Text("healthy")
+				})
+			}, func(failure *ui.RenderError) ui.View {
+				return ui.Text("caught")
+			}))
+		}))
+		pending := onlyStart(settleQueries(root))
+		invalid.Set(true)
+		require(len(settleQueries(root)) == 0, "rejected render invalidation changed pending work")
+		require(strings.Contains(root.HTML(), "caught"), "query render mutation escaped its boundary")
+		require(root.Dispatch(ui.Event{
+			Kind: "@task", Target: pending, Value: "parent result", Sequence: 1,
+		}), "child render cancelled the parent query before rejection")
+		settleQueries(root)
+		require(strings.Contains(root.HTML(), "parent result"), "parent query stopped updating after child failure")
+		root.Close()
+	}
+}
+
+func settleQueries(root *ui.Root) []ui.Command {
+	commands := []ui.Command{}
+	for turn := 0; turn < 100; turn++ {
+		batch := flush(root)
+		commands = append(commands, batch.Commands...)
+		if !root.Pending() {
+			return commands
+		}
+	}
+	panic("query updates did not settle")
+}
+
+func onlyStart(commands []ui.Command) int {
+	id := 0
+	for _, command := range commands {
+		if command.Op == "start" {
+			require(id == 0, "equivalent queries started duplicate work")
+			id = command.ID
+		}
+	}
+	require(id > 0, "query did not start")
+	return id
+}
+
+func queryContracts() {
+	var client *data.Client
+	var first, second *ui.BoolState
+	var parameter *ui.StringState
+	latest := make(map[string]data.Snapshot)
+	now := int64(1000)
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		client = data.NewClient(scope, "client", data.Options{
+			FreshMilliseconds: 1000, RetainedEntries: 1,
+			Now: func() int64 {
+				return now
+			},
+		})
+		first = ui.Bool(scope, "first", true)
+		second = ui.Bool(scope, "second", true)
+		parameter = ui.String(scope, "parameter", "shared")
+		row := func(name string, value string) ui.View {
+			return ui.Component(queryRowType, func(child *ui.Scope) ui.View {
+				result := data.Use(child, "query", client, ui.Request{Service: "query", Value: value})
+				latest[name] = result
+				return ui.Text(result.Value + result.Error)
+			}).Key(name)
+		}
+		views := []ui.View{}
+		if first.Get() {
+			views = append(views, row("first", parameter.Get()))
+		}
+		if second.Get() {
+			views = append(views, row("second", "shared"))
+		}
+		return ui.Fragment(views...)
+	}))
+	initial := root.Flush()
+	require(len(initial.Commands) == 0, "query started before commit/SSR")
+	root.Commit(initial.Revision)
+	one := onlyStart(settleQueries(root))
+	require(latest["first"].Fetching && latest["second"].Fetching, "shared query did not expose loading")
+	first.Set(false)
+	require(len(settleQueries(root)) == 0, "removing one observer cancelled a shared request")
+	sequence := 0
+	reply := func(id int, value string, message string) bool {
+		sequence++
+		return root.Dispatch(ui.Event{
+			Kind: "@task", Target: id, Value: value, Error: message, Sequence: sequence,
+		})
+	}
+	require(reply(one, "shared result", ""), "live query result was rejected")
+	settleQueries(root)
+	first.Set(true)
+	require(len(settleQueries(root)) == 0, "fresh cache triggered a redundant request")
+	require(latest["first"].HasValue && latest["first"].Value == "shared result", "returning consumer did not receive cached data")
+	request := ui.Request{Service: "query", Value: "shared"}
+	client.Invalidate(request)
+	two := onlyStart(settleQueries(root))
+	require(latest["first"].Fetching && latest["second"].Value == "shared result", "revalidation removed usable cached data")
+	reply(two, "", "offline")
+	settleQueries(root)
+	require(latest["second"].HasValue && latest["second"].Value == "shared result" &&
+		latest["second"].Error == "offline", "failed refresh discarded the previous result")
+	first.Set(false)
+	second.Set(false)
+	settleQueries(root)
+	first.Set(true)
+	three := onlyStart(settleQueries(root))
+	first.Set(false)
+	cancel := settleQueries(root)
+	require(len(cancel) == 1 && cancel[0].Op == "cancel" && cancel[0].ID == three, "last observer did not cancel pending work")
+	require(!reply(three, "too late", ""), "cancelled request delivered a late value")
+	now = 2500
+	first.Set(true)
+	second.Set(true)
+	four := onlyStart(settleQueries(root))
+	reply(four, "fresh result", "")
+	settleQueries(root)
+	parameter.Set("other")
+	five := onlyStart(settleQueries(root))
+	require(!latest["first"].HasValue && latest["first"].Value == "" &&
+		latest["second"].Value == "fresh result", "changed request reused another parameter's value")
+	reply(five, "other result", "")
+	settleQueries(root)
+	first.Set(false)
+	settleQueries(root)
+	second.Set(false)
+	settleQueries(root)
+	first.Set(true)
+	six := onlyStart(settleQueries(root))
+	require(!latest["first"].HasValue, "inactive entry count limit retained an evicted query")
+	foreign := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		data.Use(scope, "query", client, request)
+		return ui.Text("unreachable")
+	}))
+	expectPanic(func() {
+		foreign.Flush()
+	}, "client's live scope tree")
+	root.Close()
+	require(!reply(six, "closed", ""), "closed query owner accepted work")
+	var visible *ui.BoolState
+	byteRoot := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		cache := data.NewClient(scope, "bytes", data.Options{FreshMilliseconds: 1000, RetainedBytes: 16})
+		visible = ui.Bool(scope, "visible", true)
+		if !visible.Get() {
+			return ui.Text("hidden")
+		}
+		return ui.Component(queryRowType, func(child *ui.Scope) ui.View {
+			result := data.Use(child, "query", cache, request)
+			return ui.Text(result.Value)
+		})
+	}))
+	one = onlyStart(settleQueries(byteRoot))
+	byteRoot.Dispatch(ui.Event{
+		Kind: "@task", Target: one, Value: strings.Repeat("x", 128), Sequence: 1,
+	})
+	settleQueries(byteRoot)
+	visible.Set(false)
+	settleQueries(byteRoot)
+	visible.Set(true)
+	onlyStart(settleQueries(byteRoot))
+	byteRoot.Close()
+}

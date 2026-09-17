@@ -1,0 +1,136 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/forms/schema"
+)
+
+func schemaFormContracts() {
+	values := arrayInitial()
+	values["address.city"] = []string{"London"}
+	values["interests"] = []string{"", "design", "writing"}
+	values["people[initial-0].roles"] = []string{"author", "reviewer"}
+	rows, err := forms.ArrayRows(values, "people")
+	require(err == nil, "schema fixture array was invalid")
+	resolver := schema.From(forms.Data{Values: values})
+	path := schema.Field("people").Index(0)
+	namePath, phonePath := path.Field("name"), path.Field("phones").Index(0).Field("number")
+	name, err := resolver.Resolve(namePath)
+	require(err == nil && name == rows[0].Field("name"), "schema path did not resolve stable row identity")
+	phone, err := resolver.Resolve(phonePath)
+	require(err == nil && strings.HasSuffix(phone, ".phones[initial-0].number"), "schema nested position was not resolved")
+	name, err = resolver.Resolve(schema.Field("address").Field("city"))
+	require(err == nil && name == "address.city", "schema object path was not resolved")
+	name, err = resolver.Resolve(schema.Field("address.city"))
+	require(err == nil && name == "address.city", "schema literal field name was split")
+	name, err = resolver.Resolve(schema.Path{})
+	require(err == nil && name == "", "schema root issue did not address the form")
+	name, err = resolver.Resolve(schema.Field("interests").Value(1))
+	require(err == nil && name == "interests", "schema multivalue issue did not address the field")
+	name, err = resolver.Resolve(path.Field("roles").Value(1))
+	require(err == nil && name == rows[0].Field("roles"), "schema multivalue issue inside a row lost its field")
+	// Retain a resolver across an asynchronous validation and later caller edits.
+	values["people"][1], values["people"][2] = values["people"][2], values["people"][1]
+	delete(values, rows[0].Field("name"))
+	name, err = resolver.Resolve(namePath)
+	require(err == nil && name == rows[0].Field("name"), "schema resolver observed later caller edits")
+	issues := []schema.Issue{
+		{Path: namePath, Message: "Enter a name."}, {Path: namePath, Message: "Use your full name."},
+		{Path: namePath, Message: "Enter a name."},
+		{Path: schema.Field("missing"), Message: "Review the missing field."},
+		{Message: "Check the whole form."}, {Path: phonePath, Message: "Enter a number."}, {Message: ""},
+	}
+	errors := resolver.Errors(issues)
+	require(errors[rows[0].Field("name")] == "Enter a name.\nUse your full name." &&
+		errors[phone] == "Enter a number." &&
+		errors[""] == "Review the missing field.\nCheck the whole form.", "schema issues lost order, duplication policy or unresolved messages")
+	errors[rows[0].Field("name")] = "caller mutation"
+	require(resolver.Errors(issues)[rows[0].Field("name")] == "Enter a name.\nUse your full name.", "schema errors retained caller mutations")
+	for _, invalid := range []schema.Path{
+		schema.Field(""), schema.Field("people").Index(-1).Field("name"),
+		schema.Field("people").Index(2).Field("name"), (schema.Path{}).Index(0),
+		schema.Field("people").Index(0), schema.Field("people").Index(0).Index(0),
+		schema.Field("title").Index(0).Field("name"), schema.Field("missing"),
+		schema.Field("interests").Value(-1), schema.Field("interests").Value(3),
+		schema.Field("interests").Value(0).Field("child"), path.Value(0),
+	} {
+		_, err := resolver.Resolve(invalid)
+		require(err != nil, "schema malformed path was accepted")
+		require(resolver.Errors([]schema.Issue{{Path: invalid, Message: "Preserve this error."}})[""] ==
+			"Preserve this error.", "schema unresolved issue disappeared")
+	}
+	malformed := arrayInitial()
+	malformed["people"] = []string{"", "initial-0", "initial-0"}
+	_, err = schema.From(forms.Data{Values: malformed}).Resolve(namePath)
+	require(err != nil, "schema resolver accepted duplicate array identity")
+	expectPanic(func() {
+		schema.Adapt(nil)
+	}, "requires a validator")
+	var absent *schema.Resolver
+	_, err = absent.Resolve(namePath)
+	require(err != nil, "schema accepted a nil resolver")
+	_, err = (&schema.Resolver{}).Resolve(namePath)
+	require(err != nil, "schema accepted an uninitialized resolver")
+	validate := schema.Adapt(func(data forms.Data) []schema.Issue {
+		values := data.Values
+		// A library may transform its own input. Mapping stays bound to the
+		// original validation order, and the Form still owns an independent copy.
+		values["people"][1], values["people"][2] = values["people"][2], values["people"][1]
+		return []schema.Issue{{Path: namePath, Message: "Fix the first person."}}
+	})
+	var form *forms.Form
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		form = forms.Use(scope, "schema", forms.Options{
+			Initial: arrayInitial(), Arrays: []string{"people"}, Validate: validate,
+		})
+		return ui.Text("schema")
+	}))
+	flush(root)
+	form.Blur(rows[0].Field("name"))
+	require(form.Error(rows[0].Field("name")) == "Fix the first person." &&
+		form.Array("people").Items()[0].Key == rows[0].Key, "schema adapter let local transforms change form order or error identity")
+	form.Array("people").Move(rows[0].Key, 1)
+	form.Blur(rows[1].Field("name"))
+	require(form.Error(rows[1].Field("name")) == "Fix the first person." &&
+		form.Error(rows[0].Field("name")) == "", "schema adapter reused a previous validation snapshot after a row move")
+	root.Close()
+	schemaValidationLifecycle()
+}
+
+func schemaValidationLifecycle() {
+	var form *forms.Form
+	var resolver *schema.Resolver
+	decoded := 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		form = forms.Use(scope, "async-schema", forms.Options{
+			Initial: arrayInitial(), Arrays: []string{"people"},
+			ValidateAsync: func(data forms.Data) ui.Request {
+				values := data.Values
+				resolver = schema.From(forms.Data{Values: values})
+				return ui.Request{Service: "validate-schema"}
+			},
+			DecodeValidation: func(result ui.Result) forms.Errors {
+				decoded++
+				return resolver.Errors([]schema.Issue{
+					{Path: schema.Field("people").Index(0).Field("name"), Message: result.Value},
+				})
+			},
+		})
+		return ui.Text("async-schema")
+	}))
+	flush(root)
+	form.Blur("people[initial-0].name")
+	old := startCommand(flush(root))
+	form.Array("people").Move("initial-0", 1)
+	form.Blur("people[initial-1].name")
+	current := startCommand(flush(root))
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: old, Sequence: 1, Value: "Old issue"}) &&
+		decoded == 0, "cancelled schema validation decoded into a newer snapshot")
+	require(root.Dispatch(ui.Event{Kind: "@task", Target: current, Sequence: 2, Value: "Current issue"}), "current schema validation was rejected")
+	flush(root)
+	require(decoded == 1 && form.Error("people[initial-1].name") == "Current issue" &&
+		form.Error("people[initial-0].name") == "", "schema validation published to the wrong row")
+	root.Close()
+}

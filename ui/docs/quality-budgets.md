@@ -13,10 +13,10 @@ low-end profile uses constrained CPU and memory runners.
 | keyed visible collection update p95 | 8 ms | 12 ms | hard failure |
 | Web useful-content startup p75 | 1.8 s | 3.0 s | E5 gate |
 | Web compressed initial download | 350 KiB | 350 KiB | E5 gate |
-| Core Wasm AOT image, UIKit gallery (Brotli) | 600 KiB | 600 KiB | hard failure |
-| Core Wasm AOT image, official product (Brotli) | 600 KiB | 600 KiB | hard failure |
-| Core Wasm AOT image, Studio workbench (Brotli) | 640 KiB | 640 KiB | hard failure |
-| Core Wasm AOT image, full Studio (raw / Brotli / gzip) | 34,000,000 B / 950 KiB / 2,500,000 B | 34,000,000 B / 950 KiB / 2,500,000 B | hard failure |
+| Wasm VM image, UIKit gallery (Brotli) | 600 KiB | 600 KiB | hard failure |
+| Wasm VM image, official product (Brotli) | 600 KiB | 600 KiB | hard failure |
+| Wasm VM image, Studio workbench (Brotli) | 640 KiB | 640 KiB | hard failure |
+| Wasm VM image, full Studio (raw / Brotli / gzip) | 34,000,000 B / 950 KiB / 2,500,000 B | 34,000,000 B / 950 KiB / 2,500,000 B | hard failure |
 | Full Studio install precache (gzip transfer) | 3.5 MiB | 3.5 MiB | hard failure |
 | desktop warm startup p95 | 500 ms | 900 ms | E5 gate |
 | idle resident memory | 120 MiB | 160 MiB | E7 gate |

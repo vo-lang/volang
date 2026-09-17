@@ -70,9 +70,8 @@ pub(in crate::translate) fn go_start<'a>(
         .ins()
         .iconst(types::I32, if is_closure_call { 1 } else { 0 });
     let closure_ref = if is_closure_call {
-        let closure_ref = e.read_var(inst.a);
         // Invocation (including a nil function trap) belongs to the new fiber.
-        closure_ref
+        e.read_var(inst.a)
     } else {
         e.builder().ins().iconst(types::I64, 0)
     };

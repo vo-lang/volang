@@ -1,0 +1,69 @@
+package forms
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/files"
+)
+
+func (form *Form) requireText(name string) {
+	form.requireField(name)
+	if form.field(name).file {
+		panic("forms: use Selection and ChangeFiles for a file field")
+	}
+}
+
+func (form *Form) Selection(name string) files.Selection {
+	form.requireField(name)
+	field := form.field(name)
+	if !field.file {
+		panic("forms: file fields require an Options.Files declaration")
+	}
+	return field.selection
+}
+
+// ChangeFiles publishes a native selection into the same form state as text.
+// Selection errors are immediately visible; changing files cancels validation.
+func (form *Form) ChangeFiles(name string, selection files.Selection) {
+	form.requireLive()
+	previous := form.Selection(name)
+	form.state.Update(func(old any) any {
+		next := old.(snapshot)
+		next.files = cloneFiles(next.files)
+		next.files[name] = selection
+		// An acknowledgement after Clear still needs its new native revision,
+		// but must not invalidate work started with that empty selection.
+		if previous.SameFiles(selection) && previous.Error() == selection.Error() {
+			return next
+		}
+		next.work.validation.Cancel()
+		next.work.validation = nil
+		next.validating, next.submitRequested = false, false
+		next.touched = cloneTouched(next.touched)
+		next.touched[name] = true
+		next.serverErrors = editedErrors(next.serverErrors, name)
+		next.errors = includeServerErrors(form.check(form.data(next)), next.serverErrors)
+		next.message = ""
+		return next
+	})
+}
+
+// FileInput enhances a native input or a whole labelled field containing it.
+// Author type=file, name, ID and picker attributes on the native input itself.
+// Apply kit.FormField before this wrapper so its label targets the native input.
+func (form *Form) FileInput(name string, field ui.View, options files.Options) ui.View {
+	return files.Enhance(field, form.Selection(name), func(selection files.Selection) {
+		if form.has(name) {
+			form.ChangeFiles(name, selection)
+		}
+	}, options)
+}
+
+func editedErrors(source Errors, name string) Errors {
+	remaining := make(Errors)
+	for field, message := range source {
+		if field != name && field != "" {
+			remaining[field] = message
+		}
+	}
+	return remaining
+}

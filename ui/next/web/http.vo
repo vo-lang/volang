@@ -1,0 +1,143 @@
+package web
+
+import (
+	"encoding/json"
+	"errors"
+	"sort"
+	"strings"
+	"unicode/utf8"
+	ui "github.com/vo-lang/ui/next"
+)
+
+// HTTPOptions describes a bounded text request. Empty Method uses GET; empty
+// Credentials uses same-origin. Browser Fetch owns redirects, cookies and CORS.
+// Headers are copied into a canonical request identity; names are case-insensitive.
+type HTTPOptions struct {
+	Method string
+	Headers map[string]string
+	Body string
+	Credentials string
+}
+
+type httpHeader struct {
+	Name string `json:"name"`
+	Value string `json:"value"`
+}
+
+type httpRequest struct {
+	Version int `json:"version"`
+	URL string `json:"url"`
+	Method string `json:"method"`
+	Headers []httpHeader `json:"headers"`
+	Body string `json:"body"`
+	Credentials string `json:"credentials"`
+}
+
+// HTTP returns a request for ui.Start, forms.Submit or data.Use. Cache queries
+// should describe idempotent reads. Start writes from handlers or form submits.
+func HTTP(url string, options HTTPOptions) ui.Request {
+	method := strings.ToUpper(options.Method)
+	if method == "" {
+		method = "GET"
+	}
+	switch method {
+		case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS":
+		default:
+			panic("web: unsupported HTTP method")
+	}
+	credentials := options.Credentials
+	if credentials == "" {
+		credentials = "same-origin"
+	}
+	if credentials != "same-origin" && credentials != "omit" && credentials != "include" {
+		panic("web: HTTP credentials must be same-origin, omit or include")
+	}
+	if url == "" || len(url) > 8192 || !utf8.ValidString(url) || len(options.Body) > 1024 * 1024 ||
+		!utf8.ValidString(options.Body) ||
+		(method == "GET" || method == "HEAD") && options.Body != "" {
+		panic("web: HTTP requires a UTF-8 URL within 8 KiB and a body within 1 MiB; GET and HEAD have no body")
+	}
+	if len(options.Headers) > 128 {
+		panic("web: HTTP headers exceed 128 names")
+	}
+	names := make([]string, 0, len(options.Headers))
+	values := make(map[string]string)
+	bytes := 0
+	for name, value := range options.Headers {
+		name = strings.ToLower(name)
+		if name == "" {
+			panic("web: HTTP header names must be tokens")
+		}
+		for _, character := range name {
+			if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' ||
+				strings.ContainsRune("!#$%&'*+-.^_`|~", character)) {
+				panic("web: HTTP header names must be tokens")
+			}
+		}
+		if _, exists := values[name]; exists {
+			panic("web: duplicate HTTP header name")
+		}
+		for _, character := range value {
+			if character < 32 && character != '\t' || character == 127 || character > 255 {
+				panic("web: HTTP header values must use HTTP bytes without line breaks")
+			}
+		}
+		value = strings.Trim(value, " \t")
+		bytes += len(name) + len(value)
+		if bytes > 64 * 1024 {
+			panic("web: HTTP headers exceed 64 KiB")
+		}
+		names = append(names, name)
+		values[name] = value
+	}
+	sort.Strings(names)
+	headers := make([]httpHeader, 0, len(names))
+	for _, name := range names {
+		headers = append(headers, httpHeader{Name: name, Value: values[name]})
+	}
+	encoded, err := json.Marshal(httpRequest{
+		Version: 1, URL: url, Method: method, Headers: headers, Body: options.Body,
+		Credentials: credentials,
+	})
+	if err != nil {
+		panic(err.Error())
+	}
+	return ui.Request{Service: "web.http", Value: string(encoded)}
+}
+
+// HTTPResponse contains every readable HTTP status, including 4xx and 5xx.
+// Header names are lowercase and limited to what the browser exposes.
+type HTTPResponse struct {
+	Version int `json:"version"`
+	Status int `json:"status"`
+	URL string `json:"url"`
+	Redirected bool `json:"redirected"`
+	Headers map[string]string `json:"headers"`
+	Body string `json:"body"`
+}
+
+func (response HTTPResponse) OK() bool {
+	return response.Status >= 200 && response.Status < 300
+}
+
+// DecodeHTTP separates transport failures from HTTP responses. Decode Body into
+// an application type with encoding/json, including structured validation errors.
+func DecodeHTTP(result ui.Result) (HTTPResponse, error) {
+	if result.Error != "" {
+		return HTTPResponse{}, errors.New(result.Error)
+	}
+	if len(result.Value) > 13 * 1024 * 1024 {
+		return HTTPResponse{}, errors.New("web: HTTP result exceeds its budget")
+	}
+	var response HTTPResponse
+	if err := json.Unmarshal([]byte(result.Value), &response); err != nil {
+		return HTTPResponse{}, err
+	}
+	if response.Version != 1 || response.Status < 200 || response.Status > 599 ||
+		len(response.URL) > 8192 ||
+		len(response.Body) > 6 * 1024 * 1024 ||
+		len(response.Headers) > 128 {
+		return HTTPResponse{}, errors.New("web: invalid HTTP response")
+	}
+	return response, nil
+}

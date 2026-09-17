@@ -1,0 +1,132 @@
+package ui
+
+import (
+	"strconv"
+)
+
+// ElementRef belongs to a scope and binds one live element. Native handles stay
+// in the renderer. The ref can be forwarded to child views in the same root.
+type ElementRef struct {
+	scope *Scope
+	bindings map[int]*mounted
+}
+
+type elementRequest struct {
+	ref *ElementRef
+	op string
+	command int
+	value string
+}
+
+func Ref(scope *Scope, key string) *ElementRef {
+	scope.requireState(key)
+	if stored, exists := scope.states[key]; exists {
+		ref, valid := stored.(*ElementRef)
+		if !valid {
+			panic("ui: state key changed type: " + key)
+		}
+		return ref
+	}
+	ref := &ElementRef{scope: scope, bindings: make(map[int]*mounted)}
+	scope.storeState(key, ref)
+	return ref
+}
+
+func (view View) Ref(ref *ElementRef) View {
+	if view.kind == "" || view.kind == "#text" || view.kind == "#fragment" || view.kind == "#component" {
+		panic("ui: refs require an element")
+	}
+	view.ref = ref
+	return view
+}
+
+// Focus queues a request for the next commit. It may be called immediately after
+// showing an element; the binding is resolved after reconciliation. Missing or
+// disposed bindings at that point are ignored. True means the request was queued.
+func (ref *ElementRef) Focus() bool {
+	return ref.request("focus")
+}
+
+// ScrollIntoView reveals the nearest edges after the next DOM commit without
+// changing focus. Missing or disposed bindings are ignored, as with Focus.
+func (ref *ElementRef) ScrollIntoView() bool {
+	return ref.request("scroll")
+}
+
+func (ref *ElementRef) request(op string) bool {
+	return ref.requestValue(op, "")
+}
+
+func (ref *ElementRef) requestValue(op string, value string) bool {
+	if !ref.live() {
+		return false
+	}
+	root := ref.scope.root
+	if root.flushing || root.reading != nil || root.computing != 0 || root.awaiting != 0 {
+		panic("ui: element operations must be requested in a handler or post-commit effect")
+	}
+	root.elementRequests = append(root.elementRequests, elementRequest{ref: ref, op: op, value: value})
+	return true
+}
+
+func (ref *ElementRef) live() bool {
+	return ref != nil && ref.scope != nil && !ref.scope.disposed && !ref.scope.root.closed
+}
+
+func (root *Root) touchRef(ref *ElementRef) {
+	if root.refChecks == nil {
+		root.refChecks = make(map[*ElementRef]bool)
+	}
+	root.refChecks[ref] = true
+}
+
+func (root *Root) bindRef(node *mounted) {
+	ref := node.view.ref
+	if ref == nil {
+		return
+	}
+	if ref.scope == nil || ref.scope.disposed || ref.scope.root != root {
+		panic("ui: ref belongs to a different or disposed root")
+	}
+	ref.bindings[node.id] = node
+	root.touchRef(ref)
+}
+
+func (root *Root) unbindRef(node *mounted) {
+	ref := node.view.ref
+	if ref != nil && ref.bindings[node.id] == node {
+		delete(ref.bindings, node.id)
+		root.touchRef(ref)
+	}
+}
+
+func (root *Root) prepareRefs() {
+	for ref := range root.refChecks {
+		if len(ref.bindings) > 1 {
+			panic(captureRenderFailure("ui: an element ref has multiple live bindings", ref.scope))
+		}
+		delete(root.refChecks, ref)
+	}
+	for _, request := range root.elementRequests {
+		ref := request.ref
+		if request.op == "measure" {
+			// Command positions stay stable until Flush publishes the batch.
+			// Zero denotes an unbound ref; the task still returns a normal result.
+			id := 0
+			if !ref.scope.disposed {
+				for _, node := range ref.bindings {
+					id = node.id
+				}
+			}
+			root.commands[request.command].Value = strconv.Itoa(id)
+			continue
+		}
+		if ref.scope.disposed {
+			continue
+		}
+		for _, node := range ref.bindings {
+			root.emit(Mutation{Op: request.op, ID: node.id, Value: request.value})
+		}
+	}
+	root.elementRequests = nil
+}

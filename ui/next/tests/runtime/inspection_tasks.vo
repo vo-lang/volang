@@ -1,0 +1,181 @@
+package main
+
+import (
+	"encoding/json"
+	"strings"
+	"unicode/utf8"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/inspect"
+)
+
+func inspectionTaskContracts() {
+	var owner *ui.Scope
+	var visible *ui.BoolState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		visible = ui.Bool(scope, "visible", true)
+		if !visible.Get() {
+			return ui.Text("closed")
+		}
+		return ui.Component(counterType, func(scope *ui.Scope) ui.View {
+			owner = scope
+			return ui.Text("working")
+		}).Key("work")
+	}))
+	now := int64(100)
+	session := inspect.New(root, inspect.Options{
+		Now: func() int64 {
+			return now
+		},
+	})
+	initial := root.Flush()
+	expectPanic(func() {
+		root.InspectTasks()
+	}, "committed turn")
+	root.Commit(initial.Revision)
+	beforeCallback := false
+	ui.Start(owner, ui.Request{Service: "load", Value: "private request payload"}.WithTimeout(250), func(ui.Result) {
+		beforeCallback = session.Snapshot().Tasks[0].State == "completed"
+	})
+	queued := session.Snapshot().Tasks[0]
+	require(queued.State == "waiting" && queued.ObservedStart && queued.Service == "load" &&
+		queued.TimeoutMilliseconds == 250 &&
+		queued.Task.Frame.Key == "work" &&
+		queued.Nanoseconds == 0, "inspection lost queued request metadata")
+	flush(root)
+	now = 140
+	require(root.Dispatch(ui.Event{
+		Kind: "@task", Target: queued.Task.ID, Value: "private result payload", Sequence: 1,
+	}), "result was rejected")
+	completed := session.Snapshot()
+	require(beforeCallback && completed.Tasks[0].State == "completed" &&
+		completed.Tasks[0].Updates == 1 &&
+		completed.Tasks[0].Nanoseconds == 40, "inspection did not record completion before its callback")
+	bytes, err := json.Marshal(completed)
+	require(err == nil && !strings.Contains(string(bytes), "private request") &&
+		!strings.Contains(string(bytes), "private result"), "inspection retained application payloads")
+	completed.Tasks[0].Service = "caller changed"
+	require(session.Snapshot().Tasks[0].Service == "load", "task history aliases snapshots")
+	watch := ui.Subscribe(owner, ui.Request{Service: "watch"}, func(ui.Result) {})
+	active := session.Snapshot().Tasks[1]
+	require(active.Task.Subscription && active.Task.Component == queued.Task.Component, "subscription lost ownership")
+	flush(root)
+	now = 150
+	root.Dispatch(ui.Event{Kind: "@task", Target: active.Task.ID, Value: "first", Sequence: 2})
+	root.Dispatch(ui.Event{Kind: "@task", Target: active.Task.ID, Value: "second", Sequence: 3})
+	progress := session.Snapshot().Tasks[1]
+	require(progress.State == "waiting" && progress.Updates == 2 && progress.Nanoseconds == 10, "subscription progress ended the waiting span")
+	now = 170
+	root.Dispatch(ui.Event{
+		Kind: "@task", Target: active.Task.ID, Error: strings.Repeat("中", 100), Sequence: 4,
+	})
+	failed := session.Snapshot().Tasks[1]
+	require(failed.State == "failed" && failed.Updates == 3 && failed.Nanoseconds == 30 &&
+		failed.Truncated &&
+		len(failed.Error) <= 256 &&
+		utf8.ValidString(failed.Error), "task error was not bounded or terminal")
+	watch.Cancel()
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: active.Task.ID, Value: "late", Sequence: 5}) &&
+		len(session.Snapshot().Tasks) == 2, "late results or repeated cancellation added history")
+	owned := ui.Start(owner, ui.Request{Service: "owned"}, func(ui.Result) {})
+	visible.Set(false)
+	flush(root)
+	cancelled := session.Snapshot().Tasks[2]
+	require(cancelled.State == "cancelled" && cancelled.Task.Frame.Key == "work" &&
+		cancelled.Updates == 0, "unmount did not retain the cancellation's component identity")
+	owned.Cancel()
+	root.Start(ui.Request{Service: "unused"}, func(ui.Result) {})
+	root.Close()
+	require(session.Snapshot().Tasks[3].State == "cancelled", "root close lost active work")
+	session.Close()
+	late := ui.NewRoot(ui.Text("already running"))
+	flush(late)
+	late.Start(ui.Request{Service: "earlier"}, func(ui.Result) {})
+	flush(late)
+	later := inspect.New(late, inspect.Options{
+		Now: func() int64 {
+			return now
+		},
+	})
+	partial := later.Snapshot().Tasks[0]
+	require(!partial.ObservedStart && partial.Service == "" && partial.Task.Component == 0 &&
+		partial.State == "waiting", "late observer invented request metadata")
+	later.Close()
+	late.Start(ui.Request{Service: "after detach"}, func(ui.Result) {})
+	late.Close()
+	bounded := ui.NewRoot(ui.Text("bounded"))
+	collector := inspect.New(bounded, inspect.Options{
+		Now: func() int64 {
+			return now
+		},
+	})
+	flush(bounded)
+	for index := 0; index < 600; index++ {
+		bounded.Start(ui.Request{Service: "pending"}, func(ui.Result) {})
+	}
+	require(bounded.InspectTasks().Truncated && collector.Snapshot().Truncated &&
+		len(collector.Snapshot().Tasks) == 512, "active task inspection exceeded its bound")
+	bounded.Close()
+	require(len(collector.Snapshot().Tasks) == 64 && collector.Snapshot().Root.Closed, "closed tasks escaped the completed-history bound")
+	collector.Close()
+	inspectionTaskClockContracts()
+	inspectionObserverCompatibility()
+}
+
+func inspectionTaskClockContracts() {
+	root := ui.NewRoot(ui.Text("clock"))
+	now := int64(100)
+	session := inspect.New(root, inspect.Options{
+		Now: func() int64 {
+			return now
+		},
+	})
+	flush(root)
+	task := root.Start(ui.Request{Service: "clock"}, func(ui.Result) {})
+	now = 90
+	require(session.Snapshot().Tasks[0].Nanoseconds == 0, "backwards task clock produced a negative interval")
+	now = 9223372036854775807
+	clipped := session.Snapshot()
+	require(clipped.Tasks[0].Nanoseconds == 9007199254740991 && clipped.Tasks[0].Truncated &&
+		clipped.Truncated, "large elapsed time was not bounded for browser transport")
+	now = 120
+	recovered := session.Snapshot()
+	require(recovered.Tasks[0].Nanoseconds == 20 && !recovered.Truncated, "reading a task snapshot changed retained history")
+	task.Cancel()
+	now = -9223372036854775807
+	task = root.Start(ui.Request{Service: "overflow"}, func(ui.Result) {})
+	now = 9223372036854775807
+	task.Cancel()
+	result := session.Snapshot()
+	require(result.Tasks[1].Nanoseconds == 9007199254740991 && result.Truncated, "elapsed integer overflow produced an invalid task duration")
+	root.Close()
+	session.Close()
+}
+
+// The optional task extension must preserve existing three-method observers.
+type renderOnlyObserver struct {
+	renders int
+}
+
+func (observer *renderOnlyObserver) Render(*ui.Scope) func() {
+	observer.renders++
+	return nil
+}
+
+func (observer *renderOnlyObserver) Invalidate(*ui.Scope, *ui.Signal) {}
+
+func (observer *renderOnlyObserver) Dispose(*ui.Scope) {}
+
+func inspectionObserverCompatibility() {
+	root := ui.NewRoot(ui.Component(counterType, func(scope *ui.Scope) ui.View {
+		ui.InspectProp(scope, "unobserved", opaqueInspection{})
+		return ui.Text("observer")
+	}))
+	observer := &renderOnlyObserver{}
+	detach := root.Observe(observer)
+	flush(root)
+	require(observer.renders == 1, "existing observer lost render notifications")
+	task := root.Start(ui.Request{Service: "unobserved"}, func(ui.Result) {})
+	task.Cancel()
+	detach()
+	root.Close()
+}

@@ -1,0 +1,10 @@
+package main
+
+import (
+	"github.com/vo-lang/ui/next/examples/field-array/app"
+	"github.com/vo-lang/ui/next/host"
+)
+
+func main() {
+	host.RunWithData(app.View)
+}

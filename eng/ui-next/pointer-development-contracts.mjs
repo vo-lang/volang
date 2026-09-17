@@ -1,0 +1,35 @@
+import assert from 'node:assert/strict';
+import {readFile,writeFile,mkdir,mkdtemp,rm} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+import {createProject} from './project.mjs';
+import {root} from './server.mjs';
+import {join} from 'node:path';
+import {developProject} from './project-development.mjs';
+process.env.PLAYWRIGHT_BROWSERS_PATH=join(root,'target/playwright-browsers');
+const {chromium}=await import('../browser/node_modules/playwright/index.mjs');
+const output=join(root,'target/ui-next/pointer-development-check');await mkdir(output,{recursive:true});
+const temporary=await mkdtemp(join(output,'run-')),project=join(temporary,'project');
+const example=await readFile(join(root,'ui/next/examples/interaction/pointer.vo'),'utf8');
+const original=example.replace('package main','package app')+'\nfunc View(initial string) ui.View { return PointerExample() }\n';
+const source=join(project,'app/app.vo');
+let server,browser;
+try {
+ await createProject(project);await writeFile(source,original);
+ server=await developProject(project);browser=await chromium.launch();const page=await browser.newPage();
+ await page.goto(server.url);await page.waitForFunction(()=>document.getElementById('status')?.textContent==='');
+ const handle=page.getByRole('separator',{name:'Preview width'});await handle.scrollIntoViewIfNeeded();
+ const box=await handle.boundingBox(),x=Math.round(box.x+box.width/2),y=Math.round(box.y+box.height/2);
+ await page.mouse.move(x,y);await page.mouse.down();await page.mouse.move(x+40,y);
+ await page.waitForFunction(()=>document.querySelector('[data-resize-width]')?.textContent==='280 px');
+ await page.evaluate(()=>{window.previousHandle=document.querySelector('[data-resize-handle]');});
+ await writeFile(source,original.replace('A little more room','A little more space'));
+ await page.getByRole('heading',{name:'A little more space'}).waitFor();
+ assert.equal(await page.locator('[data-resize-width]').textContent(),'280 px','saved width changed');
+ assert.equal(await handle.getAttribute('data-resizing'),'false','source reload restored a drag whose native capture was released');
+ await page.mouse.up();
+ const next=await handle.boundingBox();await page.mouse.move(Math.round(next.x+next.width/2),Math.round(next.y+next.height/2));
+ await page.mouse.down();await page.mouse.move(Math.round(next.x+next.width/2)+20,Math.round(next.y+next.height/2));await page.mouse.up();
+ await page.waitForFunction(()=>document.querySelector('[data-resize-width]')?.textContent==='300 px');
+ console.log('Pointer development reload: retained width, reset native gesture, new drag passed');
+ await writeFile(join(output,'report.json'),JSON.stringify({passed:true,engine:'chromium',backend:'vm',browserVersion:browser.version(),widthRetained:true,dragReset:true,newDrag:true,exampleSha256:createHash('sha256').update(example).digest('hex'),build:JSON.parse(await readFile(join(project,'target/ui-next/dev/build-report.json')))},null,2)+'\n');
+} finally {await browser?.close();await server?.close();await rm(temporary,{recursive:true,force:true});}

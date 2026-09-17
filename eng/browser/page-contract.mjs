@@ -14,12 +14,16 @@ export class PageContract {
     else if (type !== 'mouseMoved') throw new Error(`unknown pointer operation ${type}`);
   }
   async keyEvent({ type, key }) {
-    if (type === 'keyDown') await this.page.keyboard.down(key);
+    if (type === 'keyDown') {
+      await this.waitForInputReady();
+      await this.page.keyboard.down(key);
+    }
     else if (type === 'keyUp') await this.page.keyboard.up(key);
     else throw new Error(`unknown keyboard operation ${type}`);
   }
   clickButton(name) { return this.page.getByRole('button', { name, exact: true }).click(); }
   async activate(selector, name) {
+    await this.waitForInputReady();
     const candidates = this.page.locator(selector);
     const labelled = candidates.and(this.page.getByLabel(name, { exact: true }));
     const named = candidates.and(this.page.getByRole('button', { name, exact: true }));
@@ -27,6 +31,21 @@ export class PageContract {
     await labelled.or(named).or(text).first().click();
   }
   fill(selector, value) { return this.page.locator(selector).fill(value); }
+  inputReady() {
+    return this.page.evaluate(() => document.getElementById('volang-root')?.dataset.volangRenderState !== 'busy');
+  }
+  async waitForInputReady(timeout) {
+    await expect.poll(() => this.inputReady(), { timeout, message: 'application is ready for input' }).toBe(true);
+  }
+  async afterCommit(action, timeout) {
+    await this.waitForInputReady(timeout);
+    const revision = await this.page.locator('#volang-root').getAttribute('data-volang-revision');
+    await action();
+    await expect.poll(async () => {
+      const current = await this.page.locator('#volang-root').getAttribute('data-volang-revision');
+      return current !== null && BigInt(current) > BigInt(revision ?? '0') && await this.inputReady();
+    }, { timeout, message: 'application commits the preceding input' }).toBe(true);
+  }
   async settleInput() {
     await this.page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   }
@@ -35,15 +54,16 @@ export class PageContract {
 export async function pollEvaluation(contract, expression, predicate, timeout) {
   let value = null;
   await expect.poll(async () => {
+    if (!await contract.inputReady()) return false;
     value = await contract.evaluate(expression);
     return predicate(value);
   }, { timeout, intervals: [25, 50, 100], message: `page contract: ${expression.slice(0, 180)}` }).toBe(true);
   return value;
 }
 
-export async function waitForAotInteractive(contract, timeout) {
+export async function waitForVmInteractive(contract, timeout) {
   await pollEvaluation(contract, `({
-    interactive: performance.getEntriesByName('volang-aot-interactive', 'mark').length > 0,
+    interactive: performance.getEntriesByName('volang-vm-interactive', 'mark').length > 0,
     diagnostic: document.getElementById('volang-diagnostic')?.textContent ?? '',
     phase: document.getElementById('volang-root')?.dataset.volangActivation ?? '',
     inert: document.getElementById('volang-root')?.hasAttribute('inert') === true,

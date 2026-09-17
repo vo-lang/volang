@@ -712,6 +712,9 @@ pub struct Vm {
     /// every scheduler slot has reached a terminal state.
     execution_started: bool,
     bounded_scheduling: bool,
+    /// Owned diagnostics from the most recent bounded panic outcome. This
+    /// contains no managed references and is cleared on the next scheduler run.
+    bounded_panic: Option<VmError>,
     #[cfg(feature = "native")]
     pub(crate) pending_runtime_transitions: Vec<RuntimeTransition>,
     /// Declared last so executable memory outlives scheduler and VM state.
@@ -1296,6 +1299,7 @@ impl Vm {
             terminal_memory_error: None,
             execution_started: false,
             bounded_scheduling: false,
+            bounded_panic: None,
             #[cfg(feature = "native")]
             pending_runtime_transitions: Vec::new(),
         };
@@ -2698,6 +2702,22 @@ impl Vm {
         self.scheduler.has_work()
     }
 
+    /// Whether native I/O can complete while the guest awaits host input.
+    /// Executors without an I/O notification hook only need a readiness poll
+    /// while this is true; an idle UI exchange alone needs no polling timer.
+    #[cfg(feature = "std")]
+    pub fn has_pending_io(&self) -> bool {
+        self.scheduler.has_io_waiters()
+    }
+
+    /// Take the structured error accompanying `SchedulingOutcome::Panicked`.
+    /// Bounded execution retains the ordinary panic/trap payload and source
+    /// location until consumed or another scheduler run begins. Unbounded
+    /// execution continues to return the error directly.
+    pub fn take_bounded_panic(&mut self) -> Option<VmError> {
+        self.bounded_panic.take()
+    }
+
     /// Queues a command accepted by the owning trusted island transport.
     ///
     /// The caller must authenticate `source_island_id`; the command payload
@@ -2821,6 +2841,7 @@ impl Vm {
         &mut self,
         max_iterations: Option<usize>,
     ) -> Result<SchedulingOutcome, VmError> {
+        self.bounded_panic = None;
         if !self.scheduler.fibers.is_empty() {
             self.execution_started = true;
         }
@@ -3466,20 +3487,19 @@ impl Vm {
             ExecResult::Panic => {
                 let (trap_kind, msg, source) = self.scheduler.kill_current();
                 let loc = source.map(ErrorLocation::from);
-                if !is_bounded {
-                    if let Some(kind) = trap_kind {
-                        let Some(msg) = msg else {
-                            return Some(Err(VmError::Jit(format!(
-                                "runtime trap {:?} missing panic payload",
-                                kind
-                            ))));
-                        };
-                        return Some(Err(VmError::RuntimeTrap { kind, msg, loc }));
+                let error = match (trap_kind, msg) {
+                    (Some(kind), Some(msg)) => VmError::RuntimeTrap { kind, msg, loc },
+                    (Some(kind), None) => {
+                        VmError::Jit(format!("runtime trap {:?} missing panic payload", kind))
                     }
-                    return Some(Err(VmError::PanicUnwound { msg, loc }));
+                    (None, msg) => VmError::PanicUnwound { msg, loc },
+                };
+                return Some(if is_bounded {
+                    self.bounded_panic = Some(error);
+                    Ok(SchedulingOutcome::Panicked)
                 } else {
-                    return Some(Ok(SchedulingOutcome::Panicked));
-                }
+                    Err(error)
+                });
             }
             ExecResult::ResourceError(error) => {
                 self.scheduler.kill_current();

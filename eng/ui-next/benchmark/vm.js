@@ -1,0 +1,10 @@
+import init, { VoVmIsland } from '../../../target/ui-next/wasm-runtime/vo_web.js';
+import { createVmUi } from '../../../lang/crates/vo-web/dist/ui_next/host.js';
+const runtime = await init();
+window.__benchmark.guestMemory = () => ({ linearMemoryBytes: runtime.memory.buffer.byteLength, collector: 'VM collector counters unavailable through current Web API' });
+const image = new Uint8Array(await (await fetch('./app.vob')).arrayBuffer());
+const vm = new VoVmIsland(image);
+const host = createVmUi(document.getElementById('root'), vm, false, { metrics: window.__benchmark.metrics });
+const done = host.done.finally(() => vm.free());
+window.__benchmark.close = async () => { host.close(); await done; };
+done.catch(error => { window.__benchmark.error = String(error); });

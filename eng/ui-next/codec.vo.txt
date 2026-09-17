@@ -1,0 +1,168 @@
+const maxWireInteger = 9007199254740991
+
+// VUI frames carry a version, message kind, fixed-width integers and
+// length-prefixed UTF-8 strings/arrays. The producer allocates one exact buffer.
+type wireWriter struct {
+	data []byte
+	pos int
+	invalid bool
+}
+
+func (out *wireWriter) byte(value byte) {
+	out.data[out.pos] = value
+	out.pos++
+}
+
+func (out *wireWriter) length(value int) {
+	position := out.pos
+	bits := uint64(value)
+	out.data[position] = byte(bits)
+	out.data[position + 1] = byte(bits >> 8)
+	out.data[position + 2] = byte(bits >> 16)
+	out.data[position + 3] = byte(bits >> 24)
+	out.pos = position + 4
+}
+
+func (out *wireWriter) integer(value int) {
+	if value < -maxWireInteger || value > maxWireInteger {
+		out.invalid = true
+	}
+	position := out.pos
+	bits := uint64(value)
+	out.data[position] = byte(bits)
+	out.data[position + 1] = byte(bits >> 8)
+	out.data[position + 2] = byte(bits >> 16)
+	out.data[position + 3] = byte(bits >> 24)
+	out.data[position + 4] = byte(bits >> 32)
+	out.data[position + 5] = byte(bits >> 40)
+	out.data[position + 6] = byte(bits >> 48)
+	out.data[position + 7] = byte(bits >> 56)
+	out.pos = position + 8
+}
+
+func (out *wireWriter) boolean(value bool) {
+	if value {
+		out.byte(1)
+	} else {
+		out.byte(0)
+	}
+}
+
+func (out *wireWriter) float(value float64) {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		out.invalid = true
+	}
+	bits := math.Float64bits(value)
+	for index := 0; index < 8; index++ {
+		out.byte(byte(bits >> uint(index * 8)))
+	}
+}
+
+func (out *wireWriter) string(value string) {
+	out.length(len(value))
+	copy(out.data[out.pos:], value)
+	out.pos += len(value)
+}
+
+type wireReader struct {
+	data []byte
+	pos int
+	invalid bool
+}
+
+func (in *wireReader) take(size int) bool {
+	if in.invalid || size < 0 || size > len(in.data) - in.pos {
+		in.invalid = true
+		return false
+	}
+	return true
+}
+
+func (in *wireReader) byte() byte {
+	if !in.take(1) {
+		return 0
+	}
+	value := in.data[in.pos]
+	in.pos++
+	return value
+}
+
+func (in *wireReader) length() int {
+	if !in.take(4) {
+		return 0
+	}
+	position := in.pos
+	value := uint32(in.data[position]) | uint32(in.data[position + 1]) << 8 |
+		uint32(in.data[position + 2]) << 16 |
+		uint32(in.data[position + 3]) << 24
+	in.pos = position + 4
+	return int(value)
+}
+
+func (in *wireReader) integer() int {
+	if !in.take(8) {
+		return 0
+	}
+	position := in.pos
+	value := uint64(in.data[position]) | uint64(in.data[position + 1]) << 8 |
+		uint64(in.data[position + 2]) << 16 |
+		uint64(in.data[position + 3]) << 24 |
+		uint64(in.data[position + 4]) << 32 |
+		uint64(in.data[position + 5]) << 40 |
+		uint64(in.data[position + 6]) << 48 |
+		uint64(in.data[position + 7]) << 56
+	in.pos = position + 8
+	result := int(value)
+	if result < -maxWireInteger || result > maxWireInteger {
+		in.invalid = true
+	}
+	return result
+}
+
+func (in *wireReader) boolean() bool {
+	value := in.byte()
+	if value > 1 {
+		in.invalid = true
+	}
+	return value == 1
+}
+
+func (in *wireReader) float() float64 {
+	if !in.take(8) {
+		return 0
+	}
+	bits := uint64(0)
+	for index := 0; index < 8; index++ {
+		bits |= uint64(in.byte()) << uint(index * 8)
+	}
+	value := math.Float64frombits(bits)
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		in.invalid = true
+	}
+	return value
+}
+
+func (in *wireReader) string() string {
+	size := in.length()
+	if !in.take(size) {
+		return ""
+	}
+	value := string(in.data[in.pos:in.pos + size])
+	in.pos += size
+	return value
+}
+
+// Validate array admission before allocating from a received count.
+func (in *wireReader) count(minimum int, limit int) int {
+	value := in.length()
+	if value == 4294967295 {
+		return -1
+	}
+	if value > limit || value > (len(in.data) - in.pos) / minimum {
+		in.invalid = true
+	}
+	if in.invalid {
+		return 0
+	}
+	return value
+}

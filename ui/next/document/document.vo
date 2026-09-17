@@ -1,0 +1,309 @@
+// Package document renders versioned semantic document data through ordinary
+// views. Markdown parsing belongs to build tooling; no markup executes here.
+package document
+
+import (
+	"encoding/json"
+	"errors"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/navigation"
+)
+
+const MaxBytes = 2 * 1024 * 1024
+
+const MaxNodes = 8192
+
+const MaxDepth = 64
+
+type Node struct {
+	Tag string `json:"tag"`
+	Text string `json:"text"`
+	Attrs map[string]string `json:"attrs"`
+	Children []Node `json:"children"`
+}
+
+type Document struct {
+	Version int `json:"version"`
+	HeadingID string `json:"headingID"`
+	Nodes []Node `json:"nodes"`
+}
+
+type budget struct {
+	count int
+	bytes int
+}
+
+func Decode(source string) (Document, error) {
+	if len(source) > MaxBytes || !utf8.ValidString(source) {
+		return Document{}, errors.New("document: input must be valid UTF-8 within 2 MiB")
+	}
+	var document Document
+	if err := json.Unmarshal([]byte(source), &document); err != nil {
+		return Document{}, err
+	}
+	if err := Validate(document); err != nil {
+		return Document{}, err
+	}
+	return document, nil
+}
+
+func Validate(document Document) error {
+	if document.Version != 1 {
+		return errors.New("document: unsupported version")
+	}
+	seen := make(map[string]bool)
+	if document.HeadingID != "" {
+		if !validID(document.HeadingID) {
+			return errors.New("document: invalid heading ID")
+		}
+		seen[document.HeadingID] = true
+	}
+	return validateNodes(document.Nodes, "root", false, 0, &budget{}, seen)
+}
+
+func validID(value string) bool {
+	return value != "" && len(value) <= 1024 && utf8.ValidString(value) &&
+		!strings.ContainsAny(value, " \t\r\n\f") &&
+		!hasControl(value)
+}
+
+func hasControl(value string) bool {
+	for _, character := range value {
+		if character < 32 || character >= 127 && character <= 159 {
+			return true
+		}
+	}
+	return false
+}
+
+func phrasing(tag string) bool {
+	switch tag {
+		case "#text", "em", "strong", "del", "code", "a", "img", "br", "input":
+			return true
+	}
+	return false
+}
+
+func inlineParent(tag string) bool {
+	switch tag {
+		case "p", "h1", "h2", "h3", "h4", "h5", "h6", "em", "strong", "del", "a", "code":
+			return true
+	}
+	return false
+}
+
+func validateNodes(nodes []Node, parent string, inLink bool, depth int, used *budget, seen map[string]bool) error {
+	if len(nodes) > 0 && depth >= MaxDepth {
+		return errors.New("document: nesting exceeds 64")
+	}
+	for _, node := range nodes {
+		used.count++
+		used.bytes += len(node.Text)
+		if used.count > MaxNodes || used.bytes > MaxBytes {
+			return errors.New("document: content exceeds its node or text budget")
+		}
+		if !utf8.ValidString(node.Text) || strings.Contains(node.Text, "\x00") {
+			return errors.New("document: invalid text")
+		}
+		switch node.Tag {
+			case "#text", "p", "blockquote", "ul", "ol", "li", "pre", "code", "h1", "h2", "h3", "h4", "h5", "h6", "a", "img", "em", "strong", "del", "table", "thead", "tbody", "tr", "th", "td", "br", "hr", "input":
+			default:
+				return errors.New("document: unsupported node " + node.Tag)
+		}
+		if node.Tag != "#text" && node.Text != "" {
+			return errors.New("document: text belongs to a text node")
+		}
+		if node.Tag == "#text" && (len(node.Attrs) != 0 || len(node.Children) != 0) {
+			return errors.New("document: text nodes cannot have attributes or children")
+		}
+		if inlineParent(parent) && !phrasing(node.Tag) {
+			return errors.New("document: block content inside inline content")
+		}
+		if inLink && node.Tag == "a" {
+			return errors.New("document: links cannot be nested")
+		}
+		if (parent == "ul" || parent == "ol") && node.Tag != "li" ||
+			node.Tag == "li" && parent != "ul" && parent != "ol" {
+			return errors.New("document: invalid list structure")
+		}
+		if parent == "table" && node.Tag != "thead" && node.Tag != "tbody" ||
+			(node.Tag == "thead" || node.Tag == "tbody") && parent != "table" {
+			return errors.New("document: invalid table section")
+		}
+		if (parent == "thead" || parent == "tbody") && node.Tag != "tr" ||
+			node.Tag == "tr" && parent != "thead" && parent != "tbody" {
+			return errors.New("document: invalid table row")
+		}
+		if parent == "tr" && node.Tag != "td" && node.Tag != "th" ||
+			(node.Tag == "td" || node.Tag == "th") && parent != "tr" {
+			return errors.New("document: invalid table cell")
+		}
+		if parent == "pre" && node.Tag != "code" {
+			return errors.New("document: preformatted blocks require code content")
+		}
+		if (node.Tag == "img" || node.Tag == "input" || node.Tag == "br" || node.Tag == "hr") &&
+			len(node.Children) != 0 {
+			return errors.New("document: void elements cannot have children")
+		}
+		if len(node.Attrs) > 8 {
+			return errors.New("document: too many node attributes")
+		}
+		for name, value := range node.Attrs {
+			used.bytes += len(name) + len(value)
+			if used.bytes > MaxBytes || len(value) > 4096 || !utf8.ValidString(value) ||
+				strings.Contains(value, "\x00") {
+				return errors.New("document: invalid attribute text")
+			}
+			allowed := false
+			switch name {
+				case "id":
+					if !validID(value) || seen[value] {
+						return errors.New("document: invalid or duplicate ID")
+					}
+					seen[value] = true
+					allowed = node.Tag != "#text"
+				case "href":
+					allowed = node.Tag == "a" && validURL(value, false)
+				case "src":
+					allowed = node.Tag == "img" && validURL(value, true)
+				case "title":
+					allowed = node.Tag == "a" || node.Tag == "img"
+				case "alt":
+					allowed = node.Tag == "img"
+				case "start":
+					number, err := strconv.ParseInt(value, 10, 64)
+					allowed = node.Tag == "ol" && err == nil && number >= 0 && number <= 2147483647
+				case "scope":
+					allowed = node.Tag == "th" && value == "col"
+				case "class":
+					allowed = (node.Tag == "th" || node.Tag == "td") &&
+						(value == "doc-align-start" || value == "doc-align-center" || value == "doc-align-end")
+				case "data-language":
+					allowed = node.Tag == "pre" && len(value) <= 128
+				case "type":
+					allowed = node.Tag == "input" && value == "checkbox"
+				case "disabled":
+					allowed = node.Tag == "input" && value == "true"
+				case "checked":
+					allowed = node.Tag == "input" && (value == "true" || value == "false")
+				case "aria-label":
+					allowed = node.Tag == "input" && value != ""
+			}
+			if !allowed {
+				return errors.New("document: unsupported attribute " + name + " on " + node.Tag)
+			}
+		}
+		if node.Tag == "a" {
+			if _, found := node.Attrs["href"]; !found {
+				return errors.New("document: link requires href")
+			}
+		}
+		if node.Tag == "img" {
+			if _, found := node.Attrs["src"]; !found {
+				return errors.New("document: image requires src")
+			}
+		}
+		if node.Tag == "input" &&
+			(node.Attrs["type"] != "checkbox" || node.Attrs["disabled"] != "true" ||
+				node.Attrs["aria-label"] == "") {
+			return errors.New("document: task markers require a labelled disabled checkbox")
+		}
+		if err := validateNodes(node.Children, node.Tag, inLink || node.Tag == "a", depth + 1, used, seen); err !=
+			nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validURL(value string, image bool) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || hasControl(value) || strings.Contains(value, "\\") ||
+		strings.HasPrefix(value, "//") {
+		return false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	return scheme == "" || (scheme == "https" || scheme == "http") && parsed.Host != "" ||
+		!image && scheme == "mailto"
+}
+
+// View takes a snapshot of semantic content. The root navigation adapter, when
+// installed, handles ordinary internal links; other links retain native behavior.
+func View(document Document) ui.View {
+	if err := Validate(document); err != nil {
+		panic(err)
+	}
+	return ui.Fragment(views(document.Nodes)...)
+}
+
+var preparedType = ui.Define("document.Prepared")
+
+// Prepared owns validated immutable views. Keep it in state or DerivedMemo;
+// mounting in multiple roots gives each tree independent component identities.
+type Prepared struct {
+	headingID string
+	content ui.View
+}
+
+func Prepare(document Document) (*Prepared, error) {
+	if err := Validate(document); err != nil {
+		return nil, err
+	}
+	return prepare(document), nil
+}
+
+// Parse validates a wire document once and prepares its reusable view snapshot.
+func Parse(source string) (*Prepared, error) {
+	document, err := Decode(source)
+	if err != nil {
+		return nil, err
+	}
+	return prepare(document), nil
+}
+
+func prepare(document Document) *Prepared {
+	return &Prepared{headingID: document.HeadingID, content: ui.Fragment(views(document.Nodes)...)}
+}
+
+func (prepared *Prepared) HeadingID() string {
+	return prepared.headingID
+}
+
+func (prepared *Prepared) View() ui.View {
+	if prepared == nil {
+		panic("document: nil prepared document")
+	}
+	return ui.Component(preparedType, func(*ui.Scope) ui.View {
+		return prepared.content
+	}).Memo(prepared)
+}
+
+func views(nodes []Node) []ui.View {
+	result := make([]ui.View, 0, len(nodes))
+	for _, node := range nodes {
+		if node.Tag == "#text" {
+			result = append(result, ui.Text(node.Text))
+			continue
+		}
+		children := views(node.Children)
+		view := ui.Element(node.Tag, children...)
+		if node.Tag == "a" {
+			view = navigation.Link(node.Attrs["href"], children...)
+		}
+		names := make([]string, 0, len(node.Attrs))
+		for name := range node.Attrs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			view = view.Attr(name, node.Attrs[name])
+		}
+		result = append(result, view)
+	}
+	return result
+}

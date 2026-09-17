@@ -10,6 +10,8 @@ pub struct CompileResult {
     pub(crate) error_message: Option<String>,
     pub(crate) error_line: Option<u32>,
     pub(crate) error_column: Option<u32>,
+    #[cfg(feature = "compiler")]
+    pub(crate) diagnostics_json: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -37,6 +39,14 @@ impl CompileResult {
     #[wasm_bindgen(getter, js_name = "errorColumn")]
     pub fn error_column(&self) -> Option<u32> {
         self.error_column
+    }
+
+    /// Versioned source diagnostics. Positions use zero-based lines and UTF-16
+    /// characters; byte offsets refer to the same immutable compilation source.
+    #[cfg(feature = "compiler")]
+    #[wasm_bindgen(getter, js_name = "diagnosticsJson")]
+    pub fn diagnostics_json(&self) -> Option<String> {
+        self.diagnostics_json.clone()
     }
 }
 

@@ -1,6 +1,6 @@
 import { expect } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
-import { waitForAotInteractive } from '../page-contract.mjs';
+import { waitForVmInteractive } from '../page-contract.mjs';
 
 // Playwright supplies a fresh context with no user cookies or stored projects.
 // Every mutation stays in that context's local Studio project store.
@@ -56,7 +56,7 @@ export async function runStudioCanarySmoke(contract, timeoutMilliseconds) {
   // the normal project selector. The preview's live counter must not overwrite
   // the saved source value.
   await contract.reload();
-  await waitForAotInteractive(contract, timeoutMilliseconds);
+  await waitForVmInteractive(contract, timeoutMilliseconds);
   await expect(editor).toHaveValue(edited);
   await expect(button('Save File')).toBeDisabled();
   checkpoints.reload = true;
@@ -68,7 +68,7 @@ export async function runStudioCanarySmoke(contract, timeoutMilliseconds) {
   await expect(preview.getByRole('button', { name: 'Count: 41', exact: true })).toBeVisible();
   checkpoints.reopen = true;
   await contract.reload();
-  await waitForAotInteractive(contract, timeoutMilliseconds);
+  await waitForVmInteractive(contract, timeoutMilliseconds);
   await expect(editor).toHaveValue(edited);
   checkpoints.reopenReload = true;
   await expect(page.locator('#volang-diagnostic')).toHaveText('');

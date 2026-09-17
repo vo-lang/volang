@@ -44,5 +44,5 @@ commit is atomic; DOM/native projection failure restores the previous revision.
 
 Include `vo --version`, target triple, execution mode, `vo ui doctor --format=json`,
 the smallest `.vo` reproduction and whether the failure appears in VM, JIT,
-Wasm AOT or Native AOT. Remove secrets from application logs even though the
+Wasm VM or Native AOT. Remove secrets from application logs even though the
 official observability API redacts fields marked sensitive.

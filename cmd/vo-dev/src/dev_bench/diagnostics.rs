@@ -412,7 +412,7 @@ fn matching_probes(a: &Snapshot, b: &Snapshot) -> Result<()> {
             artifact.probe.example()
         );
         let hash = &a.sources["files"][&source];
-        if !hash.as_str().is_some_and(|s| s.len() == 64) || hash != &b.sources["files"][&source] {
+        if hash.as_str().is_none_or(|s| s.len() != 64) || hash != &b.sources["files"][&source] {
             bail!("diagnostic workload source changed: {source}");
         }
     }

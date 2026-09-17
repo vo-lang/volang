@@ -28,6 +28,6 @@ vo build ui/examples/dashboard \
   -o dashboard
 ```
 
-The generated Web tree contains the Core Wasm AOT image and its version-matched
+The generated Web tree contains the Wasm VM image and its version-matched
 browser runtime. The native executable contains AOT application code and enters
 the retained WGPU shell directly.

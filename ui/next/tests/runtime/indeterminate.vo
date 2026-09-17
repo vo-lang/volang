@@ -1,0 +1,76 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+func indeterminateContracts() {
+	var mixed, bound, checked *ui.BoolState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		mixed, bound, checked = ui.Bool(scope, "mixed", true), ui.Bool(scope, "bound", true), ui.Bool(scope, "checked", false)
+		props := kit.CheckboxProps{
+			ID: "mixed", Label: "Select all", Name: "all",
+			Checked: func() bool {
+				return checked.Get()
+			},
+			OnChange: func(value bool) {
+				checked.Set(value)
+				mixed.Set(false)
+			},
+		}
+		if bound.Get() {
+			props.Indeterminate = func() bool {
+				return mixed.Get()
+			}
+		}
+		return kit.Checkbox(props)
+	}))
+	first := flush(root)
+	id := 0
+	for _, mutation := range first.Mutations {
+		if mutation.Op == "property" {
+			require(mutation.Name == "indeterminate" && mutation.Value == "true", "mixed state lost its typed native property")
+			id = mutation.ID
+		}
+	}
+	require(id > 0 && strings.Contains(root.HTML(), `data-vo-indeterminate="true"`) &&
+		!strings.Contains(root.HTML(), ` indeterminate=`), "SSR emitted an ineffective property attribute")
+	require(root.Dispatch(ui.Event{Kind: "change", Target: id, Sequence: 1, Checked: true}), "mixed checkbox did not accept native change")
+	batch := flush(root)
+	require(checked.Get() && !mixed.Get(), "native change lost checked or mixed owner state")
+	property := "missing"
+	for _, mutation := range batch.Mutations {
+		require(mutation.Op != "create" && mutation.Op != "remove", "mixed update replaced the native checkbox")
+		if mutation.Op == "property" {
+			property = mutation.Value
+		}
+	}
+	require(property == "false", "mixed false did not update the property")
+	bound.Set(false)
+	batch = flush(root)
+	require(len(batch.Mutations) == 1 && batch.Mutations[0].Op == "property" &&
+		batch.Mutations[0].Value == "", "omitting mixed state did not release control")
+	require(!strings.Contains(root.HTML(), "data-vo-indeterminate"), "released native property stayed in SSR")
+	root.Close()
+	for _, kind := range []string{"text", "radio", "file", ""} {
+		expectPanic(func() {
+			ui.NewRoot(ui.Element("input").Attr("type", kind).Indeterminate(true)).Flush()
+		}, "checkbox")
+	}
+	expectPanic(func() {
+		ui.Element("div").Indeterminate(false)
+	}, "checkbox")
+	expectPanic(func() {
+		ui.NewRoot(ui.Element("svg", ui.Element("input").Attr("type", "checkbox").Indeterminate(true))).Flush()
+	}, "HTML controls")
+	expectPanic(func() {
+		kit.Switch(kit.SwitchProps{
+			ID: "invalid", Label: "Switch",
+			Indeterminate: func() bool {
+				return true
+			},
+		})
+	}, "switch cannot")
+}

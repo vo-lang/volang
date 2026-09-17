@@ -1,0 +1,103 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"unicode/utf8"
+	"github.com/vo-lang/studio/next/app"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/data"
+	"github.com/vo-lang/ui/next/document"
+	"github.com/vo-lang/ui/next/server"
+)
+
+func handle(request server.Request) (server.Page, error) {
+	if request.BasePath != "/" {
+		return server.Page{}, fmt.Errorf("studio: this distribution requires an origin-root deployment")
+	}
+	readOnly := request.Method == "GET" || request.Method == "HEAD"
+	if readOnly {
+		path, query := request.URL, ""
+		if index := strings.IndexByte(path, '?'); index >= 0 {
+			path, query = path[:index], path[index:]
+		}
+		if path != "/" {
+			path = strings.TrimRight(path, "/")
+		}
+		for _, redirect := range app.LegacyRedirects() {
+			if path == redirect.From {
+				return server.Page{Status: 307, Headers: map[string][]string{"location": {redirect.To + query}}}, nil
+			}
+		}
+	}
+	info, err := app.Describe(request.URL)
+	if err != nil {
+		return server.Page{}, err
+	}
+	page := server.Page{Status: info.Status, Title: info.Title, Description: info.Description}
+	if !readOnly {
+		page.Status = 405
+		page.Headers = map[string][]string{"allow": {"GET, HEAD"}}
+	} else if info.Document.Asset != "" {
+		// The asset name comes from the compiled catalog. Read only the selected
+		// body from the build-verified immutable distribution, using the same
+		// request identity as the browser cache.
+		file, err := os.Open("public/studio-docs/" + info.Document.Asset)
+		if err != nil {
+			return server.Page{}, err
+		}
+		defer file.Close()
+		bytes, err := io.ReadAll(io.LimitReader(file, 2 * 1024 * 1024 + 1))
+		if err != nil {
+			return server.Page{}, err
+		}
+		if len(bytes) > 2 * 1024 * 1024 || !utf8.Valid(bytes) {
+			return server.Page{}, fmt.Errorf("studio: invalid document byte budget or encoding")
+		}
+		decoded, err := document.Decode(string(bytes))
+		if err != nil || decoded.HeadingID != info.Document.HeadingID {
+			return server.Page{}, fmt.Errorf("studio: invalid document body")
+		}
+		page.InitialData, err = data.EncodeInitial([]data.InitialValue{
+			// The request embeds the content digest and its cache is immutable.
+			// Zero keeps repeated static exports identical, independent of time.
+			{Request: info.Request, Value: string(bytes), UpdatedAtMilliseconds: 0},
+		})
+		if err != nil {
+			return server.Page{}, err
+		}
+	}
+	page.Render = func(snapshot string) ui.View {
+		initial, err := app.Initial(request.URL, snapshot)
+		if err != nil {
+			panic(err.Error())
+		}
+		return app.App(initial)
+	}
+	return page, nil
+}
+
+func printJSON(value any) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Print(string(encoded))
+}
+
+func main() {
+	if len(os.Args) == 2 {
+		if os.Args[1] == "--static-paths" {
+			printJSON(app.StaticPaths())
+			return
+		}
+		if os.Args[1] == "--static-redirects" {
+			printJSON(app.LegacyRedirects())
+			return
+		}
+	}
+	server.Run(handle)
+}

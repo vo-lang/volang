@@ -1,0 +1,204 @@
+// Package data provides optional, scope-owned request sharing and result caching.
+package data
+
+import (
+	"time"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type Options struct {
+	// Zero marks successful values stale immediately; revalidation occurs on
+	// subscription or explicit invalidation, without background polling.
+	FreshMilliseconds int
+	// Versioned content stays fresh until explicit invalidation. Retention,
+	// cancellation and request errors keep their normal behavior.
+	Immutable bool
+	// Bounds apply to inactive cached results. Zero uses 32 entries / 4 MiB.
+	RetainedEntries int
+	RetainedBytes int
+	// Background request pins, 1..32; zero uses four. Admission has no queue.
+	PrefetchLimit int
+	Now func() int64
+	// Successful server reads, copied once. Must fit the retention budget.
+	Initial []InitialValue
+}
+
+type Snapshot struct {
+	Value string
+	Error string
+	HasValue bool
+	Fetching bool
+	Stale bool
+}
+
+type entry struct {
+	request ui.Request
+	value Snapshot
+	updatedAt int64
+	task *ui.Task
+	listeners map[*ui.IntState]bool
+	retained bool
+	prefetched bool
+}
+
+type Client struct {
+	scope *ui.Scope
+	guard *ui.Store
+	options Options
+	active bool
+	entries map[ui.Request]*entry
+	retained []ui.Request
+	retainedBytes int
+	prefetching int
+}
+
+// NewClient declares one client owned by scope. Options initialize it once.
+// Place the owner above all consumers, then pass it directly or through context.
+func NewClient(scope *ui.Scope, key string, options Options) *Client {
+	if options.FreshMilliseconds < 0 || options.FreshMilliseconds > 2147483647 ||
+		options.RetainedEntries < 0 ||
+		options.RetainedBytes < 0 {
+		panic("data: freshness and retention limits must be nonnegative")
+	}
+	if options.PrefetchLimit < 0 || options.PrefetchLimit > 32 {
+		panic("data: prefetch limit must be between zero and 32")
+	}
+	guard := ui.State(scope, "data-guard:" + key, func() any {
+		return nil
+	})
+	stored := ui.State(scope, key, func() any {
+		if options.RetainedEntries == 0 {
+			options.RetainedEntries = 32
+		}
+		if options.RetainedBytes == 0 {
+			options.RetainedBytes = 4 * 1024 * 1024
+		}
+		if options.PrefetchLimit == 0 {
+			options.PrefetchLimit = 4
+		}
+		if options.Now == nil {
+			options.Now = func() int64 {
+				return time.Now().UnixNano() / 1000000
+			}
+		}
+		initial := options.Initial
+		options.Initial = nil
+		client := &Client{
+			scope: scope, guard: guard, options: options, entries: make(map[ui.Request]*entry),
+		}
+		client.installInitial(initial)
+		return client
+	})
+	client := stored.Get().(*Client)
+	ui.Effect(scope, "data-client:" + key, func() func() {
+		client.active = true
+		return func() {
+			client.active = false
+			for _, current := range client.entries {
+				current.task.Cancel()
+			}
+			client.entries = make(map[ui.Request]*entry)
+			client.retained = nil
+			client.retainedBytes = 0
+			client.prefetching = 0
+		}
+	})
+	return client
+}
+
+func (client *Client) mutate(action func()) {
+	// The unobserved store guards render/disposal before mutating lifecycle
+	// metadata, without invalidating every consumer of the client itself.
+	client.guard.Update(func(value any) any {
+		if !client.active {
+			panic("data: mutation requires a committed live client")
+		}
+		action()
+		return value
+	})
+}
+
+func (client *Client) snapshot(request ui.Request) Snapshot {
+	current := client.entries[request]
+	if current == nil {
+		return Snapshot{Fetching: true, Stale: true}
+	}
+	result := current.value
+	// Both SSR and the first browser render present the transferred value. Age
+	// is checked after commit, when revalidation can safely publish an update.
+	if result.HasValue && client.active && !client.options.Immutable {
+		now := client.options.Now()
+		result.Stale = result.Stale || now < current.updatedAt ||
+			now - current.updatedAt >= int64(client.options.FreshMilliseconds)
+	}
+	return result
+}
+
+func (client *Client) notify(current *entry) {
+	for listener := range current.listeners {
+		listener.Set(listener.Get() + 1)
+	}
+}
+
+// Entry creation is shared by subscriptions and handler-driven prefetching.
+// Call only inside the client's mutation guard.
+func (client *Client) ensureEntry(request ui.Request) *entry {
+	current := client.entries[request]
+	if current == nil {
+		current = &entry{
+			request: request, value: Snapshot{Stale: true}, listeners: make(map[*ui.IntState]bool),
+		}
+		client.entries[request] = current
+	}
+	return current
+}
+
+func (client *Client) start(current *entry) {
+	current.task.Cancel()
+	current.value.Fetching = true
+	current.value.Error = ""
+	current.task = ui.Start(client.scope, current.request, func(result ui.Result) {
+		current.task = nil
+		if current.prefetched {
+			current.prefetched = false
+			client.prefetching--
+		}
+		current.value.Fetching = false
+		current.value.Error = result.Error
+		if result.Error == "" {
+			current.value.Value = result.Value
+			current.value.HasValue = true
+			current.value.Stale = false
+			current.updatedAt = client.options.Now()
+		}
+		client.notify(current)
+		client.release(current)
+	})
+	client.notify(current)
+}
+
+// Invalidate marks this exact request stale. Active consumers share one new
+// request; inactive results remain available until a consumer returns.
+func (client *Client) Invalidate(request ui.Request) {
+	client.mutate(func() {
+		current := client.entries[request]
+		if current == nil {
+			return
+		}
+		current.value.Stale = true
+		if len(current.listeners) > 0 || current.prefetched {
+			client.start(current)
+		}
+	})
+}
+
+func (client *Client) InvalidateAll() {
+	client.mutate(func() {
+		for _, current := range client.entries {
+			current.value.Stale = true
+			if len(current.listeners) > 0 || current.prefetched {
+				client.start(current)
+			}
+		}
+	})
+}

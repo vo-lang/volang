@@ -1,0 +1,65 @@
+package forms
+
+import (
+	"strconv"
+	ui "github.com/vo-lang/ui/next"
+)
+
+// Input preserves caller attributes and binds a text input, textarea or select.
+// Use kit.FormField for its label, hint and error relationship.
+// Bindings ignore input already queued behind a row removal before DOM commit.
+func (form *Form) Input(name string, control ui.View) ui.View {
+	form.requireField(name)
+	if len(form.field(name).values) > 1 {
+		panic("forms: Input requires a field with at most one value")
+	}
+	return control.Attr("name", name).Attr("value", form.Value(name)).On("input", func(event ui.Event) {
+		if form.has(name) {
+			form.Change(name, event.Value)
+		}
+	}).On("blur", func(event ui.Event) {
+		if form.has(name) {
+			form.Blur(name)
+		}
+	})
+}
+
+// Checkbox represents its boolean value with the strings "true" and "false".
+func (form *Form) Checkbox(name string, control ui.View) ui.View {
+	form.requireField(name)
+	if value := form.Value(name); len(form.field(name).values) != 1 ||
+		value != "true" && value != "false" {
+		panic("forms: checkbox values must be true or false")
+	}
+	return control.Attr("name", name).Attr("type", "checkbox").Attr("checked", form.Value(name)).On("change", func(event ui.Event) {
+		if form.has(name) {
+			form.Change(name, strconv.FormatBool(event.Checked))
+		}
+	}).On("blur", func(event ui.Event) {
+		if form.has(name) {
+			form.Blur(name)
+		}
+	})
+}
+
+// MultipleSelect binds all native selected options to one ordered value list.
+func (form *Form) MultipleSelect(name string, control ui.View) ui.View {
+	return control.Attr("name", name).SelectedValues(form.All(name)).On("input", func(event ui.Event) {
+		if form.has(name) {
+			form.ChangeAll(name, event.SelectedValues)
+		}
+	}).On("blur", func(ui.Event) {
+		if form.has(name) {
+			form.Blur(name)
+		}
+	})
+}
+
+// View binds native submission/reset. Fields keep their standard input behavior.
+func (form *Form) View(request func(Data) ui.Request, decode func(ui.Result) Outcome, children ...ui.View) ui.View {
+	return ui.Element("form", children...).Attr("novalidate", "true").On("submit", func(event ui.Event) {
+		form.Submit(request, decode)
+	}).On("reset", func(event ui.Event) {
+		form.Reset()
+	})
+}

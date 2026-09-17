@@ -1,0 +1,191 @@
+package main
+
+import (
+	"sort"
+	"strings"
+	"{{module}}/app"
+)
+
+func catalog() []app.Note {
+	return []app.Note{
+		{
+			ID: "quiet-design", Title: "The art of making room", Author: "Mina Chen", Topic: "Design",
+			Minutes: 6, Summary: "What happens when we leave a little more space for people to think.",
+		},
+		{
+			ID: "small-systems", Title: "Small systems, lasting habits", Author: "Eli Park",
+			Topic: "Engineering", Minutes: 8,
+			Summary: "Build around a clear purpose, then give the edges room to change.",
+		},
+		{
+			ID: "better-questions", Title: "Start with a better question", Author: "Nora Wells",
+			Topic: "Research", Minutes: 5,
+			Summary: "A good question changes what we notice before it changes what we make.",
+		},
+		{
+			ID: "ordinary-words", Title: "In praise of ordinary words", Author: "Sam Rivera",
+			Topic: "Writing", Minutes: 4,
+			Summary: "Clear writing begins with the words we already use to understand one another.",
+		},
+		{
+			ID: "useful-defaults", Title: "The generosity of a useful default", Author: "Mina Chen",
+			Topic: "Design", Minutes: 7,
+			Summary: "The first choice a product makes can make everyone else's choices easier.",
+		},
+		{
+			ID: "slow-feedback", Title: "Shorten the distance to feedback", Author: "Eli Park",
+			Topic: "Engineering", Minutes: 9,
+			Summary: "Reliable systems make their state visible while there is still time to respond.",
+		},
+		{
+			ID: "field-journal", Title: "Keep a field journal", Author: "Nora Wells", Topic: "Research",
+			Minutes: 6, Summary: "Small observations become useful when we give them a place to accumulate.",
+		},
+		{
+			ID: "opening-lines", Title: "Leave the door open", Author: "Sam Rivera", Topic: "Writing",
+			Minutes: 3,
+			Summary: "An opening line is an invitation to stay, look closer and ask another question.",
+		},
+		{
+			ID: "familiar-paths", Title: "Familiar paths through new places", Author: "Mina Chen",
+			Topic: "Design", Minutes: 8,
+			Summary: "Make room for discovery while keeping the next step easy to recognize.",
+		},
+		{
+			ID: "careful-boundaries", Title: "A boundary is a promise", Author: "Eli Park",
+			Topic: "Engineering", Minutes: 10,
+			Summary: "Good interfaces say what belongs together and what each side can count on.",
+		},
+		{
+			ID: "listen-again", Title: "Listen for the second answer", Author: "Nora Wells",
+			Topic: "Research", Minutes: 7,
+			Summary: "Give a conversation enough time to move beyond its most practiced response.",
+		},
+		{
+			ID: "good-revisions", Title: "Make the next draft lighter", Author: "Sam Rivera",
+			Topic: "Writing", Minutes: 5,
+			Summary: "Revision can remove the work a reader would otherwise have to do.",
+		},
+		{
+			ID: "color-and-space", Title: "Let color do one job well", Author: "Mina Chen", Topic: "Design",
+			Minutes: 4, Summary: "A restrained palette makes the important moments easier to find.",
+		},
+		{
+			ID: "repairable-tools", Title: "Choose tools you can repair", Author: "Eli Park",
+			Topic: "Engineering", Minutes: 8,
+			Summary: "Understandable parts make change possible long after the first release.",
+		},
+		{
+			ID: "useful-patterns", Title: "Notice what repeats", Author: "Nora Wells", Topic: "Research",
+			Minutes: 6, Summary: "Patterns become convincing when we can also explain their exceptions.",
+		},
+		{
+			ID: "a-kind-note", Title: "Write the note you would need", Author: "Sam Rivera",
+			Topic: "Writing", Minutes: 4,
+			Summary: "Consider the person who will return to this decision a few months from now.",
+		},
+		{
+			ID: "thoughtful-motion", Title: "Movement with a reason", Author: "Mina Chen", Topic: "Design",
+			Minutes: 6, Summary: "A small transition can show where something came from and where it went.",
+		},
+		{
+			ID: "steady-progress", Title: "Prefer a steady rhythm", Author: "Eli Park", Topic: "Engineering",
+			Minutes: 7,
+			Summary: "Small complete changes create better places to pause, inspect and continue.",
+		},
+		{
+			ID: "shared-notes", Title: "Bring the notes to the table", Author: "Nora Wells",
+			Topic: "Research", Minutes: 5,
+			Summary: "Shared observations help a team disagree about the same thing.",
+		},
+		{
+			ID: "read-aloud", Title: "Read it aloud once", Author: "Sam Rivera", Topic: "Writing",
+			Minutes: 3, Summary: "Listen for the sentence that asks a reader to hold too much at once.",
+		},
+		{
+			ID: "room-to-return", Title: "Design a way back", Author: "Mina Chen", Topic: "Design",
+			Minutes: 9, Summary: "Exploration feels easier when the way home remains visible.",
+		},
+		{
+			ID: "name-the-work", Title: "Give the work a clear name", Author: "Eli Park",
+			Topic: "Engineering", Minutes: 5,
+			Summary: "A precise name makes ownership and responsibility easier to discuss.",
+		},
+		{
+			ID: "gentle-experiments", Title: "Try the smallest useful experiment", Author: "Nora Wells",
+			Topic: "Research", Minutes: 8,
+			Summary: "Learn enough to choose a direction without pretending every uncertainty is gone.",
+		},
+		{
+			ID: "last-paragraph", Title: "Know where to leave the reader", Author: "Sam Rivera",
+			Topic: "Writing", Minutes: 4,
+			Summary: "End when the idea is clear and the next step belongs to the person reading.",
+		},
+	}
+}
+
+func selectNotes(filter app.Filter) app.NotePage {
+	items := []app.Note{}
+	for _, note := range catalog() {
+		if filter.Topic != "" && note.Topic != filter.Topic {
+			continue
+		}
+		if filter.Search != "" &&
+			!strings.Contains(strings.ToLower(note.Title + " " + note.Author + " " + note.Topic + " " +
+				note.Summary), strings.ToLower(filter.Search)) {
+			continue
+		}
+		items = append(items, note)
+	}
+	if filter.Sort == "title" || filter.Sort == "reading" {
+		sort.Sort(&noteOrder{items: items, by: filter.Sort})
+	}
+	pages := (len(items) + 5) / 6
+	if pages == 0 {
+		pages = 1
+	}
+	page := filter.Page
+	if page < 1 {
+		page = 1
+	}
+	if page > pages {
+		page = pages
+	}
+	start, end := (page - 1) * 6, page * 6
+	if end > len(items) {
+		end = len(items)
+	}
+	return app.NotePage{Notes: items[start:end], Total: len(items), Page: page, Pages: pages}
+}
+
+func findNote(id string) (app.Note, bool) {
+	for _, note := range catalog() {
+		if note.ID == id {
+			note.Body = note.Summary +
+				"\n\nStart with one ordinary moment. Notice what feels clear, what asks for effort, and what you find yourself doing twice. A useful change often begins with paying closer attention to that small experience.\n\nWrite down what you expect to happen. Make one change that you can explain to another person. Then come back to the same moment and see whether it became easier. Keep the parts that helped; give the rest another look.\n\nThe value of a note is the conversation it can start. Leave a little room for the next person to add what they have seen."
+			return note, true
+		}
+	}
+	return app.Note{}, false
+}
+
+// sort.Interface retains the concrete record type throughout ordering.
+type noteOrder struct {
+	items []app.Note
+	by string
+}
+
+func (order *noteOrder) Len() int {
+	return len(order.items)
+}
+
+func (order *noteOrder) Swap(i int, j int) {
+	order.items[i], order.items[j] = order.items[j], order.items[i]
+}
+
+func (order *noteOrder) Less(i int, j int) bool {
+	if order.by == "reading" && order.items[i].Minutes != order.items[j].Minutes {
+		return order.items[i].Minutes < order.items[j].Minutes
+	}
+	return order.items[i].Title < order.items[j].Title
+}

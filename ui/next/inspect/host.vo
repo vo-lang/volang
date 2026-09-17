@@ -1,0 +1,54 @@
+package inspect
+
+import (
+	"encoding/json"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/host"
+)
+
+type inspectionEnvelope struct {
+	Version int `json:"version"`
+	Request string `json:"request"`
+	Snapshot Snapshot `json:"snapshot"`
+	Error string `json:"error"`
+}
+
+// Run is an explicit development entry point. The browser must install
+// createInspectionServices; normal host.Run has no inspection transport.
+// Requests are delivered through the root's ordinary serialized task queue.
+func Run(view ui.View) {
+	root, session := NewRoot(view, Options{})
+	defer session.Close()
+	host.RunRoot(root)
+}
+
+// NewRoot attaches optional root-owned inspection services and an observer. The caller
+// owns both lifetimes and may prepare the fresh root before its first render.
+func NewRoot(view ui.View, options Options) (*ui.Root, *Session) {
+	root := ui.NewRoot(view)
+	session := New(root, options)
+	root.OnMount(func() func() {
+		if session.closed {
+			return nil
+		}
+		task := root.Subscribe(ui.Request{Service: "ui.inspect.request"}, func(result ui.Result) {
+			if result.Error != "" {
+				return
+			}
+			bytes, err := json.Marshal(inspectionEnvelope{
+				Version: 1, Request: result.Value, Snapshot: session.Snapshot(),
+			})
+			if err != nil || len(bytes) > 4 * 1024 * 1024 {
+				// A diagnostic capture failure leaves the inspected application live.
+				bytes, _ = json.Marshal(inspectionEnvelope{
+					Version: 1, Request: result.Value,
+					Error: "The inspection snapshot could not fit its transport budget.",
+				})
+			}
+			root.Start(ui.Request{Service: "ui.inspect.publish", Value: string(bytes)}, func(ui.Result) {})
+		})
+		session.service = task
+		return task.Cancel
+	})
+	return root, session
+}

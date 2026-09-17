@@ -1,0 +1,75 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/host"
+)
+
+var appType = ui.Define("interaction.App")
+
+var counterType = ui.Define("interaction.Counter")
+
+type CounterProps struct {
+	Name string
+}
+
+func Counter(props CounterProps) ui.View {
+	return ui.Component(counterType, func(scope *ui.Scope) ui.View {
+		count := ui.Int(scope, "count", 0)
+		return ui.Element("button", ui.Text(props.Name + ": " + fmt.Sprint(count.Get()))).Attr("type", "button").Attr("data-counter", props.Name).On("click", func(event ui.Event) {
+			count.Set(count.Get() + 1)
+		})
+	}).Key(props.Name)
+}
+
+func App(scope *ui.Scope) ui.View {
+	name := ui.String(scope, "name", "")
+	submitted := ui.String(scope, "submitted", "")
+	reverse := ui.Bool(scope, "reverse", false)
+	visible := ui.Bool(scope, "visible", true)
+	ready := ui.Bool(scope, "ready", false)
+	ui.Effect(scope, "mounted", func() func() {
+		ready.Set(true)
+		return nil
+	})
+	status := "Starting…"
+	if ready.Get() {
+		status = "Ready to explore"
+	}
+	header := ui.Element("header", ui.Element("p", ui.Text("VOLANG UI / REWRITE LAB")).Attr("class", "eyebrow"), ui.Element("h1", ui.Text("Small changes. Stable state.")), ui.Element("p", ui.Text("Try typing, reordering, and updating each counter.")), ui.Element("p", ui.Text(status)).Attr("data-lifecycle", "").Attr("role", "status"))
+	input := ui.Element("input").Attr("id", "name").Attr("name", "name").Attr("autocomplete", "name").Attr("value", name.Get()).On("input", func(event ui.Event) {
+		name.Set(event.Value)
+	})
+	form := ui.Element("form", ui.Element("label", ui.Text("Your name")).Attr("for", "name"), input, ui.Element("button", ui.Text("Submit")).Attr("type", "submit")).On("submit", func(event ui.Event) {
+		submitted.Set(name.Get())
+	})
+	inputCard := ui.Element("section", ui.Element("h2", ui.Text("Native input")), form, ui.Element("p", ui.Text("Hello, " +
+		name.Get())).Attr("data-greeting", ""), ui.Element("output", ui.Text(submitted.Get())).Attr("data-submitted", "").Attr("aria-live", "polite")).Attr("class", "card")
+	rows := []ui.View{Counter(CounterProps{Name: "Alpha"})}
+	if visible.Get() {
+		rows = append(rows, Counter(CounterProps{Name: "Beta"}))
+	}
+	if reverse.Get() && len(rows) == 2 {
+		rows[0], rows[1] = rows[1], rows[0]
+	}
+	actions := ui.Element("div", ui.Element("button", ui.Text("Reverse order")).Attr("data-reverse", "").On("click", func(event ui.Event) {
+		reverse.Set(!reverse.Get())
+	}), ui.Element("button", ui.Text("Toggle Beta")).Attr("data-toggle", "").On("click", func(event ui.Event) {
+		visible.Set(!visible.Get())
+	})).Attr("class", "actions")
+	counterCard := ui.Element("section", ui.Element("h2", ui.Text("Independent components")), ui.Element("p", ui.Text("Each counter keeps its own state when the list moves.")), ui.Element("div", rows...).Attr("data-counters", "").Attr("class", "counters"), actions).Attr("class", "card")
+	return ui.Element("main", header, inputCard, counterCard, Recovery(), NativeElements(), EventExamples(), FocusExample(), NativeDefaults(), ControlledChoices(), MixedChoices(), VirtualLibrary(), MeasurementExample(), PointerExample(), NativeTextExample())
+}
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--ssr" {
+		root := ui.NewRoot(ui.Component(appType, App))
+		root.Flush()
+		fmt.Print(root.HTML())
+		root.Close()
+		return
+	}
+	host.Run(ui.Component(appType, App))
+}

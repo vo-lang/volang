@@ -46,7 +46,9 @@ impl EngineExtension for UiExtension {
                     .is_ok_and(|key| key.package() == SERVER)
             });
         if links_server {
-            return Err(format!("browser AOT cannot include {SERVER} authority"));
+            return Err(format!(
+                "browser bytecode cannot include {SERVER} authority"
+            ));
         }
         Ok(())
     }

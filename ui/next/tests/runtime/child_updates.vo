@@ -1,0 +1,67 @@
+package main
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func childUpdateContracts() {
+	for _, keyed := range []bool{false, true} {
+		var value *ui.IntState
+		var replace *ui.BoolState
+		captured := -1
+		root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+			value = ui.Int(scope, "value", 0)
+			replace = ui.Bool(scope, "replace", false)
+			current := value.Get()
+			first := ui.Element("button", ui.Text(fmt.Sprint(current))).Attr("data-name", "first").On("click", func(ui.Event) {
+				captured = current
+			})
+			kind := "button"
+			if replace.Get() {
+				kind = "span"
+			}
+			second := ui.Element(kind, ui.Text(fmt.Sprint(current * 2))).Attr("data-name", "second")
+			if keyed {
+				first, second = first.Key("first"), second.Key("second")
+			}
+			return ui.Element("main", first, second)
+		}))
+		initial := flush(root)
+		first, second := target(initial, "first"), target(initial, "second")
+		value.Set(4)
+		updated := flush(root)
+		require(changedText(updated, "4") && changedText(updated, "8"), "retained siblings did not both update")
+		for _, mutation := range updated.Mutations {
+			require(mutation.Op != "create" && mutation.Op != "remove" && mutation.Op != "insert", "retained siblings changed identity or order")
+		}
+		require(root.Dispatch(ui.Event{Kind: "click", Target: first, Sequence: 1}) && captured == 4, "retained child used an earlier render's handler")
+		replace.Set(true)
+		replacement := flush(root)
+		require(target(replacement, "second") != second, "changed child type retained the old identity")
+		require(root.Dispatch(ui.Event{Kind: "click", Target: first, Sequence: 2}), "replacing a sibling removed the retained handler")
+		root.Close()
+	}
+	// A shape-preserving update must still reject duplicate keys. Include empty
+	// descriptions because normalization must not hide their source key check.
+	for _, empty := range []bool{false, true} {
+		var duplicate *ui.BoolState
+		root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+			duplicate = ui.Bool(scope, "duplicate", false)
+			first, second := ui.Element("span"), ui.Element("span")
+			if empty {
+				first, second = ui.View{}, ui.View{}
+			}
+			if duplicate.Get() {
+				first, second = first.Key("duplicate"), second.Key("duplicate")
+			}
+			return ui.Element("main", first, second)
+		}))
+		flush(root)
+		duplicate.Set(true)
+		expectPanic(func() {
+			flush(root)
+		}, "duplicate sibling key")
+		root.Close()
+	}
+}

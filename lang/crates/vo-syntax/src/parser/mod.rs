@@ -1278,6 +1278,21 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Retain a selector's receiver when the member is still being typed. The
+    /// emitted diagnostic keeps the recovered tree out of normal compilation.
+    fn parse_selector_ident(&mut self, start: vo_common::span::BytePos) -> ParseResult<Ident> {
+        if self.at_eof() || self.at_any(&[TokenKind::RBrace, TokenKind::Semicolon]) {
+            self.error_expected("identifier");
+            Ok(Ident {
+                id: self.alloc_ident_id(),
+                symbol: self.interner.intern(""),
+                span: Span::new(start, start),
+            })
+        } else {
+            self.parse_ident()
+        }
+    }
+
     pub(crate) fn parse_ident_list(&mut self) -> ParseResult<Vec<Ident>> {
         let mut idents = vec![self.parse_ident()?];
         while self.eat(TokenKind::Comma) {
@@ -1334,10 +1349,17 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let end_token = self.expect(TokenKind::RBrace)?;
+        let end = if self.at_eof() {
+            // Preserve the recovered body, including local scopes, at an
+            // unfinished editor buffer. The missing brace remains an error.
+            self.error_expected("}");
+            self.current.span.end
+        } else {
+            self.expect(TokenKind::RBrace)?.span.end
+        };
         Ok(Block {
             stmts,
-            span: Span::new(start, end_token.span.end),
+            span: Span::new(start, end),
         })
     }
 }

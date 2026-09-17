@@ -1,0 +1,28 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func styleContracts() {
+	plain := ui.Element("article", ui.Text("Hello"))
+	scoped := plain.StyleScope("library-card-2").Class("card")
+	root := ui.NewRoot(ui.Fragment(plain, scoped))
+	flush(root)
+	html := root.HTML()
+	require(strings.Count(html, "data-vui-scope=") == 1, "style scope mutated the original view")
+	require(strings.Contains(html, `data-vui-scope="library-card-2"`), "style scope missing from server HTML")
+	require(strings.Count(html, "<article") == 2, "style scope introduced a wrapper")
+	root.Close()
+	for _, name := range []string{
+		"", "Upper", "1card", "has space", "中文", "card\"", strings.Repeat("a", 97),
+	} {
+		expectPanic(func() {
+			plain.StyleScope(name)
+		}, "style scope")
+	}
+	expectPanic(func() {
+		ui.Fragment(plain).StyleScope("card")
+	}, "attributes require an element")
+}

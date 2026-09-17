@@ -1,0 +1,130 @@
+package main
+
+import (
+	"fmt"
+	"math"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/collection"
+)
+
+func variableContracts() {
+	source := []collection.Item{}
+	for row := 0; row < 37; row++ {
+		source = append(source, collection.Item{Key: fmt.Sprint(row), Label: fmt.Sprint("Row ", row)})
+	}
+	items := collection.New(source)
+	var window collection.VariableWindow
+	var observe func(ui.Viewport)
+	var snapshot *ui.Store
+	var pinned *ui.StringState
+	var ref *ui.ElementRef
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		snapshot = ui.State(scope, "items", func() any {
+			return items
+		})
+		pinned = ui.String(scope, "pin", "")
+		ref = ui.Ref(scope, "viewport")
+		window, observe = collection.Variable(scope, "variable", collection.VariableOptions{
+			Items: snapshot.Get().(*collection.Items), Estimate: 7.25, Height: 53, Overscan: 2, Ref: ref,
+			PinnedKey: pinned.Get(),
+		})
+		rows := []ui.View{}
+		for _, row := range window.Rows {
+			rows = append(rows, ui.Element("div", ui.Text(fmt.Sprint(row.Top))).Key(row.Key).Attr("data-name", row.Key))
+		}
+		return ui.Element("div", rows...).Ref(ref)
+	}))
+	first := flush(root)
+	require(window.Total == 37 * 7.25 && len(window.Rows) == 10, "variable SSR estimate differs")
+	original := target(first, "0")
+	observe(ui.Viewport{Width: 200, Height: 53})
+	flush(root)
+	window.Measure("0", ui.Size{Inline: 200.25, Block: 27.25})
+	flush(root)
+	require(window.Total == 37 * 7.25 + 20, "fractional row width lost its measured height")
+	window.Measure("0", ui.Size{Inline: 200, Block: 7.25})
+	flush(root)
+	heights := make([]float64, 37)
+	for index := range heights {
+		heights[index] = 7.25
+	}
+	for sample := 0; sample < 45; sample++ {
+		row := (sample * 17) % 37
+		height := float64((sample * 13) % 73) / 3 + 1
+		window.Measure(items.At(row).Key, ui.Size{Inline: 200, Block: height})
+		heights[row] = height
+		total := 0.0
+		for _, value := range heights {
+			total += value
+		}
+		position := float64(sample * 19 % int(total)) + .125
+		observe(ui.Viewport{Width: 200, Height: 53, Top: position})
+		flush(root)
+		require(math.Abs(window.Total - total) < .000001, "measured total differs from linear reference")
+		for _, visible := range window.Rows {
+			sum := 0.0
+			for index := 0; index < visible.Index; index++ {
+				sum += heights[index]
+			}
+			require(math.Abs(visible.Top - sum) < .000001 && visible.Key == items.At(visible.Index).Key, "measured row differs from linear reference")
+		}
+	}
+	observe(ui.Viewport{Width: 200, Height: 53, Top: 0})
+	flush(root)
+	pinned.Set("0")
+	flush(root)
+	observe(ui.Viewport{Width: 200, Height: 53, Top: 150})
+	flush(root)
+	require(window.Rows[0].Key == "0" && len(window.Rows) < 37, "pinned row escaped bounded window")
+	window.Measure("removed", ui.Size{Inline: 200, Block: 100})
+	require(len(flush(root).Mutations) == 0, "removed measurement invalidated layout")
+	window.Measure("0", ui.Size{})
+	require(len(flush(root).Mutations) == 0, "hidden measurement replaced row height")
+	expectPanic(func() {
+		window.Measure("0", ui.Size{Inline: 200, Block: math.NaN()})
+	}, "invalid measured row size")
+	expectPanic(func() {
+		observe(ui.Viewport{Width: 200, Height: 53, Top: math.Inf(1)})
+	}, "invalid viewport")
+	for attempt := 0; attempt < 2; attempt++ {
+		expectPanic(func() {
+			window.Measure("0", ui.Size{Inline: 200, Block: 8000000})
+		}, "invalid measured height")
+	}
+	snapshot.Update(func(any) any {
+		return collection.New([]collection.Item{})
+	})
+	flush(root)
+	flush(root)
+	require(len(window.Rows) == 0 && window.Total == 0, "empty collection retained rows or extent")
+	require(!root.Dispatch(ui.Event{Target: original, Kind: "size", Sequence: 1, Value: `{}`}), "removed row retained a size listener")
+	root.Close()
+	expectPanic(func() {
+		window.Measure("0", ui.Size{Inline: 200, Block: 10})
+	}, "disposed")
+	expectPanic(func() {
+		var empty collection.VariableWindow
+		empty.Measure("0", ui.Size{})
+	}, "initialized variable window")
+	for _, estimate := range []float64{0, -1, math.NaN(), math.Inf(1), 8000001} {
+		expectPanic(func() {
+			invalid := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+				collection.Variable(scope, "invalid", collection.VariableOptions{
+					Items: items, Estimate: estimate, Height: 53, Ref: ui.Ref(scope, "ref"),
+				})
+				return ui.Text("")
+			}))
+			invalid.Flush()
+		}, "invalid variable-row")
+	}
+	expectPanic(func() {
+		invalid := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+			current, _ := collection.Variable(scope, "render-write", collection.VariableOptions{
+				Items: items, Estimate: 10, Height: 53, Ref: ui.Ref(scope, "ref"),
+			})
+			current.Measure("0", ui.Size{Inline: 200, Block: 10})
+			return ui.Text("")
+		}))
+		invalid.Flush()
+	}, "cannot change during render")
+}

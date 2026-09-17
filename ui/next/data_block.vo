@@ -1,0 +1,30 @@
+package ui
+
+import (
+	"encoding/json"
+	"strings"
+)
+
+// DataBlock embeds a JSON value as native document data. It supports
+// application/json and application/ld+json, preserves ordinary keyed identity,
+// and never starts a script or fetch. The snapshot escapes HTML parser tokens.
+func DataBlock(mediaType string, value any) View {
+	mediaType = strings.ToLower(mediaType)
+	if !dataBlockType(mediaType) {
+		panic("ui: DataBlock requires application/json or application/ld+json")
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		panic("ui: DataBlock JSON: " + err.Error())
+	}
+	// RawMessage may retain JSON formatting whitespace. Match HTML's newline
+	// normalization; CR characters inside JSON strings are already escaped.
+	text := strings.ReplaceAll(string(encoded), "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return Element("script", Text(text)).Attr("type", mediaType)
+}
+
+func dataBlockType(value string) bool {
+	value = strings.ToLower(value)
+	return value == "application/json" || value == "application/ld+json"
+}

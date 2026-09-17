@@ -45,13 +45,17 @@ func main() {
 	assert(a == 1, "multi return a")
 	assert(b == "hello", "multi return b")
 	// Test 7: IIFE in expression context
-	arr := []int{func() int {
-		return 1
-	}(), func() int {
-		return 2
-	}(), func() int {
-		return 3
-	}()}
+	arr := []int{
+		func() int {
+			return 1
+		}(),
+		func() int {
+			return 2
+		}(),
+		func() int {
+			return 3
+		}(),
+	}
 	assert(arr[0] == 1, "arr[0]")
 	assert(arr[1] == 2, "arr[1]")
 	assert(arr[2] == 3, "arr[2]")

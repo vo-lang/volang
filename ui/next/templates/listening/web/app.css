@@ -1,0 +1,17 @@
+* { box-sizing: border-box; }
+body { margin: 0; background: #edece5; color: #233d33; font-family: ui-sans-serif, system-ui, sans-serif; }
+.listening-room { max-width: 720px; min-height: 80vh; margin: 7vh auto; padding: clamp(24px,6vw,64px); border-radius: 24px; background: var(--vui-bg); color: var(--vui-ink); }
+@scope ([data-vui-scope="listening-room"]) to ([data-vui-scope]) {
+  h1 { font: 500 clamp(36px,6vw,64px)/1.08 Georgia,serif; letter-spacing: -.04em; margin: 24px 0; }
+  .eyebrow { font-size: 11px; letter-spacing: .18em; font-weight: 750; }
+  p { line-height: 1.7; }
+  figure { margin: 36px 0; padding: 24px; border: 1px solid var(--vui-border); border-radius: 16px; }
+  figcaption { margin-bottom: 20px; font-size: 18px; font-weight: 650; }
+  audio { display: block; width: 100%; }
+  a { color: inherit; text-underline-offset: 4px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 28px 0; }
+  textarea { min-height: 100px; }
+}
+#status { text-align: center; }
+#status:empty { display: none; }
+@media (max-width: 500px) { .listening-room { margin: 0; border-radius: 0; min-height: 100vh; } }

@@ -1,0 +1,76 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/host"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var appType = ui.Define("styling.App")
+
+var cardType = ui.Define("styling.Card")
+
+func Card(id string, nested bool) ui.View {
+	return ui.Component(cardType, func(scope *ui.Scope) ui.View {
+		count := ui.Int(scope, "count", 0)
+		child := ui.Fragment()
+		if nested {
+			child = ui.Element("aside", ui.Element("h3", ui.Text("A guest component")).Class("title"), ui.Element("p", ui.Text("My own details, with a shared theme.")).Class("detail"), ui.Element("span", ui.Text("Theme inherited")).Class("token")).StyleScope("example-guest").Class("detail").Attr("id", "guest")
+		}
+		return ui.Element("article", ui.Element("h2", ui.Text("A space for " + id)).Class("title"), ui.Element("p", ui.Text("A reusable card with its own style boundary.")).Class("detail"), ui.Element("label", ui.Text("A small note"), ui.Element("input").DefaultValue("Make room for a good idea.").Attr("aria-label", id +
+			" note")).Class("note"), kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				count.Set(count.Get() + 1)
+			},
+		}, ui.Text("Save " + id)).Class("action"), ui.Element("output", ui.Text(strconv.Itoa(count.Get()))).Attr("aria-label", id +
+			" saves"), child).StyleScope("example-card").Class("card").Attr("id", id)
+	}).Key(id)
+}
+
+func App(scope *ui.Scope) ui.View {
+	dark := ui.Bool(scope, "dark", false)
+	reversed := ui.Bool(scope, "reversed", false)
+	rtl := ui.Bool(scope, "rtl", false)
+	first, second := Card("day", true), Card("night", false)
+	if reversed.Get() {
+		first, second = second, first
+	}
+	theme, direction := "light", "ltr"
+	if dark.Get() {
+		theme = "dark"
+	}
+	if rtl.Get() {
+		direction = "rtl"
+	}
+	return ui.Element("main", ui.Element("header", ui.Element("p", ui.Text("VOLANG UI / DESIGN")).Class("eyebrow"), ui.Element("h1", ui.Text("Room to be yourself.")), ui.Element("p", ui.Text("Shared building blocks. Independent character.")).Class("intro")), ui.Element("div", kit.Button(kit.ButtonProps{
+		Variant: "secondary",
+		OnPress: func() {
+			dark.Set(!dark.Get())
+		},
+	}, ui.Text("Change theme")), kit.Button(kit.ButtonProps{
+		Variant: "secondary",
+		OnPress: func() {
+			reversed.Set(!reversed.Get())
+		},
+	}, ui.Text("Swap cards")), kit.Button(kit.ButtonProps{
+		Variant: "secondary",
+		OnPress: func() {
+			rtl.Set(!rtl.Get())
+		},
+	}, ui.Text("Change direction"))).Class("controls"), ui.Element("div", first, second).Class("cards"), ui.Element("section", ui.Element("h2", ui.Text("Beyond the cards")).Class("title"), ui.Element("p", ui.Text("These matching class names keep the page's own appearance.")).Class("detail")).Attr("id", "outside")).Class("vui", "style-demo").Attr("data-theme", theme).Attr("dir", direction)
+}
+
+func main() {
+	view := ui.Component(appType, App)
+	if len(os.Args) > 1 && os.Args[1] == "--ssr" {
+		root := ui.NewRoot(view)
+		root.Flush()
+		fmt.Print(root.HTML())
+		root.Close()
+		return
+	}
+	host.Run(view)
+}

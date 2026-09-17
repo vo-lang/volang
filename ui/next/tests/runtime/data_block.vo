@@ -1,0 +1,86 @@
+package main
+
+import (
+	"encoding/json"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func dataBlockContracts() {
+	value := map[string]string{"text": "</script><!--<script> & 中文\r\n\x00"}
+	view := ui.DataBlock("APPLICATION/LD+JSON", value).Attr("id", "metadata")
+	value["text"] = "later mutation"
+	root := ui.NewRoot(view)
+	first := flush(root)
+	html := root.HTML()
+	require(strings.Contains(html, "type=\"application/ld+json\"") &&
+		strings.Contains(html, "data-vo-text=\""), "JSON data block lost native type or text identity")
+	require(!strings.Contains(html, "<!--vo:") && !strings.Contains(html, "later mutation"), "JSON data block leaked markers or retained mutable input")
+	require(strings.Count(html, "</script>") == 1 && strings.Contains(html, "\\u003c/script\\u003e"), "JSON data block escaped text incorrectly")
+	require(len(first.Mutations) > 0, "data block fixture did not mount")
+	root.Close()
+	for _, kind := range []string{"application/json", "application/ld+json"} {
+		for _, value := range []any{
+			nil, true, 1.25, "中文", []string{"one", "two"}, json.RawMessage(`{"raw":"</script>"}`),
+			json.RawMessage("{\r\n\"raw\":\"A\\rB</script>\"\r}"),
+		} {
+			root := ui.NewRoot(ui.DataBlock(kind, value))
+			flush(root)
+			require(strings.Count(root.HTML(), "</script>") == 1, "data block payload changed document structure")
+			require(!strings.Contains(root.HTML(), "\r"), "DataBlock retained CR formatting from RawMessage")
+			root.Close()
+		}
+	}
+	expectPanic(func() {
+		ui.DataBlock("text/javascript", nil)
+	}, "application/json")
+	expectPanic(func() {
+		ui.DataBlock("application/json", func() {})
+	}, "DataBlock JSON")
+	for _, view := range []ui.View{
+		ui.Element("script", ui.Text("{}")), ui.Element("script", ui.Text("{}")).Attr("type", "module"),
+		ui.DataBlock("application/json", nil).Attr("src", "/data.json"),
+		ui.Element("svg", ui.DataBlock("application/json", nil)),
+	} {
+		expectPanic(func() {
+			ui.NewRoot(view).Flush()
+		}, "inline HTML JSON data block")
+	}
+	for _, value := range []string{"", "undefined", "{", `"<"`, "{}\r\n"} {
+		expectPanic(func() {
+			ui.NewRoot(ui.Element("script", ui.Text(value)).Attr("type", "application/json")).Flush()
+		}, "valid JSON")
+	}
+	expectPanic(func() {
+		ui.NewRoot(ui.Element("script").Attr("type", "application/json")).Flush()
+	}, "one direct Text child")
+	for _, kind := range []string{"SCRIPT", "Style", "DIV", "a:b", "1div", "a b", "custom_thing"} {
+		expectPanic(func() {
+			ui.NewRoot(ui.Element(kind)).Flush()
+		}, "invalid element name")
+	}
+	for _, kind := range []string{"template", "noscript", "xmp", "noembed", "noframes", "plaintext"} {
+		expectPanic(func() {
+			ui.NewRoot(ui.Element(kind)).Flush()
+		}, "dedicated HTML content binding")
+	}
+	expectPanic(func() {
+		ui.NewRoot(ui.Element("iframe", ui.Text("fallback"))).Flush()
+	}, "cannot have managed children")
+	root = ui.NewRoot(ui.Element("iframe").Attr("srcdoc", "<p>Embedded & content</p>").Attr("title", "Embedded document"))
+	flush(root)
+	require(strings.Contains(root.HTML(), "srcdoc=\"&lt;p&gt;Embedded &amp; content&lt;/p&gt;\"") &&
+		strings.Contains(root.HTML(), "</iframe>"), "iframe source document lost native representation")
+	root.Close()
+	var text *ui.StringState
+	root = ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		text = ui.String(scope, "data", "first")
+		return ui.DataBlock("application/json", map[string]string{"text": text.Get()}).Key("data")
+	}))
+	flush(root)
+	text.Set("second </script>")
+	batch := flush(root)
+	require(len(batch.Mutations) == 1 && batch.Mutations[0].Op == "text", "data block update replaced its owner")
+	require(strings.Contains(root.HTML(), "second \\u003c/script\\u003e"), "updated data block did not serialize")
+	root.Close()
+}

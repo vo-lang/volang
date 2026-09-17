@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::vfs::{find_module_metadata_abs, Resolver, VfsPackage};
-use vo_common::diagnostics::DiagnosticSink;
+use vo_common::diagnostics::{DiagnosticEmitter, DiagnosticSink};
 use vo_common::source::SourceMap;
 use vo_common::symbol::SymbolInterner;
 use vo_common::vfs::{
@@ -21,6 +21,8 @@ use vo_syntax::parser;
 
 use crate::check::Checker;
 use crate::objects::{PackageKey, TCObjects, TypeKey};
+
+pub mod editor;
 
 /// Borrowed metadata for one imported package in dependency order.
 pub type ImportedPackageRef<'a> = (&'a str, PackageKey, &'a crate::check::TypeInfo, &'a [File]);
@@ -93,27 +95,26 @@ impl std::fmt::Debug for AnalysisError {
 impl std::fmt::Display for AnalysisError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AnalysisError::Parse(diags, source_map) => {
-                writeln!(f, "parse error: {} error(s)", diags.error_count())?;
-                for diag in diags.iter() {
-                    if let Some(label) = diag.labels.first() {
-                        let pos = source_map.format_span(label.span);
-                        writeln!(f, "  - {} at {}", diag.message, pos)?;
-                    } else {
-                        writeln!(f, "  - {}", diag.message)?;
-                    }
+            AnalysisError::Parse(diags, source_map) | AnalysisError::Check(diags, source_map) => {
+                let stage = if matches!(self, AnalysisError::Parse(..)) {
+                    "parse error"
+                } else {
+                    "type check failed"
+                };
+                write!(f, "{stage}: {} error(s)", diags.error_count())?;
+                if diags.has_warnings() {
+                    write!(f, ", {} warning(s)", diags.warning_count())?;
                 }
-                Ok(())
-            }
-            AnalysisError::Check(diags, source_map) => {
-                writeln!(f, "type check failed: {} error(s)", diags.error_count())?;
-                for diag in diags.iter() {
-                    if let Some(label) = diag.labels.first() {
-                        let pos = source_map.format_span(label.span);
-                        writeln!(f, "  - {} at {}", diag.message, pos)?;
-                    } else {
-                        writeln!(f, "  - {}", diag.message)?;
-                    }
+                writeln!(f)?;
+                let emitter = DiagnosticEmitter::new(source_map);
+                // Show actionable failures before dependency warnings without
+                // changing the diagnostic stream consumed by analysis clients.
+                for diag in diags
+                    .iter()
+                    .filter(|diag| diag.is_error())
+                    .chain(diags.iter().filter(|diag| !diag.is_error()))
+                {
+                    writeln!(f, "  - {}", emitter.format_simple(diag))?;
                 }
                 Ok(())
             }
@@ -229,9 +230,9 @@ impl Project {
         }
         for (index, package) in packages.iter().enumerate() {
             for dependency in tc_objs.pkgs[package.key].imports() {
-                if !package_indices
+                if package_indices
                     .get(dependency)
-                    .is_some_and(|&position| position < index)
+                    .is_none_or(|&position| position >= index)
                 {
                     return Err(format!(
                         "missing or out-of-order dependency of {}",
@@ -338,6 +339,20 @@ struct ProjectState {
 }
 
 impl ProjectState {
+    fn new() -> Self {
+        Self {
+            tc_objs: Some(TCObjects::new()),
+            interner: SymbolInterner::new(),
+            source_map: SourceMap::new(),
+            diagnostics: DiagnosticSink::new(),
+            id_state: parser::IdState::default(),
+            cache: HashMap::new(),
+            in_progress: HashSet::new(),
+            checked_packages: Vec::new(),
+            extensions: Vec::new(),
+        }
+    }
+
     fn objects(&mut self) -> &mut TCObjects {
         self.tc_objs.as_mut().unwrap()
     }
@@ -348,6 +363,23 @@ impl ProjectState {
         files: &[File],
         trace: bool,
     ) -> Result<crate::check::TypeInfo, AnalysisError> {
+        let (type_info, passed) = self.check_package_facts(key, files, trace);
+        if !passed {
+            return Err(AnalysisError::Check(
+                std::mem::take(&mut self.diagnostics),
+                std::mem::take(&mut self.source_map),
+            ));
+        }
+        Ok(type_info)
+    }
+
+    /// Editor snapshots retain partial facts in their own non-executable type.
+    fn check_package_facts(
+        &mut self,
+        key: PackageKey,
+        files: &[File],
+        trace: bool,
+    ) -> (crate::check::TypeInfo, bool) {
         let mut checker = Checker::with_objects(
             key,
             std::mem::take(&mut self.interner),
@@ -358,13 +390,7 @@ impl ProjectState {
         self.tc_objs = Some(checker.tc_objs);
         self.interner = checker.interner;
         self.diagnostics.extend(checker.diagnostics.into_inner());
-        if result.is_err() {
-            return Err(AnalysisError::Check(
-                std::mem::take(&mut self.diagnostics),
-                std::mem::take(&mut self.source_map),
-            ));
-        }
-        Ok(checker.result)
+        (checker.result, result.is_ok())
     }
 }
 
@@ -436,17 +462,7 @@ fn analyze_project_with_identity_and_options<R: Resolver>(
         path: main_package_path,
         abi_path: main_package_abi_path,
     } = identity.unwrap_or_else(PackageIdentity::ad_hoc);
-    let mut state = ProjectState {
-        tc_objs: Some(TCObjects::new()),
-        interner: SymbolInterner::new(),
-        source_map: SourceMap::new(),
-        diagnostics: DiagnosticSink::new(),
-        id_state: parser::IdState::default(),
-        cache: HashMap::new(),
-        in_progress: HashSet::new(),
-        checked_packages: Vec::new(),
-        extensions: Vec::new(),
-    };
+    let mut state = ProjectState::new();
     let main_pkg_key = state
         .objects()
         .new_package(main_package_path.clone(), main_package_abi_path);
@@ -579,6 +595,23 @@ fn parse_single_file(
     state: &mut ProjectState,
     id_state: parser::IdState,
 ) -> Result<(File, parser::IdState), AnalysisError> {
+    let (file, ids, passed) = parse_source(path, content, state, id_state)?;
+    if !passed {
+        return Err(AnalysisError::Parse(
+            std::mem::take(&mut state.diagnostics),
+            std::mem::take(&mut state.source_map),
+        ));
+    }
+    Ok((file, ids))
+}
+
+/// Parse once, retaining recovered syntax for opt-in editor analysis.
+fn parse_source(
+    path: &Path,
+    content: &str,
+    state: &mut ProjectState,
+    id_state: parser::IdState,
+) -> Result<(File, parser::IdState, bool), AnalysisError> {
     #[cfg(feature = "compiler-profile")]
     vo_common::compiler_profile::source(content.len());
     let file_name = path
@@ -609,13 +642,7 @@ fn parse_single_file(
 
     let failed = diags.has_errors();
     state.diagnostics.extend(diags);
-    if failed {
-        return Err(AnalysisError::Parse(
-            std::mem::take(&mut state.diagnostics),
-            std::mem::take(&mut state.source_map),
-        ));
-    }
-    Ok((file, new_id_state))
+    Ok((file, new_id_state, !failed))
 }
 
 /// Parse source files from a FileSet.
@@ -653,8 +680,9 @@ fn parse_vfs_package(
         )
     });
     for vfs_file in files {
+        let source_path = vfs_pkg.fs_path().join(&vfs_file.path);
         let (file, new_id_state) =
-            parse_single_file(&vfs_file.path, &vfs_file.content, state, id_state)?;
+            parse_single_file(&source_path, &vfs_file.content, state, id_state)?;
         id_state = new_id_state;
         parsed_files.push(file);
     }

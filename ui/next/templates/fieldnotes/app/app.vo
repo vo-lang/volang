@@ -1,0 +1,277 @@
+package app
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/data"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/navigation"
+)
+
+var appType = ui.Define("fieldnotes.App")
+
+var environmentKey = ui.NewContext("fieldnotes.environment", nil)
+
+type submissionSeed struct {
+	Value *forms.Submission
+}
+
+type environment struct {
+	Submission *forms.Submission
+	MissingNote string
+	Router *navigation.Router
+	Cache *data.Client
+	Base string
+}
+
+var routes = navigation.NewRoutes([]navigation.Route{
+	{
+		ID: "shell", Path: "", Render: Layout,
+		Children: []navigation.Route{
+			{
+				ID: "library-layout", Path: "library", Render: LibraryLayout,
+				Children: []navigation.Route{
+					{ID: "library", Path: "", Render: Library}, {ID: "note", Path: ":id", Render: Detail},
+				},
+			},
+			{ID: "preferences", Path: "preferences", Render: Settings},
+			{ID: "missing", Path: "*rest", Render: Missing},
+		},
+	},
+})
+
+func View(encoded string) ui.View {
+	initial := Startup{Location: "/library", BasePath: "/"}
+	if encoded != "" {
+		if err := json.Unmarshal([]byte(encoded), &initial); err != nil {
+			panic(err.Error())
+		}
+	}
+	var values []data.InitialValue
+	if initial.Data != "" {
+		var err error
+		values, err = data.DecodeInitial(initial.Data)
+		if err != nil {
+			panic(err.Error())
+		}
+	}
+	return ui.Component(appType, func(scope *ui.Scope) ui.View {
+		router := navigation.Use(scope, "location", initial.Location)
+		navigation.Restore(scope, "viewport", router, "fieldnotes-content")
+		cache := data.NewClient(scope, "queries", data.Options{
+			Initial: values, FreshMilliseconds: 30000, RetainedEntries: 24,
+		})
+		seed := ui.State(scope, "submission", func() any {
+			return submissionSeed{Value: initial.Submission}
+		})
+		submission := seed.Get().(submissionSeed).Value
+		if submission != nil {
+			ui.Effect(scope, "consume-submission", func() func() {
+				seed.Update(func(any) any {
+					return submissionSeed{}
+				})
+				return nil
+			})
+		}
+		ui.Provide(scope, environmentKey, &environment{
+			Router: router, Cache: cache, Base: initial.BasePath, Submission: submission,
+			MissingNote: initial.MissingNote,
+		})
+		return routes.View(RelativeLocation(router.Current().URL, initial.BasePath), ui.Text("Page unavailable"))
+	})
+}
+
+func RelativeLocation(location string, base string) navigation.Location {
+	parsed, err := url.Parse(location)
+	if err != nil {
+		panic(err.Error())
+	}
+	path := "/" + strings.TrimPrefix(parsed.EscapedPath(), base)
+	if parsed.RawQuery != "" {
+		path += "?" + parsed.RawQuery
+	}
+	if parsed.Fragment != "" {
+		path += "#" + parsed.EscapedFragment()
+	}
+	result, err := navigation.Parse(path)
+	if err != nil {
+		panic(err.Error())
+	}
+	return result
+}
+
+func MatchRoute(location string, base string) navigation.Match {
+	match, ok := routes.Match(RelativeLocation(location, base))
+	if !ok {
+		return navigation.Match{ID: "missing"}
+	}
+	return match
+}
+
+func env(scope *ui.Scope) *environment {
+	return ui.UseContext(scope, environmentKey).(*environment)
+}
+
+func preferences(snapshot data.Snapshot) Preferences {
+	value := DefaultPreferences()
+	if snapshot.HasValue {
+		if err := json.Unmarshal([]byte(snapshot.Value), &value); err != nil {
+			panic(err.Error())
+		}
+	}
+	return value
+}
+
+func Layout(scope *ui.Scope, match navigation.Match, content ui.View) ui.View {
+	app := env(scope)
+	query := data.Use(scope, "preferences", app.Cache, PreferencesRequest(app.Base))
+	prefs := preferences(query)
+	title := "Library"
+	if match.ID == "preferences" {
+		title = "Preferences"
+	}
+	if match.ID == "note" {
+		title = "Reading room"
+	}
+	if match.ID == "missing" || match.ID == "note" && app.MissingNote == match.Param("id") {
+		title = "Page not found"
+	}
+	ui.Effect(scope, "title", func() func() {
+		app.Router.SetTitle(title + " · Fieldnotes")
+		return nil
+	}, title)
+	links := []ui.View{}
+	for _, entry := range []string{"library", "preferences"} {
+		label := "Library"
+		if entry == "preferences" {
+			label = "Preferences"
+		}
+		link := navigation.Link(app.Base + entry, ui.Text(label)).Class("nav-link")
+		if entry == "preferences" && match.ID == "preferences" ||
+			entry == "library" && (match.ID == "library" || match.ID == "note") {
+			link = link.Attr("aria-current", "page")
+		}
+		links = append(links, link)
+	}
+	return ui.Element("div", ui.Element("a", ui.Text("Skip to content")).Attr("href", "#fieldnotes-content").Class("skip-link"), ui.Element("aside", navigation.Link(app.Base +
+		"library", ui.Element("span", ui.Text("f.")).Class("brand-mark"), ui.Element("strong", ui.Text("Fieldnotes"))).Class("brand").Attr("aria-label", "Fieldnotes home"), ui.Element("p", ui.Text("A PLACE FOR GOOD IDEAS")).Class("eyebrow"), ui.Element("nav", links...).Attr("aria-label", "Main navigation"), ui.Element("div", ui.Element("p", ui.Text(prefs.Name)).Attr("data-collection-name", ""), ui.Element("small", ui.Text("Read slowly. Keep what matters."))).Class("sidebar-footer")).Class("sidebar"), ui.Element("main", content, ui.Element("p", ui.Text(app.Router.Error())).Attr("role", "alert"), ui.Element("footer", ui.Text("A small library, built with Volang UI.")).Class("site-footer")).Attr("id", "fieldnotes-content").Attr("tabindex", "-1").Class("content")).Class("vui", "fieldnotes").Attr("data-density", prefs.Density).StyleScope("fieldnotes")
+}
+
+func LibraryLayout(scope *ui.Scope, match navigation.Match, content ui.View) ui.View {
+	return ui.Element("div", ui.Element("p", ui.Text("THE READING ROOM")).Class("eyebrow"), content).Attr("data-library-layout", "")
+}
+
+func queryProblem(message string, retry func()) ui.View {
+	return ui.Element("section", ui.Element("h2", ui.Text("We couldn't load this just yet.")), ui.Element("p", ui.Text(message)).Attr("role", "alert"), kit.Button(kit.ButtonProps{
+		OnPress: retry,
+	}, ui.Text("Try again"))).Class("empty-state")
+}
+
+func Library(scope *ui.Scope, match navigation.Match, content ui.View) ui.View {
+	app := env(scope)
+	filter := ReadFilter(match.Location.Query)
+	request := NotesRequest(app.Base, filter)
+	query := data.Use(scope, "notes", app.Cache, request)
+	change := func(values url.Values, replace bool) {
+		values["page"] = nil
+		app.Router.UpdateQuery(values, navigation.NavigateOptions{
+			Replace: replace, PreserveScroll: true, PreserveFocus: true,
+		})
+	}
+	search := ui.Element("input").Attr("type", "search").Attr("id", "library-search").Attr("placeholder", "Find an idea, author or topic…").Attr("value", match.Location.Query.Get("q")).Class("vui-input").On("input", func(event ui.Event) {
+		change(url.Values{"q": {event.Value}}, true)
+	})
+	topics := []ui.View{ui.Element("option", ui.Text("All topics")).Attr("value", "")}
+	for _, topic := range Topics() {
+		topics = append(topics, ui.Element("option", ui.Text(topic)).Attr("value", topic))
+	}
+	topic := ui.Element("select", topics...).Attr("id", "library-topic").Attr("value", filter.Topic).Class("vui-input").On("change", func(event ui.Event) {
+		change(url.Values{"topic": {event.Value}}, false)
+	})
+	sort := ui.Element("select", ui.Element("option", ui.Text("Newest first")).Attr("value", "recent"), ui.Element("option", ui.Text("Title A–Z")).Attr("value", "title"), ui.Element("option", ui.Text("Quick reads first")).Attr("value", "reading")).Attr("id", "library-sort").Attr("value", filter.Sort).Class("vui-input").On("change", func(event ui.Event) {
+		change(url.Values{"sort": {event.Value}}, false)
+	})
+	body := ui.Element("p", ui.Text("Finding your next good read…")).Attr("role", "status").Class("empty-state")
+	if query.Error != "" {
+		body = queryProblem("The connection may be taking a little longer. Your filters are saved in the address.", func() {
+			app.Cache.Invalidate(request)
+		})
+	} else if query.HasValue {
+		var result NotePage
+		if err := json.Unmarshal([]byte(query.Value), &result); err != nil {
+			panic(err.Error())
+		}
+		cards := []ui.View{}
+		for _, note := range result.Notes {
+			cards = append(cards, ui.Element("article", ui.Element("div", ui.Element("span", ui.Text(note.Topic)).Class("topic"), ui.Element("span", ui.Text(fmt.Sprint(note.Minutes) +
+				" min read"))).Class("note-meta"), ui.Element("h2", noteLink(app, note)), ui.Element("p", ui.Text(note.Summary)).Class("note-summary"), ui.Element("p", ui.Text("By " +
+				note.Author)).Class("note-author")).Key(note.ID).Class("note-card"))
+		}
+		grid := ui.Element("div", cards...).Class("note-grid").Attr("data-note-grid", "")
+		if len(cards) == 0 {
+			grid = ui.Element("section", ui.Element("h2", ui.Text("A little room for discovery.")), ui.Element("p", ui.Text("Try another word or choose all topics."))).Class("empty-state").Attr("data-empty", "")
+		}
+		body = ui.Element("div", ui.Element("p", ui.Text(fmt.Sprint(result.Total) + " notes to explore")).Class("result-count").Attr("role", "status"), grid, kit.Pagination(kit.PaginationProps{
+			Page: func() int {
+				return result.Page
+			},
+			PageCount: result.Pages,
+			OnChange: func(page int) {
+				app.Router.UpdateQuery(url.Values{"page": {fmt.Sprint(page)}}, navigation.NavigateOptions{})
+			},
+		})).Attr("data-results-page", fmt.Sprint(result.Page))
+	}
+	return ui.Element("div", ui.Element("h1", ui.Text("Ideas worth keeping.")), ui.Element("p", ui.Text("A thoughtful collection on design, building and the work in between.")).Class("intro"), ui.Element("div", kit.Field("library-search", "Search the library", "", search), kit.Field("library-topic", "Topic", "", topic), kit.Field("library-sort", "Sort by", "", sort)).Class("filters"), ui.Element("div", body).Attr("aria-busy", fmt.Sprint(query.Fetching)).Attr("data-library-results", ""))
+}
+
+func noteLink(app *environment, note Note) ui.View {
+	request := NoteRequest(app.Base, note.ID)
+	warm := func(ui.Event) {
+		app.Cache.Prefetch(request)
+	}
+	return navigation.Link(app.Base + "library/" + note.ID, ui.Text(note.Title)).Attr("id", "note-" +
+		note.ID).On("focus", warm).On("pointerenter", func(event ui.Event) {
+		if event.PointerType != "touch" {
+			warm(event)
+		}
+	})
+}
+
+func Detail(scope *ui.Scope, match navigation.Match, content ui.View) ui.View {
+	app := env(scope)
+	if app.MissingNote != "" && app.MissingNote == match.Param("id") {
+		return Missing(scope, match, content)
+	}
+	request := NoteRequest(app.Base, match.Param("id"))
+	query := data.Use(scope, "note", app.Cache, request)
+	back := navigation.Link(app.Base + "library", ui.Text("← All notes")).Class("back-link")
+	if query.Error != "" {
+		return ui.Fragment(back, queryProblem("This note is unavailable. You can retry or return to the library.", func() {
+			app.Cache.Invalidate(request)
+		}))
+	}
+	if !query.HasValue {
+		return ui.Fragment(back, ui.Element("p", ui.Text("Opening your note…")).Attr("role", "status"))
+	}
+	var note Note
+	if err := json.Unmarshal([]byte(query.Value), &note); err != nil {
+		panic(err.Error())
+	}
+	paragraphs := []ui.View{}
+	for index, paragraph := range strings.Split(note.Body, "\n\n") {
+		paragraphs = append(paragraphs, ui.Element("p", ui.Text(paragraph)).Key(fmt.Sprint(index)))
+	}
+	return ui.Element("article", back, ui.Element("p", ui.Text(note.Topic + " · " +
+		fmt.Sprint(note.Minutes) +
+		" min read")).Class("note-meta"), ui.Element("h1", ui.Text(note.Title)), ui.Element("p", ui.Text(note.Summary)).Class("intro"), ui.Element("p", ui.Text("By " +
+		note.Author)).Class("byline"), ui.Element("div", paragraphs...).Class("reading-body")).Class("reading-note")
+}
+
+func Missing(scope *ui.Scope, match navigation.Match, content ui.View) ui.View {
+	return ui.Element("section", ui.Element("p", ui.Text("404")).Class("eyebrow"), ui.Element("h1", ui.Text("This page wandered off.")), ui.Element("p", ui.Text("There are plenty of other ideas waiting in the library.")), navigation.Link(env(scope).Base +
+		"library", ui.Text("Back to the library")).Class("back-link")).Class("empty-state")
+}

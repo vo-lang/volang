@@ -1,0 +1,78 @@
+package kit
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+type DialogProps struct {
+	ID string
+	Title string
+	Description string
+	Open func() bool
+	PreventClose func() bool
+	CloseLabel string
+	Class string
+	// Motion retains the native modal until its finite CSS exit settles.
+	Motion bool
+	// Zero uses 5000ms. Applies when Motion is enabled; CSS sets the duration.
+	MotionTimeoutMilliseconds int
+	// ReturnFocus identifies a custom trigger or another logical return target.
+	ReturnFocus *ui.ElementRef
+	OnOpenChange func(bool)
+}
+
+// Dialog uses the browser's modal layer, inert background and focus handling.
+// Content can supply autofocus or use an ElementRef for its initial focus.
+func Dialog(props DialogProps, content ...ui.View) ui.View {
+	return dialogPresentation(props, func(presented bool) ui.View {
+		return dialogFrame(props, "dialog", true, presented, content...)
+	})
+}
+
+// Both dialog recipes share native presentation, dismissal and focus return.
+// Live readers keep multiple events in one input batch consistent.
+func dialogFrame(props DialogProps, role string, showClose bool, presented bool, content ...ui.View) ui.View {
+	blocked := func() bool {
+		return props.PreventClose != nil && props.PreventClose()
+	}
+	close := func() {
+		if props.Open() && !blocked() {
+			props.OnOpenChange(false)
+			if !props.Motion {
+				props.ReturnFocus.Focus()
+			}
+		}
+	}
+	headingParts := []ui.View{ui.Element("h2", ui.Text(props.Title)).Attr("id", props.ID + "-title")}
+	if showClose {
+		label := props.CloseLabel
+		if label == "" {
+			label = "Close dialog"
+		}
+		headingParts = append(headingParts, Button(ButtonProps{
+			Variant: "quiet", Disabled: blocked(), OnPress: close,
+		}, ui.Text("×")).Attr("aria-label", label))
+	}
+	heading := ui.Element("div", headingParts...).Class("vui-dialog-heading")
+	children := []ui.View{heading}
+	if props.Description != "" {
+		children = append(children, ui.Element("p", ui.Text(props.Description)).Attr("id", props.ID +
+			"-description").Attr("class", "vui-dialog-description"))
+	}
+	children = append(children, content...)
+	view := ui.Element("dialog", children...).Modal(presented).Attr("id", props.ID).Class("vui-dialog").Class(props.Class).Attr("role", role).Attr("aria-labelledby", props.ID +
+		"-title").Attr("aria-modal", "true").OnWith("cancel", ui.EventOptions{PreventDefault: true}, func(event ui.Event) {
+		close()
+	}).On("close", func(event ui.Event) {
+		if props.Open() {
+			props.OnOpenChange(false)
+			if !props.Motion {
+				props.ReturnFocus.Focus()
+			}
+		}
+	})
+	if props.Description != "" {
+		view = view.Attr("aria-describedby", props.ID + "-description")
+	}
+	return view
+}

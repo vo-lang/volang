@@ -3,7 +3,7 @@
 //! Source analysis and bytecode generation remain target independent. Build
 //! backends consume a [`TargetSpec`] only after common bytecode verification,
 //! which keeps one verified module portable across VM, JIT, Native AOT, and
-//! WebAssembly AOT.
+//! Wasm VM.
 
 use core::fmt;
 use core::str::FromStr;
@@ -19,15 +19,12 @@ pub enum TargetFamily {
     WebAssembly,
 }
 
-/// Observable memory guarantees of generated AOT artifacts. Wasm VM uses
-/// vo-runtime and retains IslandSpanHeap independently of the AOT target.
+/// Observable memory guarantees shared by the supported execution backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum RuntimeMemoryContract {
     /// Independent Island SpanHeaps, sticky errors and work-bounded collection.
     IslandSpanHeap = 1,
-    /// Legacy Core Wasm ABI 6 contract, retained for format identification.
-    InstanceTracing = 2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

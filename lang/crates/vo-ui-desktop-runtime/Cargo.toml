@@ -1,0 +1,37 @@
+[package]
+name = "vo-ui-desktop-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Packaged application entries for the replacement Volang desktop UI"
+publish = false
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[[bin]]
+name = "vo-ui-desktop"
+path = "src/main.rs"
+required-features = ["runner"]
+
+[features]
+default = []
+window = ["vo-ui-webview/window", "dep:vo-ui-native", "dep:vo-vm"]
+runner = ["window", "dep:vo-target"]
+jit = ["runner", "vo-ui-webview/jit"]
+aot = ["window", "dep:vo-aot-runtime-core", "vo-ui-webview/aot"]
+
+[dependencies]
+vo-ui-webview = { path = "../vo-ui-webview", default-features = false }
+vo-ui-native = { path = "../vo-ui-native", optional = true }
+vo-ui-bridge.workspace = true
+vo-vm = { path = "../vo-vm", optional = true }
+vo-common-core.workspace = true
+vo-target = { workspace = true, optional = true }
+vo-aot-runtime-core = { path = "../vo-aot-runtime-core", optional = true }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+sha2 = "=0.10.9"

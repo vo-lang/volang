@@ -1,9 +1,65 @@
 # Volang UI architecture
 
+## Experimental Web replacement
+
+The Web-first rewrite lives in `ui/next`; its scope and completion criteria are
+tracked in [the rewrite plan](../../docs/ui-platform-rewrite-plan-20260913.md).
+Vo owns component state, reconciliation and lifecycle. The `vo-ui-bridge`
+language adapter is `no_std + alloc` and depends only on common bytecode/runtime
+contracts. It registers the bounded `next/host.Exchange` transport and owns no
+component arena. `vo-web` without default features uses this provider directly.
+New Web execution builds use no additional features; the separately delivered
+Playground compiler adds only `compiler`. Both build graphs exclude the previous
+UI kernel. The DOM and Worker hosts consume a narrow typed execution interface,
+independent of generated bindings from the default compatibility package.
+
+The existing product below remains available through the default `vo-web`
+`legacy-ui` feature. Legacy Island UI methods live in `island/legacy.rs`, while
+both paths share VM admission, loading, extern resolution and host-event replay.
+Embedders building the previous execution-only UI runtime must now select
+`--no-default-features --features legacy-ui`; the default compiler/runtime build
+retains its existing API. See [migration notes](../next/migration.md). This feature
+separation does not transfer existing product certification to the replacement.
+
+The `ui-web-rewrite` CI task owns the default Studio site candidate and its
+complete-directory verification. The previous Web task keeps its compatibility
+artifact under `target/ci/artifacts/legacy-studio`. Site promotion consumes the
+new task's exact artifact receipt; native adapters retain their P7 migration
+ownership. See [CI delivery](../../docs/ci.md#site).
+
+`lang/crates/vo-ui-native` owns the replacement's renderer-independent native
+execution session. It drives the existing verified VM/JIT/Native AOT boundary,
+retains one UI writer and carries opaque per-session reply capabilities. The
+platform executor supplies windows, I/O readiness and renderer/service cleanup;
+component semantics and the wire codec remain with their existing owners. Its
+default dependency graph excludes the previous UI kernel. See the
+[native session contract](../../lang/crates/vo-ui-native/README.md). The pipe/DOM
+fixtures validate native execution separately from the P7 window and packaging
+work; they do not replace real desktop acceptance.
+
+The replacement's `vo-ui-webview` adapter owns an immutable resource bundle and
+the system WebView on the main thread. Its bounded IPC maps each document reply
+to the native session's exact capability. `vo-ui-native::executor` constructs,
+executes and disposes the VM on a dedicated owner thread, coalesces Island
+wakeups, and polls only while actual native I/O waiters remain. Pure UI idle has
+no polling timer. The adapter shares the existing DOM host and keeps compiler
+composition outside its production graph. See the
+[desktop adapter contract](../../lang/crates/vo-ui-webview/README.md) for feature,
+closure, platform-library and remaining P7 acceptance boundaries.
+
+The experimental `vo-ui-desktop-runtime` distribution layer owns standalone
+resource manifests, verified bytecode loading and the Native AOT process entry.
+Its default resource checks require no system window libraries; explicit
+runner/JIT/AOT features compose the native adapters. Project commands reuse the
+authored boot with `desktop-mount.ts` and publish an independently runnable
+application. Optional desktop SDK artifacts join the portable toolchain receipt.
+See the [desktop preview guide](../next/desktop.md).
+
 ## Product contract
 
 Volang UI builds browser and desktop applications from typed `.vo` source.
-VM and JIT serve development; Core Wasm AOT and Native AOT serve releases.
+Native development uses VM and JIT; native releases use Native AOT.
+Web development and releases use the Wasm VM.
 Application projects have no npm dependency graph, JavaScript component
 runtime, virtual DOM, or browser-specific component API.
 
@@ -86,7 +142,7 @@ A component artifact records:
 The active multi-component wire contract is VUB1
 (`volang.ui.component-bundle`, artifact version 1, component ABI 2). VUA1 stays
 as the frozen single-root baseline. Reachable local and imported source
-components now execute through VUB1 in VM/JIT, and both AOT lowerers preserve
+components now execute through VUB1 in VM/JIT, and Native AOT preserves
 the same evaluator table and authenticated sidecar.
 
 A mounted component instance records:

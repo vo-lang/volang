@@ -1591,16 +1591,8 @@ impl Checker {
             if let Some(okey) = self.lookup(name) {
                 let lobj = self.lobj(okey);
                 let lobj_pkg = lobj.pkg();
-                if let crate::obj::EntityType::PkgName { imported, .. } = lobj.entity_type() {
-                    let imported = *imported;
+                if let Some(imported) = self.use_package_name(*ident, okey) {
                     debug_assert_eq!(self.pkg, lobj_pkg.unwrap());
-                    self.result.record_use(*ident, okey);
-                    // Mark package as used
-                    if let crate::obj::EntityType::PkgName { used, .. } =
-                        self.lobj_mut(okey).entity_type_mut()
-                    {
-                        *used = true;
-                    }
 
                     let pkg = self.package(imported);
                     let pkg_scope = *pkg.scope();

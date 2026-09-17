@@ -97,9 +97,11 @@ type Handler struct {
 
 func testClosureInStruct() {
 	multiplier := 3
-	h := Handler{process: func(x int) int {
-		return x * multiplier
-	}}
+	h := Handler{
+		process: func(x int) int {
+			return x * multiplier
+		},
+	}
 	assert(h.process(4) == 12, "closure in struct")
 }
 
@@ -107,12 +109,14 @@ func testClosureInStruct() {
 func testClosureInMap() {
 	ops := map[string]func(int, int) int{
 		"add": func(a, b int) int {
-	return a + b
-}, "sub": func(a, b int) int {
-	return a - b
-}, "mul": func(a, b int) int {
-	return a * b
-},
+			return a + b
+		},
+		"sub": func(a, b int) int {
+			return a - b
+		},
+		"mul": func(a, b int) int {
+			return a * b
+		},
 	}
 	assert(ops["add"](3, 4) == 7, "map closure add")
 	assert(ops["sub"](10, 3) == 7, "map closure sub")

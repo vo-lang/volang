@@ -1,0 +1,120 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func derivedGraph() {
+	var input *ui.IntState
+	var ignored *ui.IntState
+	var total *ui.DerivedState
+	computations := 0
+	renders := 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		input = ui.Int(scope, "input", 2)
+		ignored = ui.Int(scope, "ignored", 0)
+		left := ui.Derived(scope, "left", func() any {
+			return input.Get() * 2
+		})
+		right := ui.Derived(scope, "right", func() any {
+			return input.Get() * 3
+		})
+		total = ui.Derived(scope, "total", func() any {
+			computations++
+			return left.Get().(int) + right.Get().(int)
+		})
+		renders++
+		a := total.Get().(int)
+		b := total.Get().(int)
+		require(a == b, "derived reads disagree in one render")
+		return ui.Text(fmt.Sprint(a))
+	}))
+	flush(root)
+	require(total.Get().(int) == 10 && computations == 1, "derived result was not cached")
+	ignored.Set(1)
+	flush(root)
+	require(computations == 1 && renders == 1, "unobserved input invalidated derived state")
+	input.Set(3)
+	require(changedText(flush(root), "15"), "diamond dependencies produced an intermediate value")
+	require(computations == 2 && renders == 2, "diamond update recomputed repeatedly")
+	root.Close()
+	expectPanic(func() {
+		total.Get()
+	}, "disposed component")
+	root = ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		var a *ui.DerivedState
+		var b *ui.DerivedState
+		a = ui.Derived(scope, "a", func() any {
+			return b.Get()
+		})
+		b = ui.Derived(scope, "b", func() any {
+			return a.Get()
+		})
+		return ui.Text(fmt.Sprint(a.Get()))
+	}))
+	expectPanic(func() {
+		root.Flush()
+	}, "cyclic derived computation")
+}
+
+var themeKey = ui.NewContext("contract.theme", "default")
+
+func themedText() ui.View {
+	return ui.Component(counterType, func(scope *ui.Scope) ui.View {
+		return ui.Text(ui.UseContext(scope, themeKey).(string))
+	})
+}
+
+func inheritedContext() {
+	var outer *ui.StringState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		outer = ui.String(scope, "theme", "outer")
+		ui.Provide(scope, themeKey, outer.Get())
+		return ui.Fragment(themedText(), ui.Component(listType, func(inner *ui.Scope) ui.View {
+			ui.Provide(inner, themeKey, ui.UseContext(inner, themeKey).(string) + "/inner")
+			return ui.Element("section", themedText())
+		}))
+	}))
+	nodes := map[int]*modelNode{0: &modelNode{parent: -1}}
+	applyModel(nodes, flush(root))
+	require(modelText(nodes, 0) == "outerouter/inner", "nested context did not inherit/override")
+	outer.Set("next")
+	applyModel(nodes, flush(root))
+	require(modelText(nodes, 0) == "nextnext/inner", "context update did not reach descendants")
+	other := ui.NewRoot(themedText())
+	otherNodes := map[int]*modelNode{0: &modelNode{parent: -1}}
+	applyModel(otherNodes, flush(other))
+	require(modelText(otherNodes, 0) == "default", "context escaped its root")
+	root.Close()
+	other.Close()
+}
+
+type profile struct {
+	Name string
+	Tags []string
+}
+
+func structuredSnapshots() {
+	var store *ui.Store
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		store = ui.State(scope, "profile", func() any {
+			return profile{Name: "Ada", Tags: []string{"one"}}
+		})
+		value := store.Get().(profile)
+		return ui.Text(value.Name + ":" + strings.Join(value.Tags, ","))
+	}))
+	flush(root)
+	before := store.Get().(profile)
+	store.Update(func(previous any) any {
+		value := previous.(profile)
+		value.Name = "Grace"
+		value.Tags = append([]string{}, value.Tags...)
+		value.Tags[0] = "two"
+		return value
+	})
+	require(changedText(flush(root), "Grace:two"), "structured snapshot did not render")
+	require(before.Name == "Ada" && before.Tags[0] == "one", "snapshot update mutated previous value")
+	root.Close()
+}

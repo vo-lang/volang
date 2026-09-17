@@ -36,7 +36,7 @@ pub(in crate::translate) fn queue_new<'a>(
     let elem_slots_i32 = e.builder().ins().iconst(types::I32, i64::from(elem_slots));
     let cap = e.read_var(inst.c);
 
-    let out_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, (8) as usize);
+    let out_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, 8);
     let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
 
     let call = emit_runtime_helper_call(
@@ -69,7 +69,7 @@ pub(in crate::translate) fn queue_len<'a>(e: &mut impl RuntimeOpsEmitter<'a>, in
     let func = e.helper(HelperKind::queue_len);
     let ctx = e.ctx_param();
     let ch = e.read_var(inst.b);
-    let out_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, (8) as usize);
+    let out_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, 8);
     let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
 
     emit_checked_jit_result_helper_call(e, func, &[ctx, ch, out_ptr]);
@@ -84,7 +84,7 @@ pub(in crate::translate) fn queue_cap<'a>(e: &mut impl RuntimeOpsEmitter<'a>, in
     let func = e.helper(HelperKind::queue_cap);
     let ctx = e.ctx_param();
     let ch = e.read_var(inst.b);
-    let out_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, (8) as usize);
+    let out_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, 8);
     let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
 
     emit_checked_jit_result_helper_call(e, func, &[ctx, ch, out_ptr]);

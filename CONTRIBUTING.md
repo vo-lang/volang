@@ -29,7 +29,7 @@ worktree must remain clean after verification.
   features.
 - Keep compiler/runtime/UI layers within the ownership boundaries enforced by
   repository lint.
-- Preserve VM, JIT, Native AOT, Wasm VM, and Core Wasm AOT parity wherever the
+- Preserve VM, JIT, Native AOT, and Wasm VM parity wherever the
   affected capability declares those targets.
 - Document public behavior, compatibility, security, accessibility, and
   performance effects.

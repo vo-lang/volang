@@ -1,0 +1,163 @@
+package app
+
+import (
+	"fmt"
+	"strings"
+	"github.com/vo-lang/studio/next/documentation"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/data"
+	"github.com/vo-lang/ui/next/document"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/navigation"
+	"github.com/vo-lang/ui/next/web"
+)
+
+type preparedChapter struct {
+	document *document.Prepared
+	error string
+}
+
+var documentationContext = ui.NewContext("studio.documentation", nil)
+
+func chapters() []documentation.Page {
+	return documentation.Pages()
+}
+
+func chapterFor(topic string) documentation.Page {
+	if topic == "" {
+		topic = "first-steps"
+	}
+	for _, page := range chapters() {
+		if page.ID == topic {
+			return page
+		}
+	}
+	return documentation.Page{
+		ID: topic, Title: "Unknown chapter",
+		Summary: "Choose a chapter from the guide to keep exploring.",
+	}
+}
+
+func chapterURL(page documentation.Page) string {
+	if page.ID == "first-steps" {
+		return "/studio/docs"
+	}
+	return "/studio/docs/" + page.ID
+}
+
+func chapterRequest(page documentation.Page) ui.Request {
+	return web.FetchText("/studio-docs/" + page.Asset + "?v=" + page.SHA256).WithTimeout(10000)
+}
+
+func Docs(scope *ui.Scope, topic string) ui.View {
+	page := chapterFor(topic)
+	if page.Asset == "" {
+		return paragraph("Choose a chapter from the guide to keep exploring.")
+	}
+	client := ui.UseContext(scope, documentationContext).(*data.Client)
+	request := chapterRequest(page)
+	result := data.Use(scope, "chapter", client, request)
+	content := ui.Element("p", ui.Text("Loading this chapter…")).Attr("role", "status")
+	message := result.Error
+	prepared := ui.DerivedMemo(scope, "prepared-chapter", func() any {
+		if !result.HasValue {
+			return preparedChapter{}
+		}
+		decoded, err := document.Parse(result.Value)
+		if err != nil || decoded.HeadingID() != page.HeadingID {
+			return preparedChapter{error: "This chapter could not be read."}
+		}
+		return preparedChapter{document: decoded}
+	}, result.HasValue, result.Value, page.HeadingID).Get().(preparedChapter)
+	if prepared.document != nil {
+		content = prepared.document.View()
+	}
+	if prepared.error != "" {
+		message = prepared.error
+	}
+	if message != "" {
+		content = ui.Element("div", ui.Element("p", ui.Text("This chapter couldn’t be opened. Try again in a moment.")).Attr("role", "alert"), kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				client.Invalidate(request)
+			},
+		}, ui.Text("Try again"))).Class("studio-doc-error")
+	}
+	return ui.Element("div", content).Attr("data-document", page.ID).Attr("aria-busy", fmt.Sprint(result.Fetching))
+}
+
+func DocsLayout(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {
+	initial := ui.UseContext(scope, initialDataContext).([]data.InitialValue)
+	client := data.NewClient(scope, "documents", data.Options{
+		Immutable: true, RetainedEntries: 24, RetainedBytes: 8 * 1024 * 1024, Initial: initial,
+	})
+	ui.Provide(scope, documentationContext, client)
+	filter := ui.String(scope, "filter", "")
+	topic := docTopic(match)
+	page := chapterFor(topic)
+	title := page.Title
+	if topic == "" || topic == "first-steps" {
+		title = "A small idea, brought to life."
+	}
+	if topic == "state" {
+		title = "State that stays close."
+	}
+	if topic == "lifecycle" {
+		title = "A place for every effect."
+	}
+	if page.Title == "Unknown chapter" {
+		title = "This chapter is still unwritten."
+	}
+	groups := []ui.View{}
+	section := ""
+	links := []ui.View{}
+	query := strings.ToLower(strings.TrimSpace(filter.Get()))
+	contentMatches, searchStatus := chapterContentMatches(scope, client, query)
+	for _, chapter := range chapters() {
+		if !chapterMetadataMatches(chapter, query) && !contentMatches[chapter.ID] {
+			continue
+		}
+		if section != chapter.Section && len(links) > 0 {
+			groups = append(groups, ui.Element("section", ui.Element("h2", ui.Text(section)), ui.Element("ul", links...)).Key(section))
+			links = nil
+		}
+		section = chapter.Section
+		href := chapterURL(chapter)
+		link := navigation.Link(href, ui.Text(chapter.Title))
+		if chapter.ID == page.ID {
+			link = link.Attr("aria-current", "page")
+		}
+		links = append(links, ui.Element("li", link).Key(href))
+	}
+	if len(links) > 0 {
+		groups = append(groups, ui.Element("section", ui.Element("h2", ui.Text(section)), ui.Element("ul", links...)).Key(section))
+	}
+	if len(groups) == 0 {
+		groups = append(groups, paragraph("No matching chapters."))
+	}
+	search := kit.Field("docs-search", "Find a chapter", "", ui.Element("input").Attr("type", "search").Attr("maxlength", "128").Attr("placeholder", "Search titles and content").Attr("value", filter.Get()).On("input", func(event ui.Event) {
+		filter.Set(event.Value)
+	}))
+	breadcrumb := kit.Breadcrumb(kit.BreadcrumbProps{
+		Label: "Current chapter",
+		Items: []kit.BreadcrumbItem{
+			{Key: "docs", Label: "Guide", Href: "/studio/docs"}, {Key: "chapter", Label: page.Title},
+		},
+		Link: func(item kit.BreadcrumbItem) ui.View {
+			return navigation.Link(item.Href, ui.Text(item.Label))
+		},
+	})
+	heading := ui.Element("h1", ui.Text(title))
+	if page.HeadingID != "" {
+		heading = heading.Attr("id", page.HeadingID)
+	}
+	introContent := []ui.View{
+		ui.Element("p", ui.Text("THE FIELD GUIDE")).Class("studio-eyebrow"), heading,
+		paragraph(page.Summary),
+	}
+	if page.SourcePath != "" {
+		introContent = append(introContent, ui.Element("a", ui.Text("View source · " + page.SourcePath)).Attr("href", "https://github.com/vo-lang/volang/blob/main/" +
+			page.SourcePath).Class("studio-doc-source"))
+	}
+	intro := ui.Element("header", introContent...).Class("studio-intro")
+	return ui.Element("section", breadcrumb, intro, ui.Element("div", ui.Element("div", search, searchStatus, ui.Element("nav", groups...).Class("studio-doc-nav").Attr("aria-label", "Documentation chapters")).Class("studio-doc-tools"), ui.Element("article", outlet).Class("studio-prose")).Class("studio-doc-layout"))
+}

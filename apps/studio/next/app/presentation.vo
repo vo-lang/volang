@@ -1,0 +1,9 @@
+package app
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+func paragraph(text string) ui.View {
+	return ui.Element("p", ui.Text(text))
+}

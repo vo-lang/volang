@@ -1,0 +1,96 @@
+{
+  "default": {
+    "config": {}
+  },
+  "listening": {
+    "config": {
+      "document": {
+        "title": "The listening room",
+        "description": "A moment to listen. A little space for your thoughts."
+      }
+    }
+  },
+  "fieldnotes": {
+    "config": {
+      "serverEntry": "server",
+      "document": {
+        "title": "Fieldnotes",
+        "description": "A small place for good ideas."
+      }
+    }
+  },
+  "pages": {
+    "config": {
+      "pageEntries": {
+        "notes": {
+          "entry": "notes",
+          "developmentEntry": "notes/development",
+          "prerenderEntry": "notes/prerender"
+        }
+      },
+      "prerenderPages": [
+        {
+          "path": "/",
+          "title": "Small pages"
+        },
+        {
+          "path": "/notes",
+          "entry": "notes",
+          "data": "{\"note\":\"A thought worth keeping.\",\"home\":\"../\"}",
+          "title": "Your notebook · Small pages"
+        },
+        {
+          "path": "/notes/morning",
+          "entry": "notes",
+          "data": "{\"note\":\"Leave a little space for the unexpected.\",\"home\":\"../../\"}",
+          "title": "Morning pages · Small pages"
+        }
+      ],
+      "document": {
+        "description": "A small home for your ideas."
+      }
+    }
+  },
+  "canvas": {
+    "example": "canvas",
+    "config": {
+      "features": [
+        "canvas"
+      ],
+      "document": {
+        "title": "A world in small pixels",
+        "description": "A landscape calculated in Volang."
+      }
+    }
+  },
+  "plot": {
+    "example": "plot",
+    "config": {
+      "features": [
+        "plot"
+      ],
+      "document": {
+        "title": "The windowsill journal",
+        "description": "Seven small steps toward a greener windowsill."
+      }
+    }
+  },
+  "scroll-position": {
+    "example": "scroll-position",
+    "config": {
+      "document": {
+        "title": "Room to wander",
+        "description": "A notebook that remembers your place."
+      }
+    }
+  },
+  "variable-list": {
+    "example": "variable-list",
+    "config": {
+      "document": {
+        "title": "Room for every thought",
+        "description": "A growing notebook with room for every thought."
+      }
+    }
+  }
+}

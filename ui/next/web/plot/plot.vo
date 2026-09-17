@@ -1,0 +1,79 @@
+// Package plot provides typed line charts through the optional plot host feature.
+package plot
+
+import (
+	"encoding/json"
+	"fmt"
+	"math"
+	"strconv"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type Data struct {
+	X []float64 `json:"x"`
+	Y []float64 `json:"y"`
+}
+
+type Props struct {
+	Data Data
+	// Prepared reuses an immutable data payload across cursor/theme updates.
+	// Set Data or Prepared, never both.
+	Prepared *Prepared
+	OnCursor func(int)
+	OnError func(string)
+}
+
+// Prepared owns encoded data independently of the caller's mutable slices.
+// Keep it in State or DerivedMemo and replace it when the dataset changes.
+type Prepared struct {
+	payload string
+}
+
+func Prepare(data Data) (*Prepared, error) {
+	if len(data.X) != len(data.Y) || len(data.X) > 100000 {
+		return nil, fmt.Errorf("plot: require equally sized series with at most 100000 points")
+	}
+	for index, x := range data.X {
+		y := data.Y[index]
+		if math.IsNaN(x) || math.IsInf(x, 0) || math.IsNaN(y) || math.IsInf(y, 0) ||
+			index > 0 && x <= data.X[index - 1] {
+			return nil, fmt.Errorf("plot: require finite values and increasing X coordinates")
+		}
+	}
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	return &Prepared{payload: string(bytes)}, nil
+}
+
+func Chart(props Props) ui.View {
+	payload := ""
+	if props.Prepared != nil {
+		if props.Data.X != nil || props.Data.Y != nil {
+			panic("plot: Data and Prepared cannot be combined")
+		}
+		payload = props.Prepared.payload
+	} else {
+		bytes, err := json.Marshal(props.Data)
+		if err != nil {
+			panic(err)
+		}
+		payload = string(bytes)
+	}
+	return ui.Widget("uplot", payload, func(result ui.Result) {
+		if result.Error != "" {
+			if props.OnError != nil {
+				props.OnError(result.Error)
+			}
+			return
+		}
+		index, err := strconv.Atoi(result.Value)
+		if err != nil {
+			panic(err)
+		}
+		if props.OnCursor != nil {
+			props.OnCursor(index)
+		}
+	})
+}

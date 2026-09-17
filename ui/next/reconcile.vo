@@ -1,0 +1,324 @@
+package ui
+
+func compatible(node *mounted, view View) bool {
+	if node.view.hasModal != view.hasModal || (node.view.popover == nil) != (view.popover == nil) {
+		return false
+	}
+	if node.view.widget != nil && view.widget != nil && node.view.widget.name != view.widget.name {
+		return false
+	}
+	return node.view.kind == view.kind && node.view.component == view.component
+}
+
+func (root *Root) mount(view View, parent int, before int) *mounted {
+	if view.kind == "" {
+		view = Fragment()
+	}
+	svg := view.kind == "svg"
+	if parent != 0 && root.nodes[parent].svgChildren() {
+		svg = true
+	}
+	if !svg {
+		view = view.htmlAttributes()
+	}
+	view.validateNamespace(svg)
+	view.validateControl()
+	view.validateText(svg)
+	node := &mounted{id: root.nextID, parent: parent, view: view, svg: svg}
+	if parent != 0 {
+		container := root.nodes[parent]
+		node.owner = container.scope
+		if node.owner == nil {
+			node.owner = container.owner
+		}
+	}
+	root.nextID++
+	root.nodes[node.id] = node
+	// Register ownership before evaluating descendants. A boundary can then
+	// dispose a partial mount without scanning unrelated nodes or copying trees.
+	if parent != 0 {
+		container := root.nodes[parent]
+		container.children = append(container.children, node)
+	}
+	if root.reload != nil {
+		root.reload.mount(root, node, parent)
+	}
+	root.bindRef(node)
+	root.bindPopover(node)
+	root.bindPortal(node)
+	kind := view.kind
+	if kind == "#component" {
+		kind = "#fragment"
+	}
+	created := Mutation{Op: "create", ID: node.id, Name: kind}
+	// Only text creation consumes a value. Widget input travels once through
+	// its deferred operation after the containing DOM batch is committed.
+	if kind == "#text" {
+		created.Value = view.text
+	}
+	root.emit(created)
+	root.emit(Mutation{Op: "insert", ID: node.id, Parent: parent, Before: before})
+	for _, attr := range view.attrs {
+		root.emit(Mutation{Op: "attr", ID: node.id, Name: attr.name, Value: attr.value})
+	}
+	root.updateControl(node.id, nil, view.control)
+	for _, listener := range view.events {
+		root.emit(Mutation{Op: "listen", ID: node.id, Name: listener.name(), Value: listener.binding()})
+	}
+	if view.widget != nil {
+		root.emit(Mutation{Op: "widget", ID: node.id, Name: view.widget.name, Value: view.text})
+	}
+	if view.hasModal {
+		root.emitModal(node)
+	}
+	if view.component != nil {
+		node.scope = &Scope{root: root, node: node, parent: node.owner}
+		node.scope.reader = observe(node.scope)
+		root.render(node.scope)
+	} else {
+		node.children = root.reconcile(node.id, nil, view.children)
+	}
+	return node
+}
+
+func (root *Root) update(node *mounted, view View) {
+	if !node.svg {
+		view = view.htmlAttributes()
+	}
+	view.validateNamespace(node.svg)
+	view.validateControl()
+	view.validateText(node.svg)
+	previous := node.view
+	if previous.ref != view.ref {
+		root.unbindRef(node)
+	}
+	node.view = view
+	root.bindPopover(node)
+	root.bindPortal(node)
+	if previous.ref != view.ref {
+		root.bindRef(node)
+	}
+	if node.scope != nil {
+		if previous.memo != nil && view.memo != nil && !node.scope.dirty && node.scope.failure == nil &&
+			sameInputs("component inputs", previous.memo.values, view.memo.values) {
+			return
+		}
+		root.render(node.scope)
+		return
+	}
+	if view.kind == "#text" {
+		if previous.text != view.text {
+			root.emit(Mutation{Op: "text", ID: node.id, Value: view.text})
+		}
+		return
+	}
+	if view.widget != nil && previous.text != view.text {
+		root.emit(Mutation{Op: "widget", ID: node.id, Name: view.widget.name, Value: view.text})
+	}
+	root.updateAttributes(node, previous, view)
+	root.updateControl(node.id, previous.control, view.control)
+	root.updateListeners(node, previous, view)
+	if view.hasModal && previous.modalOpen != view.modalOpen {
+		root.emitModal(node)
+	}
+	node.children = root.reconcile(node.id, node.children, view.children)
+}
+
+func (root *Root) emitModal(node *mounted) {
+	value := "false"
+	if node.view.modalOpen {
+		value = "true"
+	}
+	root.emit(Mutation{Op: "modal", ID: node.id, Value: value})
+}
+
+func (root *Root) updateAttributes(node *mounted, previous View, view View) {
+	stable := len(previous.attrs) == len(view.attrs)
+	if stable {
+		for i, attr := range view.attrs {
+			if previous.attrs[i].name != attr.name {
+				stable = false
+				break
+			}
+		}
+	}
+	if stable {
+		for i, attr := range view.attrs {
+			if previous.attrs[i].value != attr.value {
+				root.emit(Mutation{Op: "attr", ID: node.id, Name: attr.name, Value: attr.value})
+			}
+		}
+		return
+	}
+	oldAttrs := make(map[string]string)
+	for _, attr := range previous.attrs {
+		oldAttrs[attr.name] = attr.value
+	}
+	for _, attr := range view.attrs {
+		old, exists := oldAttrs[attr.name]
+		if !exists || old != attr.value {
+			root.emit(Mutation{Op: "attr", ID: node.id, Name: attr.name, Value: attr.value})
+		}
+		delete(oldAttrs, attr.name)
+	}
+	// Iterate source order for deterministic removal, independent of map order.
+	for _, attr := range previous.attrs {
+		if _, exists := oldAttrs[attr.name]; exists {
+			root.emit(Mutation{Op: "removeAttr", ID: node.id, Name: attr.name})
+		}
+	}
+}
+
+func (root *Root) updateListeners(node *mounted, previous View, view View) {
+	stable := len(previous.events) == len(view.events)
+	if stable {
+		for i, listener := range view.events {
+			if previous.events[i].kind != listener.kind ||
+				previous.events[i].options.Capture != listener.options.Capture {
+				stable = false
+				break
+			}
+		}
+	}
+	// The node already holds the latest closures; native listener identity stays.
+	if stable {
+		for index, listener := range view.events {
+			if !previous.events[index].options.same(listener.options) {
+				root.emit(Mutation{Op: "listen", ID: node.id, Name: listener.name(), Value: listener.binding()})
+			}
+		}
+		return
+	}
+	oldEvents := make(map[string]EventOptions)
+	for _, listener := range previous.events {
+		oldEvents[listener.name()] = listener.options
+	}
+	for _, listener := range view.events {
+		old, exists := oldEvents[listener.name()]
+		if !exists || !old.same(listener.options) {
+			root.emit(Mutation{Op: "listen", ID: node.id, Name: listener.name(), Value: listener.binding()})
+		}
+		delete(oldEvents, listener.name())
+	}
+	for _, listener := range previous.events {
+		if _, exists := oldEvents[listener.name()]; exists {
+			root.emit(Mutation{Op: "unlisten", ID: node.id, Name: listener.name()})
+		}
+	}
+}
+
+// Matching is linear in sibling count. Unkeyed children retain position;
+// keyed children retain identity only within the same parent.
+func (root *Root) reconcile(parent int, previous []*mounted, views []View) []*mounted {
+	if len(views) == 0 {
+		for _, node := range previous {
+			root.remove(node)
+		}
+		return nil
+	}
+	if len(views) == 1 && len(previous) == 1 {
+		view := views[0]
+		if view.kind == "" {
+			view = Fragment()
+		}
+		if previous[0].view.key == view.key && compatible(previous[0], view) {
+			root.update(previous[0], view)
+			return previous
+		}
+	}
+	keys := make(map[string]bool)
+	for _, view := range views {
+		if view.key != "" {
+			if keys[view.key] {
+				panic("ui: duplicate sibling key: " + view.key)
+			}
+			keys[view.key] = true
+		}
+	}
+	if len(previous) == 0 {
+		result := make([]*mounted, len(views))
+		for i, view := range views {
+			result[i] = root.mount(view, parent, 0)
+		}
+		return result
+	}
+	keyed := make(map[string]int)
+	for i, node := range previous {
+		if node.view.key != "" {
+			keyed[node.view.key] = i
+		}
+	}
+	used := make([]bool, len(previous))
+	result := make([]*mounted, len(views))
+	// Keep an index for each retained child, allowing unchanged order to skip moves.
+	positions := make([]int, len(views))
+	for i, view := range views {
+		if view.kind == "" {
+			view = Fragment()
+		}
+		index := -1
+		if view.key != "" {
+			if found, exists := keyed[view.key]; exists {
+				index = found
+			}
+		} else if i < len(previous) && previous[i].view.key == "" {
+			index = i
+		}
+		if index >= 0 && compatible(previous[index], view) {
+			used[index] = true
+			result[i] = previous[index]
+			positions[i] = index
+			root.update(result[i], view)
+		} else {
+			positions[i] = -1
+			result[i] = root.mount(view, parent, 0)
+		}
+	}
+	for i, node := range previous {
+		if !used[i] {
+			root.remove(node)
+		}
+	}
+	// Preserve a longest ordered set of retained ranges. Unchanged order needs
+	// no auxiliary arrays; rotation and mixed insert/remove avoid moving peers.
+	stable := retainedOrder(positions)
+	before := 0
+	for i := len(result) - 1; i >= 0; i-- {
+		if positions[i] < 0 || (stable != nil && !stable[i]) {
+			root.emit(Mutation{Op: "insert", ID: result[i].id, Parent: parent, Before: before})
+		}
+		before = result[i].id
+	}
+	return result
+}
+
+func (root *Root) dispose(node *mounted) {
+	if root.nodes[node.id] != node {
+		return
+	}
+	root.unbindRef(node)
+	if node.scope != nil {
+		if root.observer != nil {
+			root.observer.Dispose(node.scope)
+		}
+		node.scope.disposed = true
+		node.scope.cancelTasks()
+		node.scope.releaseState()
+		node.scope.context = nil
+		node.scope.failure = nil
+		node.scope.releaseEffects()
+	}
+	for _, child := range node.children {
+		root.dispose(child)
+	}
+	delete(root.nodes, node.id)
+	delete(root.popovers, node.id)
+	delete(root.portals, node.id)
+	node.children = nil
+	node.view = View{}
+}
+
+func (root *Root) remove(node *mounted) {
+	root.emit(Mutation{Op: "remove", ID: node.id})
+	root.dispose(node)
+}

@@ -1,0 +1,274 @@
+// Package server connects a prepared native entry to an HTML and JSON host.
+// Application loading and response decisions run once in a fresh process.
+package server
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/url"
+	"os"
+	"strings"
+	"unicode/utf8"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/host"
+)
+
+// URL is the origin-relative, escaped request target, including its query.
+// BasePath identifies the deployment prefix; header names are lowercase.
+type Request struct {
+	Method string `json:"method"`
+	URL string `json:"url"`
+	BasePath string `json:"basePath"`
+	Headers map[string][]string `json:"headers"`
+	Body string `json:"body"`
+}
+
+// Page keeps HTML and its client startup data together. Render is normally the
+// same application function passed to host.RunWithData on the browser entry.
+// Client effects never run while producing server HTML. Load data in the handler
+// and pass it through InitialData, including data.EncodeInitial where needed.
+type Page struct {
+	Render func(string) ui.View
+	// Entry selects a declared browser page image. Empty uses default for HTML;
+	// JSON, redirects without HTML and bodyless responses keep Entry empty.
+	Entry string
+	InitialData string
+	Title string
+	Description string
+	Status int
+	Headers map[string][]string
+	jsonBody string
+	jsonResponse bool
+}
+
+type requestEnvelope struct {
+	Version int `json:"version"`
+	Request Request `json:"request"`
+}
+
+type responseEnvelope struct {
+	Version int `json:"version"`
+	Kind string `json:"kind"`
+	Body string `json:"body"`
+	HTML string `json:"html"`
+	Entry string `json:"entry"`
+	Data string `json:"data"`
+	Title string `json:"title"`
+	Description string `json:"description"`
+	Status int `json:"status"`
+	Headers map[string][]string `json:"headers"`
+}
+
+const protocolVersion = 4
+
+const maxRequestBytes = 8 * 1024 * 1024
+
+const maxBodyBytes = 1024 * 1024
+
+const maxDataBytes = 1024 * 1024
+
+const maxHTMLBytes = 16 * 1024 * 1024
+
+const maxJSONBytes = 2 * 1024 * 1024
+
+const maxResponseBytes = 32 * 1024 * 1024
+
+func validText(value string, maximum int) bool {
+	if len(value) > maximum || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if character < 32 && character != '\t' && character != '\n' && character != '\r' ||
+			character == 127 {
+			return false
+		}
+	}
+	return true
+}
+
+func validateHeaders(headers map[string][]string, response bool) error {
+	if len(headers) > 128 {
+		return fmt.Errorf("server: headers exceed 128 names")
+	}
+	bytes, count := 0, 0
+	for name, values := range headers {
+		if name == "" || name != strings.ToLower(name) {
+			return fmt.Errorf("server: header names must be nonempty lowercase HTTP tokens")
+		}
+		for _, character := range name {
+			if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' ||
+				strings.ContainsRune("!#$%&'*+-.^_`|~", character)) {
+				return fmt.Errorf("server: invalid HTTP header name")
+			}
+		}
+		if response {
+			switch name {
+				case "connection", "content-length", "content-type", "content-encoding", "transfer-encoding", "trailer", "upgrade", "keep-alive":
+					return fmt.Errorf("server: response framing header %s belongs to the adapter", name)
+			}
+		}
+		if len(values) == 0 {
+			return fmt.Errorf("server: header values must not be empty arrays")
+		}
+		for _, value := range values {
+			if !utf8.ValidString(value) {
+				return fmt.Errorf("server: invalid header value")
+			}
+			for _, character := range value {
+				if character < 32 && character != '\t' || character == 127 || character > 255 {
+					return fmt.Errorf("server: header values must use HTTP bytes without line breaks")
+				}
+			}
+			bytes += len(name) + len(value)
+			count++
+			if count > 256 || bytes > 64 * 1024 {
+				return fmt.Errorf("server: headers exceed their count or byte budget")
+			}
+		}
+	}
+	return nil
+}
+
+func decodeRequest(input []byte) (Request, error) {
+	if len(input) > maxRequestBytes || !utf8.Valid(input) {
+		return Request{}, fmt.Errorf("server: request must be UTF-8 within 8 MiB")
+	}
+	var envelope requestEnvelope
+	if err := json.Unmarshal(input, &envelope); err != nil {
+		return Request{}, err
+	}
+	request := envelope.Request
+	if envelope.Version != protocolVersion {
+		return Request{}, fmt.Errorf("server: expected request protocol 4")
+	}
+	switch request.Method {
+		case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS":
+		default:
+			return Request{}, fmt.Errorf("server: unsupported HTTP method")
+	}
+	if len(request.Body) > maxBodyBytes || !utf8.ValidString(request.Body) ||
+		(request.Method == "GET" || request.Method == "HEAD") && request.Body != "" {
+		return Request{}, fmt.Errorf("server: request bodies must be UTF-8 within 1 MiB; GET and HEAD have no body")
+	}
+	parsed, err := url.ParseRequestURI(request.URL)
+	if err != nil || len(request.URL) > 8192 || !strings.HasPrefix(request.URL, "/") ||
+		strings.HasPrefix(request.URL, "//") ||
+		strings.ContainsAny(request.URL, "\\#\r\n") {
+		return Request{}, fmt.Errorf("server: invalid origin-relative request URL")
+	}
+	if parsed.Scheme != "" || parsed.Host != "" || !strings.HasPrefix(request.BasePath, "/") ||
+		!strings.HasSuffix(request.BasePath, "/") ||
+		len(request.BasePath) > 1024 {
+		return Request{}, fmt.Errorf("server: invalid request origin or deployment prefix")
+	}
+	if err := validateHeaders(request.Headers, false); err != nil {
+		return Request{}, err
+	}
+	return request, nil
+}
+
+// JSON serializes a typed value into a response without mounting an application
+// or attaching client assets. The caller may set Headers on the returned Page.
+func JSON(status int, value any) (Page, error) {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return Page{}, err
+	}
+	if len(body) > maxJSONBytes || !utf8.Valid(body) {
+		return Page{}, fmt.Errorf("server: JSON must be UTF-8 within 2 MiB")
+	}
+	return Page{Status: status, jsonBody: string(body), jsonResponse: true}, nil
+}
+
+func encodePage(page Page) ([]byte, error) {
+	if page.Status == 0 {
+		page.Status = 200
+	}
+	if page.Status < 200 || page.Status > 599 {
+		return nil, fmt.Errorf("server: page status must be 200..599")
+	}
+	if len(page.InitialData) > maxDataBytes || !utf8.ValidString(page.InitialData) ||
+		!validText(page.Title, 4096) ||
+		!validText(page.Description, 8192) {
+		return nil, fmt.Errorf("server: page data or metadata exceeds its Unicode or byte contract")
+	}
+	if err := validateHeaders(page.Headers, true); err != nil {
+		return nil, err
+	}
+	noContent := page.Status == 204 || page.Status == 205 || page.Status == 304
+	locations := page.Headers["location"]
+	redirect := page.Status >= 300 && page.Status <= 399 && page.Status != 304 && len(locations) == 1 &&
+		locations[0] != ""
+	if page.Render == nil && !noContent && !redirect && !page.jsonResponse {
+		return nil, fmt.Errorf("server: an HTML page requires a render function")
+	}
+	if noContent && page.Render != nil {
+		return nil, fmt.Errorf("server: this status cannot carry HTML")
+	}
+	entry := page.Entry
+	if page.Render == nil && entry != "" {
+		return nil, fmt.Errorf("server: a client entry requires rendered HTML")
+	}
+	if page.Render != nil {
+		if entry == "" {
+			entry = "default"
+		}
+		if !validEntry(entry) {
+			return nil, fmt.Errorf("server: invalid client page entry")
+		}
+	}
+	kind := "html"
+	if page.jsonResponse {
+		if noContent || page.Render != nil || page.InitialData != "" || page.Title != "" ||
+			page.Description != "" {
+			return nil, fmt.Errorf("server: JSON responses require a body-bearing status and cannot include HTML or startup data")
+		}
+		kind = "json"
+	}
+	html := ""
+	if page.Render != nil {
+		html = host.HTML(page.Render(page.InitialData))
+	}
+	if len(html) > maxHTMLBytes || !utf8.ValidString(html) {
+		return nil, fmt.Errorf("server: HTML must be UTF-8 within 16 MiB")
+	}
+	encoded, err := json.Marshal(responseEnvelope{
+		Version: protocolVersion, Kind: kind, Body: page.jsonBody, HTML: html, Data: page.InitialData,
+		Entry: entry, Title: page.Title, Description: page.Description, Status: page.Status,
+		Headers: page.Headers,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) > maxResponseBytes {
+		return nil, fmt.Errorf("server: encoded response exceeds 32 MiB")
+	}
+	return encoded, nil
+}
+
+// Run serves one request on stdin and writes one versioned response to stdout.
+// The host owns admission, deadlines and disconnect cancellation. Application
+// output and diagnostics must use stderr; extra stdout invalidates the response.
+func Run(handle func(Request) (Page, error)) {
+	if handle == nil {
+		panic("server: a request handler is required")
+	}
+	input, err := io.ReadAll(io.LimitReader(os.Stdin, maxRequestBytes + 1))
+	if err != nil {
+		panic(err.Error())
+	}
+	request, err := decodeRequest(input)
+	if err != nil {
+		panic(err.Error())
+	}
+	page, err := handle(request)
+	if err != nil {
+		panic(err.Error())
+	}
+	encoded, err := encodePage(page)
+	if err != nil {
+		panic(err.Error())
+	}
+	fmt.Print(string(encoded))
+}

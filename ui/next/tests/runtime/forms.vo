@@ -1,0 +1,206 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+func formContracts() {
+	var form *forms.Form
+	var shown *ui.BoolState
+	var extra *ui.BoolState
+	var async *ui.BoolState
+	focused := ""
+	initial := forms.Values{
+		"name": []string{"Ada"}, "extra": []string{"kept"}, "email": []string{"false"},
+	}
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		shown = ui.Bool(scope, "shown", true)
+		extra = ui.Bool(scope, "extra", true)
+		async = ui.Bool(scope, "async", false)
+		if !shown.Get() {
+			return ui.Text("hidden")
+		}
+		fields := []string{"name", "email"}
+		if extra.Get() {
+			fields = append(fields, "extra")
+		}
+		options := forms.Options{
+			Initial: initial, Fields: fields,
+			Validate: func(data forms.Data) forms.Errors {
+				values := data.Values
+				value := values.Get("name")
+				values.Set("name", "validator cannot mutate the form")
+				if strings.TrimSpace(value) == "" {
+					return forms.Errors{"name": "Enter a name."}
+				}
+				return nil
+			},
+			FocusInvalid: func(name string) {
+				focused = name
+			},
+		}
+		if async.Get() {
+			options.ValidateAsync = func(data forms.Data) ui.Request {
+				values := data.Values
+				return ui.Request{Service: "validate", Value: values.Get("name")}
+			}
+			options.DecodeValidation = func(result ui.Result) forms.Errors {
+				return forms.Errors{"name": result.Value}
+			}
+		}
+		form = forms.Use(scope, "form", options)
+		return kit.FormField(kit.FieldProps{
+			ID: "contract-name", Label: "Name", Hint: "Hint", Error: form.Error("name"),
+		}, form.Input("name", ui.Element("input").Class("caller").DescribedBy("outside")))
+	}))
+	flush(root)
+	initial.Set("name", "caller mutation")
+	values := form.Values()
+	values.Set("name", "snapshot mutation")
+	require(form.Value("name") == "Ada" && !form.Dirty(), "initial/value maps escaped form ownership")
+	require(strings.Contains(root.HTML(), "class=\"caller vui-input\"") &&
+		strings.Contains(root.HTML(), "outside contract-name-hint"), "field wrapper replaced caller classes or descriptions")
+	form.Change("name", "")
+	require(form.Dirty() && form.Error("name") == "", "untouched field showed validation too early")
+	form.Blur("name")
+	require(form.Touched("name") && form.Error("name") == "Enter a name.", "blur did not validate the field")
+	flush(root)
+	require(strings.Contains(root.HTML(), "contract-name-error") &&
+		strings.Contains(root.HTML(), "aria-invalid=\"true\""), "field error lost its accessible association")
+	request := func(data forms.Data) ui.Request {
+		values := data.Values
+		return ui.Request{Service: "save", Value: values.Get("name")}
+	}
+	decode := func(result ui.Result) forms.Outcome {
+		return forms.Outcome{Message: result.Value}
+	}
+	form.Submit(request, decode)
+	require(focused == "name" && !form.Pending(), "invalid submission did not focus its first error")
+	form.Reset()
+	require(form.Value("name") == "Ada" && !form.Dirty() && !form.Touched("name"), "reset did not restore initial/pristine state")
+	form.Change("name", "Grace")
+	form.Submit(request, decode)
+	require(!form.Submit(request, decode), "duplicate submission started")
+	a := startCommand(flush(root))
+	form.Change("name", "Newer edit")
+	root.Dispatch(ui.Event{Kind: "@task", Target: a, Value: "Saved Grace", Sequence: 1})
+	require(form.Value("name") == "Newer edit" && form.Dirty() && form.Message() == "Saved Grace", "submission overwrote or accepted newer edits")
+	form.Change("name", "Grace")
+	require(!form.Dirty(), "submitted snapshot did not become the saved baseline")
+	form.Submit(request, func(ui.Result) forms.Outcome {
+		return forms.Outcome{Errors: forms.Errors{"name": "Already taken"}}
+	})
+	b := startCommand(flush(root))
+	form.Change("name", "Changed again")
+	root.Dispatch(ui.Event{Kind: "@task", Target: b, Sequence: 2})
+	require(form.Error("name") == "", "server error attached to a newer field value")
+	async.Set(true)
+	flush(root)
+	form.Blur("name")
+	c := startCommand(flush(root))
+	form.Submit(request, decode)
+	d := startCommand(flush(root))
+	require(c != d && !root.Dispatch(ui.Event{Kind: "@task", Target: c, Value: "stale", Sequence: 3}), "submit did not replace blur validation")
+	form.Change("name", "Latest")
+	require(!form.Pending(), "editing during validation left submission pending")
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: d, Value: "stale", Sequence: 4}), "outdated validation was accepted")
+	form.Submit(request, decode)
+	e := startCommand(flush(root))
+	root.Dispatch(ui.Event{Kind: "@task", Target: e, Value: "Reserved", Sequence: 5})
+	require(form.Error("name") == "Reserved" && !form.Pending(), "async field error was lost")
+	form.Change("name", "Available")
+	form.Submit(request, decode)
+	f := startCommand(flush(root))
+	root.Dispatch(ui.Event{Kind: "@task", Target: f, Sequence: 6})
+	g := startCommand(flush(root))
+	require(form.Submitting() && !form.Validating(), "successful validation did not start the frozen submission")
+	form.Reset()
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: g, Value: "after reset", Sequence: 7}) &&
+		!form.Pending(), "reset retained its request")
+	form.Change("extra", "retained hidden edit")
+	form.Submit(request, decode)
+	h := startCommand(flush(root))
+	extra.Set(false)
+	flush(root)
+	require(!form.Pending() && !root.Dispatch(ui.Event{Kind: "@task", Target: h, Sequence: 8}), "changed field participation retained validation")
+	_, included := form.Values()["extra"]
+	require(!included, "hidden field entered submission values")
+	extra.Set(true)
+	flush(root)
+	require(form.Value("extra") == "retained hidden edit", "conditional field lost its value")
+	form.Submit(request, decode)
+	i := startCommand(flush(root))
+	shown.Set(false)
+	flush(root)
+	stale := form
+	expectPanic(func() {
+		stale.Submit(request, decode)
+	}, "current committed form declaration")
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: i, Sequence: 9}), "removed form declaration retained a task in its parent scope")
+	shown.Set(true)
+	flush(root)
+	expectPanic(func() {
+		stale.Change("name", "obsolete handle")
+	}, "current committed form declaration")
+	require(!form.Pending(), "redeclared form kept obsolete pending status")
+	form.Submit(request, decode)
+	j := startCommand(flush(root))
+	root.Close()
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: j, Sequence: 10}), "closed form accepted validation")
+}
+
+func formRenderMutationIsolation() {
+	for _, operation := range []string{"change", "cancel", "reset", "array"} {
+		var form *forms.Form
+		var invalid *ui.BoolState
+		root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+			invalid = ui.Bool(scope, "invalid", false)
+			form = forms.Use(scope, "form", forms.Options{
+				Initial: forms.WithArray(forms.Values{"name": []string{"Ada"}}, "people", nil),
+				Arrays: []string{"people"},
+				ValidateAsync: func(forms.Data) ui.Request {
+					return ui.Request{Service: "validate"}
+				},
+				DecodeValidation: func(ui.Result) forms.Errors {
+					return nil
+				},
+			})
+			return ui.ErrorBoundary(func() ui.View {
+				return ui.Component(tabContentType, func(child *ui.Scope) ui.View {
+					if invalid.Get() {
+						if operation == "change" {
+							form.Change("name", "illegal render mutation")
+						}
+						if operation == "cancel" {
+							form.Cancel()
+						}
+						if operation == "reset" {
+							form.Reset()
+						}
+						if operation == "array" {
+							form.Array("people").Append(forms.Values{"name": []string{"illegal"}})
+						}
+					}
+					return ui.Text("healthy")
+				})
+			}, func(failure *ui.RenderError) ui.View {
+				return ui.Text("caught")
+			})
+		}))
+		flush(root)
+		form.Submit(func(forms.Data) ui.Request {
+			return ui.Request{Service: "save"}
+		}, func(ui.Result) forms.Outcome {
+			return forms.Outcome{}
+		})
+		pending := startCommand(flush(root))
+		invalid.Set(true)
+		flush(root)
+		require(strings.Contains(root.HTML(), "caught") && form.Value("name") == "Ada", "render mutation escaped its boundary")
+		require(root.Dispatch(ui.Event{Kind: "@task", Target: pending, Sequence: 1}), "illegal child render cancelled its parent's form task before rejection")
+		root.Close()
+	}
+}

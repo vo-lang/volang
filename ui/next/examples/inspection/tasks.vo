@@ -1,0 +1,72 @@
+package main
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/web"
+)
+
+type taskHandles struct {
+	request *ui.Task
+	subscription *ui.Task
+}
+
+func TaskControls(scope *ui.Scope) ui.View {
+	// Handles survive renders; visible status has its own reactive state.
+	handles := ui.State(scope, "task-handles", func() any {
+		return &taskHandles{}
+	}).Get().(*taskHandles)
+	requestStatus := ui.String(scope, "request-status", "Ready")
+	watchStatus := ui.String(scope, "watch-status", "Not subscribed")
+	start := func(request ui.Request) {
+		handles.request.Cancel()
+		requestStatus.Set("Waiting")
+		handles.request = ui.Start(scope, request, func(result ui.Result) {
+			handles.request = nil
+			if result.Error != "" {
+				requestStatus.Set(result.Error)
+			} else {
+				requestStatus.Set("Completed")
+			}
+		})
+	}
+	return ui.Element("section", ui.Element("h2", ui.Text("Follow asynchronous work")), ui.Element("p", ui.Text("Start a request or subscription, then capture its owner, status and elapsed time.")), ui.Element("div", kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			start(web.After(40, "done"))
+		},
+	}, ui.Text("Complete a request")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			start(web.After(60000, "done"))
+		},
+	}, ui.Text("Start waiting")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			start(web.After(60000, "done").WithTimeout(100))
+		},
+	}, ui.Text("Try a timeout")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			handles.request.Cancel()
+			handles.request = nil
+			requestStatus.Set("Cancelled")
+		},
+	}, ui.Text("Cancel request"))).Class("task-controls"), ui.Element("p", ui.Text(requestStatus.Get())).Attr("data-request-status", "").Attr("role", "status"), ui.Element("div", kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			handles.subscription.Cancel()
+			watchStatus.Set("Waiting for page activity")
+			handles.subscription = ui.Subscribe(scope, ui.Request{Service: "web.page-active"}, func(result ui.Result) {
+				if result.Error != "" {
+					watchStatus.Set(result.Error)
+				} else if result.Value == "true" {
+					watchStatus.Set("Page active")
+				} else {
+					watchStatus.Set("Page inactive")
+				}
+			})
+		},
+	}, ui.Text("Watch page activity")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			handles.subscription.Cancel()
+			handles.subscription = nil
+			watchStatus.Set("Subscription cancelled")
+		},
+	}, ui.Text("Cancel subscription"))).Class("task-controls"), ui.Element("p", ui.Text(watchStatus.Get())).Attr("data-watch-status", "").Attr("role", "status")).Class("vui-card")
+}

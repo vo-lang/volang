@@ -30,7 +30,7 @@ fn logical_pc(func_id: u32, pc: u32) -> u64 {
 fn exact_source_location(module: &Module, func_id: u32, pc: u32) -> Option<SourceLoc> {
     let function = module.debug_info.funcs.get(func_id as usize)?;
     // Relocation can merge several source entries at one PC. The last entry
-    // is authoritative, matching DebugInfo::lookup and Core Wasm metadata.
+    // is authoritative, matching DebugInfo::lookup.
     let end = function.entries.partition_point(|entry| entry.pc <= pc);
     let entry = function.entries.get(end.checked_sub(1)?)?;
     if entry.pc != pc {

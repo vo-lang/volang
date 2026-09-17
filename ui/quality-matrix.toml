@@ -9,8 +9,8 @@ evidence = ["lang/crates/vo-ui-integration/src/tests.rs", "ui/tests", "eng/run-u
 
 [[suite]]
 id = "web-real-browser"
-targets = ["web-vm", "web-wasm-aot"]
-commands = ["npm --prefix lang/crates/vo-web run test:ui", "npm --prefix lang/crates/vo-web run test:ui-browser", "npm --prefix lang/crates/vo-web run test:ui-component-browser", "npm --prefix lang/crates/vo-web run test:uikit-gallery-browser", "npm --prefix lang/crates/vo-web run test:data-application-browser", "npm --prefix lang/crates/vo-web run test:content-site-browser", "npm --prefix lang/crates/vo-web run test:media-application-browser", "npm --prefix lang/crates/vo-web run test:studio-workbench-browser", "npm --prefix lang/crates/vo-web run test:studio-aot-browser"]
+targets = ["web-vm"]
+commands = ["npm --prefix lang/crates/vo-web run test:ui", "npm --prefix lang/crates/vo-web run test:ui-browser", "npm --prefix lang/crates/vo-web run test:ui-component-browser", "npm --prefix lang/crates/vo-web run test:uikit-gallery-browser", "npm --prefix lang/crates/vo-web run test:data-application-browser", "npm --prefix lang/crates/vo-web run test:content-site-browser", "npm --prefix lang/crates/vo-web run test:media-application-browser", "npm --prefix lang/crates/vo-web run test:studio-workbench-browser", "npm --prefix lang/crates/vo-web run test:studio-vm-browser"]
 evidence = [".github/workflows/ci.yml#wasm_web", "lang/crates/vo-web/js/browser_smoke.ts", "eng/run-browser-smoke.mjs"]
 
 [[suite]]
@@ -21,13 +21,13 @@ evidence = [".github/workflows/ci.yml#ui_platform", "apps/studio/host-native/src
 
 [[suite]]
 id = "advanced-packs"
-targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+targets = ["headless", "web-vm", "desktop-vm", "desktop-jit", "desktop-native-aot"]
 commands = ["cargo test --locked -p vo-ui-integration official_advanced_packs_are_vm_jit_and_aot_equivalent", "cargo test --locked -p vo-ui-integration official_multi_window_editor_preserves_shared_document_and_native_aot", "cargo test --locked -p vo-ui-paint"]
 evidence = ["ui/tests/advanced-packs/main.vo", "ui/tests/multi-window-editor/main.vo", "ui/docs/advanced-capability-packs.md"]
 
 [[suite]]
 id = "resilience-security"
-targets = ["headless", "web-wasm-aot", "desktop-native-aot", "server-native-aot"]
+targets = ["headless", "desktop-native-aot", "server-native-aot"]
 commands = ["cargo test --locked -p vo-ui-integration official_ui_testing_and_observability_are_vm_jit_and_aot_equivalent", "cargo test --locked -p vo-ui-protocol -p vo-app-protocol -p vo-ui-system", "cargo test --locked -p vo-module"]
 evidence = ["ui/testing/testing.vo", "ui/observability/observability.vo", "lang/crates/vo-engine/src/compile/mod.rs", ".github/workflows/nightly.yml", "fuzz/ui-artifact/fuzz_targets/ui_artifact_decoders.rs", "fuzz/app-protocol/fuzz_targets/decoders.rs"]
 
@@ -39,6 +39,6 @@ evidence = ["ui/crates/vo-ui-benchmark/src/main.rs", "ui/docs/quality-budgets.md
 
 [[suite]]
 id = "release-artifacts"
-targets = ["web-wasm-aot", "server-native-aot", "desktop-native-aot"]
+targets = ["server-native-aot", "desktop-native-aot"]
 commands = ["cargo test --locked -p vo-dev release_", "cargo run -q -p vo-dev --locked -- ui-certify --check"]
 evidence = [".github/workflows/release.yml", "ui/docs/release-policy.md"]

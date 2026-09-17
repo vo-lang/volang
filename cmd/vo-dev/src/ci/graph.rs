@@ -93,9 +93,15 @@ impl ImpactGraph {
             }
             // Deleted working-tree manifests are still listed by ls-files.
             if revision.is_none() && !root.join(path).is_file() {
-                graph
-                    .fallback
-                    .push(format!("working-tree Cargo manifest is missing: {path}"));
+                // Wildcard members describe the directories that currently
+                // exist. Removed packages remain in the base revision graph;
+                // surviving path dependencies are checked below. Explicit
+                // members still require their manifest in the working tree.
+                if members.contains(&directory) {
+                    graph
+                        .fallback
+                        .push(format!("working-tree Cargo manifest is missing: {path}"));
+                }
                 continue;
             }
             let value: toml::Value = toml::from_str(&read(path)?)

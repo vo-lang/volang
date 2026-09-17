@@ -1,0 +1,125 @@
+package app
+
+import (
+	"encoding/json"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/web/editor"
+)
+
+type storedDraft struct {
+	Found bool `json:"found"`
+	Source string `json:"source"`
+}
+
+type editorDraft struct {
+	source *ui.StringState
+	dirty *ui.BoolState
+	error *ui.StringState
+	previous *ui.StringState
+	canRestore *ui.BoolState
+	input *ui.ElementRef
+}
+
+type draftLoad struct {
+	complete bool
+	failed bool
+}
+
+// Native source controls normalize CRLF and bare CR to LF. Draft state uses
+// the same text so compiler ranges and guarded selections share one source.
+func editorSource(value string) string {
+	if !strings.Contains(value, "\r") {
+		return value
+	}
+	return strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n")
+}
+
+func (draft *editorDraft) Set(value string) {
+	draft.dirty.Set(true)
+	draft.source.Set(editorSource(value))
+}
+
+func (draft *editorDraft) Replace(value string) {
+	value = editorSource(value)
+	if value != draft.source.Get() {
+		draft.previous.Set(draft.source.Get())
+		draft.canRestore.Set(true)
+		draft.Set(value)
+	}
+	draft.input.Focus()
+}
+
+func (draft *editorDraft) Restore() {
+	if !draft.canRestore.Get() {
+		return
+	}
+	draft.Set(draft.previous.Get())
+	draft.previous.Set("")
+	draft.canRestore.Set(false)
+	draft.input.Focus()
+}
+
+// One draft per editor scope; late restoration never overwrites active typing.
+func useEditorDraft(scope *ui.Scope, initial string, service string) *editorDraft {
+	draft := &editorDraft{
+		source: ui.String(scope, "source", editorSource(initial)), dirty: ui.Bool(scope, "dirty", false),
+		error: ui.String(scope, "draft-error", ""), previous: ui.String(scope, "previous-draft", ""),
+		canRestore: ui.Bool(scope, "restore-draft", false), input: ui.Ref(scope, "source-input"),
+	}
+	// Readiness belongs to the current storage request, even when draft data
+	// is restored by development reload. Do not write before the new read ends.
+	loaded := ui.State(scope, "loaded", func() any {
+		return draftLoad{}
+	})
+	ui.Effect(scope, "restore", func() func() {
+		pending := ui.Start(scope, ui.Request{Service: service + "-read"}, func(result ui.Result) {
+			failure := result.Error
+			if failure == "" {
+				var stored storedDraft
+				if err := json.Unmarshal([]byte(result.Value), &stored); err != nil {
+					failure = "Your saved draft could not be read."
+				} else if stored.Found && !draft.dirty.Get() {
+					draft.source.Set(editorSource(stored.Source))
+				}
+			}
+			draft.error.Set(failure)
+			loaded.Update(func(any) any {
+				return draftLoad{complete: true, failed: failure != ""}
+			})
+		})
+		return func() {
+			pending.Cancel()
+		}
+	})
+	load := loaded.Get().(draftLoad)
+	// A failed read cannot authorize replacing stored content with a default.
+	// An explicit edit can still be saved after the read has completed.
+	if load.complete && (!load.failed || draft.dirty.Get()) {
+		value := draft.source.Get()
+		ui.Effect(scope, "save-draft", func() func() {
+			pending := ui.Start(scope, ui.Request{Service: service + "-write", Value: value}, func(result ui.Result) {
+				draft.error.Set(result.Error)
+			})
+			return func() {
+				pending.Cancel()
+			}
+		}, value)
+	}
+	return draft
+}
+
+func SourceEditor(id string, draft *editorDraft, actions ui.View, run func()) ui.View {
+	control := ui.Element("textarea").Ref(draft.input).Attr("value", draft.source.Get()).Attr("spellcheck", "false").Attr("autocapitalize", "off").Attr("autocomplete", "off").Attr("maxlength", "100000").Attr("aria-label", "Volang source code").Attr("aria-keyshortcuts", "Control+Enter Meta+Enter").On("input", func(event ui.Event) {
+		draft.Set(event.Value)
+	})
+	code := editor.Enhance(control, editor.Options{ID: id}).OnWith("keydown", ui.EventOptions{
+		Keys: []string{"Enter"}, Modifiers: []ui.KeyboardModifiers{{Ctrl: true}, {Meta: true}},
+		PreventDefault: true, Capture: true,
+	}, func(event ui.Event) {
+		if !event.Repeat {
+			run()
+		}
+	})
+	return ui.Element("div", ui.Element("div", ui.Element("span", ui.Text("main.vo")), actions).Class("studio-editor-toolbar"), code, ui.Element("p", ui.Text("Ctrl + Enter or ⌘ + Enter to run. In the enhanced editor: Ctrl + Space for suggestions, F12 for a definition.")).Class("studio-editor-hint")).Class("studio-editor")
+}

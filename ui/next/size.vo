@@ -1,0 +1,43 @@
+package ui
+
+import (
+	"encoding/json"
+	"math"
+)
+
+// Size describes the first CSS border-box fragment in logical CSS pixels,
+// including padding and borders, before transforms. Inline and Block follow
+// writing mode. Use Measure for a transformed physical bounding rectangle.
+type Size struct {
+	Inline float64 `json:"inline"`
+	Block float64 `json:"block"`
+}
+
+type sizePayload struct {
+	Inline any `json:"inline"`
+	Block any `json:"block"`
+}
+
+// OnSize observes native border-box changes. Delivery is coalesced per animation
+// frame through the UI writer; removal cancels pending observations. Hidden
+// elements may report zero sizes. Non-replaced inline elements do not emit sizes.
+func (view View) OnSize(handler func(Size)) View {
+	if handler == nil {
+		panic("ui: size requires a handler")
+	}
+	return view.On("size", func(event Event) {
+		var payload sizePayload
+		if len(event.Value) > 256 || json.Unmarshal([]byte(event.Value), &payload) != nil {
+			panic("ui: invalid size")
+		}
+		inline, validInline := payload.Inline.(float64)
+		block, validBlock := payload.Block.(float64)
+		if !validInline || !validBlock || inline < 0 || block < 0 || math.IsNaN(inline) ||
+			math.IsNaN(block) ||
+			math.IsInf(inline, 0) ||
+			math.IsInf(block, 0) {
+			panic("ui: invalid size")
+		}
+		handler(Size{Inline: inline, Block: block})
+	})
+}

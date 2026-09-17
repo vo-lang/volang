@@ -154,7 +154,7 @@ id = "component-gallery"
 name = "Official UIKit gallery and interaction laboratory"
 status = "complete"
 starts_in = "E3"
-acceptance = ["Every official component, state, theme, locale, density, input mode, and accessibility mode runs as Web AOT and packaged Native AOT."]
+acceptance = ["Every official component, state, theme, locale, density, input mode, and accessibility mode runs as Web Wasm VM and packaged Native AOT."]
 commands = ["cargo test --locked -p vo-ui-integration official_uikit_", "./eng/run-uikit-gallery-contracts.sh", "npm --prefix lang/crates/vo-web run test:uikit-gallery-browser"]
 evidence = ["ui/showcases/component-gallery/main.vo", "ui/kit/catalog.toml", "ui/testdata/goldens/uikit.accessibility.txt", "ui/testdata/goldens/uikit.paint.txt", "ui/testdata/goldens/uikit.web.txt", "generated:target/ci/results/ui/volang-uikit-gallery-browser.json"]
 
@@ -191,7 +191,7 @@ name = "Pure-Volang Studio workbench"
 status = "complete"
 starts_in = "E6"
 acceptance = ["Project management, file tree, official editor, console, docs, commands, windows, and embedded previews use public APIs across VM/JIT development and Wasm/Native AOT release."]
-commands = ["cargo test --locked -p vo-ui-integration official_media_and_studio_showcases_use_public_advanced_packs", "cargo test --locked -p vo-ui-integration official_multi_window_editor_preserves_shared_document_and_native_aot", "./eng/run-studio-workbench-contracts.sh", "npm --prefix lang/crates/vo-web run test:studio-workbench-browser", "cargo test --locked -p vo pure_volang_studio_starter_opens_edits_saves_and_runs", "npm --prefix lang/crates/vo-web run test:studio-aot-browser"]
+commands = ["cargo test --locked -p vo-ui-integration official_media_and_studio_showcases_use_public_advanced_packs", "cargo test --locked -p vo-ui-integration official_multi_window_editor_preserves_shared_document_and_native_aot", "./eng/run-studio-workbench-contracts.sh", "npm --prefix lang/crates/vo-web run test:studio-workbench-browser", "cargo test --locked -p vo pure_volang_studio_starter_opens_edits_saves_and_runs", "npm --prefix lang/crates/vo-web run test:studio-vm-browser"]
 evidence = ["ui/showcases/studio-workbench/main.vo", "ui/showcases/studio-workbench/ui.web.toml", "ui/showcases/studio-workbench/ui.desktop.toml", "ui/templates/studio/main.vo", "ui/editor/editor.vo", "ui/workspace/workspace.vo", "ui/tests/multi-window-editor/main.vo", "apps/studio/app/app.vo", "apps/studio/examples/examples.vo", "apps/studio/product-parity.toml", "eng/run-studio-workbench-contracts.sh", "generated:target/ci/results/ui/volang-studio-workbench-browser.json", ".github/workflows/ci.yml#ui_platform"]
 
 [[gate]]

@@ -1,0 +1,52 @@
+package server
+
+import (
+	"fmt"
+	"net/url"
+	"strings"
+	"unicode/utf8"
+)
+
+// PostForm decodes a standard UTF-8 text form. Repeated fields retain their
+// order; empty values are preserved. URL query parameters remain separate.
+// The supported content type is application/x-www-form-urlencoded, optionally
+// followed by charset=utf-8. Multipart files require a separate upload adapter.
+func (request Request) PostForm() (url.Values, error) {
+	if request.Method != "POST" {
+		return nil, fmt.Errorf("server: PostForm requires POST")
+	}
+	types := request.Headers["content-type"]
+	if len(types) != 1 {
+		return nil, fmt.Errorf("server: PostForm requires one form content type")
+	}
+	parts := strings.Split(strings.ToLower(types[0]), ";")
+	if strings.TrimSpace(parts[0]) != "application/x-www-form-urlencoded" || len(parts) > 2 {
+		return nil, fmt.Errorf("server: PostForm requires application/x-www-form-urlencoded")
+	}
+	if len(parts) == 2 {
+		charset := strings.Split(parts[1], "=")
+		if len(charset) != 2 || strings.TrimSpace(charset[0]) != "charset" ||
+			(strings.TrimSpace(charset[1]) != "utf-8" && strings.TrimSpace(charset[1]) != "\"utf-8\"") {
+			return nil, fmt.Errorf("server: PostForm supports only UTF-8 charset")
+		}
+	}
+	if len(request.Body) > maxBodyBytes || !utf8.ValidString(request.Body) ||
+		strings.Count(request.Body, "&") + 1 > 4096 {
+		return nil, fmt.Errorf("server: form exceeds its UTF-8, 1 MiB or 4096 field budget")
+	}
+	values, err := url.ParseQuery(request.Body)
+	if err != nil {
+		return nil, err
+	}
+	for key, entries := range values {
+		if !utf8.ValidString(key) {
+			return nil, fmt.Errorf("server: form names must decode to UTF-8")
+		}
+		for _, value := range entries {
+			if !utf8.ValidString(value) {
+				return nil, fmt.Errorf("server: form values must decode to UTF-8")
+			}
+		}
+	}
+	return values, nil
+}

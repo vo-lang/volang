@@ -1,0 +1,25 @@
+[package]
+name = "vo-ui-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Native execution sessions for the replacement Volang UI"
+publish = false
+
+[features]
+default = []
+jit = ["vo-vm/jit"]
+aot = ["vo-vm/native"]
+
+[dependencies]
+vo-ui-bridge.workspace = true
+vo-vm = { path = "../vo-vm" }
+
+[dev-dependencies]
+vo-common.workspace = true
+vo-engine = { path = "../vo-engine", default-features = false }
+vo-runtime = { workspace = true, features = ["std"] }
+vo-target.workspace = true

@@ -479,7 +479,7 @@ func main() {
     }
     if loop(10) != -5 || loop(11) != 5 { panic("cleanup loops") }
 }"#;
-    let module = compile_source(&source);
+    let module = compile_source(source);
     verify_module(&module).expect("optimized control flow and metadata verify");
     for (name, limit, slots) in [
         ("repeated", 6, 5),
@@ -712,7 +712,7 @@ func main() {
     if stableString("abcd") != 4 || replacedString("abcd") != 1 { panic("string length") }
     if ranged([]int{1,2,3}) != 1 || shadowed(nil) != 23 { panic("length mutation identity") }
 }"#;
-    let module = compile_source(&source);
+    let module = compile_source(source);
     verify_module(&module).unwrap();
     for (name, expected) in [
         ("sum", 1),
@@ -5974,6 +5974,36 @@ func main() {
         b := [2][2]uint8{{uint8(i),uint8(i+1)},{3,4}}
         if narrow(b, i & 1) != b[i & 1][1] || b[1][0] != 3 { panic("narrow nested value") }
     }
+}"#,
+    );
+}
+
+#[test]
+fn parallel_nil_assignment_uses_each_destination_storage_layout() {
+    compile_and_run(
+        r#"package main
+type Number struct { value int }
+type References struct { a *Number; b *Number; active bool; value any }
+var global *Number
+func main() {
+    number := Number{value: 42}
+    refs := &References{a: &number, b: &number, active: true, value: &number}
+    refs.a, refs.b = nil, nil
+    refs.active, refs.value = false, nil
+    if refs.a != nil || refs.b != nil || refs.active || refs.value != nil { panic("fields") }
+    pointer := &number
+    list := []int{1}
+    dictionary := map[string]int{"x": 1}
+    channel := make(chan int)
+    callback := func() {}
+    var boxed any = pointer
+    pointer, list, dictionary, channel, callback, boxed = nil, nil, nil, nil, nil, nil
+    if pointer != nil || list != nil || dictionary != nil || channel != nil || callback != nil || boxed != nil { panic("locals") }
+    values := []*Number{&number, &number}
+    index := 0
+    global = &number
+    index, values[index], global = 1, nil, nil
+    if index != 1 || values[0] != nil || values[1] != &number || global != nil { panic("assignment order") }
 }"#,
     );
 }

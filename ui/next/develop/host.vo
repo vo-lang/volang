@@ -1,0 +1,96 @@
+// Package develop supplies optional inspection and state reload for local tools.
+package develop
+
+import (
+	"encoding/json"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/host"
+	"github.com/vo-lang/ui/next/inspect"
+)
+
+type bootstrap struct {
+	Version int `json:"version"`
+	State string `json:"state"`
+	Data string `json:"data"`
+}
+
+type capture struct {
+	Version int `json:"version"`
+	Request string `json:"request"`
+	State string `json:"state"`
+	Error string `json:"error"`
+}
+
+// Run uses development-mount's services. Production host.Run has no reload
+// transport, checkpoint collection or inspector. A replacement starts fresh
+// owned work after restoring compatible application data.
+func Run(view ui.View) {
+	RunWithData(func(string) ui.View {
+		return view
+	})
+}
+
+// RunWithData shares the production application's host-supplied initial data.
+func RunWithData(render func(string) ui.View) {
+	initial, available := host.Bootstrap()
+	if !available {
+		return
+	}
+	var state bootstrap
+	if initial != "" {
+		if err := json.Unmarshal([]byte(initial), &state); err != nil {
+			panic(err)
+		}
+		if state.Version != 1 {
+			panic("develop: unsupported reload bootstrap")
+		}
+	}
+	request := ""
+	root, session := inspect.NewRoot(render(state.Data), inspect.Options{})
+	root.OnMount(func() func() {
+		task := root.Subscribe(ui.Request{Service: "ui.reload.request"}, func(result ui.Result) {
+			if result.Error == "" {
+				request = result.Value
+			}
+		})
+		return task.Cancel
+	})
+	defer session.Close()
+	var report *ui.ReloadReport
+	if state.State != "" {
+		var err error
+		report, err = root.RestoreReload(state.State)
+		if err != nil {
+			panic(err)
+		}
+	}
+	host.RunRootWithIdle(root, func() {
+		if report != nil {
+			bytes, err := json.Marshal(report)
+			if err != nil {
+				panic(err)
+			}
+			root.Start(ui.Request{Service: "ui.reload.report", Value: string(bytes)}, func(ui.Result) {})
+			report = nil
+		}
+		if request == "" {
+			return
+		}
+		envelope := capture{Version: 1, Request: request}
+		request = ""
+		encoded, err := root.SaveReload()
+		if err != nil {
+			envelope.Error = err.Error()
+		} else {
+			envelope.State = encoded
+		}
+		bytes, err := json.Marshal(envelope)
+		if err != nil || len(bytes) > 8 * 1024 * 1024 {
+			bytes, _ = json.Marshal(capture{
+				Version: 1, Request: envelope.Request,
+				Error: "The reload state could not fit its transport budget.",
+			})
+		}
+		root.Start(ui.Request{Service: "ui.reload.publish", Value: string(bytes)}, func(ui.Result) {})
+	})
+}

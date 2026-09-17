@@ -1,0 +1,152 @@
+package kit
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+var tabsType = ui.Define("kit.Tabs")
+
+type TabItem struct {
+	Key string
+	Label string
+	Disabled bool
+	Content ui.View
+}
+
+type TabHeading struct {
+	Key string
+	Label string
+	Selected bool
+	Disabled bool
+}
+
+type TabsProps struct {
+	ID string
+	Label string
+	Value func() string
+	Items []TabItem
+	Vertical bool
+	RTL bool
+	Class string
+	// Title supplies noninteractive content; Label remains the accessible name.
+	Title func(TabHeading) ui.View
+	OnChange func(string)
+}
+
+// Tabs uses automatic keyboard activation. Supply a selected enabled key.
+// Panels remain mounted while hidden, retaining their local state and effects.
+func Tabs(props TabsProps) ui.View {
+	props.Items = append([]TabItem{}, props.Items...)
+	return ui.Component(tabsType, func(scope *ui.Scope) ui.View {
+		if props.ID == "" || props.Label == "" || props.Value == nil || props.OnChange == nil {
+			panic("kit: tabs require an ID, label, value reader and change handler")
+		}
+		keys := make(map[string]bool)
+		activeRef := ui.Ref(scope, "active-tab")
+		value := props.Value()
+		selected := false
+		for _, item := range props.Items {
+			if item.Key == "" || item.Label == "" || keys[item.Key] {
+				panic("kit: tabs require unique nonempty keys and labels")
+			}
+			keys[item.Key] = true
+			if item.Key == value && !item.Disabled {
+				selected = true
+			}
+		}
+		if !selected {
+			panic("kit: tabs value must identify an enabled item")
+		}
+		tabs := []ui.View{}
+		panels := []ui.View{}
+		for index, item := range props.Items {
+			tabID := props.ID + "-tab-" + fmt.Sprint(index)
+			panelID := props.ID + "-panel-" + fmt.Sprint(index)
+			tabs = append(tabs, tabButton(props, index, value, activeRef, tabID, panelID))
+			panels = append(panels, ui.Element("div", item.Content).Key(item.Key).Attr("role", "tabpanel").Attr("id", panelID).Attr("aria-labelledby", tabID).Attr("tabindex", "0").Attr("hidden", fmt.Sprint(item.Key !=
+				value)).Attr("class", "vui-tab-panel"))
+		}
+		orientation := "horizontal"
+		if props.Vertical {
+			orientation = "vertical"
+		}
+		direction := "ltr"
+		if props.RTL {
+			direction = "rtl"
+		}
+		return ui.Element("div", ui.Element("div", tabs...).Attr("role", "tablist").Attr("aria-label", props.Label).Attr("aria-orientation", orientation).Attr("class", "vui-tab-list"), ui.Element("div", panels...)).Class("vui-tabs", props.Class).Attr("data-orientation", orientation).Attr("dir", direction)
+	})
+}
+
+func tabButton(props TabsProps, index int, value string, activeRef *ui.ElementRef, tabID string, panelID string) ui.View {
+	item := props.Items[index]
+	activate := func(next int) {
+		props.OnChange(props.Items[next].Key)
+		activeRef.Focus()
+	}
+	backward, forward := "ArrowLeft", "ArrowRight"
+	if props.RTL {
+		backward, forward = forward, backward
+	}
+	if props.Vertical {
+		backward, forward = "ArrowUp", "ArrowDown"
+	}
+	step := func(next int, offset int) {
+		for tries := 0; tries < len(props.Items); tries++ {
+			next = (next + offset + len(props.Items)) % len(props.Items)
+			if !props.Items[next].Disabled {
+				activate(next)
+				return
+			}
+		}
+	}
+	tabIndex := "-1"
+	var ref *ui.ElementRef
+	if item.Key == value {
+		tabIndex = "0"
+		ref = activeRef
+	}
+	title := ui.Text(item.Label)
+	if props.Title != nil {
+		title = props.Title(TabHeading{
+			Key: item.Key, Label: item.Label, Selected: item.Key == value, Disabled: item.Disabled,
+		})
+	}
+	return ui.Element("button", title).Key(item.Key).Ref(ref).Attr("type", "button").Attr("id", tabID).Attr("role", "tab").Attr("aria-label", item.Label).Attr("aria-controls", panelID).Attr("aria-selected", fmt.Sprint(item.Key ==
+		value)).Attr("disabled", fmt.Sprint(item.Disabled)).Attr("tabindex", tabIndex).On("click", func(event ui.Event) {
+		if !item.Disabled {
+			activate(index)
+		}
+	}).OnWith("mousedown", ui.EventOptions{PreventDefault: true}, func(event ui.Event) {
+		// Click activation owns focus. Keep the browser's selection navigation
+
+		// anchor out of a panel that may be hidden by the following click.
+	}).OnWith("keydown", ui.EventOptions{
+		PreventDefault: true, Keys: []string{backward, forward, "Home", "End"},
+		Modifiers: []ui.KeyboardModifiers{{}},
+	}, func(event ui.Event) {
+		if item.Disabled {
+			return
+		}
+		if event.Key == "Home" {
+			step(-1, 1)
+		} else if event.Key == "End" {
+			step(0, -1)
+		} else {
+			// Several key events can arrive before the browser receives the next
+			// focus commit. Advance from the owner's current choice each time.
+			current := props.Value()
+			for position, candidate := range props.Items {
+				if candidate.Key == current && !candidate.Disabled {
+					delta := 1
+					if event.Key == backward {
+						delta = -1
+					}
+					step(position, delta)
+					return
+				}
+			}
+		}
+	})
+}

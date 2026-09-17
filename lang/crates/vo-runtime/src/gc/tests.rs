@@ -2305,7 +2305,8 @@ fn extension_proxy_rejects_owner_queries_before_reading_local_state() {
     });
     // A facade's empty local fields must never look like a usable collector.
     // Exercise hot reads, telemetry and mutations through the public methods.
-    let operations: &[(&str, fn(&mut Gc))] = &[
+    type CollectorOperation = (&'static str, fn(&mut Gc));
+    let operations: &[CollectorOperation] = &[
         ("should_step", |gc| {
             let _ = gc.should_step();
         }),

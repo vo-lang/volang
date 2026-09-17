@@ -1,0 +1,147 @@
+package inspect
+
+import (
+	"sort"
+	ui "github.com/vo-lang/ui/next"
+)
+
+// TaskRecord describes guest request lifetime, including time queued for the
+// host. Waiting does not imply that a provider has started executing. Values
+// and request payloads are never retained. Updates counts accepted results.
+type TaskRecord struct {
+	Task ui.TaskInspection `json:"task"`
+	Service string `json:"service"`
+	TimeoutMilliseconds int `json:"timeoutMilliseconds"`
+	State string `json:"state"`
+	Updates int `json:"updates"`
+	Error string `json:"error"`
+	Nanoseconds int64 `json:"nanoseconds"`
+	ObservedStart bool `json:"observedStart"`
+	Truncated bool `json:"truncated"`
+}
+
+type taskSpan struct {
+	record TaskRecord
+	started int64
+}
+
+func (session *Session) seedTasks() {
+	existing := session.root.InspectTasks()
+	session.truncated = session.truncated || existing.Truncated
+	if len(existing.Tasks) == 0 {
+		return
+	}
+	started := session.clock()
+	session.activeTasks = make(map[int]taskSpan)
+	for _, task := range existing.Tasks {
+		session.activeTasks[task.ID] = taskSpan{
+			record: TaskRecord{Task: task, State: "waiting", Truncated: task.Truncated}, started: started,
+		}
+	}
+}
+
+// TaskActivity implements the optional core observer extension. Metadata is
+// copied and bounded by the producer before this callback; no live task,
+// component, application value or request payload is retained by the session.
+func (session *Session) TaskActivity(activity ui.TaskActivity) {
+	if session.closed {
+		return
+	}
+	if activity.Kind == "requested" {
+		// Capturing diagnostics must not fill its own history with transport work.
+		if activity.Service == "ui.inspect.request" || activity.Service == "ui.inspect.publish" {
+			return
+		}
+		if len(session.activeTasks) == 512 {
+			session.truncated = true
+			return
+		}
+		if session.activeTasks == nil {
+			session.activeTasks = make(map[int]taskSpan)
+		}
+		clipped := activity.Truncated || activity.Task.Truncated
+		session.truncated = session.truncated || clipped
+		session.activeTasks[activity.Task.ID] = taskSpan{
+			record: TaskRecord{
+				Task: activity.Task, Service: activity.Service,
+				TimeoutMilliseconds: activity.TimeoutMilliseconds, State: "waiting", ObservedStart: true,
+				Truncated: clipped,
+			},
+			started: session.clock(),
+		}
+		return
+	}
+	span, exists := session.activeTasks[activity.Task.ID]
+	if !exists {
+		return
+	}
+	if activity.Kind == "value" || activity.Kind == "completed" || activity.Kind == "failed" {
+		if span.record.Updates < 2147483647 {
+			span.record.Updates++
+		} else {
+			span.record.Truncated = true
+		}
+	}
+	span.record.Truncated = span.record.Truncated || activity.Truncated || activity.Task.Truncated
+	if activity.Kind == "value" {
+		session.activeTasks[activity.Task.ID] = span
+		return
+	}
+	delete(session.activeTasks, activity.Task.ID)
+	span.record.State = activity.Kind
+	span.record.Error = activity.Error
+	elapsed, clipped := observedElapsed(span.started, session.clock())
+	span.record.Nanoseconds = elapsed
+	span.record.Truncated = span.record.Truncated || clipped
+	session.truncated = session.truncated || span.record.Truncated
+	if len(session.finishedTasks) == 64 {
+		copy(session.finishedTasks, session.finishedTasks[1:])
+		session.finishedTasks = session.finishedTasks[:63]
+		session.truncated = true
+	}
+	session.finishedTasks = append(session.finishedTasks, span.record)
+}
+
+// Keep elapsed observations valid in the JavaScript diagnostics transport,
+// including a supplied clock moving backwards or spanning the int64 range.
+func observedElapsed(started int64, finished int64) (int64, bool) {
+	if finished < started {
+		return 0, false
+	}
+	elapsed := finished - started
+	if elapsed < 0 || elapsed > 9007199254740991 {
+		return 9007199254740991, true
+	}
+	return elapsed, false
+}
+
+type taskOrder []TaskRecord
+
+func (values taskOrder) Len() int {
+	return len(values)
+}
+
+func (values taskOrder) Less(i int, j int) bool {
+	return values[i].Task.ID < values[j].Task.ID
+}
+
+func (values taskOrder) Swap(i int, j int) {
+	values[i], values[j] = values[j], values[i]
+}
+
+func (session *Session) taskSnapshots() ([]TaskRecord, bool) {
+	result := append([]TaskRecord{}, session.finishedTasks...)
+	truncated := false
+	if len(session.activeTasks) > 0 {
+		now := session.clock()
+		for _, span := range session.activeTasks {
+			elapsed, clipped := observedElapsed(span.started, now)
+			span.record.Nanoseconds = elapsed
+			span.record.Truncated = span.record.Truncated || clipped
+			truncated = truncated || span.record.Truncated
+			result = append(result, span.record)
+		}
+	}
+	sort.Sort(taskOrder(result))
+	return result, truncated
+}

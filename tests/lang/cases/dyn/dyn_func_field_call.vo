@@ -17,11 +17,13 @@ func main() error {
 		panic("unexpected error in main")
 	}()
 	h := &Handler{
-		name: "test", process: func(x int) int {
-	return x * 2
-}, filter: func(s string) bool {
-	return len(s) > 3
-},
+		name: "test",
+		process: func(x int) int {
+			return x * 2
+		},
+		filter: func(s string) bool {
+			return len(s) > 3
+		},
 	}
 	var obj any = h
 	// Test 1: Access name field
@@ -45,10 +47,13 @@ func main() error {
 	assert(procNil == nil, "nil func field should be nil")
 	// Test 5: Function field that captures external state
 	counter := 0
-	h3 := &Handler{name: "counter", process: func(x int) int {
-		counter += x
-		return counter
-	}}
+	h3 := &Handler{
+		name: "counter",
+		process: func(x int) int {
+			counter += x
+			return counter
+		},
+	}
 	var obj3 any = h3
 	proc3Any := obj3~>process?
 	proc3 := proc3Any.(func(int) int)

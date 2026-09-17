@@ -1,0 +1,86 @@
+package main
+
+import (
+	"encoding/json"
+	"math"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/wire"
+)
+
+func elementScrollPosition() {
+	var ref *ui.ElementRef
+	var visible *ui.BoolState
+	root := ui.NewRoot(ui.Component(ui.Define("scroll.Contract"), func(scope *ui.Scope) ui.View {
+		ref = ui.Ref(scope, "target")
+		visible = ui.Bool(scope, "visible", false)
+		if visible.Get() {
+			return ui.Element("div").Ref(ref)
+		}
+		return ui.Text("Hidden")
+	}))
+	flush(root)
+	visible.Set(true)
+	require(ref.ScrollTo(-12.5, 345.75) && root.Pending(), "cannot request newly shown target")
+	require(ref.ScrollTo(4, 9), "cannot queue second request")
+	batch := flush(root)
+	count := 0
+	for _, mutation := range batch.Mutations {
+		if mutation.Op != "scrollPosition" {
+			continue
+		}
+		var data struct {
+			Position []float64 `json:"position"`
+		}
+		require(json.Unmarshal([]byte(`{"position":` + mutation.Value + `}`), &data) == nil &&
+			len(data.Position) == 2, "invalid coordinates")
+		if count == 0 {
+			require(data.Position[0] == -12.5 && data.Position[1] == 345.75, "fractional coordinates lost")
+		}
+		if count == 1 {
+			require(data.Position[0] == 4 && data.Position[1] == 9, "ordered request lost")
+		}
+		count++
+	}
+	require(count == 2, "scroll requests missing")
+	encoded, err := wire.EncodeBatch(batch)
+	require(err == nil && encoded[3] == byte(wire.Version), "scroll wire identity lost")
+	require(ref.ScrollToIfUnchanged(ui.ScrollPosition{Left: -7.5, Top: 10}, ui.ScrollPosition{Top: 80}), "conditional request rejected")
+	conditional := flush(root)
+	require(len(conditional.Mutations) == 1, "conditional request missing")
+	var guarded struct {
+		Position []float64 `json:"position"`
+	}
+	require(json.Unmarshal([]byte(`{"position":` + conditional.Mutations[0].Value + `}`), &guarded) ==
+		nil &&
+		len(guarded.Position) == 4, "conditional coordinates malformed")
+	require(guarded.Position[0] == 0 && guarded.Position[1] == 80 && guarded.Position[2] == -7.5 &&
+		guarded.Position[3] == 10, "conditional coordinate ordering lost")
+	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		expectPanic(func() {
+			ref.ScrollTo(value, 0)
+		}, "finite")
+		expectPanic(func() {
+			ref.ScrollTo(0, value)
+		}, "finite")
+		expectPanic(func() {
+			ref.ScrollToIfUnchanged(ui.ScrollPosition{Top: value}, ui.ScrollPosition{})
+		}, "finite")
+	}
+	visible.Set(false)
+	ref.ScrollTo(0, 20)
+	for _, mutation := range flush(root).Mutations {
+		require(mutation.Op != "scrollPosition", "removed ref emitted a request")
+	}
+	root.Close()
+	require(!ref.ScrollTo(0, 0), "disposed ref accepted scroll")
+	var absent *ui.ElementRef
+	require(!absent.ScrollTo(0, 0), "nil ref accepted scroll")
+	expectPanic(func() {
+		bad := ui.NewRoot(ui.Component(ui.Define("scroll.Invalid"), func(scope *ui.Scope) ui.View {
+			ui.Ref(scope, "bad").ScrollTo(0, 0)
+			return ui.Text("")
+		}))
+		defer bad.Close()
+		bad.Flush()
+	}, "handler or post-commit effect")
+}

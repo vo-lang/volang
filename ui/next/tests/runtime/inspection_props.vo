@@ -1,0 +1,111 @@
+package main
+
+import (
+	"encoding/json"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/inspect"
+)
+
+type namedInspectionProp int
+
+func inspectionPropContracts() {
+	var label *ui.StringState
+	var child *ui.Scope
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		label = ui.String(scope, "label", "First")
+		name := label.Get()
+		return ui.Component(counterType, func(scope *ui.Scope) ui.View {
+			child = scope
+			ui.InspectProp(scope, "name", name)
+			ui.InspectProp(scope, "large", uint64(18446744073709551615))
+			ui.InspectProp(scope, "object", opaqueInspection{})
+			ui.InspectProp(scope, "named", namedInspectionProp(7))
+			ui.InspectProp(scope, "nothing", nil)
+			ui.InspectProp(scope, "flag", true)
+			ui.InspectProp(scope, "fraction", float32(1.5))
+			ui.InspectProp(scope, "last", 1)
+			ui.InspectProp(scope, "last", 2)
+			if name == "First" {
+				ui.InspectProp(scope, "conditional", "present")
+			}
+			return ui.Text(name)
+		}).Key("props")
+	}))
+	session := inspect.New(root, inspect.Options{})
+	flush(root)
+	initial := session.Snapshot()
+	require(len(initial.Props) == 1 && initial.Props[0].Component == initial.Root.Components[1].ID &&
+		len(initial.Root.Components[1].Dependencies) == 0, "prop inspection lost its owner or added a dependency")
+	values := initial.Props[0].Values
+	require(len(values) == 9 && values[0].Value == "First" && values[1].Value == "18446744073709551615" &&
+		values[2].Kind == "opaque" &&
+		values[3].Kind == "opaque" &&
+		values[4].Kind == "nil" &&
+		values[5].Value == "true" &&
+		values[6].Value == "1.5" &&
+		values[7].Value == "2", "declared props did not preserve safe scalar previews")
+	bytes, err := json.Marshal(initial)
+	require(err == nil && strings.Contains(string(bytes), "18446744073709551615"), "large integer props lost precision in JSON")
+	values[0].Value = "caller changed"
+	require(session.Snapshot().Props[0].Values[0].Value == "First", "prop snapshot aliases the collector")
+	expectPanic(func() {
+		ui.InspectProp(child, "late", 1)
+	}, "current render scope")
+	label.Set("Second")
+	flush(root)
+	updated := session.Snapshot()
+	require(len(updated.Props[0].Values) == 8 && updated.Props[0].Values[0].Value == "Second", "new render retained stale conditional props")
+	session.Close()
+	label.Set("Unobserved")
+	flush(root)
+	later := inspect.New(root, inspect.Options{})
+	require(len(later.Snapshot().Props) == 0, "late attachment invented earlier props")
+	label.Set("Observed again")
+	flush(root)
+	require(later.Snapshot().Props[0].Values[0].Value == "Observed again", "reattachment did not collect fresh props")
+	root.Close()
+	require(len(later.Snapshot().Props) == 0, "closed root retained prop records")
+	later.Close()
+	inspectionPropBounds()
+}
+
+func inspectionPropBounds() {
+	var visible *ui.BoolState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		visible = ui.Bool(scope, "visible", true)
+		if !visible.Get() {
+			return ui.Fragment()
+		}
+		children := []ui.View{}
+		for index := 0; index < 34; index++ {
+			children = append(children, ui.Component(counterType, func(scope *ui.Scope) ui.View {
+				for prop := 0; prop < 65; prop++ {
+					ui.InspectProp(scope, strconv.Itoa(prop), strings.Repeat("中", 100))
+				}
+				return ui.Text("bounded")
+			}).Key(strconv.Itoa(index)))
+		}
+		return ui.Fragment(children...)
+	}))
+	session := inspect.New(root, inspect.Options{})
+	flush(root)
+	snapshot := session.Snapshot()
+	require(snapshot.Truncated && len(snapshot.Props) == 32, "prop collection exceeded its global budget")
+	for _, component := range snapshot.Props {
+		require(len(component.Values) == 64, "prop collection exceeded its component budget")
+		for _, value := range component.Values {
+			require(value.Truncated && len(value.Value) <= 256 && utf8.ValidString(value.Value), "prop preview split Unicode or lost truncation")
+		}
+	}
+	visible.Set(false)
+	flush(root)
+	require(len(session.Snapshot().Props) == 0, "disposed component retained prop records")
+	visible.Set(true)
+	flush(root)
+	require(len(session.Snapshot().Props) == 32, "disposal did not release the prop budget")
+	root.Close()
+	session.Close()
+}

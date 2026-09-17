@@ -1,6 +1,8 @@
 package main
 
-import "runtime/mem"
+import (
+	"runtime/mem"
+)
 
 type Node struct {
 	value int
@@ -64,7 +66,9 @@ func roots(i int) {
 func escaping(i int) {
 	a := [3]int{i, i + 1, i + 2}
 	view := a[:]
-	read := func() int { return a[0] }
+	read := func() int {
+		return a[0]
+	}
 	b := a
 	a = [3]int{i + 3, i + 4, i + 5}
 	assert(view[0] == i + 3 && read() == i + 3 && b[0] == i)
@@ -128,7 +132,9 @@ func typedAggregates(i int) {
 	value, copied := scalarProjection(a, index, source)
 	assert(value == a[source] && copied[index] == a[source])
 	for k := 0; k < 4; k++ {
-		if k != index { assert(copied[k] == a[k]) }
+		if k != index {
+			assert(copied[k] == a[k])
+		}
 		assert(a[k] == i + k)
 	}
 	narrow := [3][2]uint8{{uint8(i), uint8(i + 1)}, {3, 4}, {5, 6}}

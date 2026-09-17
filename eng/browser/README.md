@@ -33,7 +33,7 @@ PLAYWRIGHT_BROWSERS_PATH="$PWD/target/playwright-browsers" node --test eng/brows
 From the repository root, after building the gallery:
 
 ```sh
-node eng/run-browser-smoke.mjs --static-root target/ui-component-gallery-aot \
+node eng/run-browser-smoke.mjs --static-root target/ui-component-gallery-vm \
   --uikit-gallery-smoke --output target/ci/results/ui/gallery.json
 ```
 
@@ -44,7 +44,7 @@ are enabled when `PLAYWRIGHT_BLOB_OUTPUT_FILE` is supplied for a sharded run.
 The compatibility entry point invalidates an old result before launching, and a
 browser startup failure cannot reuse a previous success.
 
-The `--studio-aot-smoke --base-url` option exercises a complete Studio test
+The `--studio-vm-smoke --base-url` option exercises a complete Studio test
 instance. It includes account and sharing contracts; deploy canaries must use a
 separate isolated, account-free journey:
 

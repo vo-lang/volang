@@ -1,0 +1,112 @@
+package main
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/web/canvas"
+	"github.com/vo-lang/ui/next/wire"
+)
+
+func canvasContracts() {
+	pixels := []byte{255, 0, 0, 255, 0, 255, 0, 255}
+	image := canvas.NewBitmap(2, 1, pixels)
+	pixels[0] = 0
+	require(image.Width() == 2 && image.Height() == 1, "bitmap lost logical dimensions")
+	var state *ui.Store
+	var count *ui.IntState
+	failure := ""
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		state = ui.State(scope, "image", func() any {
+			return image
+		})
+		count = ui.Int(scope, "count", 0)
+		return canvas.View(state.Get().(*canvas.Bitmap), canvas.Options{
+			Label: "Red & green pixels",
+			OnError: func(message string) {
+				failure = message
+			},
+		}).Attr("data-count", fmt.Sprint(count.Get()))
+	}))
+	first := flush(root)
+	id := 0
+	for _, mutation := range first.Mutations {
+		if mutation.Op == "create" && mutation.Name == "#widget" {
+			require(mutation.Value == "", "widget payload was duplicated in creation")
+		}
+		if mutation.Op == "widget" {
+			id = mutation.ID
+			var data struct {
+				Version int `json:"version"`
+				Width int `json:"width"`
+				Height int `json:"height"`
+				Pixels string `json:"pixels"`
+			}
+			require(json.Unmarshal([]byte(mutation.Value), &data) == nil, "bitmap payload is invalid JSON")
+			require(data.Version == 1 && data.Width == 2 && data.Height == 1, "bitmap dimensions changed at transport")
+			bytes, err := base64.StdEncoding.DecodeString(data.Pixels)
+			require(err == nil && len(bytes) == 8 && bytes[0] == 255 && bytes[5] == 255, "bitmap retained a mutable pixel alias")
+		}
+	}
+	require(id > 0 && strings.Contains(root.HTML(), `role="img"`) &&
+		strings.Contains(root.HTML(), `aria-label="Red &amp; green pixels"`) &&
+		strings.Contains(root.HTML(), `aspect-ratio:2/1`) &&
+		!strings.Contains(root.HTML(), `"pixels"`), "bitmap SSR lost its labelled placeholder")
+	count.Set(1)
+	for _, mutation := range flush(root).Mutations {
+		require(mutation.Op != "widget", "unrelated state redrew the bitmap")
+	}
+	state.Update(func(any) any {
+		return canvas.NewBitmap(1, 1, []byte{0, 0, 255, 255})
+	})
+	updated := false
+	for _, mutation := range flush(root).Mutations {
+		require(mutation.Op != "create" && mutation.Op != "remove", "bitmap update replaced its identity")
+		if mutation.Op == "widget" {
+			updated = mutation.ID == id
+		}
+	}
+	require(updated, "bitmap update was omitted")
+	require(root.Dispatch(ui.Event{
+		Kind: "@widget", Target: id, Sequence: 1, Error: "Canvas unavailable",
+	}), "bitmap failure event rejected")
+	require(failure == "Canvas unavailable", "bitmap failure did not reach its owner")
+	root.Close()
+	require(!root.Dispatch(ui.Event{Kind: "@widget", Target: id, Sequence: 2, Error: "late"}), "removed bitmap received a failure")
+	// Exercise the public maximum through the real wire encoder on every backend.
+	maximum := canvas.NewBitmap(1024, 256, make([]byte, canvas.MaxPixels * 4))
+	large := ui.NewRoot(canvas.View(maximum, canvas.Options{Label: "Maximum bitmap"}))
+	encoded, err := wire.EncodeBatch(large.Flush())
+	require(err == nil && len(encoded) > canvas.MaxPixels * 4 && len(encoded) < 1401000, "maximum bitmap does not fit the public transport: " +
+		fmt.Sprint(len(encoded), " bytes, ", err))
+	large.Close()
+	for _, size := range [][3]int{
+		{0, 1, 0}, {-1, 1, 0}, {2049, 1, 4}, {1, 2049, 4}, {1024, 1024, 4}, {2, 2, 4},
+	} {
+		expectPanic(func() {
+			canvas.NewBitmap(size[0], size[1], make([]byte, size[2]))
+		}, "invalid bitmap")
+	}
+	for _, invalid := range []*canvas.Bitmap{nil, new(canvas.Bitmap)} {
+		expectPanic(func() {
+			canvas.View(invalid, canvas.Options{Label: "Invalid"})
+		}, "constructed bitmap")
+	}
+	expectPanic(func() {
+		canvas.View(image, canvas.Options{Label: " \t\n"})
+	}, "nonempty image label")
+	expectPanic(func() {
+		root := ui.NewRoot(canvas.View(image, canvas.Options{Label: "Failure"}))
+		defer root.Close()
+		batch := flush(root)
+		for _, mutation := range batch.Mutations {
+			if mutation.Op == "widget" {
+				root.Dispatch(ui.Event{
+					Kind: "@widget", Target: mutation.ID, Sequence: 1, Error: "Canvas failure",
+				})
+			}
+		}
+	}, "Canvas failure")
+}

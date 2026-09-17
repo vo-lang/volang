@@ -20,7 +20,7 @@ inside the packaged runtime and are not an application extension surface.
 | promises/workers | scoped goroutines, typed tasks, streams, resources, and UI reducers |
 | DOM/CSS API | renderer-neutral views and typed modifiers |
 | Electron/Tauri renderer | native retained tree, layout/text engine, WGPU, AccessKit |
-| production bundle | Core Wasm AOT Web tree or linked Native AOT executable |
+| production bundle | Wasm VM Web tree or linked Native AOT executable |
 
 Components remain ordinary `.vo` functions returning `ui.View`. Component
 Model V2 gives each nested call a stable instance and links local and imported
@@ -48,7 +48,7 @@ their ABI and target support are explicit.
 
 Component libraries should expose pure-Volang functions and keep platform
 calls at the edge. This lets the same package execute under VM, JIT, Native AOT,
-and Core Wasm AOT. Copying source architecture and behavior from a mature
+and Wasm VM. Copying source architecture and behavior from a mature
 library is often useful; copying its JavaScript runtime assumptions gives poor
 portability.
 

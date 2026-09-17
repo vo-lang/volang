@@ -1,0 +1,92 @@
+package data
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+// Use observes an exact request. The full service/value/timeout identity is the
+// cache key, so parameter changes cannot reuse another request's result.
+// Snapshots contain immutable strings; callers may decode their own typed data.
+func Use(scope *ui.Scope, key string, client *Client, request ui.Request) Snapshot {
+	if client == nil || !client.scope.Contains(scope) {
+		panic("data: a query must belong to its client's live scope tree")
+	}
+	request = request.WithTimeout(request.TimeoutMilliseconds)
+	signal := ui.Int(scope, key, 0)
+	signal.Get()
+	snapshot := client.snapshot(request)
+	ui.Effect(scope, "data-query:" + key, func() func() {
+		var current *entry
+		client.mutate(func() {
+			current = client.ensureEntry(request)
+			client.activate(current)
+			current.listeners[signal] = true
+			if current.task == nil && client.snapshot(request).Stale {
+				client.start(current)
+			}
+			// An earlier observer can start revalidation in this same commit.
+			// Catch this subscriber up with changes since its initial render.
+			if client.snapshot(request) != snapshot {
+				signal.Set(signal.Get() + 1)
+			}
+		})
+		return func() {
+			delete(current.listeners, signal)
+			client.release(current)
+		}
+	}, client, request.Service, request.Value, request.TimeoutMilliseconds)
+	return snapshot
+}
+
+// A request lives until its last observer and its optional prefetch pin leave.
+func (client *Client) release(current *entry) {
+	if len(current.listeners) > 0 || current.prefetched || client.entries[current.request] != current ||
+		current.retained {
+		return
+	}
+	current.task.Cancel()
+	current.task = nil
+	current.value.Fetching = false
+	client.retain(current)
+}
+
+func entryBytes(current *entry) int {
+	return len(current.request.Service) + len(current.request.Value) + len(current.value.Value) +
+		len(current.value.Error)
+}
+
+func (client *Client) activate(current *entry) {
+	if !current.retained {
+		return
+	}
+	current.retained = false
+	client.retainedBytes -= entryBytes(current)
+	for index, request := range client.retained {
+		if request == current.request {
+			copy(client.retained[index:], client.retained[index + 1:])
+			last := len(client.retained) - 1
+			client.retained[last] = ui.Request{}
+			client.retained = client.retained[:last]
+			return
+		}
+	}
+}
+
+func (client *Client) retain(current *entry) {
+	if !current.value.HasValue && current.value.Error == "" {
+		delete(client.entries, current.request)
+		return
+	}
+	current.retained = true
+	client.retained = append(client.retained, current.request)
+	client.retainedBytes += entryBytes(current)
+	for len(client.retained) > client.options.RetainedEntries ||
+		client.retainedBytes > client.options.RetainedBytes {
+		request := client.retained[0]
+		client.retained[0] = ui.Request{}
+		client.retained = client.retained[1:]
+		oldest := client.entries[request]
+		client.retainedBytes -= entryBytes(oldest)
+		delete(client.entries, request)
+	}
+}

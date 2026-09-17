@@ -1,0 +1,43 @@
+package app
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var presencePreviewType = ui.Define("studio.PresencePreview")
+
+var presenceNoteType = ui.Define("studio.PresenceNote")
+
+func PresencePreview() ui.View {
+	return ui.Component(presencePreviewType, func(scope *ui.Scope) ui.View {
+		visible := ui.Bool(scope, "visible", true)
+		trigger := ui.Ref(scope, "trigger")
+		label, expanded := "Put it away", "true"
+		if !visible.Get() {
+			label, expanded = "Bring it back", "false"
+		}
+		return ui.Element("div", kit.Button(kit.ButtonProps{
+			Variant: "secondary",
+			OnPress: func() {
+				visible.Set(!visible.Get())
+			},
+		}, ui.Text(label)).Ref(trigger).Attr("id", "gallery-motion-toggle").Attr("aria-controls", "gallery-motion").Attr("aria-expanded", expanded), kit.Presence(kit.PresenceProps{
+			ID: "gallery-motion",
+			Visible: func() bool {
+				return visible.Get()
+			},
+			ReturnFocus: trigger,
+		}, ui.Component(presenceNoteType, func(child *ui.Scope) ui.View {
+			note := ui.String(child, "note", "A small thought for today.")
+			return ui.Element("div", kit.Field("gallery-motion-note", "A passing thought", "", ui.Element("input").Attr("value", note.Get()).On("input", func(event ui.Event) {
+				note.Set(event.Value)
+			})), kit.Button(kit.ButtonProps{
+				Variant: "quiet",
+				OnPress: func() {
+					visible.Set(false)
+				},
+			}, ui.Text("Let it go"))).Class("studio-field-demo")
+		})), ui.Element("p", ui.Text("Bring it back before it fades to keep your thought. Once it’s gone, there’s room for a fresh start.")).Class("vui-hint")).Class("studio-field-demo")
+	})
+}

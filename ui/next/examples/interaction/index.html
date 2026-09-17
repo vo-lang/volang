@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Volang UI — Interaction lab</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.55 system-ui, sans-serif; color: #223a32; background: #f3f5ee; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 760px; margin: 64px auto; padding: 0 24px; }
+    header { margin-bottom: 40px; }
+    h1 { font-size: clamp(2rem, 5vw, 3.1rem); line-height: 1.12; letter-spacing: -.045em; margin: 16px 0; }
+    h2 { font-size: 1.1rem; margin: 0 0 14px; }
+    p { color: #57695f; }
+    .eyebrow { font-size: .72rem; letter-spacing: .15em; font-weight: 700; color: #486050; }
+    .card { background: #fff; border: 1px solid #d6dfd1; border-radius: 18px; padding: 28px; margin: 20px 0; }
+    form { display: grid; grid-template-columns: 1fr auto; gap: 10px; }
+    label { grid-column: 1 / -1; font-weight: 600; font-size: .9rem; }
+    input, textarea, button { font: inherit; border: 1px solid #b7c6b4; border-radius: 9px; min-height: 44px; padding: 9px 15px; }
+    input, textarea { min-width: 0; background: #fff; color: inherit; }
+    textarea { resize: vertical; grid-column: 1 / -1; }
+    textarea + button { justify-self: start; }
+    [data-native-svg] { display: block; width: min(100%, 330px); height: auto; margin: 16px 0; }
+    [data-notes-saved] { white-space: pre-wrap; }
+    #mixed-form { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+    #mixed-form fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+    #mixed-form legend { padding: 0; margin-bottom: 14px; font-weight: 600; }
+    #mixed-form .vui-choice-field { margin-bottom: 8px; }
+    #mixed-form .vui-check { display: flex; align-items: center; gap: 12px; min-height: 44px; cursor: pointer; }
+    #mixed-form .vui-check-input { width: 18px; height: 18px; min-height: 0; flex: 0 0 auto; margin: 0; padding: 0; accent-color: #34553e; }
+    #mixed-form .vui-hint { margin-inline-start: 30px; font-size: .85rem; }
+    #mixed-form button { justify-self: start; max-width: 100%; }
+    button { background: #eaf0e3; color: #29482f; cursor: pointer; }
+    button:hover { background: #dae7cf; }
+    button[type=submit] { background: #34553e; color: #fff; }
+    :focus-visible { outline: 3px solid #709552; outline-offset: 3px; }
+    .counters, .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+    .counters button { min-width: 135px; font-variant-numeric: tabular-nums; }
+    .actions button { background: transparent; }
+    .event-zone { padding: 18px; margin-bottom: 12px; border: 1px dashed #90af64; border-radius: 10px; }
+    output { display: block; min-height: 25px; font-weight: 600; }
+    #status { max-width: 712px; margin: 24px auto; padding: 0 24px; font-size: .8rem; color: #57695f; }
+    #status[data-error] { color: #a22c26; white-space: pre-wrap; }
+    @media (max-width: 520px) { main { margin: 32px auto; padding: 0 16px; } .card { padding: 20px; } }
+    @media (prefers-color-scheme: dark) {
+      :root { color: #e5ebdf; background: #19211d; }
+      p, .eyebrow, #status { color: #aebcac; }
+      .card { background: #232f27; border-color: #41523f; }
+      input, textarea { background: #19211d; border-color: #61755b; }
+      button { background: #364c31; color: #e5ebdf; border-color: #61755b; }
+      button:hover { background: #436039; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <p id="status" role="status">Loading the interaction lab…</p>
+  <script type="module" src="/host/ui_next/lab.js"></script>
+</body>
+</html>

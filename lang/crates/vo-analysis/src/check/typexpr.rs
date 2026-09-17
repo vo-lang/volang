@@ -106,8 +106,7 @@ impl Checker {
                     if let Some((_, pkg_obj)) =
                         scope::lookup_parent(scope_key, &pkg_name, self.objs())
                     {
-                        let entity = self.lobj(pkg_obj).entity_type().clone();
-                        if let EntityType::PkgName { imported, .. } = entity {
+                        if let Some(imported) = self.use_package_name(sel.pkg, pkg_obj) {
                             let pkg_scope = *self.package(imported).scope();
                             if let Some(type_obj) = self.scope(pkg_scope).lookup(&type_name) {
                                 let (exported, is_type, typ) = {
@@ -952,8 +951,7 @@ impl Checker {
                     );
                     return None;
                 };
-                let entity = self.lobj(package_object).entity_type().clone();
-                let EntityType::PkgName { imported, .. } = entity else {
+                let Some(imported) = self.use_package_name(*pkg, package_object) else {
                     self.error_code_msg(
                         TypeError::NotAType,
                         pkg.span,
@@ -961,13 +959,6 @@ impl Checker {
                     );
                     return None;
                 };
-
-                self.result.record_use(*pkg, package_object);
-                if let EntityType::PkgName { used, .. } =
-                    self.lobj_mut(package_object).entity_type_mut()
-                {
-                    *used = true;
-                }
 
                 let package_scope = *self.package(imported).scope();
                 let Some(type_object) = self.scope(package_scope).lookup(&type_name) else {

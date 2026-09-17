@@ -1,0 +1,55 @@
+package main
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var mixedChoicesType = ui.Define("interaction.MixedChoices")
+
+func MixedChoices() ui.View {
+	return ui.Component(mixedChoicesType, func(scope *ui.Scope) ui.View {
+		reading, updates := ui.Bool(scope, "reading", true), ui.Bool(scope, "updates", false)
+		saved := ui.String(scope, "saved", "")
+		count := 0
+		if reading.Get() {
+			count++
+		}
+		if updates.Get() {
+			count++
+		}
+		return ui.Element("section", ui.Element("h2", ui.Text("Choose what reaches you")), ui.Element("form", ui.Element("fieldset", ui.Element("legend", ui.Text("Your reading list")), kit.Checkbox(kit.CheckboxProps{
+			ID: "mixed-all", Label: "Select all",
+			Checked: func() bool {
+				return reading.Get() && updates.Get()
+			},
+			Indeterminate: func() bool {
+				return reading.Get() != updates.Get()
+			},
+			OnChange: func(value bool) {
+				reading.Set(value)
+				updates.Set(value)
+			},
+			Hint: fmt.Sprint(count) + " of 2 selected",
+		}), kit.Checkbox(kit.CheckboxProps{
+			ID: "mixed-reading", Name: "reading", Label: "Reading notes",
+			Checked: func() bool {
+				return reading.Get()
+			},
+			OnChange: func(value bool) {
+				reading.Set(value)
+			},
+		}), kit.Checkbox(kit.CheckboxProps{
+			ID: "mixed-updates", Name: "updates", Label: "Project updates",
+			Checked: func() bool {
+				return updates.Get()
+			},
+			OnChange: func(value bool) {
+				updates.Set(value)
+			},
+		})), ui.Element("button", ui.Text("Save reading choices")).Attr("type", "submit")).Attr("id", "mixed-form").On("submit", func(ui.Event) {
+			saved.Set(fmt.Sprint(reading.Get()) + "/" + fmt.Sprint(updates.Get()))
+		}), ui.Element("output", ui.Text(saved.Get())).Attr("data-mixed-saved", "").Attr("aria-live", "polite")).Class("card")
+	})
+}

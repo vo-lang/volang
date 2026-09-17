@@ -1,0 +1,57 @@
+package app
+
+import (
+    "fmt"
+    ui "github.com/vo-lang/ui/next"
+    "github.com/vo-lang/ui/next/forms"
+    "github.com/vo-lang/ui/next/kit"
+)
+
+const revision = REVISION
+var appType = ui.Define("reload.example.App")
+var itemType = ui.Define("reload.example.Item")
+
+func item(name string) ui.View {
+    return ui.Component(itemType, func(scope *ui.Scope) ui.View {
+        count := ui.Int(scope, "count", 0)
+        return ui.Element("button", ui.Text(name + ":" + fmt.Sprint(count.Get()))).Attr("type", "button").Attr("data-item", name).On("click", func(ui.Event) { count.Set(count.Get() + 1) })
+    }).Key(name)
+}
+
+func View(_ string) ui.View {
+    return ui.Component(appType, func(scope *ui.Scope) ui.View {
+        if revision == 4 { panic("replacement render failed") }
+        COUNT_DECLARATION
+        ticks := ui.Int(scope, "ticks", 0)
+        ui.Watch(scope, "clock", ui.Request{Service: "lab.clock"}, func(ui.Result) { ticks.Set(ticks.Get() + 1) })
+        initial := forms.Values{"name": []string{"Ada"}, "choices": []string{"a"}}
+        if revision > 1 { initial["extra"] = []string{"new"} }
+        form := forms.Use(scope, "form", forms.Options{Initial: initial})
+        field := kit.FormField(kit.FieldProps{ID: "reload-name", Label: "Name"}, form.Input("name", ui.Element("input")))
+        choices := kit.MultiSelect(kit.MultiSelectProps{
+            ID: "reload-choices", Label: "Choices", Name: "choices", Size: 3,
+            Options: []kit.ChoiceOption{{Value: "a", Label: "A"}, {Value: "b", Label: "B"}, {Value: "c", Label: "C"}},
+            Value: func() []string { return form.All("choices") },
+            OnChange: func(values []string) { form.ChangeAll("choices", values) },
+        })
+        formView := form.View(func(data forms.Data) ui.Request { return ui.Request{Service: "lab.save", Value: data.Values.Get("name")} },
+            func(result ui.Result) forms.Outcome { return forms.Outcome{Message: result.Value} }, field, choices,
+            ui.Element("button", ui.Text("Save")).Attr("type", "submit"),
+            ui.Element("button", ui.Text("Reset")).Attr("type", "reset"))
+        children := []ui.View{item("a"), item("b")}
+        if revision == 2 { children[0], children[1] = children[1], children[0] }
+        return ui.Element("main",
+            ui.Element("h1", ui.Text("Revision " + fmt.Sprint(revision))),
+            ui.Element("button", ui.Text("Add")).Attr("type", "button").Attr("id", "reload-add").On("click", func(ui.Event) { COUNT_UPDATE }),
+            ui.Element("output", ui.Text(fmt.Sprint(count.Get()))).Attr("data-reload-count", ""),
+            ui.Element("div", children...).Attr("data-reload-items", ""), formView,
+            ui.Element("output", ui.Text(form.Message())).Attr("data-reload-message", ""),
+            ui.Element("span", ui.Text(fmt.Sprint(form.Pending()))).Attr("data-reload-pending", ""),
+            ui.Element("span", ui.Text(fmt.Sprint(ticks.Get()))).Attr("data-reload-ticks", ""),
+            ui.Element("label", ui.Text("Private note"), ui.Element("textarea").Attr("id", "reload-note").DefaultValue("Seed")),
+            ui.Element("label", ui.Text("Native checkbox"), ui.Element("input").Attr("id", "reload-native-check").Attr("type", "checkbox").DefaultChecked(true)),
+            ui.Element("select", ui.Element("option", ui.Text("First")).Attr("value", "a"), ui.Element("option", ui.Text("Second")).Attr("value", "b")).Attr("id", "reload-native-select"),
+            ui.Element("div").Attr("style", "height:1500px"), ui.Element("p", ui.Text("End")),
+        ).Class("vui")
+    })
+}

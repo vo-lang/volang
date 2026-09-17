@@ -1,0 +1,88 @@
+package app
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/web/plot"
+)
+
+var gardenType = ui.Define("garden.App")
+
+func Garden(scope *ui.Scope) ui.View {
+	visible := ui.Bool(scope, "visible", false)
+	next := ui.Bool(scope, "next", false)
+	selected := ui.Int(scope, "selected", -1)
+	failure := ui.String(scope, "failure", "")
+	heights := []float64{3, 5, 4, 8, 10, 12, 15}
+	week := "Week one"
+	if next.Get() {
+		heights = []float64{4, 7, 6, 11, 14, 17, 20}
+		week = "Week two"
+	}
+	rows := []ui.View{}
+	for index, height := range heights {
+		day := ui.Element("th", ui.Text(fmt.Sprint("Day ", index + 1))).Attr("scope", "row")
+		value := ui.Element("td", ui.Text(fmt.Sprint(height, " cm")))
+		rows = append(rows, ui.Element("tr", day, value))
+	}
+	prepared := ui.DerivedMemo(scope, "plot-data", func() any {
+		value, err := plot.Prepare(plot.Data{X: []float64{1, 2, 3, 4, 5, 6, 7}, Y: heights})
+		if err != nil {
+			panic(err)
+		}
+		return value
+	}, next.Get()).Get().(*plot.Prepared)
+	chart := ui.Element("p", ui.Text("Seven small steps toward a greener windowsill.")).Class("placeholder")
+	if visible.Get() {
+		chart = plot.Chart(plot.Props{
+			Prepared: prepared,
+			OnCursor: func(index int) {
+				selected.Set(index)
+			},
+			OnError: func(message string) {
+				failure.Set(message)
+			},
+		}).Class("growth-chart").Attr("role", "img").Attr("aria-label", "Basil height over seven days").Attr("aria-describedby", "growth-caption")
+	}
+	if failure.Get() != "" {
+		chart = ui.Element("div", ui.Element("p", ui.Text("The chart could not load. Your measurements are below.")).Attr("role", "alert"), kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				failure.Set("")
+			},
+		}, ui.Text("Try again"))).Class("placeholder")
+	}
+	toggle := "Show chart"
+	if visible.Get() {
+		toggle = "Hide chart"
+	}
+	reading := "Explore the chart or read every measurement below."
+	if index := selected.Get(); index >= 0 && index < len(heights) {
+		reading = fmt.Sprint("Day ", index + 1, ": ", heights[index], " cm")
+	}
+	showChart := kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			visible.Set(!visible.Get())
+			failure.Set("")
+		},
+	}, ui.Text(toggle)).Attr("aria-expanded", fmt.Sprint(visible.Get())).Attr("aria-controls", "growth-view")
+	changeWeek := kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			next.Set(!next.Get())
+		},
+	}, ui.Text("Change week"))
+	caption := ui.Element("figcaption", ui.Text(week + " · Basil height in centimetres")).Attr("id", "growth-caption")
+	figure := ui.Element("figure", chart, caption).Attr("id", "growth-view")
+	headings := ui.Element("tr", ui.Element("th", ui.Text("Day")).Attr("scope", "col"), ui.Element("th", ui.Text("Height")).Attr("scope", "col"))
+	table := ui.Element("table", ui.Element("caption", ui.Text("Every measurement · " + week)), ui.Element("thead", headings), ui.Element("tbody", rows...))
+	brand := ui.Element("p", ui.Text("THE WINDOWSILL JOURNAL")).Class("eyebrow")
+	title := ui.Element("h1", ui.Text("A little more green."))
+	intro := ui.Element("p", ui.Text("A week of patient watering, a little sunshine, and something to watch grow.")).Class("intro")
+	actions := ui.Element("div", showChart, changeWeek).Class("actions")
+	measurement := ui.Element("output", ui.Text(reading)).Attr("aria-label", "Selected measurement")
+	return ui.Element("main", brand, title, intro, actions, figure, measurement, table).Class("vui", "starter")
+}
+
+func View(initial string) ui.View {
+	return ui.Component(gardenType, Garden)
+}

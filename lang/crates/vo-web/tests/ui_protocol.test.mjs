@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
-  AotUiHost,
   createUiWebImports,
   decodeUiEvent,
   decodeUiMutationBatch,
@@ -766,353 +765,6 @@ test('browser system host delegates versioned application invocations', async ()
     requestId: 11n, response: { type: 'host-payload', payload: Uint8Array.of(7, 8, 9) },
   });
   host.dispose();
-});
-
-test('Core-Wasm AOT UI host commits a root and returns a guest handler identity', async () => {
-  const document = new FakeDocument();
-  const root = document.createElement('main');
-  const commits = [];
-  const host = new AotUiHost(root, {
-    onCommit: (revision, mutationCount) => commits.push({ revision, mutationCount }),
-    systemHost: {
-      execute: async (frame) => {
-        const request = decodeUiSystemRequest(frame);
-        assert.equal(request.type, 'read-clipboard');
-        return encodeUiSystemResponse(request.requestId, {
-          type: 'clipboard', content: { type: 'text', text: 'aot clipboard' },
-        });
-      },
-    },
-  });
-  const externs = host.externs();
-  const memory = new WebAssembly.Memory({ initial: 1 });
-  const data = new DataView(memory.buffer);
-  let heap = 4096;
-  const allocateString = (value) => {
-    const encoded = new TextEncoder().encode(value);
-    const header = heap;
-    const bytes = header + 16;
-    heap += 16 + encoded.byteLength;
-    data.setBigUint64(header, BigInt(encoded.byteLength), true);
-    data.setBigUint64(header + 8, BigInt(bytes), true);
-    new Uint8Array(memory.buffer, bytes, encoded.byteLength).set(encoded);
-    return BigInt(header);
-  };
-  const readString = (reference) => {
-    if (reference === 0n) return '';
-    const header = Number(reference);
-    const length = Number(data.getBigUint64(header, true));
-    const pointer = Number(data.getBigUint64(header + 8, true));
-    return new TextDecoder().decode(new Uint8Array(memory.buffer, pointer, length));
-  };
-  const allocateViewSlice = (handles) => {
-    const header = heap;
-    const values = header + 40;
-    heap += 40 + handles.length * 8;
-    data.setBigUint64(header, BigInt(values), true);
-    data.setBigUint64(header + 8, BigInt(handles.length), true);
-    data.setBigUint64(header + 16, BigInt(handles.length), true);
-    data.setBigUint64(header + 24, 8n, true);
-    data.setBigUint64(header + 32, 0n, true);
-    handles.forEach((handle, index) => data.setBigUint64(values + index * 8, handle, true));
-    return BigInt(header);
-  };
-  const floatBits = (value) => {
-    const bytes = new ArrayBuffer(8);
-    const view = new DataView(bytes);
-    view.setFloat64(0, value, true);
-    return view.getBigUint64(0, true);
-  };
-  const invoke = (name, args, destination, packageName = 'github.com/vo-lang/ui') => {
-    args.forEach((value, index) => data.setBigUint64(index * 8, BigInt.asUintN(64, value), true));
-    const call = {
-      descriptor: {}, name, externId: 0, memory, frame: 0,
-      destination, argumentsStart: 0, argumentSlots: args.length, args: [],
-      readSlot: (slot) => data.getBigUint64(slot * 8, true),
-      writeSlot: (slot, value) => data.setBigUint64(slot * 8, BigInt.asUintN(64, value), true),
-      readFloat64: (slot) => data.getFloat64(slot * 8, true),
-      writeFloat64: (slot, value) => data.setFloat64(slot * 8, value, true),
-      readString,
-      readStringBytes: (reference) => new TextEncoder().encode(readString(reference)),
-      readStringSlice: () => [],
-      readByteSlice: () => new Uint8Array(),
-      allocateString,
-      allocateStringBytes: (value) => allocateString(new TextDecoder().decode(value)),
-      allocateStringSlice: () => 0n,
-      allocateByteSlice: () => 0n,
-      clearError: (slot) => {
-        data.setBigUint64(slot * 8, 0n, true);
-        data.setBigUint64((slot + 1) * 8, 0n, true);
-      },
-      writeError: (_slot, message) => { throw new Error(message); },
-    };
-    const key = `vo1:${new TextEncoder().encode(packageName).byteLength}:${packageName}`
-      + `:${new TextEncoder().encode(name).byteLength}:${name}`;
-    return externs[key].handler(call);
-  };
-
-  await invoke('runtimeReadClipboard', [1n], 40, 'github.com/vo-lang/ui/system');
-  assert.equal(data.getBigUint64(40 * 8, true), 1n);
-  assert.equal(readString(data.getBigUint64(41 * 8, true)), 'aot clipboard');
-  assert.equal(data.getBigUint64(46 * 8, true), 1n);
-  assert.equal(data.getBigUint64(47 * 8, true), 0n);
-
-  invoke('LocationPath', [], 20);
-  assert.equal(readString(data.getBigUint64(20 * 8, true)), '/');
-  invoke('Navigate', [allocateString('/settings?tab=profile')], 20);
-  invoke('LocationPath', [], 20);
-  assert.equal(readString(data.getBigUint64(20 * 8, true)), '/settings?tab=profile');
-  assert.throws(() => invoke('Navigate', [allocateString('//example.com')], 20), /invalid/);
-
-  invoke('runtimeBegin', [1n], 20);
-  invoke('runtimeButton', [allocateString('Save'), 7n], 20);
-  invoke('FlowDirection', [data.getBigUint64(20 * 8, true), 1n], 20);
-  invoke('BorderColor', [data.getBigUint64(20 * 8, true), 0xff63_7effn], 20);
-  invoke('BorderWidth', [data.getBigUint64(20 * 8, true), floatBits(2)], 20);
-  invoke('HoverBackground', [data.getBigUint64(20 * 8, true), 0xff22_3344n], 20);
-  invoke('PressedBackground', [data.getBigUint64(20 * 8, true), 0xff33_4455n], 20);
-  invoke('FocusRing', [data.getBigUint64(20 * 8, true), 0xff44_5566n], 20);
-  invoke('Elevation', [data.getBigUint64(20 * 8, true), 3n], 20);
-  const handle = data.getBigUint64(20 * 8, true);
-  const waiting = invoke('runtimeCommitAndWait', [handle, 1n], 24);
-  assert.equal(commits.length, 1);
-  assert.equal(commits[0].revision, 1n);
-  assert.ok(commits[0].mutationCount > 0);
-  assert.equal(root.childNodes[0].tagName, 'BUTTON');
-  assert.equal(root.childNodes[0].dir, 'rtl');
-  assert.equal(root.childNodes[0].style.borderColor, '#637effff');
-  assert.equal(root.childNodes[0].style.borderWidth, '2px');
-  assert.equal(root.childNodes[0].style['--volang-hover-background'], '#223344ff');
-  assert.equal(root.childNodes[0].style['--volang-pressed-background'], '#334455ff');
-  assert.equal(root.childNodes[0].style['--volang-focus-ring'], '#445566ff');
-  assert.match(root.childNodes[0].style.boxShadow, /0 8px 20px/);
-  assert.equal(root.childNodes[0].childNodes[0].nodeValue, 'Save');
-  root.childNodes[0].dispatch('click');
-  assert.equal(await waiting, 0);
-  assert.equal(data.getBigUint64(24 * 8, true), 7n);
-  assert.equal(data.getBigUint64(25 * 8, true), 1n);
-
-  // Synchronous state helpers may call Invalidate while the guest is already
-  // handling this event. The following render owns that state, so it must not
-  // leave a second wake that races with the next browser event.
-  invoke('Invalidate', [], 20);
-
-  const stableButton = root.childNodes[0];
-  invoke('runtimeBegin', [0n], 20);
-  invoke('runtimeButton', [allocateString('Saved'), 8n], 20);
-  const nextHandle = data.getBigUint64(20 * 8, true);
-  const nextWaiting = invoke('runtimeCommitAndWait', [nextHandle, 0n], 24);
-  assert.equal(commits.at(-1).revision, 2n);
-  assert.ok(commits.at(-1).mutationCount > 0);
-  assert.equal(root.childNodes[0], stableButton);
-  assert.equal(root.childNodes[0].childNodes[0].nodeValue, 'Saved');
-  root.childNodes[0].dispatch('click');
-  assert.equal(await nextWaiting, 0);
-  assert.equal(data.getBigUint64(24 * 8, true), 8n);
-  assert.equal(data.getBigUint64(25 * 8, true), 1n);
-
-  invoke('runtimeBegin', [0n], 20);
-  invoke('runtimeButton', [allocateString('Idle'), 9n], 20);
-  const idleHandle = data.getBigUint64(20 * 8, true);
-  const invalidated = invoke('runtimeCommitAndWait', [idleHandle, 0n], 24);
-  invoke('Invalidate', [], 20);
-  assert.equal(await invalidated, 0);
-  assert.equal(data.getBigUint64(24 * 8, true), 0xffff_ffffn);
-  assert.equal(data.getBigUint64(25 * 8, true), 17n);
-
-  const keyedButton = (label, handler, key) => {
-    invoke('runtimeButton', [allocateString(label), BigInt(handler)], 20);
-    invoke('Key', [data.getBigUint64(20 * 8, true), allocateString(key)], 20);
-    return data.getBigUint64(20 * 8, true);
-  };
-  invoke('runtimeBegin', [0n], 20);
-  const firstA = keyedButton('A', 10, 'a');
-  const firstB = keyedButton('B', 11, 'b');
-  invoke('Row', [allocateViewSlice([firstA, firstB])], 20);
-  const keyedWaiting = invoke(
-    'runtimeCommitAndWait', [data.getBigUint64(20 * 8, true), 0n], 24,
-  );
-  const row = root.childNodes[0];
-  const stableA = row.childNodes[0];
-  const stableB = row.childNodes[1];
-  stableA.dispatch('click');
-  assert.equal(await keyedWaiting, 0);
-
-  invoke('runtimeBegin', [0n], 20);
-  const secondB = keyedButton('B2', 12, 'b');
-  const secondA = keyedButton('A2', 13, 'a');
-  invoke('Row', [allocateViewSlice([secondB, secondA])], 20);
-  const reorderedWaiting = invoke(
-    'runtimeCommitAndWait', [data.getBigUint64(20 * 8, true), 0n], 24,
-  );
-  assert.equal(root.childNodes[0], row);
-  assert.equal(row.childNodes[0], stableB);
-  assert.equal(row.childNodes[1], stableA);
-  assert.equal(stableB.childNodes[0].nodeValue, 'B2');
-  assert.equal(stableA.childNodes[0].nodeValue, 'A2');
-  stableB.dispatch('click');
-  assert.equal(await reorderedWaiting, 0);
-  assert.equal(data.getBigUint64(24 * 8, true), 12n);
-
-  invoke('runtimeBegin', [0n], 20);
-  const duplicateA = keyedButton('Duplicate A', 14, 'duplicate');
-  const duplicateB = keyedButton('Duplicate B', 15, 'duplicate');
-  invoke('Row', [allocateViewSlice([duplicateA, duplicateB])], 20);
-  assert.throws(
-    () => invoke('runtimeCommitAndWait', [data.getBigUint64(20 * 8, true), 0n], 24),
-    /duplicate sibling key/,
-  );
-  assert.equal(root.childNodes[0], row);
-  assert.equal(row.childNodes[0], stableB);
-  assert.equal(row.childNodes[1], stableA);
-
-  invoke('runtimeBegin', [0n], 20);
-  invoke('runtimeButton', [allocateString('Recovered'), 16n], 20);
-  const recoveredWaiting = invoke(
-    'runtimeCommitAndWait', [data.getBigUint64(20 * 8, true), 0n], 24,
-  );
-  assert.equal(root.childNodes[0].tagName, 'BUTTON');
-  assert.equal(root.childNodes[0].childNodes[0].nodeValue, 'Recovered');
-  root.childNodes[0].dispatch('click');
-  assert.equal(await recoveredWaiting, 0);
-  assert.equal(data.getBigUint64(24 * 8, true), 16n);
-
-  invoke('runtimeBegin', [0n], 20);
-  invoke('runtimeTextArea', [allocateString('a🙂b'), allocateString('Source'), 21n], 20);
-  const inputWaiting = invoke(
-    'runtimeCommitAndWait', [data.getBigUint64(20 * 8, true), 0n], 24,
-  );
-  const textArea = root.childNodes[0];
-  assert.equal(textArea.tagName, 'TEXTAREA');
-  textArea.value = 'a🙂Xb';
-  textArea.selectionStart = 4;
-  textArea.selectionEnd = 4;
-  textArea.dispatch('input');
-  assert.equal(await inputWaiting, 0);
-  assert.equal(data.getBigUint64(24 * 8, true), 21n);
-  assert.equal(data.getBigUint64(25 * 8, true), 2n);
-  assert.equal(readString(data.getBigUint64(27 * 8, true)), 'a🙂Xb');
-  assert.equal(data.getBigUint64(43 * 8, true), 4n);
-  assert.equal(data.getBigUint64(44 * 8, true), 0n);
-
-  invoke('runtimeBegin', [0n], 20);
-  invoke('runtimeTextArea', [allocateString('a🙂Xb'), allocateString('Source'), 21n], 20);
-  invoke('runtimeOnSelectionChange', [data.getBigUint64(20 * 8, true), 22n], 20);
-  const selectionWaiting = invoke(
-    'runtimeCommitAndWait', [data.getBigUint64(20 * 8, true), 0n], 24,
-  );
-  const selectedArea = root.childNodes[0];
-  selectedArea.selectionStart = 1;
-  selectedArea.selectionEnd = 3;
-  selectedArea.focus();
-  document.dispatch('selectionchange');
-  assert.equal(await selectionWaiting, 0);
-  assert.equal(data.getBigUint64(24 * 8, true), 22n);
-  assert.equal(data.getBigUint64(25 * 8, true), 20n);
-  assert.equal(readString(data.getBigUint64(27 * 8, true)), 'a🙂Xb');
-  assert.equal(data.getBigUint64(43 * 8, true), 1n);
-  assert.equal(data.getBigUint64(44 * 8, true), 2n);
-
-  invoke('runtimeBegin', [0n], 20);
-  invoke('runtimeTextInput', [allocateString('documentation'), allocateString('Command'), 23n], 20);
-  invoke('runtimeOnKeyDown', [data.getBigUint64(20 * 8, true), 24n], 20);
-  const keyWaiting = invoke(
-    'runtimeCommitAndWait', [data.getBigUint64(20 * 8, true), 0n], 24,
-  );
-  root.childNodes[0].dispatch('keydown', {
-    key: 'Enter', code: 'Enter', shiftKey: false, ctrlKey: true, altKey: false,
-    metaKey: false, repeat: true, isComposing: false,
-  });
-  assert.equal(await keyWaiting, 0);
-  assert.equal(data.getBigUint64(24 * 8, true), 24n);
-  assert.equal(data.getBigUint64(25 * 8, true), 7n);
-  assert.equal(readString(data.getBigUint64(29 * 8, true)), 'Enter');
-  assert.equal(readString(data.getBigUint64(32 * 8, true)), 'Enter');
-  assert.equal(data.getBigUint64(33 * 8, true), 2n);
-  assert.equal(data.getBigUint64(34 * 8, true), 1n);
-  assert.equal(data.getBigUint64(35 * 8, true), 0n);
-
-  const enterComponent = (key) => invoke('runtimeEnterComponent', [
-    allocateString('github.com/acme/widgets::Counter'),
-    77n,
-    1n,
-    allocateString(key),
-  ], 20);
-  const componentState = (key, initial) => {
-    enterComponent(key);
-    invoke('UseIntState', [BigInt(initial)], 20);
-    const handle = data.getBigUint64(20 * 8, true);
-    invoke('runtimeExitComponent', [], 20);
-    return handle;
-  };
-
-  invoke('runtimeBegin', [0n], 20);
-  const alphaState = componentState('alpha', 1);
-  const betaState = componentState('beta', 2);
-  assert.notEqual(alphaState, betaState);
-  assert.notEqual(alphaState & (1n << 63n), 0n);
-  invoke('IntStateCommitted', [alphaState], 20);
-  assert.equal(data.getBigUint64(20 * 8, true), 0n);
-  const scopedA = keyedButton('Scoped A', 17, 'alpha');
-  const scopedB = keyedButton('Scoped B', 18, 'beta');
-  invoke('Row', [allocateViewSlice([scopedA, scopedB])], 20);
-  const scopedWaiting = invoke(
-    'runtimeCommitAndWait', [data.getBigUint64(20 * 8, true), 0n], 24,
-  );
-  invoke('IntStateCommitted', [alphaState], 20);
-  assert.equal(data.getBigUint64(20 * 8, true), 1n);
-  root.childNodes[0].childNodes[0].dispatch('click');
-  assert.equal(await scopedWaiting, 0);
-  invoke('SetIntState', [alphaState, 11n], 20);
-
-  invoke('runtimeBegin', [0n], 20);
-  assert.equal(componentState('beta', 0), betaState);
-  assert.equal(componentState('alpha', 0), alphaState);
-  invoke('IntStateValue', [alphaState], 20);
-  assert.equal(data.getBigUint64(20 * 8, true), 11n);
-  invoke('IntStateValue', [betaState], 20);
-  assert.equal(data.getBigUint64(20 * 8, true), 2n);
-  const reorderedScopedB = keyedButton('Scoped B2', 19, 'beta');
-  const reorderedScopedA = keyedButton('Scoped A2', 20, 'alpha');
-  invoke('Row', [allocateViewSlice([reorderedScopedB, reorderedScopedA])], 20);
-  const reorderedScopedWaiting = invoke(
-    'runtimeCommitAndWait', [data.getBigUint64(20 * 8, true), 0n], 24,
-  );
-  root.childNodes[0].childNodes[0].dispatch('click');
-  assert.equal(await reorderedScopedWaiting, 0);
-
-  invoke('runtimeBegin', [0n], 20);
-  assert.equal(componentState('alpha', 0), alphaState);
-  const alphaOnly = keyedButton('Scoped A3', 21, 'alpha');
-  invoke('Row', [allocateViewSlice([alphaOnly])], 20);
-  const removalWaiting = invoke(
-    'runtimeCommitAndWait', [data.getBigUint64(20 * 8, true), 0n], 24,
-  );
-  root.childNodes[0].childNodes[0].dispatch('click');
-  assert.equal(await removalWaiting, 0);
-  assert.throws(() => invoke('IntStateValue', [betaState], 20), /stale/);
-  invoke('IntStateAlive', [alphaState], 20);
-  assert.equal(data.getBigUint64(20 * 8, true), 1n);
-  invoke('IntStateAlive', [betaState], 20);
-  assert.equal(data.getBigUint64(20 * 8, true), 0n);
-  invoke('IntStateCommitted', [betaState], 20);
-  assert.equal(data.getBigUint64(20 * 8, true), 0n);
-
-  invoke('runtimeBegin', [0n], 20);
-  assert.equal(componentState('alpha', 0), alphaState);
-  const replacementBetaState = componentState('beta', 9);
-  assert.notEqual(replacementBetaState, betaState);
-  assert.throws(() => invoke('SetIntState', [betaState, 99n], 20), /stale/);
-  invoke('IntStateValue', [replacementBetaState], 20);
-  assert.equal(data.getBigUint64(20 * 8, true), 9n);
-  const reinsertedA = keyedButton('Scoped A4', 22, 'alpha');
-  const reinsertedB = keyedButton('Scoped B4', 23, 'beta');
-  invoke('Row', [allocateViewSlice([reinsertedA, reinsertedB])], 20);
-  const insertionWaiting = invoke(
-    'runtimeCommitAndWait', [data.getBigUint64(20 * 8, true), 0n], 24,
-  );
-  root.childNodes[0].childNodes[0].dispatch('click');
-  assert.equal(await insertionWaiting, 0);
 });
 
 test('UI VM DOM session applies history commands and rerenders on popstate', () => {
@@ -2746,11 +2398,15 @@ test('UI VM DOM session switches to a reloaded Island revision', () => {
     wakeHostEvent: () => false,
     wakeHostEventWithData: () => false,
   };
-  const session = new UiVmDomSession(island, new UiDomAdapter(root));
+  let commits=0;
+  const session = new UiVmDomSession(island, new UiDomAdapter(root), {onCommit(){
+    commits++;assert.equal(session.adapter.currentRevision,1n);
+  }});
 
   assert.equal(session.reload(new Uint8Array([1, 2, 3])), 'suspended_for_host_events');
   assert.equal(session.adapter.currentRevision, 1n);
   assert.equal(root.childNodes[0].childNodes[0].nodeValue, '你好');
+  assert.equal(commits,1);
   session.dispose();
 });
 
@@ -2989,4 +2645,22 @@ test('DOM editable combobox Enter is consumed before host delivery and ordinary 
     assert.equal(decodeUiEvent(adapter.shiftEventFrame()).payload.key, key);
     assert.equal(adapter.shiftEventFrame(), undefined);
   }
+});
+
+
+test('UI VM commit notification observes accepted DOM and excludes rejected frames', () => {
+  const document=new FakeDocument(),root=document.createElement('main');
+  const outputs=[mutationFrame()];
+  const island={run:()=> 'suspended_for_host_events',takeHostOutput:()=>outputs.shift(),takePendingHostEvents:()=>[]};
+  const revisions=[];
+  const session=new UiVmDomSession(island,new UiDomAdapter(root),{onCommit(){
+    revisions.push(session.adapter.currentRevision);
+    assert.equal(root.childNodes[0].childNodes[0].nodeValue,'你好');
+  }});
+  try {
+    session.start();assert.deepEqual(revisions,[1n]);
+    outputs.push(mutationFrame());
+    assert.throws(()=>session.start(),/non-consecutive/);
+    assert.deepEqual(revisions,[1n]);
+  } finally {session.dispose();}
 });

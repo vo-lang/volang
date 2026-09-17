@@ -7,8 +7,8 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use vo_analysis::project::{PackageIdentity, Project as AnalysisProject};
 use vo_analysis::vfs::{
-    analyze_file_set_with_package_identity, package_identity_for_module_path,
-    project_package_resolver_with_workspace_sources,
+    package_identity_for_module_path, prepare_file_set_with_package_identity,
+    project_package_resolver_with_workspace_sources, PreparedAnalysis, Resolver,
 };
 use vo_common::vfs::{
     normalize_fs_path, FileSet, FileSystem, RealFs, ZipFs, MAX_ZIP_ARCHIVE_BYTES,
@@ -56,6 +56,10 @@ struct PreparedProject<F> {
 
 struct AnalyzedCompilation {
     project: AnalysisProject,
+    context: AnalysisContext,
+}
+
+struct AnalysisContext {
     source_root: PathBuf,
     mod_cache: PathBuf,
     locked_modules: Vec<vo_module::schema::lockfile::LockedModule>,
@@ -212,7 +216,9 @@ impl<F: FileSystem> PreparedProject<F> {
         })
     }
 
-    fn analyze(self) -> Result<AnalyzedCompilation, CompileError> {
+    fn prepare_analysis(
+        self,
+    ) -> Result<(PreparedAnalysis<impl Resolver, F>, AnalysisContext), CompileError> {
         let locked_modules = self.project_plan.locked_modules().to_vec();
         let resolver = project_package_resolver_with_workspace_sources(
             self.stdlib.unwrap_or_default(),
@@ -221,7 +227,7 @@ impl<F: FileSystem> PreparedProject<F> {
             &self.project_plan,
             self.workspace_sources,
         );
-        let project = analyze_file_set_with_package_identity(
+        let analysis = prepare_file_set_with_package_identity(
             self.file_set,
             resolver,
             self.fs,
@@ -230,25 +236,39 @@ impl<F: FileSystem> PreparedProject<F> {
             self.current_package,
         )
         .map_err(|e| CompileError::Analysis(format!("{}", e)))?;
-        let imported_packages = project
-            .imported_packages_in_order()
-            .into_iter()
-            .map(|(path, _, _, _)| path)
-            .collect::<Vec<_>>();
-        for ready in &self.ready_modules {
-            ready
-                .validate_import_capabilities(imported_packages.iter().copied())
-                .map_err(|error| CompileError::Analysis(error.to_string()))?;
-        }
-        Ok(AnalyzedCompilation {
-            project,
-            source_root: self.source_root,
-            mod_cache: self.mod_cache,
-            locked_modules,
-            ready_modules: self.ready_modules,
-            workspace: self.workspace,
-            native_input_fs: self.native_input_fs,
-        })
+        Ok((
+            analysis,
+            AnalysisContext {
+                source_root: self.source_root,
+                mod_cache: self.mod_cache,
+                locked_modules,
+                ready_modules: self.ready_modules,
+                workspace: self.workspace,
+                native_input_fs: self.native_input_fs,
+            },
+        ))
+    }
+
+    fn analyze(self) -> Result<AnalyzedCompilation, CompileError> {
+        let (analysis, context) = self.prepare_analysis()?;
+        let project = analysis
+            .check()
+            .map_err(|error| CompileError::Analysis(error.to_string()))?;
+        context.validate_imports(
+            project
+                .imported_packages_in_order()
+                .map(|(path, _, _, _)| path),
+        )?;
+        Ok(AnalyzedCompilation { project, context })
+    }
+
+    fn editor(self, revision: u64) -> Result<vo_analysis::editor::EditorSnapshot, CompileError> {
+        let (analysis, context) = self.prepare_analysis()?;
+        let snapshot = analysis
+            .editor(revision)
+            .map_err(|error| CompileError::Analysis(error.to_string()))?;
+        context.validate_imports(snapshot.imported_package_paths())?;
+        Ok(snapshot)
     }
 
     fn check(self) -> Result<(), CompileError> {
@@ -257,6 +277,21 @@ impl<F: FileSystem> PreparedProject<F> {
 
     fn compile(self, engine: &crate::Engine) -> Result<CompileOutput, CompileError> {
         self.analyze()?.into_output(engine)
+    }
+}
+
+impl AnalysisContext {
+    fn validate_imports<'a>(
+        &self,
+        imports: impl Iterator<Item = &'a str>,
+    ) -> Result<(), CompileError> {
+        let imports = imports.collect::<Vec<_>>();
+        for ready in &self.ready_modules {
+            ready
+                .validate_import_capabilities(imports.iter().copied())
+                .map_err(|error| CompileError::Analysis(error.to_string()))?;
+        }
+        Ok(())
     }
 }
 
@@ -284,10 +319,10 @@ impl AnalyzedCompilation {
     fn prepare_extensions_for_frozen_build(&self) -> Result<(), CompileError> {
         prepare_native_extension_specs_with_readiness_and_workspace(
             &self.project.extensions,
-            &self.ready_modules,
-            &self.mod_cache,
-            &self.workspace.options.workspace,
-            Some(&self.native_input_fs),
+            &self.context.ready_modules,
+            &self.context.mod_cache,
+            &self.context.workspace.options.workspace,
+            Some(&self.context.native_input_fs),
         )
         .map_err(CompileError::ModuleSystem)?;
         Ok(())
@@ -296,10 +331,10 @@ impl AnalyzedCompilation {
     fn into_output(self, engine: &crate::Engine) -> Result<CompileOutput, CompileError> {
         let extensions = prepare_native_extension_specs_with_readiness_and_workspace(
             &self.project.extensions,
-            &self.ready_modules,
-            &self.mod_cache,
-            &self.workspace.options.workspace,
-            Some(&self.native_input_fs),
+            &self.context.ready_modules,
+            &self.context.mod_cache,
+            &self.context.workspace.options.workspace,
+            Some(&self.context.native_input_fs),
         )
         .map_err(CompileError::ModuleSystem)?;
 
@@ -313,9 +348,9 @@ impl AnalyzedCompilation {
 
         Ok(CompileOutput {
             module,
-            source_root: self.source_root,
+            source_root: self.context.source_root,
             extensions,
-            locked_modules: self.locked_modules,
+            locked_modules: self.context.locked_modules,
         })
     }
 }
@@ -647,6 +682,15 @@ pub(super) fn check_with_project_snapshot(
     snapshot: Arc<CompileInputSnapshot>,
 ) -> Result<(), CompileError> {
     load_project_from_snapshot(context, stdlib, snapshot, &BTreeSet::new())?.check()
+}
+
+pub(super) fn editor_with_project_snapshot(
+    context: ProjectCompileContext,
+    stdlib: EmbeddedStdlib,
+    snapshot: Arc<CompileInputSnapshot>,
+    revision: u64,
+) -> Result<vo_analysis::editor::EditorSnapshot, CompileError> {
+    load_project_from_snapshot(context, stdlib, snapshot, &BTreeSet::new())?.editor(revision)
 }
 
 fn load_project_from_snapshot(

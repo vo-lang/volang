@@ -1,0 +1,46 @@
+package main
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/web/canvas"
+	"github.com/vo-lang/ui/next/wire"
+)
+
+func main() {
+	var image *ui.Store
+	root := ui.NewRoot(ui.Component(ui.Define("canvas.Fixture"), func(scope *ui.Scope) ui.View {
+		image = ui.State(scope, "image", func() any {
+			return canvas.NewBitmap(2, 1, []byte{255, 0, 0, 255, 0, 255, 0, 255})
+		})
+		return canvas.View(image.Get().(*canvas.Bitmap), canvas.Options{Label: "Red and green pixels"})
+	}))
+	first := root.Flush()
+	root.Commit(first.Revision)
+	html := root.HTML()
+	image.Update(func(any) any {
+		return canvas.NewBitmap(1, 2, []byte{0, 0, 255, 255, 255, 255, 255, 255})
+	})
+	last := root.Flush()
+	encode := func(batch ui.Batch) string {
+		bytes, err := wire.EncodeBatch(batch)
+		if err != nil {
+			panic(err)
+		}
+		return base64.StdEncoding.EncodeToString(bytes)
+	}
+	result, err := json.Marshal(struct {
+		HTML string `json:"html"`
+		First string `json:"first"`
+		Last string `json:"last"`
+	}{
+		HTML: html, First: encode(first), Last: encode(last),
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Print(string(result))
+	root.Close()
+}

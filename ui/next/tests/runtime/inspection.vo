@@ -1,0 +1,131 @@
+package main
+
+import (
+	"strings"
+	"strconv"
+	"unicode/utf8"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/inspect"
+)
+
+type opaqueInspection struct{}
+
+func (value opaqueInspection) String() string {
+	panic("inspection called application String")
+}
+
+func inspectionContracts() {
+	var input *ui.IntState
+	var visible *ui.BoolState
+	computations := 0
+	root := ui.NewRoot(ui.Component(listType, func(scope *ui.Scope) ui.View {
+		visible = ui.Bool(scope, "visible", true)
+		if !visible.Get() {
+			return ui.Fragment()
+		}
+		return ui.Component(counterType, func(child *ui.Scope) ui.View {
+			input = ui.Int(child, "input", 2)
+			ui.String(child, "long", strings.Repeat("中", 100))
+			ui.State(child, "opaque", func() any {
+				return opaqueInspection{}
+			})
+			doubled := ui.Derived(child, "double", func() any {
+				computations++
+				return input.Get() * 2
+			})
+			ui.Derived(child, "unused", func() any {
+				panic("inspection evaluated an unused derived value")
+			})
+			ui.Effect(child, "pending", func() func() {
+				ui.Start(child, ui.Request{Service: "pending"}, func(ui.Result) {})
+				ui.Subscribe(child, ui.Request{Service: "watching"}, func(ui.Result) {})
+				return nil
+			})
+			return ui.Text(strconv.Itoa(doubled.Get().(int)))
+		}).Key("child")
+	}))
+	tick := int64(0)
+	session := inspect.New(root, inspect.Options{
+		Now: func() int64 {
+			tick += 10
+			return tick
+		},
+	})
+	expectPanic(func() {
+		inspect.New(root, inspect.Options{})
+	}, "another observer")
+	first := root.Flush()
+	expectPanic(func() {
+		session.Snapshot()
+	}, "committed turn")
+	root.Commit(first.Revision)
+	initial := session.Snapshot()
+	require(len(initial.Root.Components) == 2 && !initial.Root.Truncated && computations == 1, "inspection changed rendering or lost the tree")
+	parent, child := initial.Root.Components[0], initial.Root.Components[1]
+	require(child.Parent == parent.ID && child.Frame.Key == "child" && child.Renders == 1, "inspection lost component identity")
+	require(child.Tasks == 2 && child.Subscriptions == 1 && child.Effects == 1, "inspection lost owned task/effect counts")
+	require(len(child.Dependencies) == 1 && child.Dependencies[0].Key == "double", "inspection lost the derived consumer")
+	for _, state := range child.States {
+		if state.Identity.Key == "double" {
+			require(!state.Pending && len(state.Dependencies) == 1 && state.Dependencies[0].Key == "input", "inspection lost the derived source")
+		}
+		if state.Identity.Key == "long" {
+			require(state.Truncated && len(state.Value) <= 256 && utf8.ValidString(state.Value), "inspection split Unicode or failed to bound values")
+		}
+		if state.Identity.Key == "opaque" {
+			require(state.Value == "" && state.Kind == "store", "inspection exposed an opaque store")
+		}
+	}
+	require(len(initial.Renders) == 2 && initial.Renders[0].Causes[0].Kind == "mount" &&
+		initial.Renders[0].Nanoseconds == 10, "inspection lost mount timing")
+	initial.Renders[0].Causes[0].Kind = "caller changed"
+	initial.Root.Components[1].States[0].Identity.Key = "caller changed"
+	require(session.Snapshot().Renders[0].Causes[0].Kind == "mount", "inspection history aliases the caller")
+	input.Set(3)
+	input.Set(4)
+	flush(root)
+	updated := session.Snapshot()
+	require(computations == 2 && updated.Root.Components[0].Renders == 1 &&
+		updated.Root.Components[1].Renders == 2, "inspection created extra reactive dependencies")
+	last := updated.Renders[len(updated.Renders) - 1]
+	require(len(last.Causes) == 1 && last.Causes[0].State.Key == "double" &&
+		last.Causes[0].State.Component == child.ID, "inspection lost or duplicated a derived invalidation cause")
+	visible.Set(false)
+	flush(root)
+	require(len(session.Snapshot().Root.Components) == 1, "inspection retained an unmounted component")
+	root.Close()
+	require(session.Snapshot().Root.Closed && len(session.Snapshot().Root.Components) == 0, "inspection retained a closed tree")
+	session.Close()
+	session.Close()
+	expectPanic(func() {
+		session.Snapshot()
+	}, "session is closed")
+	// Bounded history and detachable instrumentation leave normal updates live.
+	plain := ui.NewRoot(counter("bounded"))
+	collector := inspect.New(plain, inspect.Options{})
+	batch := flush(plain)
+	id := target(batch, "bounded")
+	for index := 1; index <= 80; index++ {
+		plain.Dispatch(ui.Event{Target: id, Kind: "click", Sequence: index})
+		flush(plain)
+	}
+	bounded := collector.Snapshot()
+	require(bounded.Truncated && len(bounded.Renders) == 64, "inspection history grew beyond its budget")
+	collector.Close()
+	plain.Dispatch(ui.Event{Target: id, Kind: "click", Sequence: 81})
+	flush(plain)
+	require(strings.Contains(plain.HTML(), "81"), "detaching inspection stopped the application")
+	plain.Close()
+	limited := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		ui.Int(scope, strings.Repeat("long-key", 100), 0).Get()
+		for index := 0; index < 2100; index++ {
+			ui.Int(scope, strconv.Itoa(index), index)
+		}
+		return ui.Text("many states")
+	}))
+	flush(limited)
+	partial := limited.Inspect()
+	require(partial.Truncated && len(partial.Components[0].States) == 2048 &&
+		partial.Components[0].Dependencies[0].Truncated, "inspection did not report clipped identities and state limits")
+	limited.Close()
+}

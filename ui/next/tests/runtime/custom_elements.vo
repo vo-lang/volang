@@ -1,0 +1,69 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/web/custom"
+)
+
+func customElementContracts() {
+	var event custom.Event
+	failure := ""
+	attributes := map[string]string{"label": "Original"}
+	view := custom.Element("example-counter", custom.Props{
+		Attributes: attributes,
+		Properties: struct {
+			Value int `json:"value"`
+		}{
+			Value: 4,
+		},
+		OnEvent: func(value custom.Event) {
+			event = value
+		},
+		OnError: func(message string) {
+			failure = message
+		},
+	})
+	attributes["label"] = "Changed after construction"
+	root := ui.NewRoot(view)
+	batch := flush(root)
+	id := 0
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "widget" {
+			id = mutation.ID
+			require(strings.Contains(mutation.Value, `"label":"Original"`) &&
+				strings.Contains(mutation.Value, `"value":4`), "custom element props were not frozen at construction")
+		}
+	}
+	require(id > 0 && !strings.Contains(root.HTML(), "Original"), "custom element SSR did not retain placeholder ownership")
+	sequence := 0
+	deliver := func(value string, error string) {
+		sequence++
+		require(root.Dispatch(ui.Event{
+			Kind: "@widget", Target: id, Sequence: sequence, Value: value, Error: error,
+		}), "custom element event rejected")
+	}
+	deliver(`{"type":"changed","detail":"{\"value\":5}","error":""}`, "")
+	require(event.Type == "changed" && event.Detail == `{"value":5}` && failure == "", "custom event detail was lost")
+	deliver(`{"type":"changed","detail":"","error":"cannot encode"}`, "")
+	require(failure == "cannot encode", "custom element event failure was hidden")
+	deliver("", "setter failed")
+	require(failure == "setter failed", "custom element provider failure was hidden")
+	for _, invalid := range []string{
+		"", "{}", `{"type":"changed","detail":"not json"}`, `{"type":"","detail":"null"}`,
+		strings.Repeat(" ", 131073),
+	} {
+		failure = ""
+		deliver(invalid, "")
+		require(failure != "", "invalid custom event accepted")
+	}
+	root.Close()
+	sequence++
+	require(!root.Dispatch(ui.Event{Kind: "@widget", Target: id, Sequence: sequence}), "removed element delivered an event")
+	expectPanic(func() {
+		custom.Element("", custom.Props{})
+	}, "provider name")
+	expectPanic(func() {
+		custom.Element("counter", custom.Props{Properties: strings.Repeat("x", 65536)})
+	}, "64 KiB")
+}

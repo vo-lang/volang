@@ -137,7 +137,6 @@ to the view's first byte, and its byte length. Nested views MUST retain the
 original array directly. The complete byte range MUST fit in that array.
 String consumers MUST use this descriptor contract; mutable slice capacity,
 element layout and backing geometry MUST NOT be read from a string object.
-Core Wasm MAY retain its independent physical representation.
 
 Dynamic string construction and non-empty slicing preserve their allocation
 entry points, admission checks, and sticky failure propagation. Literal
@@ -167,7 +166,6 @@ retain the full target address width, including zero-width element layouts.
 Both representations preserve allocation entry points, admission, precise
 owner tracing, typed mutation barriers and sticky allocation failures. Actual
 requested sizes and allocation counts remain observable in memory telemetry.
-Core Wasm MAY retain its independent physical representation.
 
 ### 3.3 Immutable literal evaluation and allocation observability
 

@@ -1,0 +1,27 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func htmlForms() {
+	root := ui.NewRoot(ui.Element("select", ui.Element("option", ui.Text("First")).Attr("value", "first").Attr("selected", "true"), ui.Element("optgroup", ui.Element("option", ui.Text("\t Second \n choice "))).Attr("label", "More")).Attr("value", "Second choice"))
+	flush(root)
+	html := root.HTML()
+	require(strings.Count(html, " selected=") == 1, "select value did not override explicit option selection")
+	second := strings.Index(html, "<optgroup")
+	require(second >= 0 && strings.Contains(html[second:], " selected=\"\""), "implicit option value did not collapse ASCII whitespace")
+	root.Close()
+	root = ui.NewRoot(ui.Element("input").Attr("type", "checkbox").Attr("checked", "false"))
+	flush(root)
+	html = root.HTML()
+	require(strings.Contains(html, "data-vo-checked=\"\"") && !strings.Contains(html, " checked="), "false checked binding lost its control marker")
+	root.Close()
+	root = ui.NewRoot(ui.Element("input").Attr("type", "FILE").Attr("value", "unavailable.txt"))
+	flush(root)
+	expectPanic(func() {
+		root.HTML()
+	}, "nonempty controlled value")
+	root.Close()
+}

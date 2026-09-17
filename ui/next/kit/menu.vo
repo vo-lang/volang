@@ -1,0 +1,213 @@
+package kit
+
+import (
+	"fmt"
+	"strings"
+	"time"
+	"unicode/utf8"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type MenuItem struct {
+	Key string
+	Label string
+	Disabled bool
+	Separator bool
+}
+
+type MenuProps struct {
+	ID string
+	Label string
+	Items []MenuItem
+	Open func() bool
+	OnOpenChange func(bool)
+	OnAction func(string)
+	Disabled bool
+	Placement string
+	Class string
+	TriggerClass string
+	TriggerRef *ui.ElementRef
+	// Trigger supplies noninteractive content; Label remains the accessible name.
+	Trigger func(bool) ui.View
+	Item func(MenuItem) ui.View
+}
+
+var menuType = ui.Define("kit.Menu")
+
+// Menu composes an anchored action menu. Disabled actions stay focusable;
+// separators do not participate in keyboard navigation.
+func Menu(props MenuProps) ui.View {
+	if props.ID == "" || props.Label == "" || props.Open == nil || props.OnOpenChange == nil ||
+		props.OnAction == nil {
+		panic("kit: menu requires an ID, label, open reader, change handler and action handler")
+	}
+	props.Items = append([]MenuItem{}, props.Items...)
+	return ui.Component(menuType, func(scope *ui.Scope) ui.View {
+		anchor := props.TriggerRef
+		if anchor == nil {
+			anchor = ui.Ref(scope, "trigger")
+		}
+		active := ui.String(scope, "active", "")
+		search := ui.String(scope, "search", "")
+		typedAt := ui.Int(scope, "typed-at", 0)
+		activeRef := ui.Ref(scope, "active-item")
+		keys := make(map[string]bool)
+		items := []MenuItem{}
+		dependencies := []any{props.Open()}
+		for _, item := range props.Items {
+			if item.Key == "" || keys[item.Key] || !item.Separator && item.Label == "" {
+				panic("kit: menu items require unique keys and actions require labels")
+			}
+			keys[item.Key] = true
+			dependencies = append(dependencies, item.Key, item.Separator)
+			if !item.Separator {
+				items = append(items, item)
+			}
+		}
+		indexOf := func(key string) int {
+			for index, item := range items {
+				if item.Key == key {
+					return index
+				}
+			}
+			return -1
+		}
+		focus := func(index int) {
+			if len(items) == 0 {
+				return
+			}
+			index = (index + len(items)) % len(items)
+			active.Set(items[index].Key)
+			activeRef.Focus()
+		}
+		openAt := func(index int) {
+			if props.Disabled || len(items) == 0 {
+				return
+			}
+			search.Set("")
+			typedAt.Set(0)
+			props.OnOpenChange(true)
+			focus(index)
+		}
+		ui.Effect(scope, "repair-active", func() func() {
+			if props.Open() {
+				if len(items) == 0 {
+					props.OnOpenChange(false)
+				} else if indexOf(active.Get()) < 0 {
+					focus(0)
+				}
+			}
+			return nil
+		}, dependencies...)
+		open := props.Open() && len(items) > 0
+		label := ui.Text(props.Label)
+		if props.Trigger != nil {
+			label = props.Trigger(open)
+		}
+		trigger := Button(ButtonProps{
+			Variant: "secondary", Disabled: props.Disabled || len(items) == 0,
+			OnPress: func() {
+				if props.Disabled {
+					return
+				}
+				if props.Open() {
+					props.OnOpenChange(false)
+					anchor.Focus()
+				} else {
+					openAt(0)
+				}
+			},
+		}, label).Ref(anchor).Class(props.TriggerClass).Attr("id", props.ID + "-trigger").Attr("aria-label", props.Label).Attr("tabindex", "0").Attr("aria-haspopup", "menu").Attr("aria-controls", props.ID).Attr("aria-expanded", fmt.Sprint(open)).OnWith("keydown", ui.EventOptions{
+			PreventDefault: true, Keys: []string{"ArrowDown", "ArrowUp"},
+			Modifiers: []ui.KeyboardModifiers{{}},
+		}, func(event ui.Event) {
+			index := 0
+			if event.Key == "ArrowUp" {
+				index = len(items) - 1
+			}
+			openAt(index)
+		})
+		children := []ui.View{}
+		for index, item := range props.Items {
+			if item.Separator {
+				children = append(children, ui.Element("div").Key(item.Key).Attr("role", "separator").Attr("aria-orientation", "horizontal").Class("vui-menu-separator"))
+				continue
+			}
+			label := ui.Text(item.Label)
+			if props.Item != nil {
+				label = props.Item(item)
+			}
+			itemView := ui.Element("button", label).Key(item.Key).Attr("id", props.ID + "-item-" +
+				fmt.Sprint(index)).Attr("type", "button").Attr("role", "menuitem").Attr("tabindex", "-1").Attr("aria-label", item.Label).Attr("aria-disabled", fmt.Sprint(item.Disabled)).Attr("autofocus", fmt.Sprint(item.Key ==
+				active.Get())).Attr("data-highlighted", fmt.Sprint(item.Key == active.Get())).Class("vui-menu-item").On("focus", func(ui.Event) {
+				active.Set(item.Key)
+			}).On("click", func(ui.Event) {
+				if item.Disabled || !props.Open() {
+					return
+				}
+				props.OnOpenChange(false)
+				props.OnAction(item.Key)
+			})
+			if item.Key == active.Get() {
+				itemView = itemView.Ref(activeRef)
+			}
+			children = append(children, itemView)
+		}
+		popup := ui.Element("div", children...).Popover(ui.PopoverOptions{
+			Open: open, Anchor: anchor, Placement: props.Placement,
+		}).Attr("id", props.ID).Attr("role", "menu").Attr("aria-labelledby", props.ID + "-trigger").Class("vui-menu").Class(props.Class).On("toggle", func(event ui.Event) {
+			if event.Value == "closed" && props.Open() {
+				props.OnOpenChange(false)
+			}
+		}).OnWith("keydown", ui.EventOptions{
+			Capture: true, PreventDefault: true, Keys: []string{"ArrowDown", "ArrowUp", "Home", "End"},
+			Modifiers: []ui.KeyboardModifiers{{}},
+		}, func(event ui.Event) {
+			if !props.Open() {
+				return
+			}
+			next := indexOf(active.Get())
+			if event.Key == "Home" {
+				next = 0
+			} else if event.Key == "End" {
+				next = len(items) - 1
+			} else if event.Key == "ArrowUp" {
+				next--
+			} else {
+				next++
+			}
+			focus(next)
+		}).On("keydown", func(event ui.Event) {
+			if !props.Open() || event.IsComposing || event.CtrlKey || event.AltKey || event.MetaKey {
+				return
+			}
+			if event.Key == "Tab" {
+				props.OnOpenChange(false)
+				return
+			}
+			if event.Key == " " || utf8.RuneCountInString(event.Key) != 1 {
+				return
+			}
+			key := strings.ToLower(event.Key)
+			now := int(time.Now().UnixNano() / 1000000)
+			prefix := key
+			if now >= typedAt.Get() && now - typedAt.Get() < 700 && search.Get() != key {
+				prefix = search.Get() + key
+			}
+			typedAt.Set(now)
+			search.Set(prefix)
+			start := indexOf(active.Get())
+			if prefix != key {
+				start--
+			}
+			for offset := 1; offset <= len(items); offset++ {
+				index := (start + offset + len(items)) % len(items)
+				if strings.HasPrefix(strings.ToLower(items[index].Label), prefix) {
+					focus(index)
+					return
+				}
+			}
+		})
+		return ui.Fragment(trigger, popup)
+	})
+}

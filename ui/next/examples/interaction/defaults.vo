@@ -1,0 +1,47 @@
+package main
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+var defaultsType = ui.Define("interaction.NativeDefaults")
+
+func NativeDefaults() ui.View {
+	return ui.Component(defaultsType, func(scope *ui.Scope) ui.View {
+		changed := ui.Bool(scope, "changed", false)
+		lastInput := ui.String(scope, "last-input", "")
+		lastNotes := ui.String(scope, "last-notes", "")
+		lastChecked := ui.String(scope, "last-checked", "")
+		lastRadio := ui.String(scope, "last-radio", "")
+		value, notes := "A starting point", "\nA small note.\n中文"
+		if changed.Get() {
+			value, notes = "Updated baseline", "Updated note"
+		}
+		input := ui.Element("input").Attr("id", "defaults-input").Attr("name", "title").DefaultValue(value).On("input", func(event ui.Event) {
+			lastInput.Set(event.Value)
+		})
+		textarea := ui.Element("textarea").Attr("id", "defaults-notes").Attr("name", "notes").DefaultValue(notes).On("input", func(event ui.Event) {
+			lastNotes.Set(event.Value)
+		})
+		check := ui.Element("input").Attr("id", "defaults-check").Attr("type", "checkbox").Attr("name", "opt-in").Attr("value", "yes").DefaultChecked(!changed.Get()).On("change", func(event ui.Event) {
+			lastChecked.Set(fmt.Sprint(event.Checked))
+		})
+		radios := []ui.View{}
+		for _, key := range []string{"a", "b"} {
+			radio := ui.Element("input").Attr("id", "defaults-radio-" + key).Attr("type", "radio").Attr("name", "plan").Attr("value", key).DefaultChecked(key ==
+				"a").On("change", func(event ui.Event) {
+				if event.Checked {
+					lastRadio.Set(event.Value)
+				}
+			})
+			radios = append(radios, ui.Element("label", radio, ui.Text("Plan " + key)))
+		}
+		form := ui.Element("form", ui.Element("label", ui.Text("Starting text")).Attr("for", "defaults-input"), input, ui.Element("label", ui.Text("Starting notes")).Attr("for", "defaults-notes"), textarea, ui.Element("label", check, ui.Text("Keep me updated")), ui.Element("fieldset", ui.Element("legend", ui.Text("Your plan")), ui.Fragment(radios...)), ui.Element("button", ui.Text("Reset native fields")).Attr("type", "reset").Attr("data-reset-defaults", "")).Attr("id", "native-default-form")
+		update := ui.Element("button", ui.Text("Change reset defaults")).Attr("type", "button").Attr("data-change-defaults", "").Attr("data-default-state", fmt.Sprint(changed.Get())).On("click", func(ui.Event) {
+			changed.Set(!changed.Get())
+		})
+		fixed := ui.Fragment(ui.Element("label", ui.Text("A fixed component value"), ui.Element("input").Attr("id", "defaults-fixed").Attr("value", "Component value")), ui.Element("label", ui.Element("input").Attr("id", "defaults-fixed-check").Attr("type", "checkbox").Attr("checked", "false"), ui.Text("A fixed component choice")))
+		return ui.Element("section", ui.Element("h2", ui.Text("A starting point, with room to edit")), form, update, fixed, ui.Element("p", ui.Text(lastInput.Get())).Attr("data-default-last-input", ""), ui.Element("p", ui.Text(lastNotes.Get())).Attr("data-default-last-notes", ""), ui.Element("p", ui.Text(lastChecked.Get())).Attr("data-default-last-check", ""), ui.Element("p", ui.Text(lastRadio.Get())).Attr("data-default-last-radio", "")).Attr("class", "card")
+	})
+}

@@ -1,0 +1,36 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"regexp"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/host"
+)
+
+var appType = ui.Define("publichost.App")
+
+var unicodePattern = regexp.MustCompile("中文|😀")
+
+func App(scope *ui.Scope) ui.View {
+	count := ui.Int(scope, "count", 0)
+	name := ui.String(scope, "name", "")
+	message := ui.String(scope, "message", "")
+	ui.Watch(scope, "host", ui.Request{Service: "example.messages"}, func(result ui.Result) {
+		message.Set(result.Value)
+	})
+	return ui.Element("section", ui.Element("button", ui.Text("Count: " + fmt.Sprint(count.Get()))).Attr("type", "button").Attr("data-counter", "").On("click", func(event ui.Event) {
+		count.Set(count.Get() + 1)
+	}), ui.Element("label", ui.Text("Name"), ui.Element("input").Attr("value", name.Get()).On("input", func(event ui.Event) {
+		name.Set(event.Value)
+	})), ui.Element("output", ui.Text("Hello, " + name.Get())).Attr("data-greeting", "").Attr("data-match", fmt.Sprint(unicodePattern.MatchString(name.Get()))), ui.Element("output", ui.Text(message.Get())).Attr("data-message", ""), ui.Widget("example.badge", fmt.Sprint(count.Get()), func(result ui.Result) {}))
+}
+
+func main() {
+	view := ui.Component(appType, App)
+	if len(os.Args) > 1 && os.Args[1] == "--ssr" {
+		fmt.Print(host.HTML(view))
+		return
+	}
+	host.Run(view)
+}

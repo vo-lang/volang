@@ -235,6 +235,15 @@ impl Diagnostic {
     pub fn is_warning(&self) -> bool {
         self.severity.is_warning()
     }
+
+    /// Main source location, falling back to the first context label when no
+    /// primary label is available. Label insertion order is not significance.
+    pub fn primary_label(&self) -> Option<&Label> {
+        self.labels
+            .iter()
+            .find(|label| label.style == LabelStyle::Primary)
+            .or_else(|| self.labels.first())
+    }
 }
 
 /// A collector for diagnostics during compilation.
@@ -417,7 +426,7 @@ impl<'a> DiagnosticEmitter<'a> {
     /// Emits a diagnostic in simple format: "file:line:col: severity: message"
     /// Use this for runtime errors or when source code is not available.
     pub fn format_simple(&self, diagnostic: &Diagnostic) -> String {
-        let loc = diagnostic.labels.first().and_then(|label| {
+        let loc = diagnostic.primary_label().and_then(|label| {
             self.source_map.lookup_span(label.span).map(|file| {
                 let lc = file.line_col(label.span.start);
                 format!("{}:{}:{}", file.name(), lc.line, lc.column)
@@ -591,6 +600,30 @@ pub fn format_simple_error(loc: Option<&SourceLoc>, severity: &str, message: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_location_uses_the_primary_label_before_related_context() {
+        let mut sources = SourceMap::new();
+        sources.add_file("related.vo", "other");
+        sources.add_file("main.vo", "target");
+        let diagnostic = Diagnostic::error("type mismatch")
+            .with_label(Label::secondary(0u32..5u32))
+            .with_label(Label::primary(6u32..12u32));
+        assert_eq!(
+            DiagnosticEmitter::new(&sources).format_simple(&diagnostic),
+            "main.vo:1:1: error: type mismatch"
+        );
+        assert_eq!(
+            diagnostic.primary_label().unwrap().span,
+            Span::from_u32(6, 12)
+        );
+        let context_only = Diagnostic::note("context").with_label(Label::secondary(0u32..5u32));
+        assert_eq!(
+            context_only.primary_label().unwrap().span,
+            Span::from_u32(0, 5)
+        );
+        assert!(Diagnostic::error("no source").primary_label().is_none());
+    }
 
     #[test]
     fn test_severity() {

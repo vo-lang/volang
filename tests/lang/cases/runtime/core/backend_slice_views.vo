@@ -6,7 +6,7 @@ type Holder struct {
 	right int
 }
 
-type Zero struct {}
+type Zero struct{}
 
 var globalData = [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
 
@@ -24,7 +24,6 @@ func check() int {
 	grown = append(grown, 10, 11)
 	grown[0] = 99
 	assert(base[2] == 3 && len(grown) == 4)
-
 	holder := Holder{left: 77, right: 88}
 	flat := holder.data[1:4:6]
 	copy(flat, []byte{12, 13, 14})
@@ -33,7 +32,6 @@ func check() int {
 	restoredFlat = append(restoredFlat, 15)
 	assert(holder.data[2] == 13 && holder.data[3] == 15)
 	assert(holder.left == 77 && holder.right == 88)
-
 	globalView := globalData[2:4:6]
 	globalView[0] = 21
 	assert(globalData[2] == 21 && cap(globalView) == 4)

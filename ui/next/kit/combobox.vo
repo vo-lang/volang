@@ -1,0 +1,246 @@
+package kit
+
+import (
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type ComboboxOption struct {
+	Key string
+	Label string
+	Disabled bool
+}
+
+// ComboboxProps describes an editable text field with optional suggestions.
+// Value is the input text. Selecting a suggestion sends its Label to OnChange;
+// OnSelect additionally receives its stable key. Arbitrary text remains valid
+// unless the application supplies a constraint through its form validation.
+type ComboboxProps struct {
+	ID string
+	Label string
+	Name string
+	Hint string
+	Error string
+	Placeholder string
+	Value func() string
+	OnChange func(string)
+	OnSelect func(string)
+	OnBlur func()
+	Options []ComboboxOption
+	Disabled bool
+	Required bool
+	EmptyLabel string
+	Class string
+	InputClass string
+	PopupClass string
+	InputRef *ui.ElementRef
+	// Filter defaults to a case-insensitive substring match. Supply a filter
+	// returning true when the caller already filtered an asynchronous result.
+	Filter func(ComboboxOption, string) bool
+	// Option supplies noninteractive content inside an option.
+	Option func(ComboboxOption) ui.View
+}
+
+var comboboxType = ui.Define("kit.Combobox")
+
+func Combobox(props ComboboxProps) ui.View {
+	if props.ID == "" || props.Label == "" || props.Value == nil || props.OnChange == nil {
+		panic("kit: combobox requires an ID, label, value reader and change handler")
+	}
+	props.Options = append([]ComboboxOption{}, props.Options...)
+	return ui.Component(comboboxType, func(scope *ui.Scope) ui.View {
+		inputRef := props.InputRef
+		if inputRef == nil {
+			inputRef = ui.Ref(scope, "input")
+		}
+		open := ui.Bool(scope, "open", false)
+		all := ui.Bool(scope, "all", false)
+		active := ui.String(scope, "active", "")
+		activeRef := ui.Ref(scope, "active-option")
+		ids := make(map[string]string)
+		dependencies := []any{props.Disabled, props.Value(), all.Get()}
+		for index, option := range props.Options {
+			if option.Key == "" || option.Label == "" || ids[option.Key] != "" {
+				panic("kit: combobox options require unique keys and nonempty labels")
+			}
+			ids[option.Key] = props.ID + "-option-" + fmt.Sprint(index)
+			dependencies = append(dependencies, option.Key, option.Label, option.Disabled)
+		}
+		matching := func() []ComboboxOption {
+			query := props.Value()
+			normalized := strings.ToLower(strings.TrimSpace(query))
+			items := []ComboboxOption{}
+			for _, option := range props.Options {
+				matches := all.Get()
+				if !matches {
+					if props.Filter == nil {
+						matches = strings.Contains(strings.ToLower(option.Label), normalized)
+					} else {
+						matches = props.Filter(option, query)
+					}
+				}
+				if matches {
+					items = append(items, option)
+				}
+			}
+			return items
+		}
+		close := func() {
+			open.Set(false)
+			active.Set("")
+		}
+		choose := func(option ComboboxOption) {
+			if props.Disabled || option.Disabled || !open.Get() {
+				return
+			}
+			close()
+			props.OnChange(option.Label)
+			if props.OnSelect != nil {
+				props.OnSelect(option.Key)
+			}
+		}
+		move := func(delta int) {
+			if props.Disabled {
+				return
+			}
+			if !open.Get() {
+				all.Set(true)
+				open.Set(true)
+			}
+			items := matching()
+			index := -1
+			for current, option := range items {
+				if option.Key == active.Get() {
+					index = current
+				}
+			}
+			if index < 0 && delta < 0 {
+				index = len(items)
+			}
+			for index += delta; index >= 0 && index < len(items); index += delta {
+				if !items[index].Disabled {
+					active.Set(items[index].Key)
+					activeRef.ScrollIntoView()
+					return
+				}
+			}
+		}
+		items := matching()
+		activeKey := ""
+		for _, option := range items {
+			if option.Key == active.Get() && !option.Disabled {
+				activeKey = option.Key
+			}
+		}
+		ui.Effect(scope, "repair-active", func() func() {
+			if props.Disabled {
+				close()
+			} else if activeKey == "" {
+				active.Set("")
+			}
+			return nil
+		}, dependencies...)
+		visible := open.Get() && !props.Disabled && len(items) > 0
+		keys := []string{"ArrowDown", "ArrowUp"}
+		if visible && activeKey != "" {
+			keys = append(keys, "Enter")
+		}
+		input := ui.Element("input").Ref(inputRef).Class(props.InputClass)
+		input = input.Attr("type", "text").Attr("value", props.Value()).Attr("name", props.Name)
+		input = input.Attr("placeholder", props.Placeholder).Attr("autocomplete", "off")
+		input = input.Attr("disabled", fmt.Sprint(props.Disabled)).Attr("required", fmt.Sprint(props.Required))
+		input = input.Attr("role", "combobox").Attr("aria-autocomplete", "list")
+		input = input.Attr("aria-expanded", fmt.Sprint(visible)).Attr("aria-controls", props.ID +
+			"-listbox")
+		if visible && activeKey != "" {
+			input = input.Attr("aria-activedescendant", ids[activeKey])
+		}
+		if open.Get() && !props.Disabled && len(items) == 0 {
+			input = input.DescribedBy(props.ID + "-empty")
+		}
+		input = input.On("input", func(event ui.Event) {
+			if props.Disabled {
+				return
+			}
+			props.OnChange(event.Value)
+			all.Set(false)
+			active.Set("")
+			open.Set(!event.IsComposing)
+		}).On("click", func(ui.Event) {
+			if !props.Disabled && !open.Get() {
+				all.Set(true)
+				open.Set(true)
+			}
+		}).On("blur", func(ui.Event) {
+			close()
+			if props.OnBlur != nil {
+				props.OnBlur()
+			}
+		}).OnWith("keydown", ui.EventOptions{
+			Capture: true, PreventDefault: true, Keys: keys, Modifiers: []ui.KeyboardModifiers{{}},
+		}, func(event ui.Event) {
+			if event.Key == "ArrowDown" {
+				move(1)
+			} else if event.Key == "ArrowUp" {
+				move(-1)
+			} else {
+				for _, option := range matching() {
+					if option.Key == active.Get() {
+						choose(option)
+						return
+					}
+				}
+			}
+		}).On("keydown", func(event ui.Event) {
+			if event.IsComposing {
+				return
+			}
+			if event.Key == "Tab" || event.Key == "Escape" {
+				close()
+			}
+			if event.Key == "ArrowLeft" || event.Key == "ArrowRight" || event.Key == "Home" ||
+				event.Key == "End" {
+				active.Set("")
+			}
+		})
+		children := []ui.View{}
+		for _, option := range items {
+			content := ui.Text(option.Label)
+			if props.Option != nil {
+				content = props.Option(option)
+			}
+			item := ui.Element("div", content).Key(option.Key)
+			if option.Key == activeKey {
+				item = item.Ref(activeRef)
+			}
+			item = item.Attr("id", ids[option.Key]).Attr("role", "option").Attr("aria-label", option.Label)
+			item = item.Attr("aria-selected", fmt.Sprint(option.Key == activeKey)).Attr("aria-disabled", fmt.Sprint(option.Disabled))
+			item = item.Class("vui-combobox-option").OnWith("mousedown", ui.EventOptions{
+				PreventDefault: true,
+			}, func(ui.Event) {})
+			item = item.On("click", func(ui.Event) {
+				choose(option)
+			})
+			children = append(children, item)
+		}
+		popup := ui.Element("div", children...).Popover(ui.PopoverOptions{Open: visible, Anchor: inputRef})
+		popup = popup.Attr("id", props.ID + "-listbox").Attr("role", "listbox").Attr("aria-label", props.Label)
+		popup = popup.Class("vui-combobox-popup").Class(props.PopupClass).On("toggle", func(event ui.Event) {
+			if event.Value == "closed" && visible && open.Get() {
+				close()
+			}
+		})
+		empty := props.EmptyLabel
+		if empty == "" {
+			empty = "No matching suggestions."
+		}
+		message := ui.Element("p", ui.Text(empty)).Class("vui-hint").Attr("id", props.ID + "-empty").Attr("role", "status").Attr("hidden", fmt.Sprint(!open.Get() ||
+			props.Disabled ||
+			len(items) > 0))
+		field := FormField(FieldProps{
+			ID: props.ID, Label: props.Label, Hint: props.Hint, Error: props.Error,
+		}, input)
+		return ui.Element("div", field, popup, message).Class("vui-combobox").Class(props.Class)
+	})
+}

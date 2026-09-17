@@ -1,0 +1,86 @@
+// Package collection provides immutable keyed data and scoped collection windowing.
+package collection
+
+import (
+	"strings"
+)
+
+type Item struct {
+	Key string
+	Label string
+	Disabled bool
+}
+
+// Items copies and indexes the input once. Keep the snapshot between renders;
+// replace it when data changes. At returns a value, never the backing slice.
+type Items struct {
+	items []Item
+	indices map[string]int
+	labels []string
+}
+
+func New(items []Item) *Items {
+	result := &Items{
+		items: append([]Item{}, items...), indices: make(map[string]int, len(items)),
+		labels: make([]string, len(items)),
+	}
+	for index, item := range result.items {
+		if item.Key == "" || item.Label == "" {
+			panic("collection: items require nonempty keys and labels")
+		}
+		if _, exists := result.indices[item.Key]; exists {
+			panic("collection: item keys must be unique")
+		}
+		result.indices[item.Key] = index
+		result.labels[index] = strings.ToLower(item.Label)
+	}
+	return result
+}
+
+func (items *Items) Len() int {
+	return len(items.items)
+}
+
+func (items *Items) At(index int) Item {
+	return items.items[index]
+}
+
+func (items *Items) Index(key string) int {
+	if index, exists := items.indices[key]; exists {
+		return index
+	}
+	return -1
+}
+
+// Next finds an enabled item strictly after from in direction (-1 or 1).
+// It stops at the collection edge. Use -1/1 for first, Len()/-1 for last.
+func (items *Items) Next(from int, direction int) int {
+	if direction != -1 && direction != 1 {
+		panic("collection: direction must be -1 or 1")
+	}
+	for index := from + direction; index >= 0 && index < items.Len(); index += direction {
+		if !items.items[index].Disabled {
+			return index
+		}
+	}
+	return -1
+}
+
+// Search wraps once, skipping disabled items. Prefix matching uses Unicode
+// lowercase without locale-specific collation or diacritic folding.
+func (items *Items) Search(prefix string, after int) int {
+	if prefix == "" || items.Len() == 0 {
+		return -1
+	}
+	prefix = strings.ToLower(prefix)
+	if after < -1 || after >= items.Len() {
+		after = -1
+	}
+	for step := 1; step <= items.Len(); step++ {
+		index := (after + step) % items.Len()
+		if !items.items[index].Disabled && strings.HasPrefix(items.labels[index], prefix) {
+			return index
+		}
+	}
+	return -1
+}

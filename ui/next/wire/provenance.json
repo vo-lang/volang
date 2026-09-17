@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 2,
+  "artifact": "ui-next-wire.guest",
+  "path": "ui/next/wire",
+  "generator": {
+    "command": [
+      "node",
+      "eng/ui-next/generate.mjs",
+      "--write"
+    ],
+    "version": 1
+  },
+  "toolchain": {
+    "node": ">=24",
+    "format": "volang-ui-next-binary-v25"
+  },
+  "inputs": [
+    "ui/next/wire.schema.json",
+    "eng/ui-next/generate.mjs",
+    "eng/ui-next/generate-codec.mjs",
+    "eng/ui-next/codec.vo.txt",
+    "eng/ui-next/codec.ts.txt"
+  ],
+  "sourceDigests": {
+    "ui/next/wire.schema.json": "sha256:4a897fb6f80d02e26e0bb772c7877945df86d003c4426459bb18d7038ef00547",
+    "eng/ui-next/generate.mjs": "sha256:b5168a6ec71cda0106f845ba18dd4787dc5cbc880e8c481c4a43d8d65fbb00f5",
+    "eng/ui-next/generate-codec.mjs": "sha256:13c6de952ce46ee99cedd146a9341f23933778f855bb715c20f89d2ba6bf57d5",
+    "eng/ui-next/codec.vo.txt": "sha256:71cfa0a9bd189421a7606135f60a2fce50f7117b3b029af01b4d8d0fcaa147a4",
+    "eng/ui-next/codec.ts.txt": "sha256:74987f865bdb289e306c2581a346503734671307052a6ea1fc9afd9a1cec9738"
+  },
+  "outputs": [
+    {
+      "path": "wire.vo",
+      "digest": "sha256:152395480e375e8804fe0b643b94d688a2757d96fe291e13dcd106a8a449c114",
+      "size": 2630
+    },
+    {
+      "path": "encode.vo",
+      "digest": "sha256:07de8937bdc7f8678222139694dd0a5afb8d01abe561ad0866c96be72937f992",
+      "size": 20126
+    },
+    {
+      "path": "limits.rs",
+      "digest": "sha256:57b8c5cdc287df3eb9b3353e5d8f70f6f452c4b865f8787f221697d458dcc513",
+      "size": 130
+    }
+  ]
+}

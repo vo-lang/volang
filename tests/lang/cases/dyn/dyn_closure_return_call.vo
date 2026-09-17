@@ -62,9 +62,11 @@ func main() error {
 	result = adder2(10)
 	assert(result == 60, "50 + 10 should be 60")
 	// Test 4: FuncHolder with stored closure
-	holder := &FuncHolder{fn: func() string {
-		return "hello from closure"
-	}}
+	holder := &FuncHolder{
+		fn: func() string {
+			return "hello from closure"
+		},
+	}
 	var hobj any = holder
 	fnAny := hobj~>GetFunc()?
 	fn := fnAny.(func() string)

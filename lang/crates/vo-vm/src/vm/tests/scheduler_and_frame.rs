@@ -1,6 +1,75 @@
 use super::*;
 
 #[test]
+fn bounded_panic_preserves_owned_diagnostics_and_original_location() {
+    for bounded in [false, true] {
+        for trap in [None, Some(RuntimeTrapKind::DivisionByZero)] {
+            let mut vm = Vm::new();
+            let message = vo_runtime::objects::string::from_rust_str(
+                &mut vm.state.gc,
+                "bounded 中文 failure",
+            );
+            let mut fiber = Fiber::new(0);
+            let value = vo_runtime::InterfaceSlot::from_ref(message, 0, ValueKind::String);
+            if let Some(kind) = trap {
+                fiber.set_recoverable_trap(kind, value);
+            } else {
+                fiber.set_recoverable_panic(value);
+            }
+            fiber.panic_source_loc = vo_common_core::debug_info::DiagnosticSource::new(7, 19);
+            vm.scheduler.spawn(fiber);
+            vm.scheduler.schedule_next().unwrap();
+            let outcome = vm.handle_exec_result(ExecResult::Panic, bounded).unwrap();
+            let error = if bounded {
+                assert_eq!(outcome.unwrap(), SchedulingOutcome::Panicked);
+                vm.take_bounded_panic()
+                    .expect("bounded panic retains structured error")
+            } else {
+                outcome.unwrap_err()
+            };
+            assert!(
+                vm.take_bounded_panic().is_none(),
+                "diagnostics must be consumed once"
+            );
+            let (message, location) = match error {
+                VmError::PanicUnwound { msg, loc } => {
+                    assert!(trap.is_none());
+                    (msg.unwrap(), loc.unwrap())
+                }
+                VmError::RuntimeTrap { kind, msg, loc } => {
+                    assert_eq!(Some(kind), trap);
+                    (msg, loc.unwrap())
+                }
+                other => panic!("lost panic classification: {other:?}"),
+            };
+            drop(vm);
+            assert_eq!(message, "bounded 中文 failure");
+            assert_eq!((location.func_id(), location.pc()), (7, 19));
+        }
+    }
+}
+
+#[test]
+fn another_scheduler_run_retires_unconsumed_bounded_panic() {
+    let mut vm = Vm::new();
+    let mut fiber = Fiber::new(0);
+    fiber.set_fatal_panic();
+    vm.scheduler.spawn(fiber);
+    vm.scheduler.schedule_next().unwrap();
+    assert_eq!(
+        vm.handle_exec_result(ExecResult::Panic, true)
+            .unwrap()
+            .unwrap(),
+        SchedulingOutcome::Panicked
+    );
+    assert_eq!(
+        vm.run_scheduled_with_budget(1).unwrap(),
+        SchedulingOutcome::Completed
+    );
+    assert!(vm.take_bounded_panic().is_none());
+}
+
+#[test]
 fn allocation_poll_preserves_pc_and_grants_one_instruction_retry() {
     let vms = [
         Vm::new(),

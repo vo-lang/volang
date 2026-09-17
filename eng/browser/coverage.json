@@ -196,7 +196,7 @@
     },
     {
       "id": "studio",
-      "source_function": "runStudioAotSmoke",
+      "source_function": "runStudioVmSmoke",
       "source_lines": 1014,
       "contract": "eng/browser/scenarios/studio.mjs",
       "checkpoints": [
@@ -237,7 +237,7 @@
         "sharedProjectReopen",
         "documentationColdStart"
       ],
-      "flag": "studioAotSmoke"
+      "flag": "studioVmSmoke"
     },
     {
       "id": "studio-canary",

@@ -2251,10 +2251,8 @@ fn check_import_covered_by_edges(
             "workspace dependency coverage requires an external import: {import_path}"
         )));
     }
-    if let Some(importer_github) = importer_module.as_public() {
-        if importer_github.owns_import(import_path).is_some() {
-            return Ok(());
-        }
+    if importer_module.owns_import(import_path).is_some() {
+        return Ok(());
     }
     if crate::identity::find_owning_module(import_path, allowed_edges).is_some() {
         return Ok(());
@@ -3037,14 +3035,21 @@ mod tests {
 
     #[test]
     fn test_check_import_covered_by_its_own_module() {
-        let importer: ModIdentity = ModulePath::parse("github.com/acme/app").unwrap().into();
-        assert!(check_import_covered_by_edges(
-            "github.com/acme/app",
-            "github.com/acme/app/util",
-            &importer,
-            &[],
-        )
-        .is_ok());
+        for module in ["github.com/acme/app", "local/app"] {
+            let importer = ModIdentity::parse(module).unwrap();
+            for import in [module.to_string(), format!("{module}/util/nested")] {
+                assert!(check_import_covered_by_edges(module, &import, &importer, &[]).is_ok());
+            }
+            for import in [
+                format!("{module}-other/util"),
+                "local/other/util".to_string(),
+            ] {
+                assert!(matches!(
+                    check_import_covered_by_edges(module, &import, &importer, &[]),
+                    Err(Error::WorkspaceSourceOutsideGraph { .. })
+                ));
+            }
+        }
     }
 
     #[test]

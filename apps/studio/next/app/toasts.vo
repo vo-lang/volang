@@ -1,0 +1,62 @@
+package app
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var toastPreviewType = ui.Define("studio.ToastPreview")
+
+func ToastPreview() ui.View {
+	return ui.Component(toastPreviewType, func(scope *ui.Scope) ui.View {
+		queue := kit.NewToasts(scope, "messages", kit.ToastOptions{Capacity: 5})
+		next := ui.Int(scope, "next", 0)
+		status := ui.String(scope, "status", "A little reassurance, without losing your place.")
+		returnFocus := ui.Ref(scope, "return")
+		add := func(action bool) {
+			next.Set(next.Get() + 1)
+			message := kit.ToastMessage{
+				Key: fmt.Sprint("note-", next.Get()), Title: "A little note for you",
+				Description: "Your thought has a place here.", DurationMilliseconds: 5000, Variant: "success",
+			}
+			if action {
+				message.Title = "An idea to come back to"
+				message.Description = "Saved for later. You can undo this whenever you’re ready."
+				message.DurationMilliseconds = 0
+				message.ActionLabel = "Undo"
+				message.OnAction = func() {
+					status.Set("Undone. You can always change your mind.")
+				}
+			}
+			if queue.Show(message) {
+				status.Set(message.Title + ". " + message.Description)
+			} else {
+				status.Set("Your notification area is full. Close a note to make room.")
+			}
+		}
+		return ui.Element("div", ui.Element("div", kit.Button(kit.ButtonProps{
+			Variant: "secondary",
+			OnPress: func() {
+				add(false)
+			},
+		}, ui.Text("Send a note")).Ref(returnFocus).Attr("id", "gallery-send-note"), kit.Button(kit.ButtonProps{
+			Variant: "quiet",
+			OnPress: func() {
+				add(true)
+			},
+		}, ui.Text("Try an action")), kit.Button(kit.ButtonProps{
+			Variant: "quiet", Disabled: queue.Len() == 0,
+			OnPress: func() {
+				queue.Focus()
+			},
+		}, ui.Text("View notifications")), kit.Button(kit.ButtonProps{
+			Variant: "quiet", Disabled: queue.Len() == 0,
+			OnPress: func() {
+				queue.Clear()
+			},
+		}, ui.Text("Dismiss all notes"))).Class("studio-actions"), ui.Element("p", ui.Text(status.Get())).Attr("data-toast-status", "").Class("vui-hint"), kit.ToastRegion(kit.ToastRegionProps{
+			ID: "gallery-notifications", Queue: queue, ReturnFocus: returnFocus, Label: "Your notifications",
+		})).Class("studio-choice-demo")
+	})
+}

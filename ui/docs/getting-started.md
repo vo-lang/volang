@@ -1,7 +1,7 @@
 # Getting started with Volang UI
 
 Volang UI ships with the `vo` toolchain. Application code is typed `.vo`
-source. Development uses the VM or JIT; Web releases use Core Wasm AOT and
+source. Development uses the VM or JIT; Web releases use Wasm VM and
 desktop releases use Native AOT.
 
 ## Create and run

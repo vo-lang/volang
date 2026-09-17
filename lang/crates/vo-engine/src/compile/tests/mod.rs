@@ -29,6 +29,7 @@ use super::native::{
 use super::CompileError;
 
 mod cases;
+mod editor;
 
 #[test]
 fn zip_path_parser_preserves_internal_roots_that_end_in_known_extensions() {

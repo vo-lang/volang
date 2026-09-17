@@ -19,7 +19,7 @@ in progress. A coordinated advisory will credit reporters who want attribution.
 
 ## Security boundaries
 
-Volang treats source, bytecode, Core Wasm images, extension artifacts, module
+Volang treats source, bytecode, Wasm runtime modules, extension artifacts, module
 metadata, browser messages, UI artifacts, archives, and package registries as
 untrusted inputs. Reports involving verifier bypasses, sandbox or capability
 escapes, memory safety, package authenticity, release provenance, denial of

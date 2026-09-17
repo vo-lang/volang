@@ -1,0 +1,107 @@
+package main
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+func startCommand(batch ui.Batch) int {
+	for _, command := range batch.Commands {
+		if command.Op == "start" {
+			return command.ID
+		}
+	}
+	panic("missing start command")
+}
+
+func taskLifetimes() {
+	var query *ui.StringState
+	var visible *ui.BoolState
+	var resource *ui.ResourceState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		query = ui.String(scope, "query", "A")
+		visible = ui.Bool(scope, "visible", true)
+		if !visible.Get() {
+			return ui.Text("hidden")
+		}
+		resource = ui.Resource(scope, "search", ui.Request{Service: "search", Value: query.Get()})
+		result := resource.Get()
+		if result.Pending {
+			return ui.Text("loading")
+		}
+		if result.Error != "" {
+			return ui.Text("error:" + result.Error)
+		}
+		return ui.Text(result.Value)
+	}))
+	first := root.Flush()
+	require(len(first.Commands) == 0, "task started during render")
+	root.Commit(first.Revision)
+	a := startCommand(flush(root))
+	query.Set("B")
+	flush(root)
+	transition := flush(root)
+	b := startCommand(transition)
+	require(len(transition.Commands) == 2 && transition.Commands[0].Op == "cancel" &&
+		transition.Commands[0].ID == a, "old request was not cancelled before starting replacement")
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: a, Value: "old A", Sequence: 1}), "obsolete task accepted")
+	require(root.Dispatch(ui.Event{Kind: "@task", Target: b, Value: "new B", Sequence: 2}), "current task rejected")
+	require(changedText(flush(root), "new B"), "current task result did not render")
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: b, Value: "duplicate B", Sequence: 3}), "completed task ran twice")
+	resource.Reload()
+	require(changedText(flush(root), "loading"), "retry did not show pending state")
+	retry := startCommand(flush(root))
+	root.Dispatch(ui.Event{Kind: "@task", Target: retry, Error: "unavailable", Sequence: 4})
+	require(changedText(flush(root), "error:unavailable"), "load failure did not reach local state")
+	resource.Reload()
+	flush(root)
+	last := startCommand(flush(root))
+	visible.Set(false)
+	flush(root)
+	cancel := flush(root)
+	require(len(cancel.Commands) == 1 && cancel.Commands[0].Op == "cancel" &&
+		cancel.Commands[0].ID == last, "conditional resource retained work")
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: last, Value: "late", Sequence: 5}), "removed declaration accepted task result")
+	visible.Set(true)
+	require(changedText(flush(root), "loading"), "redeclared resource showed an old result")
+	active := startCommand(flush(root))
+	close := root.Close()
+	require(len(close.Commands) == 1 && close.Commands[0].ID == active, "root close did not cancel task")
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: active, Sequence: 6}), "closed root accepted completion")
+}
+
+func requestTimeouts() {
+	request := ui.Request{Service: "test"}
+	limited := request.WithTimeout(100)
+	require(request.TimeoutMilliseconds == 0 && limited.TimeoutMilliseconds == 100, "timeout builder mutated the request")
+	for _, invalid := range []int{-1, 2147483648} {
+		expectPanic(func() {
+			request.WithTimeout(invalid)
+		}, "timeout between")
+	}
+	var timeout *ui.IntState
+	var resource *ui.ResourceState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		timeout = ui.Int(scope, "timeout", 100)
+		resource = ui.Resource(scope, "load", request.WithTimeout(timeout.Get()))
+		return ui.Text(resource.Get().Error)
+	}))
+	flush(root)
+	first := flush(root)
+	a := startCommand(first)
+	require(first.Commands[0].TimeoutMilliseconds == 100, "deadline did not reach the host command")
+	timeout.Set(200)
+	flush(root)
+	next := flush(root)
+	b := startCommand(next)
+	require(len(next.Commands) == 2 && next.Commands[0].Op == "cancel" && next.Commands[0].ID == a &&
+		next.Commands[1].TimeoutMilliseconds == 200, "changed deadline did not replace its request")
+	root.Dispatch(ui.Event{
+		Kind: "@task", Target: b, Error: "Request timed out after 200 ms", Sequence: 1,
+	})
+	require(changedText(flush(root), "Request timed out after 200 ms"), "timeout did not become a local error")
+	resource.Reload()
+	flush(root)
+	retry := flush(root)
+	require(startCommand(retry) > b && retry.Commands[0].TimeoutMilliseconds == 200, "timeout retry did not receive a fresh deadline")
+	root.Close()
+}

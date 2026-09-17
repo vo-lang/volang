@@ -1,0 +1,63 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/web"
+)
+
+var destinationsType = ui.Define("workbench.Destinations")
+
+func Destinations() ui.View {
+	return ui.Component(destinationsType, func(scope *ui.Scope) ui.View {
+		disabled := ui.Bool(scope, "disabled", false)
+		focus := ui.Ref(scope, "destinations")
+		form := forms.Use(scope, "journey", forms.Options{
+			Initial: forms.Values{"destinations": []string{"lisbon", "taipei"}, "days": []string{"sat"}},
+			Validate: func(data forms.Data) forms.Errors {
+				values := data.Values
+				if len(values["destinations"]) == 0 {
+					return forms.Errors{"destinations": "Choose at least one destination."}
+				}
+				return nil
+			},
+			FocusInvalid: func(string) {
+				focus.Focus()
+			},
+		})
+		choices := kit.MultiSelect(kit.MultiSelectProps{
+			ID: "journey-destinations", Label: "Places to explore", Name: "destinations",
+			Options: []kit.ChoiceOption{
+				{Value: "lisbon", Label: "Lisbon"}, {Value: "taipei", Label: "Taipei · 台北"},
+				{Value: "kyoto", Label: "Kyoto · 京都"},
+				{Value: "later", Label: "More places soon", Disabled: true},
+			},
+			Value: func() []string {
+				return form.All("destinations")
+			},
+			OnChange: func(values []string) {
+				form.ChangeAll("destinations", values)
+			},
+			OnBlur: func() {
+				form.Blur("destinations")
+			},
+			Disabled: disabled.Get(), InputRef: focus,
+			Hint: "Use your device’s native multiple-selection controls.", Error: form.Error("destinations"),
+		})
+		days := kit.FormField(kit.FieldProps{ID: "journey-days", Label: "Days to wander"}, form.MultipleSelect("days", ui.Element("select", ui.Element("option", ui.Text("Friday")).Attr("value", "fri"), ui.Element("option", ui.Text("Saturday")).Attr("value", "sat"), ui.Element("option", ui.Text("Sunday")).Attr("value", "sun"))).Attr("size", "3"))
+		controls := ui.Element("div", ui.Element("button", ui.Text("Save journey")).Attr("type", "submit").Attr("data-journey-save", "").Attr("disabled", fmt.Sprint(form.Pending())), ui.Element("button", ui.Text("Reset journey")).Attr("type", "reset").Attr("data-journey-reset", ""), ui.Element("button", ui.Text("Toggle destinations")).Attr("type", "button").Attr("data-journey-disable", "").On("click", func(ui.Event) {
+			disabled.Set(!disabled.Get())
+		})).Class("actions")
+		view := form.View(func(data forms.Data) ui.Request {
+			values := data.Values
+			return web.After(180, "Saved " + strings.Join(values["destinations"], ",") + " / " +
+				strings.Join(values["days"], ","))
+		}, func(result ui.Result) forms.Outcome {
+			return forms.Outcome{Message: result.Value}
+		}, choices, days, controls)
+		return ui.Element("section", ui.Element("h2", ui.Text("A small journey")), view, ui.Element("p", ui.Text(strings.Join(form.All("destinations"), ","))).Attr("data-journey-values", ""), ui.Element("span", ui.Text(strings.Join(form.All("days"), ","))).Attr("data-journey-days", "").Attr("hidden", "true"), ui.Element("output", ui.Text(form.Message())).Attr("data-journey-status", "").Attr("aria-live", "polite")).Class("card")
+	})
+}

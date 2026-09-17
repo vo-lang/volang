@@ -1,0 +1,39 @@
+package ui
+
+// Keep one slice descriptor while a batch grows. Appending individual records
+// creates successively longer slice views; a collector can retain and rescan
+// those overlapping prefixes until its active cycle finishes.
+type mutationBuffer struct {
+	items []Mutation
+	length int
+}
+
+func (root *Root) emit(value Mutation) {
+	buffer := &root.mutations
+	if buffer.length == len(buffer.items) {
+		capacity := len(buffer.items) * 2
+		if capacity == 0 {
+			capacity = 8
+		}
+		items := make([]Mutation, capacity)
+		copy(items, buffer.items)
+		buffer.items = items
+	}
+	buffer.items[buffer.length] = value
+	buffer.length++
+}
+
+func (buffer *mutationBuffer) truncate(length int) {
+	for index := length; index < buffer.length; index++ {
+		buffer.items[index] = Mutation{}
+	}
+	buffer.length = length
+}
+
+// Transfer ownership to the immutable published batch. The next render starts
+// a new buffer, so retaining a previous Batch never observes later writes.
+func (buffer *mutationBuffer) take() []Mutation {
+	items := buffer.items[:buffer.length]
+	*buffer = mutationBuffer{}
+	return items
+}

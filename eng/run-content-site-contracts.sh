@@ -8,7 +8,7 @@ snapshot="$(mktemp "${TMPDIR:-/tmp}/volang-content-site.XXXXXX")"
 trap 'rm -f "$snapshot"' EXIT
 
 actions=(
-  "--click=Wasm AOT"
+  "--click=Wasm VM"
   "--wait-text=Compilation"
   "--click=Concurrency"
   "--wait-text=Scoped lifetime"

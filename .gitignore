@@ -63,3 +63,5 @@ lang/crates/vo-web/aot-support/
 __pycache__/
 
 eng/browser/node_modules/
+eng/ui-next/node_modules/
+ui/editors/vscode/node_modules/

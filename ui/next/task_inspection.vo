@@ -1,0 +1,72 @@
+package ui
+
+// RuntimeTaskObserver is an optional extension to RuntimeObserver. Requests are
+// observed when the guest queues them, before host execution; values, terminal
+// results and cancellation are observed before application callbacks run.
+// The observer must only read metadata and must not change application state.
+type RuntimeTaskObserver interface {
+	TaskActivity(TaskActivity)
+}
+
+type TaskInspection struct {
+	ID int `json:"id"`
+	Component int `json:"component"`
+	Frame ComponentFrame `json:"frame"`
+	Subscription bool `json:"subscription"`
+	Truncated bool `json:"truncated"`
+}
+
+type TaskActivity struct {
+	Task TaskInspection
+	Kind string
+	Service string
+	TimeoutMilliseconds int
+	Error string
+	Truncated bool
+}
+
+type TasksInspection struct {
+	Tasks []TaskInspection
+	Truncated bool
+}
+
+func (task *Task) inspectMetadata() TaskInspection {
+	result := TaskInspection{ID: task.id, Subscription: task.stream}
+	if task.scope != nil && task.scope.node != nil && task.scope.node.view.component != nil {
+		result.Component = task.scope.node.id
+		result.Frame, result.Truncated = inspectionFrame(task.scope.node.view)
+	}
+	return result
+}
+
+func (task *Task) notifyActivity(kind string, service string, timeout int, failure string) {
+	if task.root.taskObserver == nil {
+		return
+	}
+	task.root.taskObserver.TaskActivity(TaskActivity{
+		Task: task.inspectMetadata(), Kind: kind, Service: inspectionText(service, 256),
+		TimeoutMilliseconds: timeout, Error: inspectionText(failure, 256),
+		Truncated: len(service) > 256 || len(failure) > 256,
+	})
+}
+
+// InspectTasks supports attaching diagnostics after work has started. Existing
+// requests have no retained service or payload in the execution path. The
+// observer records those details only for starts it actually observes.
+// The snapshot holds no task, callback or component references.
+func (root *Root) InspectTasks() TasksInspection {
+	if root.flushing || root.committing || root.awaiting != 0 {
+		panic("ui: inspection requires a committed turn")
+	}
+	result := TasksInspection{}
+	for _, task := range root.tasks {
+		if len(result.Tasks) == 512 {
+			result.Truncated = true
+			break
+		}
+		metadata := task.inspectMetadata()
+		result.Truncated = result.Truncated || metadata.Truncated
+		result.Tasks = append(result.Tasks, metadata)
+	}
+	return result
+}

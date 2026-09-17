@@ -1,0 +1,65 @@
+package forms
+
+import (
+	"slices"
+	"github.com/vo-lang/ui/next/files"
+)
+
+// Data is one validation/submission snapshot. Values holds ordered text fields;
+// Files holds immutable native selections. File contents stay in the host root.
+type Data struct {
+	Values Values
+	Files map[string]files.Selection
+}
+
+func cloneFiles(source map[string]files.Selection) map[string]files.Selection {
+	result := make(map[string]files.Selection)
+	for name, selection := range source {
+		result[name] = selection
+	}
+	return result
+}
+
+func cloneData(source Data) Data {
+	return Data{Values: cloneValues(source.Values), Files: cloneFiles(source.Files)}
+}
+
+func (data Data) has(name string) bool {
+	_, text := data.Values[name]
+	_, file := data.Files[name]
+	return text || file
+}
+
+func (data Data) equalField(other Data, name string) bool {
+	selection, file := data.Files[name]
+	if file {
+		previous, exists := other.Files[name]
+		return exists && selection.SameFiles(previous) && selection.Error() == previous.Error()
+	}
+	values, exists := data.Values[name]
+	previous, before := other.Values[name]
+	return exists && before && slices.EqualString(values, previous)
+}
+
+func (form *Form) data(current snapshot) Data {
+	result := Data{Values: form.values(current.values), Files: make(map[string]files.Selection)}
+	for name, selection := range current.files {
+		if form.allFields || slices.ContainsString(form.fields, name) {
+			result.Files[name] = selection
+		}
+	}
+	return result
+}
+
+// Data returns detached maps/lists for all participating text and file fields.
+func (form *Form) Data() Data {
+	return form.data(form.read())
+}
+
+func clearFiles(source map[string]files.Selection) map[string]files.Selection {
+	result := make(map[string]files.Selection)
+	for name, selection := range source {
+		result[name] = selection.Clear()
+	}
+	return result
+}

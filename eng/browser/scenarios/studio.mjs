@@ -1,7 +1,7 @@
-import { pollEvaluation, waitForAotInteractive } from '../page-contract.mjs';
+import { pollEvaluation, waitForVmInteractive } from '../page-contract.mjs';
 import { beginEditorOpenTiming, editorOpenDuration, disposeEditorOpenTiming } from '../editor-timing.mjs';
 
-export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRoot) {
+export async function runStudioVmSmoke(contract, timeoutMilliseconds, projectRoot) {
   const languageExampleOpenBudgetMilliseconds = 5_000;
   const clickPoint = async (expression) => {
     const point = await pollEvaluation(contract,
@@ -34,11 +34,11 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
   );
   checkpoints.performance = await pollEvaluation(contract,
     `(() => {
-      const startup = performance.getEntriesByName('volang-aot-startup', 'measure').at(-1);
-      const host = performance.getEntriesByName('volang-aot-host-startup', 'measure').at(-1);
-      const image = performance.getEntriesByName('volang-aot-image-fetch', 'measure').at(-1);
+      const startup = performance.getEntriesByName('volang-vm-startup', 'measure').at(-1);
+      const host = performance.getEntriesByName('volang-vm-host-startup', 'measure').at(-1);
+      const image = performance.getEntriesByName('volang-vm-image-fetch', 'measure').at(-1);
       const resource = performance.getEntriesByType('resource').find(
-        (entry) => new URL(entry.name).pathname === '/app.wasm',
+        (entry) => new URL(entry.name).pathname === '/app.vob',
       );
       return {
         startupMs: startup?.duration ?? -1,
@@ -101,8 +101,10 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
     screenHeight: 720,
   });
   await pollEvaluation(contract,
-    `innerWidth >= 840`,
-    (value) => value === true,
+    `({ width: innerWidth, buttons: Array.from(document.querySelectorAll('[data-testid="studio-topbar"] button'))
+      .map(button => button.getAttribute('aria-label') ?? (button.textContent ?? '').trim()) })`,
+    (value) => value?.width >= 840
+      && JSON.stringify(value?.buttons) === JSON.stringify(["Commands", "Open workspace", "New project"]),
     timeoutMilliseconds,
   );
 
@@ -142,7 +144,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
     (value) => value === true,
     timeoutMilliseconds,
   );
-  const source = "package main\n\nfunc main() {\n\tprintln(\"studio AOT smoke\") // "
+  const source = "package main\n\nfunc main() {\n\tprintln(\"studio VM smoke\") // "
     + "volang".repeat(100) + "\n}\n";
   const edited = await contract.evaluate(`(() => {
       const editor = document.querySelector('[data-testid="volang-code-editor"]');
@@ -153,7 +155,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
       editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
       return true;
     })()`);
-  if (edited !== true) throw new Error("Studio AOT smoke could not edit main.vo");
+  if (edited !== true) throw new Error("Studio VM smoke could not edit main.vo");
   checkpoints.edited = await pollEvaluation(contract,
     `({
       source: document.querySelector('[data-testid="volang-code-editor"]')?.value ?? "",
@@ -174,7 +176,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
       return editor.scrollLeft === 420;
     })()`);
   if (scrolled !== true) {
-    throw new Error("Studio AOT smoke could not scroll a long editor line");
+    throw new Error("Studio VM smoke could not scroll a long editor line");
   }
   checkpoints.editorScroll = await pollEvaluation(contract,
     `(() => {
@@ -195,17 +197,17 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
   const searchedUnsaved = await contract.evaluate(`(() => {
       const input = document.querySelector('input[aria-label="Search workspace"]');
       if (!(input instanceof HTMLInputElement)) return false;
-      input.value = "studio AOT smoke";
+      input.value = "studio VM smoke";
       input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
       return true;
     })()`);
   if (searchedUnsaved !== true) {
-    throw new Error("Studio AOT smoke could not search the unsaved editor snapshot");
+    throw new Error("Studio VM smoke could not search the unsaved editor snapshot");
   }
   checkpoints.unsavedSearch = await pollEvaluation(contract,
     `document.body.textContent ?? ""`,
     (value) => typeof value === "string" && value.includes("main.vo:4")
-      && value.includes("studio AOT smoke"),
+      && value.includes("studio VM smoke"),
     timeoutMilliseconds,
   );
   await activateButton("Explorer");
@@ -219,7 +221,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
       return true;
     })()`);
   if (duplicatePathEntered !== true) {
-    throw new Error("Studio AOT smoke could not enter an existing file path");
+    throw new Error("Studio VM smoke could not enter an existing file path");
   }
   const duplicateCreateActivated = await contract.evaluate(`(() => {
       const button = Array.from(document.querySelectorAll('button')).find(
@@ -230,7 +232,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
       return true;
     })()`);
   if (duplicateCreateActivated !== true) {
-    throw new Error("Studio AOT smoke could not submit an existing file path");
+    throw new Error("Studio VM smoke could not submit an existing file path");
   }
   checkpoints.noOverwriteCreate = await pollEvaluation(contract,
     `({
@@ -249,7 +251,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
       return true;
     })()`);
   if (duplicateDialogClosed !== true) {
-    throw new Error("Studio AOT smoke could not close the duplicate-file dialog");
+    throw new Error("Studio VM smoke could not close the duplicate-file dialog");
   }
   await activateButton("New file");
   const nestedPathEntered = await contract.evaluate(`(() => {
@@ -260,7 +262,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
       return true;
     })()`);
   if (nestedPathEntered !== true) {
-    throw new Error("Studio AOT smoke could not enter a nested source path");
+    throw new Error("Studio VM smoke could not enter a nested source path");
   }
   const nestedCreateActivated = await contract.evaluate(`(() => {
       const button = Array.from(document.querySelectorAll('button')).find(
@@ -271,7 +273,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
       return true;
     })()`);
   if (nestedCreateActivated !== true) {
-    throw new Error("Studio AOT smoke could not create a nested source file");
+    throw new Error("Studio VM smoke could not create a nested source file");
   }
   checkpoints.nestedSourcePackage = await pollEvaluation(contract,
     `({
@@ -329,7 +331,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
   await activateButton("Run VM");
   checkpoints.run = await pollEvaluation(contract,
     `document.querySelector('[role="log"]')?.textContent ?? ""`,
-    (value) => typeof value === "string" && value.includes("studio AOT smoke")
+    (value) => typeof value === "string" && value.includes("studio VM smoke")
       && value.includes("process exited successfully")
       && /Duration [0-9.]+(?:ns|µs|ms|s|m|h)/.test(value),
     timeoutMilliseconds,
@@ -344,7 +346,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
       return true;
     })()`);
   if (endlessEdited !== true) {
-    throw new Error("Studio AOT smoke could not prepare a cancellable run");
+    throw new Error("Studio VM smoke could not prepare a cancellable run");
   }
   await activateButton("Run VM");
   await pollEvaluation(contract,
@@ -373,7 +375,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
       return true;
     })()`);
   if (sourceRestoredAfterCancellation !== true) {
-    throw new Error("Studio AOT smoke could not restore source after run cancellation");
+    throw new Error("Studio VM smoke could not restore source after run cancellation");
   }
 
   await activateButton("Commands");
@@ -417,7 +419,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
     return true;
   })()`);
   if (commandActivated !== true) {
-    throw new Error("Studio AOT smoke could not activate the filtered command");
+    throw new Error("Studio VM smoke could not activate the filtered command");
   }
   checkpoints.command = await pollEvaluation(contract,
     `({
@@ -526,7 +528,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
       return true;
     })()`);
   if (invalidated !== true) {
-    throw new Error("Studio AOT smoke could not create an editor diagnostic");
+    throw new Error("Studio VM smoke could not create an editor diagnostic");
   }
   await pollEvaluation(contract,
     `Array.from(document.querySelectorAll('[role="status"]')).some(
@@ -542,7 +544,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
       return true;
     })()`);
   if (problemsActivated !== true) {
-    throw new Error("Studio AOT smoke could not open the Problems panel");
+    throw new Error("Studio VM smoke could not open the Problems panel");
   }
   await pollEvaluation(contract,
     `(() => {
@@ -564,7 +566,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
       return true;
     })()`);
   if (diagnosticActivated !== true) {
-    throw new Error("Studio AOT smoke could not activate the editor diagnostic");
+    throw new Error("Studio VM smoke could not activate the editor diagnostic");
   }
   checkpoints.diagnosticNavigation = await pollEvaluation(contract,
     `(() => {
@@ -591,7 +593,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
       return true;
     })()`);
   if (restoredStarter !== true) {
-    throw new Error("Studio AOT smoke could not restore the starter source");
+    throw new Error("Studio VM smoke could not restore the starter source");
   }
   await pollEvaluation(contract,
     `Array.from(document.querySelectorAll('[role="status"]'), (status) => status.textContent ?? '')`,
@@ -666,7 +668,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
       return true;
     })()`);
   if (unrelatedMessagePosted !== true) {
-    throw new Error("Studio AOT smoke could not exercise preview message isolation");
+    throw new Error("Studio VM smoke could not exercise preview message isolation");
   }
   checkpoints.previewMessageIsolation = await pollEvaluation(contract,
     `(() => {
@@ -762,7 +764,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
   );
   const warmReloadStarted = Date.now();
   await contract.reload({ ignoreCache: true });
-  await waitForAotInteractive(contract, timeoutMilliseconds);
+  await waitForVmInteractive(contract, timeoutMilliseconds);
   checkpoints.warmReloadMs = Date.now() - warmReloadStarted;
   if (checkpoints.warmReloadMs > 5_000) {
     throw new Error(`Studio warm reload took ${checkpoints.warmReloadMs}ms`);
@@ -801,7 +803,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
     timeoutMilliseconds,
   );
   await contract.reload({ ignoreCache: true });
-  await waitForAotInteractive(contract, timeoutMilliseconds);
+  await waitForVmInteractive(contract, timeoutMilliseconds);
   checkpoints.sharedProjectPersistence = await pollEvaluation(contract,
     `({
       path: location.pathname,

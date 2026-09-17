@@ -1,0 +1,63 @@
+package main
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+func subscriptionLifetimes() {
+	var visible *ui.BoolState
+	var query *ui.StringState
+	var label *ui.StringState
+	var current *ui.StringState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		visible = ui.Bool(scope, "watch-visible", true)
+		query = ui.String(scope, "watch-query", "A")
+		label = ui.String(scope, "watch-label", "old:")
+		current = ui.String(scope, "watch-value", "waiting")
+		prefix := label.Get()
+		if visible.Get() {
+			ui.Watch(scope, "watch", ui.Request{Service: "source", Value: query.Get()}, func(result ui.Result) {
+				current.Set(prefix + result.Value + result.Error)
+			})
+		}
+		return ui.Text(current.Get())
+	}))
+	first := root.Flush()
+	require(len(first.Commands) == 0, "subscription started during render")
+	root.Commit(first.Revision)
+	start := flush(root)
+	require(len(start.Commands) == 1 && start.Commands[0].Op == "watch", "subscription start missing")
+	a := start.Commands[0].ID
+	require(root.Dispatch(ui.Event{Kind: "@task", Target: a, Value: "one", Sequence: 1}), "first subscription value rejected")
+	require(changedText(flush(root), "old:one"), "first subscription value lost")
+	label.Set("new:")
+	require(len(flush(root).Commands) == 0 && !root.Pending(), "unchanged subscription restarted")
+	require(root.Dispatch(ui.Event{Kind: "@task", Target: a, Value: "two", Sequence: 2}), "second subscription value rejected")
+	require(changedText(flush(root), "new:two"), "subscription retained stale callback props")
+	query.Set("B")
+	flush(root)
+	replacement := flush(root)
+	require(len(replacement.Commands) == 2 && replacement.Commands[0].Op == "cancel" &&
+		replacement.Commands[0].ID == a &&
+		replacement.Commands[1].Op == "watch", "subscription replacement ordering")
+	b := replacement.Commands[1].ID
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: a, Sequence: 3}), "cancelled subscription delivered")
+	require(root.Dispatch(ui.Event{Kind: "@task", Target: b, Error: "closed", Sequence: 4}), "subscription error rejected")
+	require(changedText(flush(root), "new:closed"), "subscription error lost")
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: b, Value: "late", Sequence: 5}), "terminated subscription delivered")
+	visible.Set(false)
+	flush(root)
+	visible.Set(true)
+	flush(root)
+	c := flush(root).Commands[0].ID
+	visible.Set(false)
+	flush(root)
+	cancel := flush(root)
+	require(len(cancel.Commands) == 1 && cancel.Commands[0].ID == c &&
+		cancel.Commands[0].Op == "cancel", "removed subscription declaration remained active")
+	visible.Set(true)
+	flush(root)
+	d := flush(root).Commands[0].ID
+	close := root.Close()
+	require(len(close.Commands) == 1 && close.Commands[0].ID == d, "root close retained subscription")
+}

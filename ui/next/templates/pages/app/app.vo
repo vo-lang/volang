@@ -1,0 +1,21 @@
+package app
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+var appType = ui.Define("pages.Home")
+
+const heading = "An idea begins here."
+
+func View(initial string) ui.View {
+	return ui.Component(appType, func(scope *ui.Scope) ui.View {
+		count := ui.Int(scope, "count", 0)
+		return ui.Element("main", ui.DataBlock("application/ld+json", map[string]string{
+			"@context": "https://schema.org", "@type": "WebPage", "name": heading,
+		}).Attr("id", "page-data"), ui.Element("p", ui.Text("SMALL PAGES")).Class("eyebrow"), ui.Element("h1", ui.Text(heading)), ui.Element("p", ui.Text("Give yourself a little room to think. Your notebook is just a page away.")).Class("intro"), ui.Element("a", ui.Text("Open your notebook")).Attr("href", "notes/").Class("primary-link"), ui.Element("section", ui.Element("h2", ui.Text("One small step")), ui.Element("p", ui.Text("Small beginnings add up. Mark a little progress today.")), ui.Element("button", ui.Text("Take a step")).Attr("type", "button").On("click", func(event ui.Event) {
+			count.Set(count.Get() + 1)
+		}), ui.Element("output", ui.Text(fmt.Sprintf("%d little steps", count.Get()))).Attr("data-count", "").Attr("aria-live", "polite")).Class("page-card")).Class("vui", "small-pages")
+	})
+}

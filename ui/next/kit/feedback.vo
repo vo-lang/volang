@@ -1,0 +1,100 @@
+package kit
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type ProgressProps struct {
+	ID string
+	Label string
+	Value float64
+	// Max defaults to 1. Indeterminate omits the native value attribute.
+	Max float64
+	Indeterminate bool
+	ValueText string
+	Class string
+	BarClass string
+}
+
+func Progress(props ProgressProps) ui.View {
+	if props.ID == "" || props.Label == "" {
+		panic("kit: progress requires an ID and label")
+	}
+	if props.Max == 0 {
+		props.Max = 1
+	}
+	if !finiteNumber(props.Max) || props.Max <= 0 || !finiteNumber(props.Value) || props.Value < 0 ||
+		props.Value > props.Max {
+		panic("kit: progress requires a finite positive maximum and a value within 0..max")
+	}
+	bar := ui.Element("progress").Attr("id", props.ID).Attr("max", fmt.Sprint(props.Max)).Class("vui-progress-bar").Class(props.BarClass)
+	if !props.Indeterminate {
+		bar = bar.Attr("value", fmt.Sprint(props.Value))
+	}
+	if props.ValueText != "" {
+		bar = bar.Attr("aria-valuetext", props.ValueText)
+	}
+	return ui.Element("div", ui.Element("label", ui.Text(props.Label)).Attr("for", props.ID), bar).Class("vui-progress").Class(props.Class)
+}
+
+type SpinnerProps struct {
+	Label string
+	Decorative bool
+	Class string
+}
+
+func Spinner(props SpinnerProps) ui.View {
+	art := ui.Element("span").Attr("aria-hidden", "true").Class("vui-spinner-art")
+	if props.Decorative {
+		return ui.Element("span", art).Attr("aria-hidden", "true").Class("vui-spinner").Class(props.Class)
+	}
+	label := props.Label
+	if label == "" {
+		label = "Loading"
+	}
+	return ui.Element("span", art, ui.Element("span", ui.Text(label)).Class("vui-visually-hidden")).Attr("role", "status").Class("vui-spinner").Class(props.Class)
+}
+
+type AlertProps struct {
+	Title string
+	// Variant is info (default), success, warning or danger. Urgent controls
+	// assertive announcement independently from its visual appearance.
+	Variant string
+	Urgent bool
+	OnDismiss func()
+	DismissLabel string
+	Class string
+}
+
+func feedbackVariant(variant string) string {
+	if variant == "" {
+		variant = "info"
+	}
+	if variant != "info" && variant != "success" && variant != "warning" && variant != "danger" {
+		panic("kit: unknown feedback variant")
+	}
+	return variant
+}
+
+func Alert(props AlertProps, content ...ui.View) ui.View {
+	variant := feedbackVariant(props.Variant)
+	role := "status"
+	if props.Urgent {
+		role = "alert"
+	}
+	parts := []ui.View{}
+	if props.Title != "" {
+		parts = append(parts, ui.Element("strong", ui.Text(props.Title)).Key("title").Class("vui-alert-title"))
+	}
+	parts = append(parts, ui.Element("div", content...).Key("content").Class("vui-alert-content"))
+	children := []ui.View{ui.Element("div", parts...).Class("vui-alert-body")}
+	if props.OnDismiss != nil {
+		label := props.DismissLabel
+		if label == "" {
+			label = "Dismiss message"
+		}
+		children = append(children, Button(ButtonProps{Variant: "quiet", OnPress: props.OnDismiss}, ui.Text("×")).Attr("aria-label", label).Class("vui-alert-dismiss"))
+	}
+	return ui.Element("div", children...).Attr("role", role).Attr("aria-atomic", "true").Attr("data-variant", variant).Class("vui-alert").Class(props.Class)
+}

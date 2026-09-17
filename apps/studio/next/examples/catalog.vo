@@ -1,0 +1,236 @@
+// Package examples owns the small editable catalog for the rewritten Studio.
+package examples
+
+type Example struct {
+	ID string `json:"id"`
+	Title string `json:"title"`
+	Description string `json:"description"`
+	Source string `json:"source"`
+}
+
+func Console() []Example {
+	return []Example{
+		{
+			ID: "hello-world", Title: "Hello world",
+			Description: "Start with values, a loop, and a friendly greeting.",
+			Source: `package main
+
+import "fmt"
+
+func main() {
+    names := []string{"Ada", "Grace", "you"}
+    for _, name := range names {
+        fmt.Println("Hello,", name)
+    }
+}
+`,
+		},
+		{
+			ID: "channels", Title: "Channels",
+			Description: "Collect work from goroutines through a typed channel.",
+			Source: `package main
+
+import "fmt"
+
+func main() {
+    results := make(chan int, 4)
+    for number := 1; number <= 4; number++ {
+        go func(value int) { results <- value * value }(number)
+    }
+    total := 0
+    for count := 0; count < 4; count++ { total += <-results }
+    fmt.Println("Squares total:", total)
+}
+`,
+		},
+		{
+			ID: "closures", Title: "Closures", Description: "Give each function its own captured state.",
+			Source: `package main
+
+import "fmt"
+
+func counter() func() int {
+    value := 0
+    return func() int { value++; return value }
+}
+
+func main() {
+    first, second := counter(), counter()
+    fmt.Println(first(), first(), first())
+    fmt.Println("Another counter:", second())
+}
+`,
+		},
+		{
+			ID: "errors", Title: "Errors and cleanup",
+			Description: "Propagate an error with ? and keep cleanup close to its owner.",
+			Source: `package main
+
+import (
+    "errors"
+    "fmt"
+)
+
+func validate(number int) error {
+    if number < 0 { fail errors.New("Choose a nonnegative number.") }
+    return nil
+}
+
+func double(number int) (int, error) {
+    validate(number)?
+    return number * 2, nil
+}
+
+func main() {
+    defer func() { fmt.Println("All done.") }()
+    value, err := double(21)
+    fmt.Println("Result:", value, "Error:", err)
+    _, err = double(-1)
+    fmt.Println(err)
+}
+`,
+		},
+		{
+			ID: "interfaces", Title: "Interfaces",
+			Description: "Use a small structural contract with an ordinary value type.",
+			Source: `package main
+
+import "fmt"
+
+type Greeter interface { Greeting() string }
+type Person struct { Name string }
+
+func (person Person) Greeting() string { return "Hello, " + person.Name + "!" }
+
+func welcome(guest Greeter) { fmt.Println(guest.Greeting()) }
+
+func main() { welcome(Person{Name: "Ada"}) }
+`,
+		},
+		{
+			ID: "dynamic", Title: "Dynamic JSON",
+			Description: "Read runtime-shaped data through explicit dynamic access.",
+			Source: `package main
+
+import (
+    "encoding/json"
+    "fmt"
+)
+
+func main() error {
+    source := "{\"name\":\"Ada\",\"score\":42}"
+    record := json.Decode([]byte(source))?
+    fmt.Println(record~>name?, record~>score?)
+    return nil
+}
+`,
+		},
+	}
+}
+
+func UI() []Example {
+	return []Example{
+		{
+			ID: "counter", Title: "A little counter",
+			Description: "Compose a button and a value with local component state.",
+			Source: `package main
+
+import (
+    "fmt"
+    ui "github.com/vo-lang/ui/next"
+    "github.com/vo-lang/ui/next/host"
+    "github.com/vo-lang/ui/next/kit"
+)
+
+var counter = ui.Define("example.Counter")
+
+func main() {
+    host.Run(ui.Component(counter, func(scope *ui.Scope) ui.View {
+        count := ui.Int(scope, "count", 0)
+        return ui.Element("main",
+            ui.Element("h2", ui.Text("Make something good.")),
+            ui.Element("p", ui.Text("Change the words, try the button, and make it yours.")),
+            kit.Button(kit.ButtonProps{
+                OnPress: func() { count.Set(count.Get() + 1) },
+            }, ui.Text("One more idea")),
+            ui.Element("output", ui.Text(fmt.Sprint(count.Get(), " little ideas"))).Attr("aria-live", "polite"),
+        ).Class("preview-example")
+    }))
+}
+`,
+		},
+		{
+			ID: "filter", Title: "A filterable list",
+			Description: "Connect a native text field to a small, keyed list.",
+			Source: `package main
+
+import (
+    "strings"
+    ui "github.com/vo-lang/ui/next"
+    "github.com/vo-lang/ui/next/host"
+    "github.com/vo-lang/ui/next/kit"
+)
+
+var list = ui.Define("example.FilterableList")
+
+func main() {
+    host.Run(ui.Component(list, func(scope *ui.Scope) ui.View {
+        query := ui.String(scope, "query", "")
+        items := []ui.View{}
+        for _, name := range []string{"Ada", "Grace", "Linus", "Margaret", "Yukihiro"} {
+            if strings.Contains(strings.ToLower(name), strings.ToLower(query.Get())) {
+                items = append(items, ui.Element("li", ui.Text(name)).Key(name))
+            }
+        }
+        content := ui.Element("ul", items...)
+        if len(items) == 0 { content = ui.Element("p", ui.Text("No matching names.")) }
+        return ui.Element("main",
+            ui.Element("h2", ui.Text("A few good names.")),
+            kit.Field("names-query", "Find a name", "", ui.Element("input").Attr("value", query.Get()).On("input", func(event ui.Event) {
+                query.Set(event.Value)
+            })),
+            content,
+        ).Class("preview-example")
+    }))
+}
+`,
+		},
+		{
+			ID: "checklist", Title: "Independent checkboxes",
+			Description: "Give each reusable row its own state and stable identity.",
+			Source: `package main
+
+import (
+    "fmt"
+    ui "github.com/vo-lang/ui/next"
+    "github.com/vo-lang/ui/next/host"
+    "github.com/vo-lang/ui/next/kit"
+)
+
+var task = ui.Define("example.Task")
+
+func Task(id string, title string) ui.View {
+    return ui.Component(task, func(scope *ui.Scope) ui.View {
+        done := ui.Bool(scope, "done", false)
+        return ui.Element("li", kit.Checkbox(kit.CheckboxProps{
+            ID: id, Label: title,
+            Checked: func() bool { return done.Get() },
+            OnChange: func(value bool) { done.Set(value) },
+        })).Attr("data-complete", fmt.Sprint(done.Get()))
+    }).Key(id)
+}
+
+func main() {
+    host.Run(ui.Element("main",
+        ui.Element("h2", ui.Text("One small step.")),
+        ui.Element("ul",
+            Task("think", "Find an idea"),
+            Task("make", "Make a small version"),
+            Task("share", "Share what you learned"),
+        ),
+    ).Class("preview-example"))
+}
+`,
+		},
+	}
+}

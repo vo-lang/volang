@@ -131,7 +131,7 @@ binary hash and is excluded from ordinary diagnostic timing collection.
 
 Process orchestration duration includes polling and is unsuitable for cold-start
 benchmark claims. These native probes supplement the seven-backend benchmark
-catalog; they do not establish Native AOT, Wasm VM, Core Wasm, browser or another
+catalog; they do not establish Native AOT, Wasm VM, browser or another
 native architecture's coverage.
 
 ## Runtime input and result contracts

@@ -134,7 +134,7 @@ pub(in crate::translate) fn slice_new<'a>(
     let cap = e.read_var(inst.c + 1);
 
     // Create stack slot for output
-    let out_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, (8) as usize);
+    let out_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, 8);
     let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
 
     // Call checked helper: (gc, meta, elem_bytes, len, cap, out) -> error_code

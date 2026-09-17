@@ -8,7 +8,7 @@ the executable help as the final authority for flags.
 
 ```sh
 vo run <file|dir> [--mode=vm|jit] [-- args...]
-vo check [path]
+vo check [path] [--read-only]
 vo test [path] [--mode=vm|jit]
 vo fmt [file|dir...] [--check]
 ```
@@ -20,6 +20,10 @@ passed to the Volang program.
 `check` performs frontend and module validation without execution. `test` runs
 the selected test entry or the project test convention. `fmt` rewrites source;
 `--check` reports drift without writing.
+
+`check --read-only` validates existing source and locked dependencies without
+running generators, downloading modules or writing compilation caches. Prepare
+missing dependencies and generated source explicitly before this check.
 
 ## Create projects
 
@@ -37,13 +41,20 @@ dependency.
 
 ```sh
 vo build [path] [-o output] [--target=TRIPLE] \
-  [--kind=bin|object|wasm|bytecode] [--runtime=PATH] [--no-cache]
+  [--kind=bin|object|bytecode] [--runtime=PATH] \
+  [--link-arg=ARG]... [--windows-gui] [--no-cache]
 ```
 
 The default kind is a Native AOT executable. `object` emits a relocatable
-object, `wasm` emits Core Wasm AOT, and `bytecode` emits the verified `.vob`
+object, and `bytecode` emits the verified `.vob`
 format. `emit bytecode` is the explicit low-level bytecode command; `dump`
 disassembles a `.vob` file.
+
+Custom native runtimes can supply platform library flags through repeated
+`--link-arg=ARG` options. Each value reaches the linker as one literal argument,
+in order; no shell expansion occurs. On Windows, `--windows-gui` selects a GUI
+executable without a console window while preserving the normal `main` entry.
+Both options apply only to native executable linking.
 
 ## Manage dependencies
 
@@ -93,10 +104,18 @@ vo ui package [path] [-o dist] [--target=TRIPLE] [--runtime=PATH]
 `ui dev` serves the Web development projection with state-preserving rebuilds.
 `ui run` opens the native development host. `ui test` drives semantic input and
 can capture governed snapshots. `inspect` reports the view/runtime contract;
-`doctor` diagnoses project and host readiness. `build` creates a Core Wasm AOT
+`doctor` diagnoses project and host readiness. `build` creates a bytecode and Wasm VM
 Web bundle, and `package` creates a Native AOT desktop package.
 
 `vo ui source` lists or exports official UIKit package source for inspection.
+
+New projects created with `vo ui create` contain `ui-next.json` and select the
+replacement UI tools. Their `vo ui check [path]` validates source entries and host
+imports without running prerendering or writing a distribution. Use `build`
+before `preview`. `vo ui doctor [path] [--target web|desktop] [--json]` reports
+configuration and installation checks with repair guidance and a nonzero status
+on failure. It does not change the project or install dependencies. Projects
+without the new manifest retain the compatibility commands above.
 
 ## Release modules
 

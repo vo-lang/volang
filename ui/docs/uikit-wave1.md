@@ -104,14 +104,14 @@ The shared contracts include:
 ## Development and release parity
 
 The component gallery is the permanent UIKit laboratory. Run it through VM
-and JIT semantic tests during development, serve its Wasm AOT build in a real
+and JIT semantic tests during development, serve its Wasm VM build in a real
 browser, and build the same source as a Native AOT executable for release:
 
 ```sh
 ./eng/run-uikit-gallery-contracts.sh
-vo ui build ui/showcases/component-gallery -o target/ui-component-gallery-aot
+vo ui build ui/showcases/component-gallery -o target/ui-component-gallery-vm
 npm --prefix lang/crates/vo-web run test:uikit-gallery-browser -- \
-  --static-root ../../../target/ui-component-gallery-aot
+  --static-root ../../../target/ui-component-gallery-vm
 vo-dev ui-certify --check
 ```
 

@@ -1,0 +1,105 @@
+package data
+
+import (
+	"encoding/json"
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+// InitialValue carries a successful server read, including an empty response.
+// Request keeps its full service/payload/deadline identity across hydration.
+type InitialValue struct {
+	Request ui.Request
+	Value string
+	UpdatedAtMilliseconds int64
+}
+
+type initialEnvelope struct {
+	Version int
+	Values []InitialValue
+}
+
+const maxInitialEntries = 256
+
+const maxInitialBytes = 4 * 1024 * 1024
+
+func initialBytes(values []InitialValue) (int, error) {
+	if len(values) > maxInitialEntries {
+		return 0, fmt.Errorf("data: initial values exceed %d entries", maxInitialEntries)
+	}
+	seen := make(map[ui.Request]bool, len(values))
+	bytes := 0
+	for _, value := range values {
+		request := value.Request
+		if request.Service == "" || request.TimeoutMilliseconds < 0 ||
+			request.TimeoutMilliseconds > 2147483647 {
+			return 0, fmt.Errorf("data: initial value has an invalid request")
+		}
+		if value.UpdatedAtMilliseconds < 0 || value.UpdatedAtMilliseconds > 9007199254740991 {
+			return 0, fmt.Errorf("data: initial timestamp must be a nonnegative safe millisecond integer")
+		}
+		if seen[request] {
+			return 0, fmt.Errorf("data: initial values repeat a request")
+		}
+		seen[request] = true
+		for _, text := range []string{request.Service, request.Value, value.Value} {
+			if len(text) > maxInitialBytes - bytes {
+				return 0, fmt.Errorf("data: initial values exceed the byte limit")
+			}
+			bytes += len(text)
+		}
+	}
+	return bytes, nil
+}
+
+// EncodeInitial serializes a bounded snapshot prepared by server application
+// code. No I/O, executable callbacks, in-flight work or errors are transferred.
+func EncodeInitial(values []InitialValue) (string, error) {
+	if _, err := initialBytes(values); err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(initialEnvelope{Version: 1, Values: values})
+	if err != nil {
+		return "", err
+	}
+	if len(encoded) > maxInitialBytes {
+		return "", fmt.Errorf("data: encoded initial values exceed the byte limit")
+	}
+	return string(encoded), nil
+}
+
+// DecodeInitial validates the envelope before any client cache is changed.
+func DecodeInitial(encoded string) ([]InitialValue, error) {
+	if len(encoded) > maxInitialBytes {
+		return nil, fmt.Errorf("data: encoded initial values exceed the byte limit")
+	}
+	var envelope initialEnvelope
+	if err := json.Unmarshal([]byte(encoded), &envelope); err != nil {
+		return nil, err
+	}
+	if envelope.Version != 1 {
+		return nil, fmt.Errorf("data: unsupported initial snapshot version")
+	}
+	if _, err := initialBytes(envelope.Values); err != nil {
+		return nil, err
+	}
+	return envelope.Values, nil
+}
+
+func (client *Client) installInitial(values []InitialValue) {
+	bytes, err := initialBytes(values)
+	if err != nil {
+		panic(err)
+	}
+	if len(values) > client.options.RetainedEntries || bytes > client.options.RetainedBytes {
+		panic("data: initial values must fit the client's retention budget")
+	}
+	for _, value := range values {
+		client.entries[value.Request] = &entry{
+			request: value.Request, value: Snapshot{Value: value.Value, HasValue: true},
+			updatedAt: value.UpdatedAtMilliseconds, retained: true, listeners: make(map[*ui.IntState]bool),
+		}
+		client.retained = append(client.retained, value.Request)
+	}
+	client.retainedBytes = bytes
+}

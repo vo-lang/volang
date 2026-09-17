@@ -1,0 +1,48 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func nativeTextContracts() {
+	var value *ui.StringState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		value = ui.String(scope, "text", "A <title> & \"quote\"\r\n中文")
+		return ui.Fragment(ui.Element("title", ui.Text(value.Get())), ui.Element("style", ui.Text("p::before {content: '< & \"quote\"';}")), ui.Element("style", ui.Text("")), ui.Element("title"))
+	}))
+	first := flush(root)
+	html := root.HTML()
+	require(strings.Contains(html, "A &lt;title&gt; &amp; &quot;quote&quot;&#13;\n中文</title>"), "native title text lost escaping or CR")
+	require(strings.Contains(html, "p::before {content: '< & \"quote\"';}</style>"), "style text was escaped as ordinary HTML")
+	require(strings.Count(html, "data-vo-text=") == 3 && !strings.Contains(html, "<!--vo:t:"), "native text identities leaked into content")
+	value.Set("Updated </title> & text")
+	batch := flush(root)
+	require(len(batch.Mutations) == 1 && changedText(batch, value.Get()), "native text update remounted its element")
+	require(strings.Contains(root.HTML(), "Updated &lt;/title&gt; &amp; text</title>"), "updated title cannot serialize")
+	require(len(first.Mutations) > 0, "native text fixture never mounted")
+	root.Close()
+	for _, view := range []ui.View{
+		ui.Element("title", ui.Text("one"), ui.Text("two")),
+		ui.Element("style", ui.Fragment(ui.Text("text"))), ui.Element("style", ui.Element("span")),
+	} {
+		expectPanic(func() {
+			ui.NewRoot(view).Flush()
+		}, "at most one direct Text child")
+	}
+	for _, ending := range []string{"</style>", "</STYLE >", "</style/>", "</style\n>"} {
+		expectPanic(func() {
+			ui.NewRoot(ui.Element("style", ui.Text(ending))).Flush()
+		}, "closing style tag")
+	}
+	expectPanic(func() {
+		ui.NewRoot(ui.Element("style", ui.Text("a\r\nb"))).Flush()
+	}, "LF newlines")
+	expectPanic(func() {
+		ui.NewRoot(ui.Element("title", ui.Text("a\x00b"))).Flush()
+	}, "NUL")
+	root = ui.NewRoot(ui.Element("style", ui.Text("/* </stylesheet> </stylex> */")))
+	flush(root)
+	require(strings.Contains(root.HTML(), "</stylesheet> </stylex> */"), "representable style text was rejected")
+	root.Close()
+}

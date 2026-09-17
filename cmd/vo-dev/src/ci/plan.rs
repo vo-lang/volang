@@ -587,7 +587,12 @@ mod tests {
         let language = graph.impact(&["tests/lang/arrays.vo".into()]);
         assert_eq!(
             selected_task_ids(&manifest, "pull-request", &language).unwrap(),
-            BTreeSet::from(["contracts", "language-native-smoke", "wasm-web-smoke"])
+            BTreeSet::from([
+                "contracts",
+                "language-native-smoke",
+                "ui-web-rewrite",
+                "wasm-web-smoke"
+            ])
         );
         for path in [
             "apps/studio/main.vo",
@@ -602,9 +607,13 @@ mod tests {
                     "contracts",
                     "rust-quality",
                     "wasm-web-smoke",
+                    "ui-web-rewrite",
                     "ui-platform-linux-smoke",
                     "ui-platform-macos-full",
-                    "ui-platform-windows-full"
+                    "ui-platform-windows-full",
+                    "ui-desktop-rewrite-linux",
+                    "ui-desktop-rewrite-macos",
+                    "ui-desktop-rewrite-windows"
                 ]),
                 "{path}"
             );

@@ -2,7 +2,7 @@
 
 E5 turns the shared Volang UI component graph into deployable Web and desktop
 products. Application logic remains typed Volang source. Development can use
-the VM or JIT; release artifacts use Core Wasm AOT or Native AOT.
+the VM or JIT; release artifacts use Wasm VM or Native AOT.
 
 ## Web product
 
@@ -15,7 +15,7 @@ target has the bare-browser host surface.
 A project may declare `ui.web.toml`:
 
 ```toml
-routes = ["/", "/articles/wasm-aot", "/offline"]
+routes = ["/", "/articles/wasm", "/offline"]
 
 [document]
 language = "en"
@@ -45,8 +45,7 @@ require_https = true
 
 `vo ui build . -o dist` validates all routes and policies, executes each route
 under its declared location, writes semantic SSR HTML, and emits the selective
-activation map next to the server nodes. The output also contains the Core Wasm
-AOT image, runtime modules, public assets, PWA manifest, offline service worker,
+activation map next to the server nodes. The output also contains the verified bytecode, runtime modules, public assets, PWA manifest, offline service worker,
 security headers and `deployment.json`. The deployment manifest describes the
 static, Netlify, Cloudflare Pages and object-storage adapter contract without
 adding an application JavaScript dependency graph.
@@ -62,7 +61,7 @@ invalidation.
 The permanent `showcases/content-site` application covers SSG, route-specific
 SSR, streaming, metadata, assets, search, forms, activation, PWA and offline
 behavior. Its home and article routes are checked in VM and JIT, the release is
-lowered to Web AOT, and the result runs in a real browser with zero console
+compiled to verified Web bytecode, and the result runs in a real browser with zero console
 errors.
 
 ## Desktop product

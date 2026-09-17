@@ -1,0 +1,91 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"strings"
+	"time"
+	"{{module}}/app"
+	"github.com/vo-lang/ui/next/data"
+	"github.com/vo-lang/ui/next/server"
+)
+
+var visits int
+
+func main() {
+	server.Run(func(request server.Request) (server.Page, error) {
+		visits++
+		location, err := url.Parse(request.URL)
+		if err != nil { return server.Page{}, err }
+		if strings.HasSuffix(location.Path, "/api/http") { return handleHTTP(request) }
+		if strings.HasSuffix(location.Path, "/http") {
+			encoded, err := json.Marshal(app.Initial{HTTP: true, BasePath: request.BasePath})
+			if err != nil { return server.Page{}, err }
+			return server.Page{Render: app.View, InitialData: string(encoded), Title: "Profile settings"}, nil
+		}
+		if strings.HasSuffix(location.Path, "/slow") { time.Sleep(5 * time.Second) }
+		if strings.HasSuffix(location.Path, "/error") { return server.Page{}, fmt.Errorf("private loader failure") }
+		if strings.HasSuffix(location.Path, "/bad-header") {
+			return server.Page{Headers: map[string][]string{"content-type": {"application/json"}}}, nil
+		}
+		if strings.HasSuffix(location.Path, "/bad-data") {
+			return server.Page{InitialData: strings.Repeat("x", 1024 * 1024 + 1)}, nil
+		}
+		if strings.HasSuffix(location.Path, "/bad-status") { return server.Page{Status: 101}, nil }
+		if strings.HasSuffix(location.Path, "/no-content") { return server.Page{Status: 204}, nil }
+		if strings.HasSuffix(location.Path, "/cookies") {
+			return server.Page{Render: app.View, Headers: map[string][]string{"set-cookie": {"a=1; HttpOnly", "b=2; SameSite=Lax"}}}, nil
+		}
+		if strings.HasSuffix(location.Path, "/redirect") {
+			return server.Page{Status: 303, Headers: map[string][]string{"location": {request.BasePath + "profile?name=Redirected"}}}, nil
+		}
+		if request.Method != "GET" && request.Method != "HEAD" && request.Method != "POST" {
+			return server.Page{Render: app.View, Status: 405, Headers: map[string][]string{"allow": {"GET, HEAD, POST"}}}, nil
+		}
+		name := location.Query().Get("name")
+		backend := location.Query().Get("backend")
+		submissionError := ""
+		if request.Method == "POST" {
+			fields, err := request.PostForm()
+			if err != nil { return server.Page{Render: app.View, Status: 400}, nil }
+			name, backend = fields.Get("name"), fields.Get("backend")
+			if strings.TrimSpace(name) == "" { submissionError = "Enter your name." } else {
+				target := request.BasePath + "profile?name=" + url.QueryEscape(name)
+				if backend != "" { target += "&backend=" + url.QueryEscape(backend) }
+				return server.Page{Status: 303, Headers: map[string][]string{"location": {target}}}, nil
+			}
+		} else if name == "" { name = "Visitor" }
+		initial, err := data.EncodeInitial([]data.InitialValue{{
+			Request: app.ProfileRequest(request.BasePath, name), Value: "Profile for " + name,
+			UpdatedAtMilliseconds: time.Now().UnixNano() / 1000000,
+		}})
+		if err != nil { return server.Page{}, err }
+		encoded, err := json.Marshal(app.Initial{Name: name, BasePath: request.BasePath, Data: initial, Visit: visits, Backend: backend, Error: submissionError})
+		if err != nil { return server.Page{}, err }
+		status := 200
+		if submissionError != "" { status = 422 }
+		if location.Path != request.BasePath && !strings.HasSuffix(location.Path, "/profile") { status = 404 }
+		return server.Page{Render: app.View, InitialData: string(encoded), Title: name + " · Request page",
+			Description: "Profile for " + name, Status: status,
+			Headers: map[string][]string{"x-server-visit": {fmt.Sprint(visits)}},
+		}, nil
+	})
+}
+
+func handleHTTP(request server.Request) (server.Page, error) {
+	if request.Method == "GET" || request.Method == "HEAD" {
+		return server.JSON(200, app.HTTPOutcome{Message: "Loaded from Vo", Method: request.Method})
+	}
+	var profile app.ProfileBody
+	if err := json.Unmarshal([]byte(request.Body), &profile); err != nil { return server.JSON(400, app.HTTPOutcome{Message: "Invalid JSON"}) }
+	if profile.Name == "timeout" || profile.Name == "cancel" { time.Sleep(5 * time.Second) }
+	if profile.Name == "taken" {
+		return server.JSON(422, app.HTTPOutcome{Errors: map[string]string{"name": "Name is already used."}})
+	}
+	response, err := server.JSON(201, app.HTTPOutcome{Message: "Saved " + profile.Name, Method: request.Method})
+	if err != nil { return server.Page{}, err }
+	response.Headers = map[string][]string{"x-method": {request.Method}}
+	if len(request.Headers["x-request"]) > 0 { response.Headers["x-request"] = request.Headers["x-request"] }
+	return response, nil
+}

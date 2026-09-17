@@ -1,0 +1,153 @@
+package main
+
+import (
+	"encoding/json"
+	"math"
+	"strings"
+	"github.com/vo-lang/ui/next/wire"
+)
+
+func sameWireEvent(first wire.Event, second wire.Event) bool {
+	a, ae := json.Marshal(first)
+	b, be := json.Marshal(second)
+	return ae == nil && be == nil && string(a) == string(b)
+}
+
+func wireEncoding() {
+	pointerWireEncoding()
+	text := "normal \" \\ \b \f \n \r \t <>& 中文 🙂 \u2028\u2029"
+	for index := 0; index < 32; index++ {
+		text += string(rune(index))
+	}
+	event := wire.Event{
+		Target: -9007199254740991, Kind: "input", Value: text, Key: "Enter", Checked: true,
+		Sequence: 9007199254740991, Error: "failed", Capture: true, AltKey: true, CtrlKey: true,
+		MetaKey: true, ShiftKey: true, Repeat: true, IsComposing: true, Button: 2, PointerType: "pen",
+		SelectedValues: []string{text, "", "second"},
+	}
+	encoded, err := wire.EncodeEvent(event)
+	require(err == nil, "event encoding failed")
+	decoded, err := wire.DecodeEvent(encoded)
+	require(err == nil && sameWireEvent(decoded, event), "event roundtrip changed strings, booleans, integers or selected values")
+	for end := 0; end < len(encoded); end++ {
+		_, err = wire.DecodeEvent(encoded[:end])
+		require(err != nil, "truncated event accepted")
+	}
+	_, err = wire.DecodeEvent(append(encoded, 0))
+	require(err != nil, "trailing byte accepted")
+	batch := wire.Batch{
+		Version: wire.Version, Revision: 42, InputSequence: 0,
+		Mutations: []wire.Mutation{
+			{Op: "create", ID: 1, Name: "p", Value: text}, {Op: "insert", ID: 1, Parent: 0},
+		},
+		Commands: []wire.Command{
+			{Op: "start", ID: 1, Name: "web.delay", Value: "{}", TimeoutMilliseconds: 1500},
+		},
+	}
+	encoded, err = wire.EncodeBatch(batch)
+	restored, decodeError := wire.DecodeBatch(encoded)
+	require(err == nil && decodeError == nil && restored.Mutations[0] == batch.Mutations[0] &&
+		restored.Commands[0] == batch.Commands[0], "nested batch roundtrip failed")
+		// Count admission uses available frame bytes before allocating an array.
+	for index := 29; index < 33; index++ {
+		encoded[index] = 0xfe
+	}
+	_, err = wire.DecodeBatch(encoded)
+	require(err != nil, "impossible array count admitted")
+	for _, entries := range [][]wire.Mutation{nil, []wire.Mutation{}} {
+		batch = wire.Batch{Mutations: entries}
+		encoded, err = wire.EncodeBatch(batch)
+		restored, decodeError = wire.DecodeBatch(encoded)
+		require(err == nil && decodeError == nil && (restored.Mutations == nil) == (entries == nil), "nil/empty array identity lost")
+	}
+	input := wire.InputBatch{Events: []wire.Event{event, {}}}
+	encoded, err = wire.EncodeInputBatch(input)
+	inputResult, decodeError := wire.DecodeInputBatch(encoded)
+	require(err == nil && decodeError == nil && len(inputResult.Events) == 2 &&
+		sameWireEvent(inputResult.Events[0], event), "input batch roundtrip failed")
+	for _, values := range [][]string{nil, []string{}, []string{"", "中文", "same", "same"}} {
+		original := wire.Event{SelectedValues: values}
+		bytes, encodeError := wire.EncodeEvent(original)
+		restored, decodeError := wire.DecodeEvent(bytes)
+		require(encodeError == nil && decodeError == nil && sameWireEvent(original, restored), "selected string array changed nil, empty, order or repeated values")
+	}
+	_, err = wire.EncodeEvent(wire.Event{SelectedValues: make([]string, wire.MaxSelectedValues + 1)})
+	require(err != nil, "selection count exceeded its bound")
+	encoded, err = wire.EncodeCommitAck(wire.CommitAck{Revision: 123})
+	golden := []byte{86, 85, 73, 25, 6, 123, 0, 0, 0, 0, 0, 0, 0}
+	require(err == nil && string(encoded) == string(golden), "ack byte order or header changed")
+	// Distinct bytes catch misplaced fixed-width stores independently of a
+	// roundtrip through the same encoder and decoder.
+	for _, revision := range []int{5124095576030430, -5124095576030430} {
+		bytes := []byte{86, 85, 73, 25, 6, 222, 188, 154, 120, 86, 52, 18, 0}
+		if revision < 0 {
+			bytes = []byte{86, 85, 73, 25, 6, 34, 67, 101, 135, 169, 203, 237, 255}
+		}
+		actual, encodeError := wire.EncodeCommitAck(wire.CommitAck{Revision: revision})
+		restored, decodeError := wire.DecodeCommitAck(bytes)
+		require(encodeError == nil && string(actual) == string(bytes) && decodeError == nil &&
+			restored.Revision == revision, "fixed-width integer byte positions changed")
+	}
+	_, err = wire.DecodeEvent(encoded)
+	require(err != nil, "wrong message kind accepted")
+	encoded[3] = 2
+	_, err = wire.DecodeCommitAck(encoded)
+	require(err != nil, "old wire version accepted")
+	_, err = wire.EncodeCommitAck(wire.CommitAck{Revision: 9007199254740992})
+	require(err != nil, "unsafe host integer accepted")
+	encoded, err = wire.EncodeEvent(wire.Event{})
+	encoded[25] = 2
+	_, err = wire.DecodeEvent(encoded)
+	require(err != nil, "invalid boolean accepted")
+	_, err = wire.EncodeMutation(wire.Mutation{Op: "unknown"})
+	require(err != nil, "unknown operation accepted")
+	large := strings.Repeat("a", wire.MaxFrameBytes)
+	encoded, err = wire.EncodeEvent(wire.Event{Value: large})
+	require(err != nil && encoded == nil, "oversized frame returned partial bytes")
+	empty, _ := wire.EncodeEvent(wire.Event{})
+	encoded, err = wire.EncodeEvent(wire.Event{Value: large[:wire.MaxFrameBytes - len(empty)]})
+	require(err == nil && len(encoded) == wire.MaxFrameBytes, "exact frame limit rejected")
+}
+
+func pointerWireEncoding() {
+	point := wire.PointerData{
+		ID: 42, ClientX: -12.75, ClientY: 19.125, Buttons: 3, Pressure: 0.625, IsPrimary: true,
+	}
+	bytes, err := wire.EncodePointerData(point)
+	golden := []byte{0, 0, 0, 0, 0, 128, 41, 192}
+	require(err == nil && string(bytes[13:21]) == string(golden), "float byte order changed")
+	for _, value := range []float64{
+		0, math.Copysign(0, -1), math.SmallestNonzeroFloat64, math.MaxFloat64, -math.MaxFloat64,
+	} {
+		point.ClientX = value
+		bytes, err = wire.EncodePointerData(point)
+		restored, decodeError := wire.DecodePointerData(bytes)
+		require(err == nil && decodeError == nil &&
+			math.Float64bits(restored.ClientX) == math.Float64bits(value), "finite float bits changed")
+	}
+	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		point.ClientX = value
+		_, err = wire.EncodePointerData(point)
+		require(err != nil, "nonfinite pointer was encoded")
+		bits := math.Float64bits(value)
+		for index := 0; index < 8; index++ {
+			bytes[13 + index] = byte(bits >> uint(index * 8))
+		}
+		_, err = wire.DecodePointerData(bytes)
+		require(err != nil, "nonfinite pointer was decoded")
+	}
+	point.ClientX = -12.75
+	event := wire.Event{Pointer: &point}
+	bytes, err = wire.EncodeEvent(event)
+	decoded, decodeError := wire.DecodeEvent(bytes)
+	require(err == nil && decodeError == nil && decoded.Pointer != nil && *decoded.Pointer == point, "optional pointer changed")
+	for index := 0; index < len(bytes); index++ {
+		_, err = wire.DecodeEvent(bytes[:index])
+		require(err != nil, "truncated optional pointer accepted")
+	}
+	empty, _ := wire.EncodeEvent(wire.Event{})
+	require(len(bytes) - len(empty) == 41, "optional pointer payload size changed")
+	empty[len(empty) - 1] = 2
+	_, err = wire.DecodeEvent(empty)
+	require(err != nil, "invalid optional presence accepted")
+}

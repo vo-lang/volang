@@ -4,7 +4,7 @@
 //! It is used by both the Vo CLI launcher and the vox library.
 
 mod aot;
-#[cfg(any(feature = "aot-native", feature = "aot-wasm"))]
+#[cfg(feature = "aot-native")]
 mod aot_cache;
 mod compile;
 mod engine;
@@ -12,14 +12,13 @@ mod format;
 mod run;
 mod scan;
 mod toolchain;
+pub use compile::editor;
 pub use engine::{Engine, EngineExtension};
 
 #[cfg(feature = "aot-native")]
 pub use aot::compile_native_aot_object;
-#[cfg(feature = "aot-wasm")]
-pub use aot::compile_wasm_aot_image;
 pub use aot::native_aot_requires_toolchain_host;
-#[cfg(any(feature = "aot-native", feature = "aot-wasm"))]
+#[cfg(feature = "aot-native")]
 pub use aot_cache::{AotArtifactCache, AotCacheArtifactKind, AotCacheKey};
 pub use compile::{
     check, check_path, check_path_with_auto_install, check_path_with_auto_install_with_options,
@@ -55,9 +54,3 @@ pub use vo_target::{
 };
 pub use vo_vm::bytecode::Module;
 pub use vo_vm::{GcMode, JitExecutionStats, JitSideExitReason, OomPolicy, VmMemoryConfig};
-#[cfg(feature = "aot-wasm")]
-pub use vo_wasm_aot::{
-    decode_wasm_aot_manifest, WasmAotArtifact, WasmAotKind, WasmAotManifest, WASM_AOT_ABI_VERSION,
-    WASM_AOT_ENTRY_EXPORT, WASM_AOT_MANIFEST_SECTION, WASM_AOT_MEMORY_EXPORT,
-    WASM_AOT_RUNTIME_FUNCTION, WASM_AOT_RUNTIME_MODULE,
-};

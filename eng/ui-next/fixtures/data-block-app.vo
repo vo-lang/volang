@@ -1,0 +1,21 @@
+package app
+
+import (
+	"encoding/json"
+	"strconv"
+	ui "github.com/vo-lang/ui/next"
+)
+
+var appType = ui.Define("documentData.App")
+
+func View(initial string) ui.View {
+	return ui.Component(appType, func(scope *ui.Scope) ui.View {
+		count := ui.Int(scope, "count", 0)
+		raw := "\r\n{\r\n\"text\":\"A\\rB </script> <!-- <script> & 中文\",\r\n\"count\":" +
+			strconv.Itoa(count.Get()) +
+			"\r}\r"
+		return ui.Element("main", ui.DataBlock("application/json", json.RawMessage(raw)).Attr("id", "raw-data"), ui.Element("h1", ui.Text("Document data")), ui.Element("button", ui.Text("Update data")).Attr("type", "button").On("click", func(ui.Event) {
+			count.Set(count.Get() + 1)
+		})).Class("vui")
+	})
+}

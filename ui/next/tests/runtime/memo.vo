@@ -1,0 +1,215 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func memoContracts() {
+	var parent *ui.IntState
+	var prop *ui.IntState
+	var child *ui.IntState
+	var show *ui.BoolState
+	renders, setups, cleanups, captured := 0, 0, 0, -1
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		parent = ui.Int(scope, "parent", 0)
+		prop = ui.Int(scope, "prop", 1)
+		show = ui.Bool(scope, "show", true)
+		parent.Get()
+		value := prop.Get()
+		if !show.Get() {
+			return ui.Fragment()
+		}
+		return ui.Component(counterType, func(inner *ui.Scope) ui.View {
+			renders++
+			child = ui.Int(inner, "value", 0)
+			ui.Effect(inner, "life", func() func() {
+				setups++
+				return func() {
+					cleanups++
+				}
+			}, value)
+			return ui.Element("button", ui.Text(fmt.Sprint(value + child.Get()))).Attr("data-name", "memo").On("click", func(ui.Event) {
+				captured = value
+			})
+		}).Memo(value)
+	}))
+	id := target(flush(root), "memo")
+	parent.Set(1)
+	require(len(flush(root).Mutations) == 0 && renders == 1 && setups == 1, "equal memo inputs rendered or restarted effects")
+	parent.Set(2)
+	child.Set(3)
+	require(changedText(flush(root), "4") && renders == 2, "parent memo skipped a dirty child")
+	prop.Set(7)
+	require(changedText(flush(root), "10") && renders == 3 && setups == 2 && cleanups == 1, "changed memo input lost state or effect update")
+	require(root.Dispatch(ui.Event{Target: id, Kind: "click", Sequence: 1}) && captured == 7, "memo retained a stale capture")
+	show.Set(false)
+	flush(root)
+	require(cleanups == 2 && !root.Dispatch(ui.Event{Target: id, Kind: "click", Sequence: 2}), "memo removal retained handlers/resources")
+	root.Close()
+	expectPanic(func() {
+		ui.Text("x").Memo()
+	}, "requires a component")
+	expectPanic(func() {
+		ui.Component(counterType, func(*ui.Scope) ui.View {
+			return ui.Text("x")
+		}).Memo([]int{1})
+	}, "comparable snapshots")
+}
+
+func memoContextContracts() {
+	var value *ui.StringState
+	var override *ui.BoolState
+	var unrelated *ui.IntState
+	middleRenders, leafRenders := 0, 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		value = ui.String(scope, "theme", "first")
+		override = ui.Bool(scope, "override", false)
+		unrelated = ui.Int(scope, "unrelated", 0)
+		unrelated.Get()
+		if override.Get() {
+			ui.Provide(scope, themeKey, value.Get())
+		}
+		return ui.Component(listType, func(*ui.Scope) ui.View {
+			middleRenders++
+			return ui.Component(counterType, func(leaf *ui.Scope) ui.View {
+				leafRenders++
+				return ui.Text(ui.UseContext(leaf, themeKey).(string))
+			}).Memo()
+		}).Memo()
+	}))
+	flush(root)
+	unrelated.Set(1)
+	flush(root)
+	require(middleRenders == 1 && leafRenders == 1, "unchanged context invalidated memo subtree")
+	override.Set(true)
+	require(changedText(flush(root), "first"), "new provider did not reach a memo descendant")
+	value.Set("next")
+	require(changedText(flush(root), "next"), "changed provider did not reach a memo descendant")
+	override.Set(false)
+	require(changedText(flush(root), "default"), "removed provider did not restore fallback")
+	require(middleRenders == 1 && leafRenders == 4, "context propagation rerendered an unrelated intermediary")
+	root.Close()
+}
+
+func memoDerivedContracts() {
+	var prop *ui.IntState
+	var unrelated *ui.IntState
+	var input *ui.IntState
+	computations := 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		prop = ui.Int(scope, "prop", 2)
+		unrelated = ui.Int(scope, "unrelated", 0)
+		input = ui.Int(scope, "input", 3)
+		unrelated.Get()
+		capture := prop.Get()
+		computed := ui.DerivedMemo(scope, "computed", func() any {
+			computations++
+			return capture * input.Get()
+		}, capture)
+		return ui.Text(fmt.Sprint(computed.Get()))
+	}))
+	flush(root)
+	unrelated.Set(1)
+	flush(root)
+	require(computations == 1, "equal derived captures discarded cache")
+	prop.Set(4)
+	require(changedText(flush(root), "12") && computations == 2, "derived capture did not refresh")
+	input.Set(5)
+	require(changedText(flush(root), "20") && computations == 3, "memo derived ignored a reactive dependency")
+	root.Close()
+}
+
+type selectedPair struct {
+	Left int
+	Right int
+}
+
+func storeSelectionContracts() {
+	var state *ui.Store
+	var derived *ui.DerivedState
+	leftRenders, rightRenders, computations := 0, 0, 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		state = ui.State(scope, "pair", func() any {
+			return selectedPair{Left: 1, Right: 2}
+		})
+		return ui.Fragment(ui.Component(counterType, func(*ui.Scope) ui.View {
+			leftRenders++
+			value := state.Select(func(value any) any {
+				return value.(selectedPair).Left
+			}).(int)
+			return ui.Text(fmt.Sprint(value))
+		}), ui.Component(counterType, func(inner *ui.Scope) ui.View {
+			rightRenders++
+			derived = ui.DerivedMemo(inner, "right", func() any {
+				computations++
+				return state.Select(func(value any) any {
+					return value.(selectedPair).Right
+				})
+			}, state)
+			return ui.Text(fmt.Sprint(derived.Get()))
+		}))
+	}))
+	flush(root)
+	state.Update(func(value any) any {
+		pair := value.(selectedPair)
+		pair.Left = 3
+		return pair
+	})
+	require(changedText(flush(root), "3") && leftRenders == 2 && rightRenders == 1 && computations == 1, "projection invalidated an unchanged sibling/derived")
+	state.Update(func(value any) any {
+		pair := value.(selectedPair)
+		pair.Right = 4
+		return pair
+	})
+	require(changedText(flush(root), "4") && leftRenders == 2 && rightRenders == 2 && computations == 2, "changed derived projection was lost")
+	expectPanic(func() {
+		state.Select(func(any) any {
+			state.Update(func(any) any {
+				return selectedPair{}
+			})
+			return 0
+		})
+	}, "cannot change during render")
+	require(state.Peek().(selectedPair).Right == 4, "impure selector mutated state")
+	expectPanic(func() {
+		state.Select(func(any) any {
+			return []int{1}
+		})
+	}, "comparable snapshots")
+	root.Close()
+	expectPanic(func() {
+		state.Select(func(value any) any {
+			return value
+		})
+	}, "disposed component")
+}
+
+func memoReloadContracts() {
+	var count *ui.IntState
+	computations := 0
+	view := func(scale int) ui.View {
+		return ui.Component(branchType, func(scope *ui.Scope) ui.View {
+			count = ui.Int(scope, "count", 2)
+			value := ui.DerivedMemo(scope, "memo", func() any {
+				computations++
+				return count.Get() * scale
+			}, scale)
+			return ui.Text(fmt.Sprint(value.Get()))
+		}).Memo(scale)
+	}
+	first := ui.NewRoot(view(2))
+	flush(first)
+	count.Set(5)
+	flush(first)
+	encoded, err := first.SaveReload()
+	require(err == nil, "memo reload snapshot failed")
+	second := ui.NewRoot(view(3))
+	_, err = second.RestoreReload(encoded)
+	require(err == nil, "memo reload rejected")
+	flush(second)
+	require(count.Get() == 5 && computations == 3 && strings.Contains(second.HTML(), "15"), "memo reload reused stale derived output/captures")
+	first.Close()
+	second.Close()
+}

@@ -1,0 +1,119 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+func menuContracts() {
+	var open *ui.BoolState
+	var version *ui.IntState
+	actions := []string{}
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		open = ui.Bool(scope, "open", false)
+		version = ui.Int(scope, "version", 0)
+		items := []kit.MenuItem{
+			{Key: "copy", Label: "Copy"}, {Key: "create", Label: "Create"},
+			{Key: "separator", Separator: true}, {Key: "export", Label: "Export", Disabled: true},
+			{Key: "rename", Label: "Rename"}, {Key: "chinese", Label: "中文"},
+		}
+		if version.Get() == 1 {
+			items = items[1:]
+		}
+		if version.Get() == 2 {
+			items = []kit.MenuItem{}
+		}
+		return kit.Menu(kit.MenuProps{
+			ID: "actions", Label: "Actions", Items: items,
+			Trigger: func(expanded bool) ui.View {
+				label := "Open actions"
+				if expanded {
+					label = "Close actions"
+				}
+				return ui.Element("span", ui.Text(label)).Attr("aria-hidden", "true")
+			},
+			Open: func() bool {
+				return open.Get()
+			},
+			OnOpenChange: func(value bool) {
+				open.Set(value)
+			},
+			OnAction: func(key string) {
+				actions = append(actions, key)
+			},
+		})
+	}))
+	initial := flush(root)
+	ids := make(map[string]int)
+	for _, mutation := range initial.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "id" {
+			ids[mutation.Value] = mutation.ID
+		}
+	}
+	trigger, popup := ids["actions-trigger"], ids["actions"]
+	copy, create := ids["actions-item-0"], ids["actions-item-1"]
+	disabled, rename, chinese := ids["actions-item-3"], ids["actions-item-4"], ids["actions-item-5"]
+	require(trigger > 0 && copy > 0 && chinese > 0, "menu identities missing")
+	require(attributeMutation(initial, trigger, "aria-label", "Actions") &&
+		strings.Contains(root.HTML(), "Open actions"), "custom menu trigger lost its accessible name or content")
+	require(strings.Contains(root.HTML(), `role="menu"`) &&
+		strings.Contains(root.HTML(), `role="separator"`), "menu roles missing")
+	sequence := 0
+	sequence = kitModifiedKeys(root, trigger, "ArrowDown", false, sequence)
+	send := func(id int, kind string, key string, capture bool) {
+		sequence++
+		root.Dispatch(ui.Event{Target: id, Kind: kind, Key: key, Capture: capture, Sequence: sequence})
+	}
+	press := func(key string) ui.Batch {
+		capture := key == "ArrowDown" || key == "ArrowUp" || key == "Home" || key == "End"
+		send(popup, "keydown", key, capture)
+		return flush(root)
+	}
+	send(trigger, "keydown", "ArrowUp", false)
+	require(open.Get() && focusTarget(flush(root)) == chinese, "ArrowUp did not open the last action")
+	require(strings.Contains(root.HTML(), "Close actions"), "custom menu trigger received stale open state")
+	require(focusTarget(press("ArrowDown")) == copy, "menu did not wrap")
+	send(popup, "keydown", "ArrowDown", true)
+	send(popup, "keydown", "ArrowDown", true)
+	require(focusTarget(flush(root)) == disabled, "burst navigation lost latest state or reached separator")
+	send(disabled, "click", "", false)
+	flush(root)
+	require(open.Get() && len(actions) == 0, "disabled action activated or dismissed the menu")
+	require(focusTarget(press("End")) == chinese, "End missed the last action")
+	require(focusTarget(press("Home")) == copy, "Home missed the first action")
+	require(focusTarget(press("c")) == create, "typeahead did not find the next matching item")
+	require(focusTarget(press("c")) == copy, "repeated typeahead did not cycle")
+	require(focusTarget(press("r")) == create, "typeahead prefix did not match Create")
+	send(popup, "keydown", "Tab", false)
+	flush(root)
+	require(!open.Get(), "Tab did not dismiss the menu")
+	send(trigger, "keydown", "ArrowDown", false)
+	require(focusTarget(flush(root)) == copy, "ArrowDown did not open the first action")
+	require(focusTarget(press("中")) == chinese, "typeahead split a Unicode key")
+	send(rename, "click", "", false)
+	send(rename, "click", "", false)
+	flush(root)
+	require(!open.Get() && len(actions) == 1 && actions[0] == "rename", "action was lost or delivered twice")
+	send(trigger, "click", "", false)
+	flush(root)
+	version.Set(1)
+	flush(root)
+	require(focusTarget(flush(root)) == create, "removing the active item did not repair focus after commit")
+	version.Set(2)
+	flush(root)
+	require(!open.Get(), "an empty menu stayed open")
+	flush(root)
+	root.Close()
+	expectPanic(func() {
+		invalid := ui.NewRoot(kit.Menu(kit.MenuProps{
+			ID: "invalid", Label: "Invalid",
+			Items: []kit.MenuItem{{Key: "a", Label: "A"}, {Key: "a", Separator: true}},
+			Open: func() bool {
+				return false
+			},
+			OnOpenChange: func(bool) {}, OnAction: func(string) {},
+		}))
+		invalid.Flush()
+	}, "unique keys")
+}

@@ -353,8 +353,16 @@ fn compile_parallel_assign(
 
     // 2. Evaluate all RHS left-to-right to temporaries
     let mut rhs_temps = Vec::with_capacity(assign.rhs.len());
-    for rhs in &assign.rhs {
-        let rhs_type = info.expr_type(rhs.id);
+    for (index, rhs) in assign.rhs.iter().enumerate() {
+        let mut rhs_type = info.expr_type(rhs.id);
+        // A nil literal has no storage layout of its own. Materialize it in
+        // the destination layout before snapshotting the parallel RHS values,
+        // so GC references and interface slots retain their precise types.
+        if info.is_nil(rhs_type) {
+            if let Some((_, lhs_type)) = &lhs_lvalues[index] {
+                rhs_type = *lhs_type;
+            }
+        }
         let rhs_slot_types = info.type_slot_types(rhs_type);
         let tmp = func.alloc_slots(&rhs_slot_types);
         crate::assign::emit_assign(

@@ -416,6 +416,7 @@ impl<'a> Parser<'a> {
             }
             // Selector or type assertion
             TokenKind::Dot => {
+                let member_start = self.current.span.end;
                 self.advance();
                 if self.at(TokenKind::LParen) {
                     // Type assertion: x.(T) or x.(type)
@@ -446,7 +447,7 @@ impl<'a> Parser<'a> {
                     }
                 } else {
                     // Selector: x.field
-                    let sel = self.parse_ident()?;
+                    let sel = self.parse_selector_ident(member_start)?;
                     let span = Span::new(start, self.current.span.start);
                     self.make_expr(
                         ExprKind::Selector(Box::new(SelectorExpr { expr: left, sel })),

@@ -1,0 +1,25 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"github.com/vo-lang/studio/next/app"
+	"github.com/vo-lang/ui/next/host"
+	"github.com/vo-lang/ui/next/prerender"
+)
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--ssr-data" {
+		prerender.Run(app.App)
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--ssr" {
+		initial := "/studio/gallery"
+		if len(os.Args) > 2 {
+			initial = os.Args[2]
+		}
+		fmt.Print(host.HTML(app.App(initial)))
+		return
+	}
+	host.RunWithData(app.App)
+}

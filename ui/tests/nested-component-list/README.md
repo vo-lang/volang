@@ -7,7 +7,7 @@ This permanent probe covers the first executable slice of Component Model V2:
 - insertion, removal, movement, replacement, and fresh-state semantics;
 - incremental text/property updates after each event;
 - canonical VUB1 component identities across VM, JIT, Native AOT, and Core
-  Wasm AOT compilation.
+  Wasm VM compilation.
 
 The phase control reorders, removes, reinserts, and replaces instances. Movement
 preserves Alpha's state, reinsertion creates fresh Beta state, and replacement

@@ -1,0 +1,127 @@
+package app
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/data"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/web"
+)
+
+type Initial struct {
+	Name string
+	BasePath string
+	Data string
+	Visit int
+	Backend string
+	Error string
+	HTTP bool
+}
+
+var pageType = ui.Define("server-test.Page")
+
+func ProfileRequest(base string, name string) ui.Request {
+	return ui.Request{Service: "web.fetch-text", Value: base + "api/profile?name=" + url.QueryEscape(name)}.WithTimeout(1500)
+}
+
+func View(encoded string) ui.View {
+	initial := Initial{Name: "Visitor", BasePath: "/"}
+	if encoded != "" {
+		if err := json.Unmarshal([]byte(encoded), &initial); err != nil { panic(err) }
+	}
+	if initial.HTTP { return HTTPPanel(initial.BasePath) }
+	values := []data.InitialValue{}
+	if initial.Data != "" {
+		var err error
+		values, err = data.DecodeInitial(initial.Data)
+		if err != nil { panic(err) }
+	}
+	return ui.Component(pageType, func(scope *ui.Scope) ui.View {
+		name := ui.String(scope, "name", initial.Name)
+		count := ui.Int(scope, "count", 0)
+		client := data.NewClient(scope, "data", data.Options{Initial: values, FreshMilliseconds: 60000})
+		profile := data.Use(scope, "profile", client, ProfileRequest(initial.BasePath, initial.Name))
+		return ui.Element("main",
+			ui.Element("h1", ui.Text("Hello, " + name.Get() + ".")),
+			ui.Element("form",
+				ui.Element("label", ui.Text("Your name"), ui.Element("input").Attr("name", "name").Attr("value", name.Get()).On("input", func(event ui.Event) { name.Set(event.Value) })),
+				ui.Element("input").Attr("type", "hidden").Attr("name", "backend").Attr("value", initial.Backend),
+				ui.Element("button", ui.Text("Save name")).Attr("type", "submit"),
+			).Attr("method", "post").Attr("action", initial.BasePath + "profile").Attr("accept-charset", "UTF-8"),
+			ui.Element("p", ui.Text(initial.Error)).Attr("role", "alert"),
+			ui.Element("button", ui.Text("One more")).On("click", func(ui.Event) { count.Set(count.Get() + 1) }),
+			ui.Element("output", ui.Text(fmt.Sprint(count.Get()))),
+			ui.Element("p", ui.Text(profile.Value)).Attr("data-profile", ""),
+			ui.Element("p", ui.Text(fmt.Sprint(initial.Visit))).Attr("data-server-visit", ""),
+		)
+	})
+}
+
+var httpType = ui.Define("server-test.HTTP")
+
+type ProfileBody struct { Name string `json:"name"` }
+type HTTPOutcome struct {
+	Message string `json:"message"`
+	Method string `json:"method"`
+	Errors forms.Errors `json:"errors"`
+}
+
+func HTTPPanel(base string) ui.View {
+	return ui.Component(httpType, func(scope *ui.Scope) ui.View {
+		nameRef := ui.Ref(scope, "name")
+		loaded := ui.String(scope, "loaded", "Not loaded")
+		status := ui.Int(scope, "status", 0)
+		form := forms.Use(scope, "profile", forms.Options{
+			Initial: forms.Values{"name": {"Ada"}},
+			FocusInvalid: func(string) { nameRef.Focus() },
+		})
+		request := func(data forms.Data) ui.Request {
+			values := data.Values
+			encoded, err := json.Marshal(ProfileBody{Name: values.Get("name")})
+			if err != nil { panic(err.Error()) }
+			timeout := 10000
+			if values.Get("name") == "timeout" { timeout = 150 }
+			return web.HTTP(base + "api/http", web.HTTPOptions{Method: "PATCH", Body: string(encoded), Headers: map[string]string{"Content-Type": "application/json", "X-Request": "typed-vo"}}).WithTimeout(timeout)
+		}
+		decode := func(result ui.Result) forms.Outcome {
+			response, err := web.DecodeHTTP(result)
+			if err != nil { return forms.Outcome{Errors: forms.Errors{"": err.Error()}} }
+			status.Set(response.Status)
+			var outcome HTTPOutcome
+			if err := json.Unmarshal([]byte(response.Body), &outcome); err != nil { return forms.Outcome{Errors: forms.Errors{"": err.Error()}} }
+			if !response.OK() {
+				if len(outcome.Errors) > 0 { return forms.Outcome{Errors: outcome.Errors} }
+				return forms.Outcome{Errors: forms.Errors{"": fmt.Sprint("HTTP ", response.Status)}}
+			}
+			return forms.Outcome{Message: outcome.Message}
+		}
+		label := "Save profile"
+		if form.Pending() { label = "Saving…" }
+		return ui.Element("main",
+			ui.Element("h1", ui.Text("Profile settings")),
+			form.View(request, decode,
+				ui.Element("label", ui.Text("Display name")).Attr("for", "http-name"),
+				form.Input("name", ui.Element("input").Ref(nameRef).Attr("id", "http-name")).Attr("aria-invalid", fmt.Sprint(form.Error("name") != "")).DescribedBy("http-name-error"),
+				ui.Element("p", ui.Text(form.Error("name"))).Attr("id", "http-name-error").Attr("role", "alert"),
+				ui.Element("button", ui.Text(label)).Attr("type", "submit").Attr("data-http-submit", "").Attr("disabled", fmt.Sprint(form.Pending())),
+				ui.Element("button", ui.Text("Cancel save")).Attr("type", "button").Attr("disabled", fmt.Sprint(!form.Pending())).On("click", func(ui.Event) { form.Cancel() }),
+				ui.Element("p", ui.Text(form.Error(""))).Attr("data-http-error", "").Attr("role", "alert"),
+			),
+			ui.Element("p", ui.Text(form.Message())).Attr("data-http-message", "").Attr("aria-live", "polite"),
+			ui.Element("p", ui.Text(fmt.Sprint(status.Get()))).Attr("data-http-status", ""),
+			ui.Element("p", ui.Text(fmt.Sprint(form.Dirty()))).Attr("data-http-dirty", ""),
+			ui.Element("button", ui.Text("Load profile")).On("click", func(ui.Event) {
+				ui.Start(scope, web.HTTP(base + "api/http", web.HTTPOptions{}).WithTimeout(1000), func(result ui.Result) {
+					response, err := web.DecodeHTTP(result)
+					if err != nil { loaded.Set(err.Error()); return }
+					var value HTTPOutcome
+					if err := json.Unmarshal([]byte(response.Body), &value); err != nil { loaded.Set(err.Error()); return }
+					loaded.Set(value.Message)
+				})
+			}),
+			ui.Element("p", ui.Text(loaded.Get())).Attr("data-http-loaded", ""),
+		)
+	})
+}

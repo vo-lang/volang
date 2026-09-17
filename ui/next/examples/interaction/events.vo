@@ -1,0 +1,47 @@
+package main
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+var eventsType = ui.Define("interaction.Events")
+
+func EventExamples() ui.View {
+	return ui.Component(eventsType, func(scope *ui.Scope) ui.View {
+		stopped := ui.Bool(scope, "stopped", false)
+		log := ui.String(scope, "log", "")
+		shortcut := ui.String(scope, "shortcut", "Focus the button and press a shortcut.")
+		child := ui.Element("button", ui.Text("Trace a click")).Attr("type", "button").Attr("data-phase-click", "").OnWith("click", ui.EventOptions{
+			StopPropagation: stopped.Get(),
+		}, func(event ui.Event) {
+			log.Set(log.Get() + "target ")
+		})
+		zone := ui.Element("div", child).Attr("class", "event-zone").OnWith("click", ui.EventOptions{
+			Capture: true,
+		}, func(event ui.Event) {
+			log.Set("capture ")
+		}).On("click", func(event ui.Event) {
+			log.Set(log.Get() + "bubble")
+		})
+		toggle := ui.Element("button", ui.Text("Toggle propagation")).Attr("type", "button").Attr("data-phase-toggle", "").Attr("data-stopped", fmt.Sprint(stopped.Get())).On("click", func(event ui.Event) {
+			stopped.Set(!stopped.Get())
+			log.Set("")
+		})
+		keyboard := ui.Element("button", ui.Text("Try a keyboard shortcut")).Attr("type", "button").Attr("data-shortcut", "").OnWith("keydown", ui.EventOptions{
+			PreventDefault: true,
+		}, func(event ui.Event) {
+			if event.Key == "K" || event.Key == "k" {
+				shortcut.Set("ctrl=" + fmt.Sprint(event.CtrlKey) + " shift=" + fmt.Sprint(event.ShiftKey) +
+					" composing=" +
+					fmt.Sprint(event.IsComposing))
+			}
+		})
+		prevented := ui.Element("a", ui.Text("Handle this link locally")).Attr("href", "#prevented-navigation").Attr("data-prevented-link", "").OnWith("click", ui.EventOptions{
+			PreventDefault: true,
+		}, func(event ui.Event) {
+			log.Set("link handled")
+		})
+		return ui.Element("section", ui.Element("h2", ui.Text("Events, in order")), zone, toggle, ui.Element("output", ui.Text(log.Get())).Attr("data-event-log", ""), keyboard, ui.Element("output", ui.Text(shortcut.Get())).Attr("data-shortcut-log", ""), prevented).Attr("class", "card")
+	})
+}

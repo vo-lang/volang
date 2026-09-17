@@ -88,7 +88,7 @@ impl Engine {
             .map_err(CompileError::Target)
     }
 
-    #[cfg(any(feature = "aot-native", feature = "aot-wasm"))]
+    #[cfg(feature = "aot-native")]
     pub fn aot_cache_key(
         &self,
         module_bytes: &[u8],

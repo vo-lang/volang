@@ -3257,9 +3257,9 @@ fn jit_interface_array_payload_matches(
     // collector's allocation extent still includes their complete ArrayHeader.
     if header.kind() != ValueKind::Array
         || header.is_value_slots_object()
-        || !gc
+        || gc
             .allocated_data_size_bytes(object)
-            .is_some_and(|bytes| bytes >= array::HEADER_SLOTS * crate::slot::SLOT_BYTES)
+            .is_none_or(|bytes| bytes < array::HEADER_SLOTS * crate::slot::SLOT_BYTES)
     {
         return false;
     }

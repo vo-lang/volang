@@ -139,10 +139,12 @@ fn provider_failure_prevents_execution_and_aot_lowering() {
         .unwrap_err();
     assert!(error.to_string().contains("provider admission refused"));
     assert!(sink.take_bytes().is_empty());
-    #[cfg(feature = "aot-wasm")]
+    #[cfg(feature = "aot-native")]
     {
-        let target = TargetSpec::parse(crate::WASM32_UNKNOWN_UNKNOWN).unwrap();
-        let error = engine.compile_wasm_aot_image(&output, &target).unwrap_err();
+        let target = TargetSpec::host().unwrap();
+        let error = engine
+            .compile_native_aot_object(&output, &target, false)
+            .unwrap_err();
         assert!(
             error.to_string().contains("provider admission refused"),
             "{error}"
@@ -152,13 +154,13 @@ fn provider_failure_prevents_execution_and_aot_lowering() {
             engine.aot_cache_key(
                 &bytes,
                 &target,
-                crate::AotCacheArtifactKind::CoreWasm,
+                crate::AotCacheArtifactKind::NativeObject,
                 false
             ),
             Engine::default().aot_cache_key(
                 &bytes,
                 &target,
-                crate::AotCacheArtifactKind::CoreWasm,
+                crate::AotCacheArtifactKind::NativeObject,
                 false
             )
         );

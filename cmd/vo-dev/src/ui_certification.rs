@@ -30,19 +30,17 @@ const CAPABILITY_TIERS: [&str; 6] = [
     "tooling",
     "ecosystem",
 ];
-const UI_TARGETS: [&str; 7] = [
+const UI_TARGETS: [&str; 6] = [
     "headless",
     "web-vm",
-    "web-wasm-aot",
     "desktop-vm",
     "desktop-jit",
     "desktop-native-aot",
     "server-native-aot",
 ];
-const UIKIT_TARGETS: [&str; 6] = [
+const UIKIT_TARGETS: [&str; 5] = [
     "headless",
     "web-vm",
-    "web-wasm-aot",
     "desktop-vm",
     "desktop-jit",
     "desktop-native-aot",
@@ -68,10 +66,9 @@ const QUALITY_SUITES: [&str; 7] = [
     "performance",
     "release-artifacts",
 ];
-const QUALITY_TARGETS: [&str; 10] = [
+const QUALITY_TARGETS: [&str; 9] = [
     "headless",
     "web-vm",
-    "web-wasm-aot",
     "desktop-vm",
     "desktop-jit",
     "desktop-native-aot",
@@ -643,17 +640,29 @@ fn validate_authoring_assets(root: &Path, certification: &CertificationFile) -> 
     {
         bail!("Volang UI editor package identity or version is invalid");
     }
-    for forbidden in [
-        "main",
-        "browser",
-        "scripts",
-        "dependencies",
-        "devDependencies",
-    ] {
-        if package.get(forbidden).is_some() {
-            bail!("Volang UI editor package must remain zero-runtime; found {forbidden}");
-        }
+    if package.get("main").and_then(serde_json::Value::as_str) != Some("./extension.cjs")
+        || package.get("browser").is_some()
+        || package
+            .pointer("/capabilities/untrustedWorkspaces/supported")
+            .and_then(serde_json::Value::as_str)
+            != Some("limited")
+        || package
+            .pointer("/capabilities/virtualWorkspaces/supported")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+    {
+        bail!("Volang UI editor must declare its native language-client and workspace boundaries");
     }
+    checked_repo_path(
+        root,
+        "ui/editors/vscode/extension.cjs",
+        "UI language client",
+    )?;
+    checked_repo_path(
+        root,
+        "ui/editors/vscode/package-lock.json",
+        "UI language client lock",
+    )?;
     let contributes = package
         .get("contributes")
         .context("Volang UI editor package has no contributions")?;
@@ -728,11 +737,11 @@ fn validate_authoring_assets(root: &Path, certification: &CertificationFile) -> 
     let readme_path = checked_repo_path(root, "ui/editors/vscode/README.md", "UI authoring asset")?;
     let readme = fs::read_to_string(&readme_path)
         .with_context(|| format!("could not read {}", readme_path.display()))?;
-    if !readme.contains("zero-runtime")
-        || !readme.contains("no executable extension host code")
-        || !readme.contains("npm dependency")
+    if !readme.contains("vo lsp --stdio")
+        || !readme.contains("workspace trust")
+        || !readme.contains("never installs them")
     {
-        bail!("Volang UI editor package must document its zero-runtime boundary");
+        bail!("Volang UI editor package must document its compiler and workspace boundaries");
     }
     Ok(())
 }

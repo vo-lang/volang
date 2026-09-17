@@ -1,0 +1,79 @@
+package main
+
+// Method metadata must use checked tuples, including unnamed/variadic
+// parameters and every grouped result, for static and dynamic interface calls.
+type Reader interface {
+	Read(string) (int, int)
+}
+
+type Counter struct {
+	value int
+}
+
+func (counter Counter) Read(string) (first int, second int) {
+	return counter.value, counter.value + 1
+}
+
+type PointerReader interface {
+	Pair(int, string) (int, int, string)
+}
+
+func (counter *Counter) Pair(int, string) (first int, second int, label string) {
+	counter.value++
+	return counter.value, counter.value + 1, "pointer"
+}
+
+type VariadicReader interface {
+	Defaults(...string) (string, string)
+}
+
+func (counter Counter) Defaults(...string) (first string, second string) {
+	return "first", "second"
+}
+
+type Promoted struct {
+	Counter
+}
+
+func read(reader Reader) int {
+	a, b := reader.Read("ignored")
+	assert(b == a + 1)
+	method := reader.Read
+	c, d := method("also ignored")
+	assert(a == c && b == d)
+	return a
+}
+
+func main() {
+	for i := 0; i < 200; i++ {
+		var direct Reader = Counter{value: i}
+		assert(read(direct) == i)
+		var boxed any = Counter{value: i + 1}
+		dynamic, ok := boxed.(Reader)
+		assert(ok && read(dynamic) == i + 1)
+		promoted := Promoted{Counter: Counter{value: i + 2}}
+		var inherited Reader = promoted
+		assert(read(inherited) == i + 2)
+		boxed = promoted
+		dynamic, ok = boxed.(Reader)
+		assert(ok && read(dynamic) == i + 2)
+		counter := &Counter{value: i}
+		var pointer PointerReader = counter
+		a, b, label := pointer.Pair(0, "")
+		assert(a == i + 1 && b == i + 2 && label == "pointer")
+		boxed = counter
+		pointer, ok = boxed.(PointerReader)
+		assert(ok)
+		a, b, label = pointer.Pair(0, "")
+		assert(a == i + 2 && b == i + 3 && label == "pointer")
+		var variadic VariadicReader = Counter{}
+		first, second := variadic.Defaults("a", "b")
+		assert(first == "first" && second == "second")
+		boxed = Counter{}
+		variadic, ok = boxed.(VariadicReader)
+		assert(ok)
+		first, second = variadic.Defaults()
+		assert(first == "first" && second == "second")
+	}
+	println("interface method signatures: ok")
+}

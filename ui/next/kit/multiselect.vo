@@ -1,0 +1,92 @@
+package kit
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/wire"
+)
+
+type MultiSelectProps struct {
+	ID string
+	Label string
+	Name string
+	Form string
+	Options []ChoiceOption
+	Value func() []string
+	DefaultValues []string
+	OnChange func([]string)
+	OnBlur func()
+	Size int
+	Disabled bool
+	Required bool
+	Hint string
+	Error string
+	Class string
+	InputClass string
+	InputRef *ui.ElementRef
+}
+
+// MultiSelect retains the browser's native multiple-selection interaction.
+// Its event values follow option order and include selected disabled options;
+// native FormData independently omits unsuccessful controls/options.
+func MultiSelect(props MultiSelectProps) ui.View {
+	if props.ID == "" || props.Label == "" || len(props.Options) > wire.MaxSelectedValues {
+		panic("kit: multiple selects require an ID, label and at most 4096 options")
+	}
+	if props.Value != nil && props.DefaultValues != nil {
+		panic("kit: selection readers and defaults cannot be combined")
+	}
+	if props.Size == 0 {
+		props.Size = 4
+	}
+	if props.Size < 1 {
+		panic("kit: multiple select size must be positive")
+	}
+	options := choiceValues(props.Options, true)
+	values := props.DefaultValues
+	if props.Value != nil {
+		values = props.Value()
+	}
+	selected := make(map[string]bool)
+	for _, value := range values {
+		if _, found := options[value]; !found || selected[value] {
+			panic("kit: multiple selection requires unique declared option values")
+		}
+		selected[value] = true
+	}
+	children := []ui.View{}
+	for _, option := range props.Options {
+		child := ui.Element("option", ui.Text(option.Label)).Key("option:" + option.Value).Attr("value", option.Value).Attr("disabled", fmt.Sprint(option.Disabled))
+		if props.Value == nil {
+			child = child.Attr("selected", fmt.Sprint(selected[option.Value]))
+		}
+		children = append(children, child)
+	}
+	input := ui.Element("select", children...).Attr("multiple", "true").Attr("size", fmt.Sprint(props.Size)).Attr("name", props.Name).Ref(props.InputRef).Class(props.InputClass)
+	input = input.Attr("disabled", fmt.Sprint(props.Disabled)).Attr("required", fmt.Sprint(props.Required))
+	if props.Form != "" {
+		input = input.Attr("form", props.Form)
+	}
+	if props.Value != nil {
+		input = input.SelectedValues(values)
+	}
+	if props.OnChange != nil {
+		input = input.On("change", func(event ui.Event) {
+			if props.Disabled {
+				return
+			}
+			for _, value := range event.SelectedValues {
+				if _, found := options[value]; !found {
+					return
+				}
+			}
+			props.OnChange(append([]string{}, event.SelectedValues...))
+		})
+	}
+	if props.OnBlur != nil {
+		input = input.On("blur", func(ui.Event) {
+			props.OnBlur()
+		})
+	}
+	return FormField(FieldProps{ID: props.ID, Label: props.Label, Hint: props.Hint, Error: props.Error}, input).Class(props.Class)
+}

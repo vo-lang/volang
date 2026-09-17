@@ -1186,9 +1186,11 @@ fn compile_file_functions(
                         .id(&info.project.tc_objs)
                         .into_owned();
 
-                    // Generate method signature rttid
-                    let signature = generate_method_signature(func_decl, info, ctx);
-                    let signature_rttid = ctx.intern_rttid(signature);
+                    // Use the checked signature, which includes unnamed parameters
+                    // and every grouped result. Reconstructing it from AST names
+                    // loses those slots and disagrees with interface metadata.
+                    let signature = info.obj_type(func_obj_key, "method must have a signature");
+                    let signature_rttid = ctx.intern_type_key(signature, info);
 
                     // For value receiver methods, generate a wrapper that accepts GcRef
                     // and dereferences it before calling the original method
@@ -1455,43 +1457,6 @@ fn collect_embedded_methods(
                 }
             }
         }
-    }
-}
-
-/// Generate RuntimeType::Func signature for a method (excluding receiver).
-/// Uses Var types directly - type checker already converts variadic T to []T.
-fn generate_method_signature(
-    func_decl: &vo_syntax::ast::FuncDecl,
-    info: &TypeInfoWrapper,
-    ctx: &mut CodegenContext,
-) -> vo_common_core::RuntimeType {
-    use vo_common_core::{RuntimeType, ValueRttid};
-
-    // Collect param ValueRttids from Var objects (not TypeExpr)
-    // Type checker already changed variadic param type from T to []T
-    let mut params = Vec::new();
-    for param in &func_decl.sig.params {
-        for name in &param.names {
-            let obj_key = info.get_def(name);
-            let type_key = info.obj_type(obj_key, "param must have type");
-            let rttid = ctx.intern_type_key(type_key, info);
-            let vk = info.type_value_kind(type_key);
-            params.push(ValueRttid::new(rttid, vk));
-        }
-    }
-
-    let mut results = Vec::new();
-    for r in &func_decl.sig.results {
-        let type_key = info.type_expr_type(r.ty.id);
-        let rttid = ctx.intern_type_key(type_key, info);
-        let vk = info.type_value_kind(type_key);
-        results.push(ValueRttid::new(rttid, vk));
-    }
-
-    RuntimeType::Func {
-        params,
-        results,
-        variadic: func_decl.sig.variadic,
     }
 }
 

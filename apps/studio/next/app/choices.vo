@@ -1,0 +1,40 @@
+package app
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var choicesPreviewType = ui.Define("studio.ChoicesPreview")
+
+func ChoicesPreview() ui.View {
+	return ui.Component(choicesPreviewType, func(scope *ui.Scope) ui.View {
+		message := ui.String(scope, "message", "A few preferences to make it yours.")
+		return ui.Element("form", kit.Select(kit.SelectProps{
+			ID: "preferences-language", Name: "language", Label: "A familiar language",
+			Placeholder: "Choose a language", Required: true,
+			Options: []kit.ChoiceOption{
+				{Value: "en", Label: "English"}, {Value: "zh", Label: "中文"}, {Value: "ja", Label: "日本語"},
+				{Value: "fr", Label: "Français · coming soon", Disabled: true},
+			},
+		}), kit.RadioGroup(kit.RadioGroupProps{
+			ID: "preferences-density", Name: "density", Label: "Room to breathe",
+			DefaultValue: "comfortable", Required: true,
+			Options: []kit.ChoiceOption{
+				{Value: "comfortable", Label: "Comfortable"},
+				{Value: "spacious", Label: "Spacious · coming soon", Disabled: true},
+				{Value: "compact", Label: "Compact"},
+			},
+			Hint: "Choose the spacing that feels right.",
+		}), kit.Checkbox(kit.CheckboxProps{
+			ID: "preferences-tips", Name: "tips", Value: "yes", Label: "Show helpful tips",
+			DefaultChecked: true,
+		}), ui.Element("div", ui.Element("button", ui.Text("Save preferences")).Attr("type", "submit").Class("vui-button"), ui.Element("button", ui.Text("Reset preferences")).Attr("type", "reset").Class("vui-button").Attr("data-variant", "secondary")).Class("studio-actions"), ui.Element("p", ui.Text(message.Get())).Attr("role", "status").Attr("data-preferences-result", "")).Attr("id", "preferences-form").Class("studio-choice-demo").OnWith("submit", ui.EventOptions{
+			PreventDefault: true,
+		}, func(ui.Event) {
+			message.Set("Your preferences are ready.")
+		}).On("reset", func(ui.Event) {
+			message.Set("A fresh start, just for you.")
+		})
+	})
+}

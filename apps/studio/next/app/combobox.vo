@@ -1,0 +1,82 @@
+package app
+
+import (
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/web"
+)
+
+var comboboxPreviewType = ui.Define("studio.ComboboxPreview")
+
+func ComboboxPreview() ui.View {
+	return ui.Component(comboboxPreviewType, func(scope *ui.Scope) ui.View {
+		open := ui.Bool(scope, "open", false)
+		trigger := ui.Ref(scope, "trigger")
+		input := ui.Ref(scope, "input")
+		form := forms.Use(scope, "destination", forms.Options{
+			Initial: forms.Values{"place": []string{""}},
+			Validate: func(data forms.Data) forms.Errors {
+				values := data.Values
+				if strings.TrimSpace(values.Get("place")) == "" {
+					return forms.Errors{"place": "Give your next stop a name."}
+				}
+				return nil
+			},
+			FocusInvalid: func(string) {
+				input.Focus()
+			},
+		})
+		options := []kit.ComboboxOption{}
+		for index, label := range []string{
+			"Amsterdam", "Berlin", "Copenhagen", "Dublin", "Edinburgh", "Florence", "Helsinki", "Lisbon",
+			"Oslo", "Paris", "Porto", "Prague", "Reykjavík", "Rome", "Stockholm", "Vienna", "Zürich", "京都",
+			"東京",
+		} {
+			options = append(options, kit.ComboboxOption{
+				Key: fmt.Sprint(index), Label: label, Disabled: label == "Berlin",
+			})
+		}
+		field := kit.Combobox(kit.ComboboxProps{
+			ID: "destination-place", Label: "Your next stop", Name: "place", InputRef: input,
+			Hint: "Pick a suggestion or type someplace new.", Placeholder: "Where will your curiosity lead?",
+			Options: options, Required: true, Error: form.Error("place"),
+			Value: func() string {
+				return form.Value("place")
+			},
+			OnChange: func(value string) {
+				form.Change("place", value)
+			},
+			OnBlur: func() {
+				form.Blur("place")
+			},
+		})
+		content := form.View(func(data forms.Data) ui.Request {
+			values := data.Values
+			return web.After(50, "Next stop: " + values.Get("place") + ".")
+		}, func(result ui.Result) forms.Outcome {
+			return forms.Outcome{Message: result.Value}
+		}, field, ui.Element("div", kit.Button(kit.ButtonProps{Disabled: form.Pending()}, ui.Text("Save destination")).Attr("type", "submit"), kit.Button(kit.ButtonProps{
+			Variant: "quiet",
+		}, ui.Text("Reset destination")).Attr("type", "reset")).Class("studio-actions"), ui.Element("output", ui.Text(form.Message())).Attr("data-destination-status", "").Attr("aria-live", "polite"))
+		dialog := kit.Dialog(kit.DialogProps{
+			ID: "destination-dialog", Title: "A little further afield",
+			Open: func() bool {
+				return open.Get()
+			},
+			ReturnFocus: trigger,
+			OnOpenChange: func(value bool) {
+				open.Set(value)
+			},
+		}, content)
+		return ui.Fragment(kit.Button(kit.ButtonProps{
+			Variant: "secondary",
+			OnPress: func() {
+				open.Set(true)
+				input.Focus()
+			},
+		}, ui.Text("Choose a place")).Ref(trigger).Attr("data-open-destination", ""), ui.Element("p", ui.Text("A suggestion can be the start of something.")), dialog)
+	}).Memo()
+}

@@ -1189,10 +1189,12 @@ fn global_gvn(
     mark_range_proven_bounds_checks(
         ir,
         flow,
-        &pc_range,
-        &incoming,
-        &rpo,
-        &entry_mask,
+        RangeCheckRegion {
+            pcs: &pc_range,
+            incoming: &incoming,
+            rpo: &rpo,
+            entry_mask: &entry_mask,
+        },
         &mut leaders,
         &mut elided_bounds_checks,
     );
@@ -1407,16 +1409,26 @@ fn collection_bounds_check_key(
     })
 }
 
+struct RangeCheckRegion<'a> {
+    pcs: &'a std::ops::Range<usize>,
+    incoming: &'a [Vec<(crate::ir::BlockId, crate::ir::BlockEdge)>],
+    rpo: &'a [crate::ir::BlockId],
+    entry_mask: &'a [bool],
+}
+
 fn mark_range_proven_bounds_checks(
     ir: &crate::ir::FunctionIr,
     flow: &ArtifactFlow,
-    pc_range: &std::ops::Range<usize>,
-    incoming: &[Vec<(crate::ir::BlockId, crate::ir::BlockEdge)>],
-    rpo: &[crate::ir::BlockId],
-    entry_mask: &[bool],
+    region: RangeCheckRegion<'_>,
     leaders: &mut [u32],
     elided_bounds_checks: &mut [u64],
 ) {
+    let RangeCheckRegion {
+        pcs: pc_range,
+        incoming,
+        rpo,
+        entry_mask,
+    } = region;
     let mut lengths = HashMap::<(u8, u32), u32>::new();
     let mut comparisons = HashMap::<u32, (Opcode, u32, u32)>::new();
 

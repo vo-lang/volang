@@ -1,0 +1,72 @@
+package kit
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/web"
+)
+
+var dialogMotionType = ui.Define("kit.DialogMotion")
+
+// Presentation belongs to its current root. Reload restores application data,
+// while an old root's pending exit and native modal lifetime end together.
+type dialogMotionState struct {
+	Presented bool
+	Closing bool
+}
+
+func dialogPresentation(props DialogProps, render func(bool) ui.View) ui.View {
+	if props.ID == "" || props.Title == "" || props.Open == nil || props.OnOpenChange == nil {
+		panic("kit: dialog requires an ID, title, open reader and change handler")
+	}
+	if !props.Motion {
+		return render(props.Open())
+	}
+	timeout := props.MotionTimeoutMilliseconds
+	if timeout == 0 {
+		timeout = 5000
+	}
+	request := web.MotionFinished(props.ID, timeout)
+	return ui.Component(dialogMotionType, func(scope *ui.Scope) ui.View {
+		visible := props.Open()
+		state := ui.State(scope, "presentation", func() any {
+			return dialogMotionState{Presented: visible}
+		})
+		current := state.Get().(dialogMotionState)
+		panel := ui.Ref(scope, "panel")
+		ui.Effect(scope, "motion", func() func() {
+			if visible {
+				if !current.Presented || current.Closing {
+					state.Update(func(any) any {
+						return dialogMotionState{Presented: true}
+					})
+				}
+				if current.Closing {
+					panel.Focus()
+				}
+				return nil
+			}
+			if !current.Presented {
+				return nil
+			}
+			state.Update(func(any) any {
+				return dialogMotionState{Presented: true, Closing: true}
+			})
+			task := ui.Start(scope, request, func(ui.Result) {
+				if !props.Open() {
+					state.Update(func(any) any {
+						return dialogMotionState{}
+					})
+					props.ReturnFocus.Focus()
+				}
+			})
+			return func() {
+				task.Cancel()
+			}
+		}, visible, props.ID, timeout)
+		phase, inactive := "open", "false"
+		if !visible {
+			phase, inactive = "closed", "true"
+		}
+		return render(visible || current.Presented).Ref(panel).Class("vui-dialog-motion").Attr("data-state", phase).Attr("inert", inactive).Attr("aria-hidden", inactive)
+	})
+}

@@ -216,6 +216,33 @@ func testMapNilVsEmpty() {
 	assert(m3 != nil, "testMapNilVsEmpty: m3 should not be nil")
 }
 
+func testParallelNilAssignment() {
+	type References struct {
+		first *IntWrapper
+		second *IntWrapper
+		value any
+		active bool
+	}
+	number := &IntWrapper{value: 42}
+	refs := &References{first: number, second: number, value: number, active: true}
+	refs.first, refs.second = nil, nil
+	refs.active, refs.value = false, nil
+	assert(refs.first == nil && refs.second == nil && refs.value == nil && !refs.active, "parallel nil struct fields")
+	pointer := number
+	list := []int{1}
+	dictionary := map[string]int{"x": 1}
+	channel := make(chan int)
+	callback := func() {}
+	var boxed any = number
+	pointer, list, dictionary, channel, callback, boxed = nil, nil, nil, nil, nil, nil
+	assert(pointer == nil && list == nil && dictionary == nil && channel == nil && callback == nil &&
+		boxed == nil, "parallel nil reference layouts")
+	items := []*IntWrapper{number, number}
+	index := 0
+	index, items[index] = 1, nil
+	assert(index == 1 && items[0] == nil && items[1] == number, "parallel nil assignment order")
+}
+
 func main() {
 	testNilToPointer()
 	testNilToSlice()
@@ -229,5 +256,8 @@ func main() {
 	testNilReassignment()
 	testSliceNilVsEmpty()
 	testMapNilVsEmpty()
+	for i := 0; i < 300; i++ {
+		testParallelNilAssignment()
+	}
 	fmt.Println("assignable_nil: ALL PASSED")
 }

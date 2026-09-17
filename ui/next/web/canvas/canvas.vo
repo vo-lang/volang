@@ -1,0 +1,76 @@
+// Package canvas displays bounded RGBA bitmaps through an optional Web adapter.
+package canvas
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+// MaxPixels bounds one bitmap to 1 MiB of RGBA8 input.
+const MaxPixels = 262144
+
+type Bitmap struct {
+	width int
+	height int
+	payload string
+}
+
+// Snapshot RGBA8 pixels once; callers retain no mutable alias into the bitmap.
+func NewBitmap(width int, height int, pixels []byte) *Bitmap {
+	if width < 1 || height < 1 || width > 2048 || height > 2048 || width > MaxPixels / height ||
+		len(pixels) != width * height * 4 {
+		panic("canvas: invalid bitmap dimensions or RGBA byte count")
+	}
+	bytes, err := json.Marshal(struct {
+		Version int `json:"version"`
+		Width int `json:"width"`
+		Height int `json:"height"`
+		Pixels string `json:"pixels"`
+	}{
+		Version: 1, Width: width, Height: height, Pixels: base64.StdEncoding.EncodeToString(pixels),
+	})
+	if err != nil {
+		panic(err)
+	}
+	return &Bitmap{width: width, height: height, payload: string(bytes)}
+}
+
+// Width and Height are logical pixel dimensions, independent of CSS size.
+func (bitmap *Bitmap) Width() int {
+	return bitmap.width
+}
+
+func (bitmap *Bitmap) Height() int {
+	return bitmap.height
+}
+
+type Options struct {
+	// Label describes the image, including before browser activation.
+	Label string
+	// OnError can replace the view with an application fallback. A missing
+	// handler propagates the failure through the component's error boundary.
+	OnError func(string)
+}
+
+// View retains one native canvas across bitmap updates. Use normal View keys,
+// attributes and event handlers. A new key recreates a failed native instance.
+func View(bitmap *Bitmap, options Options) ui.View {
+	if bitmap == nil || bitmap.payload == "" || strings.TrimSpace(options.Label) == "" {
+		panic("canvas: require a constructed bitmap and a nonempty image label")
+	}
+	return ui.Widget("canvas-bitmap", bitmap.payload, func(result ui.Result) {
+		if result.Error != "" {
+			if options.OnError != nil {
+				options.OnError(result.Error)
+			} else {
+				panic(result.Error)
+			}
+		}
+	}).Attr("role", "img").Attr("aria-label", options.Label).Attr("style", "width:100%;aspect-ratio:" +
+		fmt.Sprint(bitmap.width) +
+		"/" +
+		fmt.Sprint(bitmap.height))
+}

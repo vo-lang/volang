@@ -1,0 +1,81 @@
+package files
+
+import (
+	"encoding/json"
+	"strings"
+	"unicode/utf8"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type Options struct {
+	// ID identifies one authored input[type=file] inside the enhanced field.
+	ID string
+	// Zero uses MaxFiles and MaxFileBytes; the native multiple attribute can
+	// further restrict selection to one file. Accept remains a native picker hint.
+	MaxFiles int
+	MaxFileBytes int
+	OnError func(string)
+}
+
+type inputPayload struct {
+	Version int `json:"version"`
+	InputID string `json:"inputID"`
+	Owner string `json:"owner"`
+	Revision int `json:"revision"`
+	Tokens []string `json:"tokens"`
+	Error string `json:"error"`
+	MaxFiles int `json:"maxFiles"`
+	MaxFileBytes int `json:"maxFileBytes"`
+}
+
+// Enhance wraps a native file input or a labelled field containing that input.
+// Type, name, accept, multiple, required, disabled and labels remain native HTML.
+// Do not bind a string value. The callback publishes selections into Vo state.
+func Enhance(field ui.View, value Selection, change func(Selection), options Options) ui.View {
+	if change == nil || options.ID == "" || len(options.ID) > 1024 ||
+		strings.ContainsAny(options.ID, " \t\r\n\f\x00") ||
+		!utf8.ValidString(options.ID) {
+		panic("files: require a change handler and a nonempty input ID without whitespace")
+	}
+	if options.MaxFiles == 0 {
+		options.MaxFiles = MaxFiles
+	}
+	if options.MaxFileBytes == 0 {
+		options.MaxFileBytes = MaxFileBytes
+	}
+	if options.MaxFiles < 1 || options.MaxFiles > MaxFiles || options.MaxFileBytes < 1 ||
+		options.MaxFileBytes > MaxFileBytes {
+		panic("files: selection limits exceed the native file input bounds")
+	}
+	tokens := make([]string, len(value.files))
+	for index, file := range value.files {
+		tokens[index] = file.token
+	}
+	encoded, err := json.Marshal(inputPayload{
+		Version: 1, InputID: options.ID, Owner: value.owner, Revision: value.revision, Tokens: tokens,
+		Error: value.error, MaxFiles: options.MaxFiles, MaxFileBytes: options.MaxFileBytes,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return ui.Element("div", field, ui.Widget("native-files", string(encoded), func(result ui.Result) {
+		if result.Error != "" {
+			if options.OnError != nil {
+				options.OnError(result.Error)
+			} else {
+				panic("files: " + result.Error)
+			}
+			return
+		}
+		selection, err := decode(result.Value)
+		if err != nil {
+			if options.OnError != nil {
+				options.OnError(err.Error())
+			} else {
+				panic(err)
+			}
+			return
+		}
+		change(selection)
+	})).Class("vui-file-input")
+}

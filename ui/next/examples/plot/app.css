@@ -1,0 +1,19 @@
+* { box-sizing: border-box; }
+body { margin: 0; background: #f6f5ef; color: #253d32; font-family: ui-sans-serif, system-ui, sans-serif; }
+.starter { max-width: 700px; margin: 6vh auto; padding: 24px; }
+.eyebrow { font-size: 11px; font-weight: 750; letter-spacing: .18em; color: #61756a; }
+h1 { font-size: clamp(36px, 7vw, 56px); line-height: 1.1; letter-spacing: -.05em; font-weight: 550; margin: 24px 0; }
+.intro { color: #647368; font-size: 16px; line-height: 1.8; margin-bottom: 28px; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 28px; }
+figure { margin: 0; }
+.growth-chart, .placeholder { width: 100%; min-width: 0; height: 210px; }
+.placeholder { display: grid; align-content: center; justify-items: center; gap: 12px; border-radius: 16px; background: #e5ebe4; text-align: center; margin: 0; padding: 20px; }
+figcaption, output { display: block; color: #647368; font-size: 13px; line-height: 1.6; margin-top: 14px; }
+table { border-collapse: collapse; width: 100%; margin-top: 32px; font-size: 14px; }
+caption { text-align: left; font-weight: 650; padding-bottom: 12px; }
+th, td { text-align: left; padding: 9px 0; border-bottom: 1px solid #dce2d9; }
+tbody th { font-weight: 450; }
+td, th:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+#status { max-width: 700px; margin: 24px auto; padding: 0 24px; font-size: 14px; }
+#status:empty { display: none; }
+@media (max-width: 480px) { .starter { margin-top: 2vh; } }

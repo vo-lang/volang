@@ -651,6 +651,63 @@ fn success_preserves_root_and_dependency_warnings() {
 }
 
 #[test]
+fn type_only_imports_record_uses_and_do_not_warn() {
+    let project = analyze_files(
+        &[
+            ("types.vo", concat!(
+                "package main\nimport model \"github.com/acme/lib\"\n",
+                "type Alias = model.Value\n",
+                "type Box struct { Item model.Value; Items []model.Value; Lookup map[string]*model.Value }\n",
+                "func Accept(value model.Value) model.Value { return value }\n",
+                "func main() { var local model.Value; _ = local }\n",
+            )),
+            ("unused.vo", "package main\nimport unused \"github.com/acme/lib\"\n"),
+        ],
+        &[("github.com/acme/lib/lib.vo", "package lib\ntype Value struct { Count int }\n")],
+    ).unwrap();
+    let warnings = project
+        .diagnostics
+        .iter()
+        .filter(|diag| diag.code == Some(TypeError::UnusedImport as u16))
+        .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 1, "{:?}", project.diagnostics);
+    assert_eq!(
+        project
+            .source_map
+            .lookup_span(warnings[0].labels[0].span)
+            .unwrap()
+            .name(),
+        "unused.vo"
+    );
+
+    struct Qualifiers(Vec<ast::Ident>);
+    impl Visitor for Qualifiers {
+        fn visit_type_expr(&mut self, ty: &ast::TypeExpr) {
+            if let ast::TypeExprKind::Selector(selector) = &ty.kind {
+                self.0.push(selector.pkg);
+            }
+            ast::walk_type_expr(self, ty);
+        }
+    }
+    let root = project.main();
+    let mut qualifiers = Qualifiers(Vec::new());
+    for file in &root.files {
+        qualifiers.visit_file(file);
+    }
+    assert_eq!(qualifiers.0.len(), 7);
+    for qualifier in qualifiers.0 {
+        let object = root
+            .type_info
+            .get_use(&qualifier)
+            .expect("qualified type must record its package use");
+        assert!(matches!(
+            project.tc_objs.lobjs[object].entity_type(),
+            vo_analysis::obj::EntityType::PkgName { used: true, .. }
+        ));
+    }
+}
+
+#[test]
 fn dependency_errors_preserve_codes_spans_and_sources() {
     for (source, parse_error) in [
         ("package lib\nfunc F( {}", true),

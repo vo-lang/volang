@@ -1,0 +1,25 @@
+package main
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+var recoveryType = ui.Define("interaction.Recovery")
+
+func Recovery() ui.View {
+	return ui.ErrorBoundary(func() ui.View {
+		return ui.Component(recoveryType, func(scope *ui.Scope) ui.View {
+			broken := ui.Bool(scope, "broken", false)
+			if broken.Get() {
+				panic("This panel could not render.")
+			}
+			return ui.Element("section", ui.Element("h2", ui.Text("Room to recover")), ui.Element("p", ui.Text("A failed panel can restart while the rest of your page stays usable.")), ui.Element("button", ui.Text("Try a local failure")).Attr("data-break", "").On("click", func(event ui.Event) {
+				broken.Set(true)
+			})).Attr("class", "card")
+		})
+	}, func(failure *ui.RenderError) ui.View {
+		return ui.Element("section", ui.Element("h2", ui.Text("Let’s try that again")), ui.Element("p", ui.Text("Your other inputs and counters are still here.")).Attr("role", "alert"), ui.Element("button", ui.Text("Restart panel")).Attr("data-recover", "").On("click", func(event ui.Event) {
+			failure.Retry()
+		})).Attr("class", "card")
+	})
+}

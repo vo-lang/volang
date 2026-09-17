@@ -1,0 +1,86 @@
+package app
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"github.com/vo-lang/studio/next/documentation"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/navigation"
+)
+
+// PageInfo shares route identity, metadata and the selected document request
+// between browser navigation and native page delivery.
+type PageInfo struct {
+	Title string
+	Description string
+	Status int
+	Document documentation.Page
+	Request ui.Request
+}
+
+// StaticPaths enumerates the same public pages and chapter catalog used by
+// navigation. The native delivery entry exposes this list to the exporter.
+func StaticPaths() []string {
+	paths := []string{
+		"/studio", "/studio/gallery", "/studio/playground", "/studio/playground/ui", "/studio/recover",
+		"/studio/docs",
+	}
+	for _, page := range chapters() {
+		paths = append(paths, "/studio/docs/" + page.ID)
+	}
+	return paths
+}
+
+func describeMatch(match navigation.Match) PageInfo {
+	page := PageInfo{
+		Title: "Gallery", Description: "Explore Volang UI, try the language, and find your next idea.",
+		Status: 200,
+	}
+	switch match.ID {
+		case "home", "gallery":
+		case "recover":
+			page.Title = "Recover browser projects"
+			page.Description = "Download projects saved in the previous browser Studio."
+		case "playground", "ui-playground":
+			page.Title = "Playground"
+		case "docs-start", "docs-topic":
+			page.Title = "Documentation"
+			page.Document = chapterFor(docTopic(match))
+			page.Description = page.Document.Summary
+			if page.Document.SectionID == "" {
+				page.Status = 404
+			}
+			if page.Document.Asset != "" {
+				page.Title = page.Document.Title
+				page.Request = chapterRequest(page.Document)
+			}
+		default:
+			page.Title = "Page not found"
+			page.Status = 404
+	}
+	page.Title += " · Volang Studio"
+	return page
+}
+
+func Describe(location string) (PageInfo, error) {
+	parsed, err := navigation.Parse(location)
+	if err != nil {
+		return PageInfo{}, err
+	}
+	match, _ := studioRoutes.Match(parsed)
+	return describeMatch(match), nil
+}
+
+// Initial keeps the application envelope identical for native rendering and
+// browser startup. The optional snapshot is data.EncodeInitial output.
+func Initial(location string, snapshot string) (string, error) {
+	encoded, err := json.Marshal(initialEnvelope{Version: 1, Location: location, Data: snapshot})
+	if err != nil {
+		return "", err
+	}
+	if len(encoded) > 1024 * 1024 || strings.ContainsRune(location, '\x00') {
+		return "", fmt.Errorf("studio: invalid initial data or size above 1 MiB")
+	}
+	return string(encoded), nil
+}

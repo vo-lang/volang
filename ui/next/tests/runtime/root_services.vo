@@ -1,0 +1,118 @@
+package main
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/host"
+	"github.com/vo-lang/ui/next/inspect"
+)
+
+func rootServiceContracts() {
+	view := counter("service-view")
+	plain := host.HTML(view)
+	root, inspection := inspect.NewRoot(view, inspect.Options{})
+	first := root.Flush()
+	require(root.HTML() == plain && len(first.Commands) == 0, "inspection changed SSR node identity or started a service before commit")
+	root.Close()
+	inspection.Close()
+	root, inspection = inspect.NewRoot(view, inspect.Options{})
+	flush(root)
+	inspectionRequest := flush(root).Commands[0].ID
+	inspection.Close()
+	stopped := flush(root)
+	require(len(stopped.Commands) == 1 && stopped.Commands[0].Op == "cancel" &&
+		stopped.Commands[0].ID == inspectionRequest, "closed inspector retained its root subscription")
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: inspectionRequest, Sequence: 1}), "detached inspector received a late request")
+	root.Close()
+	root, inspection = inspect.NewRoot(view, inspect.Options{})
+	inspection.Close()
+	flush(root)
+	require(!root.Pending(), "closed inspector started after root activation")
+	root.Close()
+	starts, cleanups, received := 0, 0, 0
+	root = ui.NewRoot(ui.Text("no component required"))
+	request := ui.Request{Service: "root-source"}
+	expectPanic(func() {
+		root.Start(request, func(ui.Result) {})
+	}, "post-commit")
+	root.OnMount(func() func() {
+		starts++
+		root.Subscribe(request, func(ui.Result) {
+			received++
+		})
+		root.Start(request, func(ui.Result) {
+			received++
+		})
+		return func() {
+			cleanups++
+		}
+	})
+	first = root.Flush()
+	require(starts == 0 && len(first.Commands) == 0, "root service ran in SSR")
+	expectPanic(func() {
+		root.Subscribe(request, func(ui.Result) {})
+	}, "post-commit")
+	expectPanic(func() {
+		root.OnMount(func() func() {
+			return nil
+		})
+	}, "unmounted root")
+	root.Commit(first.Revision)
+	started := flush(root)
+	require(starts == 1 && len(started.Commands) == 2 && started.Commands[0].Op == "watch" &&
+		started.Commands[1].Op == "start", "root service did not start exactly once after commit")
+	watch, one := started.Commands[0].ID, started.Commands[1].ID
+	require(root.Dispatch(ui.Event{Kind: "@task", Target: watch, Sequence: 1}), "root subscription lost its first event")
+	require(root.Dispatch(ui.Event{Kind: "@task", Target: watch, Sequence: 2}), "root subscription did not retain ownership")
+	require(root.Dispatch(ui.Event{Kind: "@task", Target: one, Sequence: 3}), "root task lost its result")
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: one, Sequence: 4}), "root task repeated a result")
+	flush(root)
+	require(starts == 1 && received == 3, "root service restarted or duplicated delivery")
+	closed := root.Close()
+	require(cleanups == 1 && len(closed.Commands) == 1 && closed.Commands[0].ID == watch &&
+		closed.Commands[0].Op == "cancel", "root service did not cancel before cleanup")
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: watch, Sequence: 5}), "closed root accepted service result")
+	root.Close()
+	require(cleanups == 1, "root cleanup repeated")
+	expectPanic(func() {
+		root.Start(request, func(ui.Result) {})
+	}, "post-commit")
+	abandoned := ui.NewRoot(ui.Text("uncommitted"))
+	abandoned.OnMount(func() func() {
+		starts++
+		return nil
+	})
+	abandoned.Flush()
+	abandoned.Close()
+	require(starts == 1, "abandoned root started a service")
+	failing := ui.NewRoot(ui.Text("setup failure"))
+	failing.OnMount(func() func() {
+		failing.Subscribe(request, func(ui.Result) {
+			received++
+		})
+		return func() {
+			cleanups++
+			panic("secondary cleanup")
+		}
+	})
+	failing.OnMount(func() func() {
+		panic("primary setup")
+	})
+	batch := failing.Flush()
+	expectPanic(func() {
+		failing.Commit(batch.Revision)
+	}, "primary setup")
+	require(cleanups == 2, "failed root setup leaked earlier services")
+	failing.Close()
+	bounded := ui.NewRoot(ui.Text("bounded"))
+	for index := 0; index < 64; index++ {
+		bounded.OnMount(func() func() {
+			return nil
+		})
+	}
+	expectPanic(func() {
+		bounded.OnMount(func() func() {
+			return nil
+		})
+	}, "at most 64")
+	bounded.Close()
+}

@@ -106,12 +106,12 @@ fn feedback_inline_executes_real_code_and_falls_back_when_targets_or_generations
                     closure::create(&mut gc, 2, 0),
                 ];
                 let mut dispatch = [JitDispatchEntry::unavailable(); 3];
-                for id in 1..3 {
-                    dispatch[id].native = unsafe {
+                for (id, entry) in dispatch.iter_mut().enumerate().skip(1) {
+                    entry.native = unsafe {
                         jit.get_func_ptr_for_tier(id as u32, JitTier::Baseline)
                             .unwrap()
                     } as *const u8;
-                    dispatch[id].generation = 7;
+                    entry.generation = 7;
                 }
                 for target in [1_usize, 2, 1] {
                     for stale in [false, true] {
@@ -148,11 +148,11 @@ fn feedback_inline_executes_real_code_and_falls_back_when_targets_or_generations
                         ctx.fiber_sp = sp as u32;
                         ctx.jit_func_table = dispatch.as_ptr();
                         ctx.jit_func_count = 3;
-                        for id in 1..3 {
+                        for (id, entry) in dispatch.iter().enumerate().skip(1) {
                             assert!(parts.ic_table[0].publish_native_target(
                                 id as u64,
                                 &PreparedCall {
-                                    ic_jit_func_ptr: dispatch[id].native,
+                                    ic_jit_func_ptr: entry.native,
                                     callee_local_slots: u32::from(width),
                                     func_id: id as u32,
                                     dispatch_generation: if stale && id == target { 6 } else { 7 },

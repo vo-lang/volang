@@ -1,0 +1,140 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+func selectionContracts() {
+	var checked *ui.BoolState
+	var selected *ui.StringState
+	var disabled *ui.BoolState
+	var reversed *ui.BoolState
+	var radioRef *ui.ElementRef
+	changes := 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		checked = ui.Bool(scope, "checked", false)
+		selected = ui.String(scope, "selected", "a")
+		disabled = ui.Bool(scope, "disabled", false)
+		reversed = ui.Bool(scope, "reversed", false)
+		radioRef = ui.Ref(scope, "radio")
+		options := []kit.ChoiceOption{
+			{Value: "a", Label: "Alpha"}, {Value: "b", Label: "Beta"},
+			{Value: "c", Label: "Unavailable", Disabled: true},
+		}
+		if reversed.Get() {
+			options[0], options[1] = options[1], options[0]
+		}
+		read := func() string {
+			return selected.Get()
+		}
+		change := func(value string) {
+			changes++
+			selected.Set(value)
+		}
+		return ui.Fragment(kit.Checkbox(kit.CheckboxProps{
+			ID: "check", Label: "Consent", Name: "consent", Form: "external", Required: true,
+			Checked: func() bool {
+				return checked.Get()
+			},
+			Disabled: disabled.Get(), Hint: "Optional details", Error: "Please choose",
+			OnChange: func(value bool) {
+				changes++
+				checked.Set(value)
+			},
+			LabelContent: func() ui.View {
+				return ui.Element("strong", ui.Text("Your consent"))
+			},
+		}), kit.Switch(kit.SwitchProps{ID: "switch", Label: "Updates", DefaultChecked: true}), kit.RadioGroup(kit.RadioGroupProps{
+			ID: "radios", Label: "Plan", Options: options, Value: read, OnChange: change,
+			Disabled: disabled.Get(), Hint: "One choice", Error: "Review your choice", InputRef: radioRef,
+		}), kit.Select(kit.SelectProps{
+			ID: "select", Label: "Theme", Name: "theme", Options: options, Value: read, OnChange: change,
+			Disabled: disabled.Get(),
+		}), kit.Select(kit.SelectProps{
+			ID: "native-select", Label: "Native theme", Options: options, DefaultValue: "b",
+		}))
+	}))
+	initial := flush(root)
+	ids := make(map[string]int)
+	for _, mutation := range initial.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "id" {
+			ids[mutation.Value] = mutation.ID
+		}
+	}
+	html := root.HTML()
+	require(strings.Contains(html, `aria-describedby="check-error check-hint"`) &&
+		strings.Contains(html, `aria-label="Consent"`), "checkable descriptions or custom label missing")
+	require(strings.Contains(html, `form="external"`) && strings.Contains(html, `<fieldset`) &&
+		strings.Contains(html, `<legend`), "native form or group semantics missing")
+	require(strings.Contains(html, `role="switch"`), "switch role missing")
+	radioRef.Focus()
+	require(focusTarget(flush(root)) == ids["radios-option-0"], "radio error focus did not bind selected input")
+	sequence := 0
+	dispatch := func(id int, value string, isChecked bool) {
+		sequence++
+		root.Dispatch(ui.Event{
+			Target: id, Kind: "change", Value: value, Checked: isChecked, Sequence: sequence,
+		})
+	}
+	dispatch(ids["check"], "", true)
+	dispatch(ids["check"], "", false)
+	dispatch(ids["radios-option-1"], "b", true)
+	require(!checked.Get() && selected.Get() == "b" && changes == 3, "queued native choice events lost updates")
+	flush(root)
+	radioRef.Focus()
+	require(focusTarget(flush(root)) == ids["radios-option-1"], "radio error focus did not follow controlled selection")
+	dispatch(ids["radios-option-0"], "a", false)
+	dispatch(ids["radios-option-2"], "c", true)
+	dispatch(ids["select"], "c", false)
+	dispatch(ids["select"], "unknown", false)
+	require(changes == 3, "unchecked, disabled or unknown choices invoked callbacks")
+	flush(root)
+	reversed.Set(true)
+	for _, mutation := range flush(root).Mutations {
+		require(mutation.Op != "create" && mutation.Op != "remove", "choice reorder replaced native inputs")
+	}
+	dispatch(ids["radios-option-0"], "a", true)
+	require(selected.Get() == "a", "keyed radio callback followed the old index")
+	flush(root)
+	disabled.Set(true)
+	flush(root)
+	dispatch(ids["check"], "", true)
+	dispatch(ids["radios-option-1"], "b", true)
+	dispatch(ids["select"], "b", false)
+	require(changes == 4 && !checked.Get() && selected.Get() == "a", "disabled fields accepted changes")
+	root.Close()
+	expectPanic(func() {
+		kit.Checkbox(kit.CheckboxProps{
+			ID: "a", Label: "A",
+			Checked: func() bool {
+				return false
+			},
+			DefaultChecked: true,
+		})
+	}, "cannot be combined")
+	expectPanic(func() {
+		kit.RadioGroup(kit.RadioGroupProps{
+			ID: "a", Label: "A",
+			Options: []kit.ChoiceOption{{Value: "x", Label: "X"}, {Value: "x", Label: "Y"}},
+		})
+	}, "unique values")
+	expectPanic(func() {
+		kit.RadioGroup(kit.RadioGroupProps{ID: "a", Label: "A", DefaultValue: "missing"})
+	}, "must identify an option")
+	expectPanic(func() {
+		kit.Select(kit.SelectProps{
+			ID: "a", Label: "A", Placeholder: "Choose",
+			Options: []kit.ChoiceOption{{Value: "", Label: "Empty"}},
+		})
+	}, "placeholder conflicts")
+	expectPanic(func() {
+		kit.Select(kit.SelectProps{
+			ID: "a", Label: "A",
+			Value: func() string {
+				return "missing"
+			},
+		})
+	}, "must identify an option")
+}

@@ -1,0 +1,41 @@
+package ui
+
+import (
+	"encoding/json"
+	"math"
+)
+
+// ScrollPosition contains physical CSS-pixel offsets, including negative RTL left.
+type ScrollPosition struct {
+	Left float64
+	Top float64
+}
+
+// ScrollTo queues an instant position after the next commit, without changing focus.
+func (ref *ElementRef) ScrollTo(left float64, top float64) bool {
+	return ref.scrollPosition([]float64{left, top})
+}
+
+// ScrollToIfUnchanged applies a correction only if the native position still
+// matches the previous observation before this commit changes layout. New or
+// missing bindings have no matching observation. False means no request queued;
+// true does not guarantee the condition later matches the live native position.
+func (ref *ElementRef) ScrollToIfUnchanged(previous ScrollPosition, next ScrollPosition) bool {
+	return ref.scrollPosition([]float64{next.Left, next.Top, previous.Left, previous.Top})
+}
+
+func (ref *ElementRef) scrollPosition(values []float64) bool {
+	if !ref.live() {
+		return false
+	}
+	for _, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			panic("ui: scroll coordinates must be finite")
+		}
+	}
+	bytes, err := json.Marshal(values)
+	if err != nil {
+		panic(err)
+	}
+	return ref.requestValue("scrollPosition", string(bytes))
+}

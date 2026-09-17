@@ -1,0 +1,102 @@
+package app
+
+import (
+	"encoding/json"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/data"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/navigation"
+)
+
+var appType = ui.Define("studio.App")
+
+var routerContext = ui.NewContext("studio.router", nil)
+
+var initialDataContext = ui.NewContext("studio.initial-data", []data.InitialValue{})
+
+type initialEnvelope struct {
+	Version int
+	Location string
+	Data string
+}
+
+func App(initial string) ui.View {
+	var values []data.InitialValue
+	if strings.HasPrefix(initial, "{") {
+		var envelope initialEnvelope
+		if len(initial) > 1024 * 1024 {
+			panic("studio: initial data exceeds 1 MiB")
+		}
+		if err := json.Unmarshal([]byte(initial), &envelope); err != nil {
+			panic(err)
+		}
+		if envelope.Version != 1 {
+			panic("studio: unsupported initial data")
+		}
+		if envelope.Data != "" {
+			decoded, err := data.DecodeInitial(envelope.Data)
+			if err != nil {
+				panic(err)
+			}
+			values = decoded
+		}
+		initial = envelope.Location
+	}
+	return ui.Component(appType, func(scope *ui.Scope) ui.View {
+		router := navigation.Use(scope, "router", initial)
+		navigation.Restore(scope, "viewport", router, "studio-content")
+		ui.Provide(scope, routerContext, router)
+		ui.Provide(scope, initialDataContext, values)
+		return studioRoutes.View(router.Current(), ui.Element("main", NotFound()).Class("studio-message"))
+	})
+}
+
+func StudioLayout(scope *ui.Scope, match navigation.Match, content ui.View) ui.View {
+	router := ui.UseContext(scope, routerContext).(*navigation.Router)
+	location := match.Location
+	dark := ui.Bool(scope, "dark", false)
+	theme := "light"
+	if dark.Get() {
+		theme = "dark"
+	}
+	section := "gallery"
+	if match.ID == "recover" {
+		section = "recover"
+	}
+	if match.ID == "playground" || match.ID == "ui-playground" {
+		section = "playground"
+	}
+	if strings.HasPrefix(match.ID, "docs-") {
+		section = "docs"
+	}
+	ui.Effect(scope, "navigation", func() func() {
+		router.SetTitle(describeMatch(match).Title)
+		return nil
+	}, location.Path, location.Query.Get("topic"))
+	nav := []ui.View{}
+	for _, entry := range []string{"gallery", "playground", "docs"} {
+		label := "Gallery"
+		if entry == "playground" {
+			label = "Playground"
+		}
+		if entry == "docs" {
+			label = "Documentation"
+		}
+		link := navigation.Link("/studio/" + entry, ui.Text(label)).Attr("class", "studio-nav-link").Attr("data-nav", entry)
+		if section == entry {
+			link = link.Attr("aria-current", "page")
+		}
+		nav = append(nav, link)
+	}
+	sidebar := ui.Element("aside", navigation.Link("/studio/gallery", ui.Element("span", ui.Text("v")).Attr("class", "studio-mark"), ui.Element("strong", ui.Text("volang")), ui.Element("span", ui.Text("studio")).Attr("class", "studio-wordmark")).Attr("class", "studio-brand").Attr("aria-label", "Volang Studio home"), ui.Element("p", ui.Text("MAKE SOMETHING GOOD")).Attr("class", "studio-nav-label"), ui.Element("nav", nav...).Attr("aria-label", "Main navigation"), ui.Element("div", ui.Element("p", ui.Text("Small pieces.\nThoughtful possibilities.")), kit.Switch(kit.SwitchProps{
+		ID: "studio-theme", Label: "Dark appearance",
+		Checked: func() bool {
+			return dark.Get()
+		},
+		OnChange: func(value bool) {
+			dark.Set(value)
+		},
+	})).Attr("class", "studio-sidebar-footer")).Attr("class", "studio-sidebar")
+	return ui.Element("div", ui.Element("a", ui.Text("Skip to content")).Attr("href", "#studio-content").Attr("class", "studio-skip"), sidebar, ui.Element("main", content, ui.Element("p", ui.Text(router.Error())).Attr("role", "alert"), ui.Element("footer", ui.Text("Built with Volang UI · A work in progress, made to be explored."), navigation.Link("/studio/recover", ui.Text("Recover browser projects")).Class("studio-recovery-link"))).Attr("id", "studio-content").Attr("tabindex", "-1")).Attr("class", "vui studio").Attr("data-theme", theme).Attr("data-section", section)
+}

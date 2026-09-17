@@ -1,0 +1,41 @@
+package app
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/collection"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var libraryPreviewType = ui.Define("studio.LibraryPreview")
+
+func LibraryPreview() ui.View {
+	return ui.Component(libraryPreviewType, func(scope *ui.Scope) ui.View {
+		library := ui.State(scope, "library", func() any {
+			items := []collection.Item{}
+			titles := []string{
+				"A quiet morning", "A walk by the water", "Something worth keeping", "A little adventure",
+				"Room for a new thought",
+			}
+			for index := 0; index < 1000; index++ {
+				items = append(items, collection.Item{
+					Key: fmt.Sprint(index), Label: fmt.Sprint(titles[index % len(titles)], " · ", index + 1),
+				})
+			}
+			return collection.New(items)
+		})
+		selected := ui.String(scope, "selected", "0")
+		items := library.Get().(*collection.Items)
+		return ui.Element("div", kit.Listbox(kit.ListboxProps{
+			ID: "gallery-library", Label: "Find your next thought", Items: items, Virtual: true, Height: 208,
+			RowHeight: 40, Overscan: 2,
+			Selected: func() []string {
+				return []string{selected.Get()}
+			},
+			OnSelectionChange: func(keys []string) {
+				selected.Set(keys[0])
+			},
+			Hint: "Explore with the arrow keys, then press Space to choose.",
+		}), ui.Element("p", ui.Text("A place to begin: "), ui.Element("strong", ui.Text(items.At(items.Index(selected.Get())).Label))).Class("vui-hint").Attr("data-gallery-library-choice", "")).Class("studio-field-demo")
+	})
+}

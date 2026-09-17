@@ -1,0 +1,95 @@
+package forms
+
+import (
+	"slices"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/files"
+)
+
+var fieldType = ui.Define("forms.Field")
+
+// Field creates a separately subscribed component for one field. The callback
+// can read any other field too; those reads become ordinary dependencies.
+func (form *Form) Field(name string, render func(*Form) ui.View) ui.View {
+	if name == "" || render == nil {
+		panic("forms: Field requires a name and render function")
+	}
+	return ui.Component(fieldType, func(*ui.Scope) ui.View {
+		form.requireField(name)
+		return render(form)
+	}).Key(name)
+}
+
+type fieldSnapshot struct {
+	active bool
+	file bool
+	values []string
+	selection files.Selection
+	touched bool
+	error string
+}
+
+func (form *Form) field(name string) fieldSnapshot {
+	return form.state.SelectEqual(func(value any) any {
+		current := value.(snapshot)
+		selection, file := current.files[name]
+		active := selectedField(current.values, name, form.fields, form.allFields, current.arrays)
+		if file {
+			active = form.allFields || slices.ContainsString(form.fields, name)
+		}
+		message := ""
+		if current.submitted || current.touched[name] {
+			message = current.errors[name]
+		}
+		return fieldSnapshot{
+			active: active, file: file, values: current.values[name], selection: selection,
+			touched: current.touched[name], error: message,
+		}
+	}, func(left any, right any) bool {
+		a, b := left.(fieldSnapshot), right.(fieldSnapshot)
+		return a.active == b.active && a.file == b.file && a.touched == b.touched && a.error == b.error &&
+			slices.EqualString(a.values, b.values) &&
+			a.selection.Same(b.selection)
+	}).(fieldSnapshot)
+}
+
+func firstValue(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+// Declaration reads observe structure only. Values/status have their own
+// subscriptions, so merely owning a form does not subscribe to every edit.
+func sameDeclaration(left any, right any) bool {
+	a, b := left.(snapshot), right.(snapshot)
+	if !slices.EqualString(a.arrays, b.arrays) || !slices.EqualString(a.fileFields, b.fileFields) ||
+		len(a.values) != len(b.values) {
+		return false
+	}
+	for name := range a.values {
+		if _, exists := b.values[name]; !exists {
+			return false
+		}
+	}
+	return true
+}
+
+func (form *Form) checkEdit(current snapshot, name string) Errors {
+	if form.options.Validate != nil || form.options.ValidateAsync != nil {
+		return form.check(form.data(current))
+	}
+	errors := make(Errors)
+	for field, message := range current.errors {
+		if field != name && field != "" && form.has(field) {
+			errors[field] = message
+		}
+	}
+	if validate := form.options.FieldValidators[name]; validate != nil {
+		if message := validate(slices.CloneString(current.values[name])); message != "" {
+			errors[name] = message
+		}
+	}
+	return errors
+}

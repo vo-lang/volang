@@ -1,0 +1,51 @@
+package main
+
+import (
+	"strconv"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/inspect"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var appType = ui.Define("inspection.App")
+
+var counterType = ui.Define("inspection.Counter")
+
+func Counter(name string, step int) ui.View {
+	return ui.Component(counterType, func(scope *ui.Scope) ui.View {
+		ui.InspectProp(scope, "name", name)
+		ui.InspectProp(scope, "step", step)
+		count := ui.Int(scope, "count", 0)
+		doubled := ui.Derived(scope, "doubled", func() any {
+			return count.Get() * 2
+		})
+		return ui.Element("section", ui.Element("h2", ui.Text(name)), kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				count.Set(count.Get() + step)
+			},
+		}, ui.Text("Add to " + name)), ui.Element("output", ui.Text(strconv.Itoa(doubled.Get().(int)))).Attr("data-counter", name)).Class("vui-card")
+	}).Key(name)
+}
+
+func App(scope *ui.Scope) ui.View {
+	show := ui.Bool(scope, "show-second", true)
+	step := ui.Int(scope, "step", 1)
+	second := ui.Fragment()
+	if show.Get() {
+		second = Counter("Second", step.Get())
+	}
+	return ui.Element("main", ui.Element("p", ui.Text("VOLANG UI / DEVELOPMENT")).Class("eyebrow"), ui.Element("h1", ui.Text("See what changed.")), ui.Element("p", ui.Text("Each counter owns its state. Capture a snapshot to inspect their dependencies and recent renders.")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			show.Set(!show.Get())
+		},
+	}, ui.Text("Toggle second counter")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			step.Set(step.Get() + 1)
+		},
+	}, ui.Text("Increase counter step")), ui.Element("p", ui.Text("Counter step: " +
+		strconv.Itoa(step.Get()))).Attr("data-counter-step", ""), Counter("First", step.Get()), second, TaskControls(scope)).Class("vui", "inspection-demo")
+}
+
+func main() {
+	inspect.Run(ui.Component(appType, App))
+}

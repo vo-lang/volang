@@ -17,7 +17,10 @@ vo ui new studio --template=studio
 
 Every starter is parsed by the CLI test suite and installed from the bundled,
 authenticated official UI module. `ui/editors/vscode` contributes `.vo` syntax,
-configuration and snippets with no executable editor-host or npm dependency.
+configuration and snippets, plus the native compiler language service through
+`vo lsp --stdio`. The extension bundles its official language client; user
+application projects have no additional npm dependency. See the
+[extension guide](../editors/vscode/README.md) for setup and supported queries.
 
 Official UIKit implementation source can be inspected or exported without a
 package-manager script:
@@ -78,7 +81,7 @@ vo ui doctor
 vo ui doctor . --format=json
 ```
 
-The doctor checks the host target, bundled official module, Web AOT runtime,
+The doctor checks the host target, bundled official module, Web VM runtime,
 module cache and optional application compile/mount contract. Its JSON schema
 is `volang.ui.doctor.v1`, making the same checks usable by IDEs and CI.
 

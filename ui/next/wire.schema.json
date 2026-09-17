@@ -1,0 +1,312 @@
+{
+  "version": 25,
+  "limits": {
+    "frameBytes": 16777216,
+    "mutations": 200000,
+    "queuedEvents": 4096,
+    "queuedBytes": 67108864,
+    "eventKeys": 64,
+    "eventKeyBytes": 128,
+    "eventModifiers": 16,
+    "selectedValues": 4096,
+    "portals": 64
+  },
+  "operations": [
+    "create",
+    "insert",
+    "remove",
+    "text",
+    "attr",
+    "removeAttr",
+    "listen",
+    "unlisten",
+    "widget",
+    "focus",
+    "modal",
+    "popover",
+    "scroll",
+    "default",
+    "selection",
+    "portal",
+    "property",
+    "scrollPosition",
+    "textSelection"
+  ],
+  "eventKinds": [
+    "click",
+    "mousedown",
+    "input",
+    "change",
+    "submit",
+    "reset",
+    "keydown",
+    "keyup",
+    "focus",
+    "blur",
+    "focusin",
+    "focusout",
+    "contextmenu",
+    "cancel",
+    "close",
+    "toggle",
+    "viewport",
+    "pointerenter",
+    "pointerleave",
+    "pointerdown",
+    "pointermove",
+    "pointerup",
+    "pointercancel",
+    "pointerover",
+    "pointerout",
+    "gotpointercapture",
+    "lostpointercapture",
+    "size"
+  ],
+  "eventFlags": {
+    "Capture": 1,
+    "PreventDefault": 2,
+    "StopPropagation": 4,
+    "Passive": 8,
+    "CapturePointer": 16,
+    "Latest": 32
+  },
+  "keyModifiers": {
+    "Alt": 1,
+    "Ctrl": 2,
+    "Meta": 4,
+    "Shift": 8
+  },
+  "types": {
+    "Event": [
+      [
+        "Target",
+        "int",
+        "target"
+      ],
+      [
+        "Kind",
+        "string",
+        "kind"
+      ],
+      [
+        "Value",
+        "string",
+        "value"
+      ],
+      [
+        "Key",
+        "string",
+        "key"
+      ],
+      [
+        "Checked",
+        "bool",
+        "checked"
+      ],
+      [
+        "Sequence",
+        "int",
+        "sequence"
+      ],
+      [
+        "Error",
+        "string",
+        "error"
+      ],
+      [
+        "Capture",
+        "bool",
+        "capture"
+      ],
+      [
+        "AltKey",
+        "bool",
+        "altKey"
+      ],
+      [
+        "CtrlKey",
+        "bool",
+        "ctrlKey"
+      ],
+      [
+        "MetaKey",
+        "bool",
+        "metaKey"
+      ],
+      [
+        "ShiftKey",
+        "bool",
+        "shiftKey"
+      ],
+      [
+        "Repeat",
+        "bool",
+        "repeat"
+      ],
+      [
+        "IsComposing",
+        "bool",
+        "isComposing"
+      ],
+      [
+        "Button",
+        "int",
+        "button"
+      ],
+      [
+        "PointerType",
+        "string",
+        "pointerType"
+      ],
+      [
+        "SelectedValues",
+        "[]string",
+        "selectedValues"
+      ],
+      [
+        "Pointer",
+        "*PointerData",
+        "pointer"
+      ]
+    ],
+    "Mutation": [
+      [
+        "Op",
+        "operation",
+        "op"
+      ],
+      [
+        "ID",
+        "int",
+        "id"
+      ],
+      [
+        "Parent",
+        "int",
+        "parent"
+      ],
+      [
+        "Before",
+        "int",
+        "before"
+      ],
+      [
+        "Name",
+        "string",
+        "name"
+      ],
+      [
+        "Value",
+        "string",
+        "value"
+      ]
+    ],
+    "Command": [
+      [
+        "Op",
+        "string",
+        "op"
+      ],
+      [
+        "ID",
+        "int",
+        "id"
+      ],
+      [
+        "Name",
+        "string",
+        "name"
+      ],
+      [
+        "Value",
+        "string",
+        "value"
+      ],
+      [
+        "TimeoutMilliseconds",
+        "int",
+        "timeoutMilliseconds"
+      ]
+    ],
+    "Batch": [
+      [
+        "Version",
+        "int",
+        "version"
+      ],
+      [
+        "Revision",
+        "int",
+        "revision"
+      ],
+      [
+        "InputSequence",
+        "int",
+        "inputSequence"
+      ],
+      [
+        "Mutations",
+        "[]Mutation",
+        "mutations"
+      ],
+      [
+        "Commands",
+        "[]Command",
+        "commands"
+      ]
+    ],
+    "InputBatch": [
+      [
+        "Events",
+        "[]Event",
+        "events"
+      ]
+    ],
+    "CommitAck": [
+      [
+        "Revision",
+        "int",
+        "revision"
+      ]
+    ],
+    "Bootstrap": [
+      [
+        "Data",
+        "string",
+        "data"
+      ]
+    ],
+    "PointerData": [
+      [
+        "ID",
+        "int",
+        "id"
+      ],
+      [
+        "ClientX",
+        "float64",
+        "clientX"
+      ],
+      [
+        "ClientY",
+        "float64",
+        "clientY"
+      ],
+      [
+        "Buttons",
+        "int",
+        "buttons"
+      ],
+      [
+        "Pressure",
+        "float64",
+        "pressure"
+      ],
+      [
+        "IsPrimary",
+        "bool",
+        "isPrimary"
+      ]
+    ]
+  }
+}

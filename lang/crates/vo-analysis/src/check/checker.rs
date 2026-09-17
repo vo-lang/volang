@@ -250,6 +250,23 @@ impl Checker {
         self.resolve_symbol(ident.symbol)
     }
 
+    /// Record a resolved package qualifier in both semantic metadata and lint state.
+    pub(crate) fn use_package_name(
+        &mut self,
+        ident: vo_syntax::ast::Ident,
+        object: ObjKey,
+    ) -> Option<PackageKey> {
+        let crate::obj::EntityType::PkgName { imported, used } =
+            self.lobj_mut(object).entity_type_mut()
+        else {
+            return None;
+        };
+        *used = true;
+        let imported = *imported;
+        self.result.record_use(ident, object);
+        Some(imported)
+    }
+
     /// Returns the universe.
     pub(crate) fn universe(&self) -> &Universe {
         self.tc_objs.universe()

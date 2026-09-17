@@ -1,0 +1,164 @@
+package main
+
+import (
+	"fmt"
+	"math"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/collection"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+func collectionContracts() {
+	source := []collection.Item{
+		{Key: "a", Label: "Alpha"}, {Key: "b", Label: "Beta", Disabled: true}, {Key: "c", Label: "中文"},
+	}
+	items := collection.New(source)
+	source[0].Label = "Changed"
+	require(items.At(0).Label == "Alpha" && items.Index("absent") == -1, "collection retained mutable input or lost index")
+	require(items.Next(0, 1) == 2 && items.Next(2, 1) == -1 && items.Search("中", 2) == 2 &&
+		items.Search("b", -1) == -1, "collection navigation or Unicode search failed")
+	expectPanic(func() {
+		collection.New([]collection.Item{{Key: "a", Label: "A"}, {Key: "a", Label: "Again"}})
+	}, "unique")
+	options := collection.WindowOptions{Count: 100000, RowHeight: 40, Height: 240, Overscan: 2}
+	for _, top := range []float64{-1, 0, 0.5, 39.75, 40, 4000, 3999999, math.Inf(1), math.NaN()} {
+		window := collection.WindowFor(options, top, 240)
+		require(window.Start >= 0 && window.End <= 100000 && window.End - window.Start <= 11 &&
+			window.Total == 4000000, "virtual range lost bounds")
+	}
+	last := collection.WindowFor(options, 4000000, 240)
+	require(last.End == 100000 && last.Contains(99999), "overscroll omitted the last row")
+	expectPanic(func() {
+		collection.WindowFor(collection.WindowOptions{Count: 1000000000, RowHeight: 40, Height: 240}, 0, 240)
+	}, "extent")
+	var owner *ui.Scope
+	var observer func(ui.Viewport)
+	renders := 0
+	windowRoot := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		owner = scope
+		renders++
+		window, report := collection.Virtual(scope, "window", options)
+		observer = report
+		return ui.Text(fmt.Sprint(window.Start))
+	}))
+	flush(windowRoot)
+	observer(ui.Viewport{Height: 240, Top: 1.5})
+	flush(windowRoot)
+	require(renders == 1, "scrolling inside one row rerendered the window")
+	observer(ui.Viewport{Height: 240, Top: 4000})
+	advanced := flush(windowRoot)
+	require(renders == 2 && changedText(advanced, "98"), "window did not advance")
+	windowRoot.Close()
+	require(!owner.Contains(owner), "window scope remained active after unmount")
+}
+
+func listboxContracts() {
+	data := []collection.Item{}
+	for index := 0; index < 1000; index++ {
+		data = append(data, collection.Item{
+			Key: fmt.Sprint(index), Label: "Item " + fmt.Sprint(index), Disabled: index == 1,
+		})
+	}
+	items := collection.New(data)
+	var chosen *ui.Store
+	var disabled *ui.BoolState
+	var snapshot *ui.Store
+	mounted, disposed := 0, 0
+	row := ui.Define("contract.VirtualRow")
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		chosen = ui.State(scope, "chosen", func() any {
+			return []string{}
+		})
+		snapshot = ui.State(scope, "items", func() any {
+			return items
+		})
+		disabled = ui.Bool(scope, "disabled", false)
+		return kit.Listbox(kit.ListboxProps{
+			ID: "list", Label: "Items", Items: snapshot.Get().(*collection.Items), Multiple: true,
+			Virtual: true, Height: 200, RowHeight: 40, Overscan: 2, Disabled: disabled.Get(),
+			Selected: func() []string {
+				return chosen.Get().([]string)
+			},
+			OnSelectionChange: func(keys []string) {
+				chosen.Update(func(any) any {
+					return keys
+				})
+			},
+			Item: func(item collection.Item) ui.View {
+				return ui.Component(row, func(scope *ui.Scope) ui.View {
+					ui.Effect(scope, "mounted", func() func() {
+						mounted++
+						return func() {
+							disposed++
+						}
+					})
+					return ui.Text(item.Label)
+				})
+			},
+		})
+	}))
+	first := flush(root)
+	id, firstOption := 0, 0
+	for _, mutation := range first.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "id" {
+			if mutation.Value == "list" {
+				id = mutation.ID
+			}
+			if mutation.Value == "list-option-0" {
+				firstOption = mutation.ID
+			}
+		}
+	}
+	require(id > 0 && mounted == 8 && strings.Count(root.HTML(), `role="option"`) == 8, "initial list did not window its rows")
+	sequence := 0
+	sequence = kitModifiedKeys(root, id, "ArrowDown", true, sequence)
+	send := func(event ui.Event) {
+		sequence++
+		event.Sequence = sequence
+		event.Target = id
+		root.Dispatch(event)
+	}
+	press := func(key string) {
+		send(ui.Event{Kind: "keydown", Key: key, Capture: true})
+	}
+	press("ArrowDown")
+	press("ArrowDown")
+	require(attributeMutation(flush(root), id, "aria-activedescendant", "list-option-3"), "listbox key burst did not advance or skip disabled row")
+	require(len(chosen.Get().([]string)) == 0, "moving active focus changed explicit selection")
+	press(" ")
+	press("ArrowDown")
+	press(" ")
+	require(strings.Join(chosen.Get().([]string), ",") == "3,4", "multi-selection burst read stale state")
+	flush(root)
+	send(ui.Event{Kind: "viewport", Value: `{"height":200,"width":300,"top":20000,"left":0}`})
+	flush(root)
+	require(strings.Contains(root.HTML(), `id="list-option-4"`) &&
+		strings.Contains(root.HTML(), `aria-posinset="501"`), "scroll lost active option or full collection position")
+	require(strings.Count(root.HTML(), `role="option"`) <= 11 && disposed > 0, "virtual scroll retained removed row scopes")
+	press("End")
+	batch := flush(root)
+	require(attributeMutation(batch, id, "aria-activedescendant", "list-option-999") &&
+		focusTarget(batch) == 0, "End did not reach pinned final row without moving DOM focus")
+	press("Enter")
+	flush(root)
+	require(strings.Join(chosen.Get().([]string), ",") == "3,4,999", "last virtual item was not selectable")
+	// Filtered-out selections remain caller-owned; active focus repairs to a live row.
+	snapshot.Update(func(any) any {
+		return collection.New([]collection.Item{{Key: "3", Label: "Retained"}})
+	})
+	flush(root)
+	flush(root)
+	require(strings.Contains(root.HTML(), `aria-activedescendant="list-option-0"`) &&
+		strings.Contains(root.HTML(), `aria-selected="true"`), "collection replacement lost selected key or active descendant")
+	disabled.Set(true)
+	flush(root)
+	press(" ")
+	flush(root)
+	require(len(chosen.Get().([]string)) == 3 &&
+		!strings.Contains(root.HTML(), "aria-activedescendant"), "disabled list accepted input or retained an active descendant")
+	sequence++
+	require(!root.Dispatch(ui.Event{Target: firstOption, Kind: "click", Sequence: sequence}), "removed virtual row accepted stale event")
+	root.Close()
+	require(mounted == disposed, "virtual list did not dispose every mounted row")
+}

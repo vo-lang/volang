@@ -958,10 +958,10 @@ impl IoRuntime {
         if let Some(clock) = &self.manual_clock {
             let now = clock.elapsed_ns.load(Ordering::SeqCst);
             for _ in 0..limit {
-                if !self
+                if self
                     .manual_timers
                     .first_key_value()
-                    .is_some_and(|((deadline, _), _)| *deadline <= now)
+                    .is_none_or(|((deadline, _), _)| *deadline > now)
                 {
                     break;
                 }

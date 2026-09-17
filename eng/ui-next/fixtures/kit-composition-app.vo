@@ -1,0 +1,124 @@
+package app
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/collection"
+)
+
+var appType = ui.Define("kitChecks.App")
+
+var noteType = ui.Define("kitChecks.Note")
+
+var choices = collection.New([]collection.Item{
+	{Key: "a", Label: "Alpha"}, {Key: "b", Label: "Beta"},
+})
+
+func View(initial string) ui.View {
+	return ui.Component(appType, func(scope *ui.Scope) ui.View {
+		tab := ui.String(scope, "tab", "a")
+		open := ui.Bool(scope, "menu", false)
+		combo := ui.String(scope, "combo", "")
+		selected := ui.State(scope, "selected", func() any {
+			return []string{}
+		})
+		expanded := ui.State(scope, "expanded", func() any {
+			return []string{}
+		})
+		version := ui.Int(scope, "version", 0)
+		reversed := ui.Bool(scope, "reversed", false)
+		stable := ui.Bool(scope, "stable", true)
+		items := []kit.AccordionItem{}
+		if stable.Get() {
+			items = append(items, kit.AccordionItem{
+				Key: "stable", Label: "Stable",
+				Content: ui.Component(noteType, func(scope *ui.Scope) ui.View {
+					text := ui.String(scope, "note", "")
+					return kit.Field("stable-note", "Note", "", ui.Element("input").Attr("value", text.Get()).On("input", func(event ui.Event) {
+						text.Set(event.Value)
+					}))
+				}),
+			})
+		}
+		for index := 0; index < 7; index++ {
+			key := fmt.Sprint(version.Get(), ":", index)
+			items = append(items, kit.AccordionItem{Key: key, Label: key, Content: ui.Text(key)})
+		}
+		if reversed.Get() {
+			for left, right := 0, len(items) - 1; left < right; left, right = left + 1, right - 1 {
+				items[left], items[right] = items[right], items[left]
+			}
+		}
+		return ui.Element("main", ui.Element("h1", ui.Text("Native controls")), kit.Tabs(kit.TabsProps{
+			ID: "tabs", Label: "Sections", Class: "custom-tabs",
+			Title: func(heading kit.TabHeading) ui.View {
+				return ui.Element("span", ui.Text("◇")).Attr("aria-hidden", "true").Attr("data-selected", fmt.Sprint(heading.Selected))
+			},
+			Items: []kit.TabItem{{Key: "a", Label: "Alpha"}, {Key: "b", Label: "Beta"}},
+			Value: func() string {
+				return tab.Get()
+			},
+			OnChange: func(key string) {
+				tab.Set(key)
+			},
+		}), kit.Menu(kit.MenuProps{
+			ID: "menu", Label: "Actions",
+			Trigger: func(open bool) ui.View {
+				return ui.Element("span", ui.Text("…")).Attr("aria-hidden", "true").Attr("data-open", fmt.Sprint(open))
+			},
+			Items: []kit.MenuItem{{Key: "a", Label: "Alpha"}, {Key: "b", Label: "Beta"}},
+			Open: func() bool {
+				return open.Get()
+			},
+			OnOpenChange: func(value bool) {
+				open.Set(value)
+			},
+			OnAction: func(string) {},
+		}), kit.Listbox(kit.ListboxProps{
+			ID: "list", Label: "List", Items: choices,
+			Selected: func() []string {
+				return selected.Get().([]string)
+			},
+			OnSelectionChange: func(value []string) {
+				selected.Update(func(any) any {
+					return value
+				})
+			},
+		}), kit.Combobox(kit.ComboboxProps{
+			ID: "combo", Label: "Suggestion",
+			Options: []kit.ComboboxOption{{Key: "a", Label: "Alpha"}, {Key: "b", Label: "Beta"}},
+			Value: func() string {
+				return combo.Get()
+			},
+			OnChange: func(value string) {
+				combo.Set(value)
+			},
+		}), kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				reversed.Set(!reversed.Get())
+			},
+		}, ui.Text("Reverse")), kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				version.Set(version.Get() + 1)
+			},
+		}, ui.Text("Replace other items")), kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				stable.Set(!stable.Get())
+				expanded.Update(func(any) any {
+					return []string{}
+				})
+			},
+		}, ui.Text("Toggle stable item")), kit.Accordion(kit.AccordionProps{
+			ID: "accordion", Items: items,
+			Expanded: func() []string {
+				return expanded.Get().([]string)
+			},
+			OnChange: func(value []string) {
+				expanded.Update(func(any) any {
+					return value
+				})
+			},
+		})).Class("vui")
+	})
+}

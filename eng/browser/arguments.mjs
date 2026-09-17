@@ -12,7 +12,7 @@ export function parseArguments(arguments_) {
     contentSiteSmoke: false,
     mediaApplicationSmoke: false,
     studioWorkbenchSmoke: false,
-    studioAotSmoke: false,
+    studioVmSmoke: false,
     studioCanarySmoke: false,
     studioBootstrapSmoke: false,
     studioLifecycleSmoke: false,
@@ -58,8 +58,8 @@ export function parseArguments(arguments_) {
       parsed.mediaApplicationSmoke = true;
     } else if (argument === "--studio-workbench-smoke") {
       parsed.studioWorkbenchSmoke = true;
-    } else if (argument === "--studio-aot-smoke") {
-      parsed.studioAotSmoke = true;
+    } else if (argument === "--studio-vm-smoke") {
+      parsed.studioVmSmoke = true;
     } else if (argument === "--studio-canary-smoke") {
       parsed.studioCanarySmoke = true;
     } else if (argument === "--studio-bootstrap-smoke") {
@@ -89,7 +89,7 @@ export function parseArguments(arguments_) {
     && (parsed.componentStateSmoke || parsed.uikitGallerySmoke
       || parsed.dataApplicationSmoke || parsed.contentSiteSmoke
       || parsed.mediaApplicationSmoke || parsed.studioWorkbenchSmoke
-      || parsed.studioAotSmoke || parsed.studioCanarySmoke || parsed.studioBootstrapSmoke || parsed.studioLifecycleSmoke);
+      || parsed.studioVmSmoke || parsed.studioCanarySmoke || parsed.studioBootstrapSmoke || parsed.studioLifecycleSmoke);
   const staticScenarios = [
     parsed.componentStateSmoke,
     parsed.uikitGallerySmoke,
@@ -97,19 +97,19 @@ export function parseArguments(arguments_) {
     parsed.contentSiteSmoke,
     parsed.mediaApplicationSmoke,
     parsed.studioWorkbenchSmoke,
-    parsed.studioAotSmoke,
+    parsed.studioVmSmoke,
     parsed.studioCanarySmoke,
     parsed.studioBootstrapSmoke,
     parsed.studioLifecycleSmoke,
   ].filter(Boolean).length;
   if (parsed.expectedArtifact && !parsed.baseURL) throw new Error("expected artifact requires a deployed base URL");
-  if (parsed.baseURL && !parsed.studioAotSmoke && !parsed.studioCanarySmoke) throw new Error("base URL requires a Studio journey");
+  if (parsed.baseURL && !parsed.studioVmSmoke && !parsed.studioCanarySmoke) throw new Error("base URL requires a Studio journey");
   if (staticScenarios > 1) {
     throw new Error("choose exactly one static browser smoke scenario");
   }
   if (!compiledSmoke && !staticSmoke) {
     throw new Error(
-      "usage: run-browser-smoke.mjs (--project <dir> --global <window-key> | --static-root <dir> (--component-state-smoke | --uikit-gallery-smoke | --data-application-smoke | --content-site-smoke | --media-application-smoke | --studio-workbench-smoke | --studio-aot-smoke | --studio-canary-smoke | --studio-bootstrap-smoke | --studio-lifecycle-smoke))",
+      "usage: run-browser-smoke.mjs (--project <dir> --global <window-key> | --static-root <dir> (--component-state-smoke | --uikit-gallery-smoke | --data-application-smoke | --content-site-smoke | --media-application-smoke | --studio-workbench-smoke | --studio-vm-smoke | --studio-canary-smoke | --studio-bootstrap-smoke | --studio-lifecycle-smoke))",
     );
   }
   if (!Number.isSafeInteger(parsed.timeout) || parsed.timeout < 1_000 || parsed.timeout > 120_000) {

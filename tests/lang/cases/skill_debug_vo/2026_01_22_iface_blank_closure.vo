@@ -248,9 +248,12 @@ func test12() {
 // Test 13: Interface slice with mixed types
 // ============================================================================
 func test13() {
-	items := []any{42, "hello", &Counter{value: 13}, func() int {
-		return 100
-	}}
+	items := []any{
+		42, "hello", &Counter{value: 13},
+		func() int {
+			return 100
+		},
+	}
 	// Check types
 	_, ok := items[0].(int)
 	assert(ok, "test13: [0] is int")

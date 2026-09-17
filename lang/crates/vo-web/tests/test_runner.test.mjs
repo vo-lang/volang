@@ -10,7 +10,7 @@ import { hostPlatform } from '../test_runner_host.mjs';
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-for (const runner of ['test_runner.mjs', 'aot_test_runner.mjs']) {
+for (const runner of ['test_runner.mjs']) {
   test(`${runner} drains a failing matrix JSON report through a pipe`, async () => {
     const temporary = await mkdtemp(join(tmpdir(), 'volang-runner-report-'));
     try {
@@ -154,4 +154,32 @@ test('host contracts reject missing identity, unknown capabilities and forged pr
   assert.equal(jobHost(job, unavailable).failure_kind, null);
   assert.equal(jobHost({ ...job, requires_host: ['symlink'] }, unavailable).failure_kind, 'portability');
   assert.equal(jobHost(job, {}).failure_kind, 'infrastructure');
+});
+
+test('explicit guest exits preserve zero success and report nonzero failure', async () => {
+  const root = resolve(project, '../../..');
+  const parent = join(root, 'target/ci');
+  await mkdir(parent, {recursive:true});
+  const temporary = await mkdtemp(join(parent, 'wasm-runner-exit-'));
+  try {
+    const jobs = [];
+    for (const code of [0, 7]) {
+      const path = join(temporary, `exit-${code}.vo`);
+      await writeFile(path, `package main\nimport "os"\nfunc main() { println("before exit"); os.Exit(${code}); println("unreachable") }\n`);
+      jobs.push({id:`exit-${code}`,case_id:`exit-${code}`,kind:'file',path,target:'wasm',backend:'vo-web',requires_host:[],resource_group:null,timeout_sec:5});
+    }
+    const plan = join(temporary, 'plan.json');
+    await writeFile(plan, JSON.stringify({schema:'volang.test-plan.v2',suite:'lang',host_platform:hostPlatform,jobs}));
+    const child = spawnSync(process.execPath, [join(project,'test_runner.mjs'),'--plan',plan,'--format','json','--jobs','1'], {
+      encoding:'utf8',maxBuffer:2*1024*1024,timeout:15000,
+    });
+    assert.ifError(child.error);
+    assert.equal(child.status,1,child.stderr);
+    const report = JSON.parse(child.stdout);
+    assert.equal(report.passed,1); assert.equal(report.failed,1);
+    assert.equal(report.jobs[0].status,'passed');
+    assert.equal(report.jobs[1].status,'failed');
+    assert.match(report.jobs[1].error,/guest exited with status 7/);
+    for(const job of report.jobs)assert.equal(job.stdout,'before exit\n');
+  } finally {await rm(temporary,{recursive:true,force:true});}
 });

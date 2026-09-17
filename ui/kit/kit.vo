@@ -1,6 +1,6 @@
 // Package kit is the official application-level component library for Volang
 // UI. Components are ordinary typed Volang functions, so they execute through
-// VM, JIT, native AOT, and Wasm AOT without an application JavaScript runtime.
+// VM, JIT, native AOT, and Wasm VM without an application JavaScript runtime.
 package kit
 
 import (

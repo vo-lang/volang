@@ -1,0 +1,10 @@
+package main
+
+import (
+	"github.com/vo-lang/studio/next/app"
+	"github.com/vo-lang/ui/next/develop"
+)
+
+func main() {
+	develop.RunWithData(app.App)
+}

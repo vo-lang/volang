@@ -422,9 +422,11 @@ func testMap() {
 }
 
 func testPool() {
-	p := &sync.Pool{New: func() any {
-		return "new-item"
-	}}
+	p := &sync.Pool{
+		New: func() any {
+			return "new-item"
+		},
+	}
 	// Get from empty pool calls New
 	v := p.Get()
 	s, _ := v.(string)

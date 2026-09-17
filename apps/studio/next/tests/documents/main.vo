@@ -1,0 +1,60 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"github.com/vo-lang/studio/next/app"
+	"github.com/vo-lang/studio/next/documentation"
+	"github.com/vo-lang/ui/next/document"
+	"github.com/vo-lang/ui/next/host"
+)
+
+func main() {
+	pages := documentation.Pages()
+	for _, page := range pages {
+		bytes, err := os.ReadFile("apps/studio/next/documentation/" + page.Asset)
+		if err != nil {
+			panic(err)
+		}
+		decoded, err := document.Decode(string(bytes))
+		if err != nil {
+			panic(page.ID + ": " + err.Error())
+		}
+		if decoded.HeadingID != page.HeadingID {
+			panic("chapter heading differs from catalog")
+		}
+		html := host.HTML(document.View(decoded))
+		if len(html) == 0 || strings.Contains(html, "<script") {
+			panic("chapter did not render semantic content")
+		}
+	}
+	search, err := os.ReadFile("apps/studio/next/documentation/" + documentation.SearchAsset())
+	if err != nil {
+		panic(err)
+	}
+	for _, query := range []string{"InspectProp", "  INSPECTPROP  ", "ui.InspectProp scope"} {
+		matches, err := app.SearchChapters(string(search), query)
+		if err != nil || !matches["first-steps"] || !matches["state"] {
+			panic("chapter body/code search lost a declared prop example")
+		}
+	}
+	all, err := app.SearchChapters(string(search), "")
+	if err != nil || len(all) != len(pages) {
+		panic("empty query lost a chapter")
+	}
+	missing, err := app.SearchChapters(string(search), "a-term-absent-from-this-guide-718503")
+	if err != nil || len(missing) != 0 {
+		panic("unknown query produced a chapter")
+	}
+	for _, invalid := range []string{
+		"", "{}", `{"version":1,"pages":[]}`,
+		strings.Replace(string(search), `"version":1`, `"version":2`, 1),
+		strings.Repeat("x", 2 * 1024 * 1024 + 1),
+	} {
+		if _, err := app.SearchChapters(invalid, "component"); err == nil {
+			panic("invalid search index was accepted")
+		}
+	}
+	fmt.Println("studio document contracts:", len(pages), "chapters and text search ok")
+}

@@ -1,0 +1,61 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/web/custom"
+)
+
+var customType = ui.Define("workbench.CustomElement")
+
+type counterModel struct {
+	Title string `json:"title"`
+	Value int `json:"value"`
+}
+
+type counterProperties struct {
+	Model counterModel `json:"model"`
+}
+
+type counterChange struct {
+	Value int `json:"value"`
+}
+
+func CustomElementExample() ui.View {
+	return ui.Component(customType, func(scope *ui.Scope) ui.View {
+		count := ui.Int(scope, "count", 0)
+		plum := ui.Bool(scope, "plum", false)
+		shown := ui.Bool(scope, "shown", true)
+		failure := ui.String(scope, "failure", "")
+		attributes := make(map[string]string)
+		title := "A little encouragement"
+		if plum.Get() {
+			attributes["accent"] = "plum"
+			title = "A different perspective"
+		}
+		component := ui.Fragment()
+		if shown.Get() {
+			component = custom.Element("example-counter", custom.Props{
+				Attributes: attributes,
+				Properties: counterProperties{Model: counterModel{Title: title, Value: count.Get()}},
+				OnEvent: func(event custom.Event) {
+					var change counterChange
+					if err := json.Unmarshal([]byte(event.Detail), &change); err != nil {
+						failure.Set(err.Error())
+						return
+					}
+					count.Set(change.Value)
+				},
+				OnError: func(message string) {
+					failure.Set(message)
+				},
+			}).Attr("data-custom-counter", "")
+		}
+		return ui.Element("section", ui.Element("h2", ui.Text("Good company")), ui.Element("p", ui.Text("Bring a familiar Web component along. Its own view, with shared application data.")), ui.Element("div", ui.Element("button", ui.Text("Change its look")).Attr("data-custom-look", "").On("click", func(ui.Event) {
+			plum.Set(!plum.Get())
+		}), ui.Element("button", ui.Text("Toggle component")).Attr("data-custom-toggle", "").On("click", func(ui.Event) {
+			shown.Set(!shown.Get())
+		})).Class("actions"), component, ui.Element("output", ui.Text(fmt.Sprint(count.Get(), " moments of encouragement"))).Attr("data-custom-count", ""), ui.Element("p", ui.Text(failure.Get())).Attr("role", "alert").Attr("data-custom-error", "")).Class("card wide")
+	})
+}

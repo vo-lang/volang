@@ -2,7 +2,7 @@
 
 The E2 public surface keeps ordinary application code in `ui`, `ui/kit`, and
 `ui/task`. The same source executes in VM and JIT development sessions and in
-Core Wasm AOT and Native AOT releases.
+Wasm VM and Native AOT releases.
 
 ## Environment and typed callbacks
 

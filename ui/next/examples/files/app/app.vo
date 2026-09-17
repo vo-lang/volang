@@ -1,0 +1,115 @@
+package app
+
+import (
+	"strconv"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/files"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/web"
+	"github.com/vo-lang/ui/next/web/upload"
+)
+
+var pageType = ui.Define("example.attachments.Page")
+
+type reader struct {
+	task *ui.Task
+	identity string
+}
+
+func View(initial string) ui.View {
+	return ui.Component(pageType, func(scope *ui.Scope) ui.View {
+		preview := ui.String(scope, "preview", "")
+		reading := ui.State(scope, "reader", func() any {
+			return &reader{}
+		}).Get().(*reader)
+		form := forms.Use(scope, "attachment-form", forms.Options{
+			Initial: forms.Values{"title": []string{"A note for the team"}}, Files: []string{"attachments"},
+			Validate: func(data forms.Data) forms.Errors {
+				errors := make(forms.Errors)
+				if strings.TrimSpace(data.Values.Get("title")) == "" {
+					errors["title"] = "Give this delivery a title."
+				}
+				if data.Files["attachments"].Len() == 0 {
+					errors["attachments"] = "Choose at least one file."
+				}
+				return errors
+			},
+		})
+		selection := form.Selection("attachments")
+		identity := ""
+		for _, file := range selection.Files() {
+			identity += file.Token() + ";"
+		}
+		ui.Effect(scope, "file-preview", func() func() {
+			preview.Set("")
+			if reading.identity != identity {
+				reading.task.Cancel()
+				reading.task = nil
+			}
+			return nil
+		}, identity)
+		title := kit.FormField(kit.FieldProps{
+			ID: "delivery-title", Label: "Delivery title", Error: form.Error("title"),
+		}, form.Input("title", ui.Element("input")))
+		picker := kit.FormField(kit.FieldProps{
+			ID: "attachments", Label: "Files",
+			Hint: "Up to 3 files, 2 MiB each. Text previews stay in this page.",
+			Error: form.Error("attachments"),
+		}, ui.Element("input").Attr("type", "file").Attr("name", "attachments").Attr("multiple", "true"))
+		rows := []ui.View{}
+		for _, file := range selection.Files() {
+			rows = append(rows, ui.Element("li", ui.Element("span", ui.Text(file.Name)), ui.Element("small", ui.Text(strconv.Itoa(file.Size) +
+				" bytes"))).Key(file.Token()))
+		}
+		status := form.Message()
+		if form.Submitting() {
+			status = "Sending your files…"
+		}
+		dirty := "Ready for a fresh delivery"
+		if form.Dirty() {
+			dirty = "You have an unsent delivery"
+		}
+		return ui.Element("main", ui.Element("header", ui.Element("p", ui.Text("VOLANG UI / FILES")).Class("eyebrow"), ui.Element("h1", ui.Text("Send a little context.")), ui.Element("p", ui.Text("A thought, a draft, the details that make a difference.")).Class("intro")), form.View(func(data forms.Data) ui.Request {
+			return upload.Multipart("./api/upload", data, web.HTTPOptions{
+				Headers: map[string]string{"accept": "application/json"},
+			}).WithTimeout(15000)
+		}, func(result ui.Result) forms.Outcome {
+			response, err := web.DecodeHTTP(result)
+			if err != nil {
+				return forms.Outcome{Errors: forms.Errors{"": err.Error()}}
+			}
+			if !response.OK() {
+				return forms.Outcome{
+					Errors: forms.Errors{
+						"attachments": "This delivery was declined. Choose another file and try again.",
+					},
+				}
+			}
+			return forms.Outcome{Message: "Delivery received. Thank you."}
+		}, title, form.FileInput("attachments", picker, files.Options{
+			ID: "attachments", MaxFiles: 3, MaxFileBytes: 2 * 1024 * 1024,
+		}), ui.Element("ul", rows...).Attr("id", "chosen-files"), ui.Element("div", ui.Element("button", ui.Text("Preview text")).Attr("type", "button").Attr("disabled", strconv.FormatBool(selection.Len() ==
+			0)).On("click", func(ui.Event) {
+			reading.task.Cancel()
+			current := form.Selection("attachments")
+			if current.Len() == 0 {
+				return
+			}
+			reading.identity = ""
+			for _, file := range current.Files() {
+				reading.identity += file.Token() + ";"
+			}
+			reading.task = ui.Start(scope, files.ReadText(current.Files()[0]), func(result ui.Result) {
+				if result.Error != "" {
+					preview.Set(result.Error)
+				} else {
+					preview.Set(result.Value)
+				}
+			})
+		}), ui.Element("button", ui.Text("Clear files")).Attr("type", "button").On("click", func(ui.Event) {
+			form.ChangeFiles("attachments", form.Selection("attachments").Clear())
+		})).Class("secondary-actions"), ui.Element("pre", ui.Text(preview.Get())).Attr("id", "file-preview").Attr("aria-label", "File preview"), ui.Element("p", ui.Text(form.Error(""))).Attr("role", "alert"), ui.Element("div", ui.Element("button", ui.Text("Send delivery")).Attr("type", "submit").Attr("disabled", strconv.FormatBool(form.Pending())).Class("primary"), ui.Element("button", ui.Text("Start over")).Attr("type", "reset")).Class("actions"), ui.Element("p", ui.Text(status)).Attr("id", "delivery-status").Attr("role", "status"), ui.Element("p", ui.Text(dirty)).Attr("id", "delivery-dirty").Class("footnote")).Attr("id", "delivery-form"), ui.Element("footer", ui.Text("Made with Volang UI. Your files are sent only when you choose Send delivery.")))
+	})
+}

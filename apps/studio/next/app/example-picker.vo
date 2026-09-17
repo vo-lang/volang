@@ -1,0 +1,49 @@
+package app
+
+import (
+	"github.com/vo-lang/studio/next/examples"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+func ExamplePicker(scope *ui.Scope, id string, draft *editorDraft, catalog []examples.Example, replace func(string), stop func()) ui.View {
+	selected := ui.String(scope, "example", catalog[0].ID)
+	options := make([]kit.ChoiceOption, 0, len(catalog))
+	current := catalog[0]
+	for _, item := range catalog {
+		options = append(options, kit.ChoiceOption{Value: item.ID, Label: item.Title})
+		if item.ID == selected.Get() {
+			current = item
+		}
+	}
+	choice := kit.Select(kit.SelectProps{
+		ID: id, Label: "Choose an example", Options: options,
+		Value: func() string {
+			return selected.Get()
+		},
+		OnChange: func(value string) {
+			selected.Set(value)
+		},
+	})
+	open := func() {
+		for _, item := range catalog {
+			if item.ID == selected.Get() {
+				replace(item.Source)
+				return
+			}
+		}
+	}
+	buttons := []ui.View{
+		kit.Button(kit.ButtonProps{Variant: "secondary", OnPress: open}, ui.Text("Open example")),
+	}
+	if draft.canRestore.Get() {
+		buttons = append(buttons, kit.Button(kit.ButtonProps{
+			Variant: "quiet",
+			OnPress: func() {
+				stop()
+				draft.Restore()
+			},
+		}, ui.Text("Restore previous draft")))
+	}
+	return ui.Element("section", choice, ui.Element("div", buttons...).Class("studio-actions"), ui.Element("p", ui.Text(current.Description))).Class("studio-example-picker")
+}

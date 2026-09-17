@@ -238,7 +238,7 @@ pub(super) fn validate(snapshot: &Snapshot, directory: &Path) -> Result<()> {
         .collect::<BTreeSet<_>>();
     if expected != actual
         || actual.len() != snapshot.inputs.len()
-        || snapshot.input_compiler.is_some() != !actual.is_empty()
+        || snapshot.input_compiler.is_some() == actual.is_empty()
     {
         bail!("incomplete or duplicate diagnostic input set");
     }

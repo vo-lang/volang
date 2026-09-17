@@ -19,14 +19,17 @@ jit = ["vo-engine/jit", "vo-ui-integration/jit"]
 desktop-ui = ["dep:vo-ui-shell-native"]
 
 [dependencies]
+lsp-server = "=0.7.9"
+lsp-types = "=0.97.0"
+url = "=2.5.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 toml = "0.8"
 vo-common-core = { path = "../../lang/crates/vo-common-core" }
 vo-common = { path = "../../lang/crates/vo-common" }
-vo-engine = { path = "../../lang/crates/vo-engine", default-features = false, features = ["aot-native", "aot-wasm"] }
-vo-ui-integration = { path = "../../lang/crates/vo-ui-integration", default-features = false, features = ["aot-native", "aot-wasm"] }
+vo-engine = { path = "../../lang/crates/vo-engine", default-features = false, features = ["aot-native"] }
+vo-ui-integration = { path = "../../lang/crates/vo-ui-integration", default-features = false, features = ["aot-native"] }
 vo-module = { path = "../../lang/crates/vo-module" }
 vo-release = { path = "../../lang/crates/vo-release" }
 vo-schema-compiler = { path = "../../lang/crates/vo-schema-compiler" }

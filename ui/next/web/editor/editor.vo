@@ -1,0 +1,47 @@
+// Package editor progressively enhances a native textarea with a source editor.
+// The control retains its value, form binding, Ref, and server-rendered fallback.
+package editor
+
+import (
+	"encoding/json"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type Options struct {
+	ID string
+	// Language is "vo" (the default) or "plain".
+	Language string
+	// A failed optional enhancement leaves the native control usable.
+	OnError func(string)
+}
+
+type payload struct {
+	Version int `json:"version"`
+	InputID string `json:"inputID"`
+	Language string `json:"language"`
+}
+
+// Enhance accepts a native textarea directly. Attach shared keyboard commands
+// to the returned wrapper with Capture so both editing surfaces receive them.
+// Changing ID requires replacing the wrapper's key together with the control.
+func Enhance(control ui.View, options Options) ui.View {
+	if options.ID == "" || len(options.ID) > 1024 || strings.ContainsAny(options.ID, " \t\n\r\f") {
+		panic("editor: require a nonempty control ID without whitespace, at most 1024 bytes")
+	}
+	if options.Language == "" {
+		options.Language = "vo"
+	}
+	if options.Language != "vo" && options.Language != "plain" {
+		panic("editor: language must be vo or plain")
+	}
+	bytes, err := json.Marshal(payload{Version: 1, InputID: options.ID, Language: options.Language})
+	if err != nil {
+		panic(err)
+	}
+	return ui.Element("div", control.Attr("id", options.ID), ui.Widget("code-editor", string(bytes), func(result ui.Result) {
+		if result.Error != "" && options.OnError != nil {
+			options.OnError(result.Error)
+		}
+	})).Class("vui-code-editor")
+}

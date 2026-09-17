@@ -1,0 +1,60 @@
+package ui
+
+import (
+	"encoding/json"
+	"unicode/utf8"
+)
+
+// TextSelection uses zero-based UTF-16 offsets, matching native Web text
+// controls and source-editor positions. End is exclusive. An empty direction
+// means forward; backward preserves which end the next keyboard action moves.
+type TextSelection struct {
+	Start int `json:"start"`
+	End int `json:"end"`
+	Direction string `json:"direction"`
+}
+
+type textSelectionRequest struct {
+	Selection TextSelection `json:"selection"`
+	Source string `json:"source"`
+}
+
+// SelectTextIfUnchanged selects and focuses an HTML textarea or text input after
+// the next commit, only while its value still equals source. Newer user input,
+// active composition, disabled controls, and missing bindings leave focus and
+// selection intact. True means queued, with the same lifetime rules as Focus.
+func (ref *ElementRef) SelectTextIfUnchanged(source string, selection TextSelection) bool {
+	if !ref.live() {
+		return false
+	}
+	if selection.Start < 0 || selection.End < selection.Start || selection.End > len(source) {
+		panic("ui: text selection requires an ordered nonnegative range within the source")
+	}
+	if !utf8.ValidString(source) {
+		panic("ui: text selection requires UTF-8 source")
+	}
+	length := 0
+	for _, char := range source {
+		if char > 0xffff {
+			if selection.Start == length + 1 || selection.End == length + 1 {
+				panic("ui: text selection splits a Unicode character")
+			}
+			length++
+		}
+		length++
+	}
+	if selection.End > length {
+		panic("ui: text selection range exceeds the UTF-16 source length")
+	}
+	if selection.Direction == "" {
+		selection.Direction = "forward"
+	}
+	if selection.Direction != "forward" && selection.Direction != "backward" {
+		panic("ui: text selection direction must be forward or backward")
+	}
+	bytes, err := json.Marshal(textSelectionRequest{Selection: selection, Source: source})
+	if err != nil {
+		panic(err)
+	}
+	return ref.requestValue("textSelection", string(bytes))
+}

@@ -1,0 +1,51 @@
+package navigation
+
+import (
+	"encoding/json"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type navigationCommit struct {
+	Observer string `json:"observer"`
+	Revision int `json:"revision"`
+	URL string `json:"url"`
+}
+
+// Restore owns window scroll restoration until its declaring scope is removed.
+// Declare one viewport owner per window, beside the root router. focusID names
+// an optional focusable main content element, used after non-initial navigation.
+func Restore(scope *ui.Scope, key string, router *Router, focusID string) {
+	if router == nil || !router.scope.Contains(scope) {
+		panic("navigation: restoration must belong to its router's scope tree")
+	}
+	latest := ui.String(scope, key + ":entry", "")
+	ui.Watch(scope, key + ":watch", ui.Request{Service: "web.navigation", Value: focusID}, func(result ui.Result) {
+		if result.Error != "" {
+			router.error.Set(result.Error)
+			return
+		}
+		latest.Set(result.Value)
+	})
+	value := latest.Get()
+	location := router.Current()
+	ui.Effect(scope, key + ":commit", func() func() {
+		if value == "" {
+			return nil
+		}
+		var commit navigationCommit
+		if err := json.Unmarshal([]byte(value), &commit); err != nil {
+			panic(err)
+		}
+		if commit.URL != location.URL {
+			return nil
+		}
+		task := ui.Start(scope, ui.Request{Service: "web.navigation-commit", Value: value}, func(result ui.Result) {
+			if result.Error != "" {
+				router.error.Set(result.Error)
+			}
+		})
+		return func() {
+			task.Cancel()
+		}
+	}, value, location.URL)
+}

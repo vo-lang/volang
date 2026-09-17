@@ -215,7 +215,9 @@ fn compile_entries(module: &VoModule) -> (JitCompiler, Vec<Entry>) {
             .unwrap();
         let staged = jit.stage_function(id, "sequence continuation").unwrap();
         let (code, _) = jit.publish_function_artifact(staged).unwrap();
-        entries.push(Entry::Continuation(unsafe { std::mem::transmute(code) }));
+        entries.push(Entry::Continuation(unsafe {
+            std::mem::transmute::<*const u8, NativeJitFunc>(code)
+        }));
     }
     for tier in [JitTier::Baseline, JitTier::Optimizing] {
         assert!(

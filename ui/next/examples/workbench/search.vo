@@ -1,0 +1,66 @@
+package main
+
+import (
+	"fmt"
+	"net/url"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/data"
+	"github.com/vo-lang/ui/next/web"
+)
+
+var searchType = ui.Define("workbench.Search")
+
+var searchResultType = ui.Define("workbench.SearchResult")
+
+func SearchResult(client *data.Client, request ui.Request, mirror bool) ui.View {
+	name := "primary"
+	if mirror {
+		name = "mirror"
+	}
+	return ui.Component(searchResultType, func(scope *ui.Scope) ui.View {
+		result := data.Use(scope, "query", client, request)
+		text := result.Value
+		if result.Fetching && !result.HasValue {
+			text = "Searching…"
+		}
+		if result.Error != "" {
+			text = "Could not load: " + result.Error
+		}
+		if mirror {
+			return ui.Element("div", ui.Element("small", ui.Text("Another view of the same result")), ui.Element("p", ui.Text(text)).Attr("data-remote-mirror", "").Attr("data-fetching", fmt.Sprint(result.Fetching)))
+		}
+		return ui.Element("output", ui.Text(text)).Attr("data-remote-result", "").Attr("data-fetching", fmt.Sprint(result.Fetching)).Attr("aria-live", "polite")
+	}).Key(name)
+}
+
+func Search(initial []data.InitialValue) ui.View {
+	return ui.Component(searchType, func(scope *ui.Scope) ui.View {
+		client := data.NewClient(scope, "client", data.Options{FreshMilliseconds: 30000, Initial: initial})
+		query := ui.String(scope, "query", "welcome")
+		visible := ui.Bool(scope, "visible", true)
+		mirror := ui.Bool(scope, "mirror", true)
+		request := web.FetchText("/api/search?q=" + url.QueryEscape(query.Get())).WithTimeout(300)
+		input := ui.Element("input").Attr("id", "remote-search").Attr("value", query.Get()).On("input", func(event ui.Event) {
+			query.Set(event.Value)
+		})
+		retry := ui.Element("button", ui.Text("Try again")).Attr("type", "button").Attr("data-retry", "").On("click", func(ui.Event) {
+			client.Invalidate(request)
+		})
+		results := []ui.View{}
+		if visible.Get() {
+			results = append(results, SearchResult(client, request, false))
+			if mirror.Get() {
+				results = append(results, SearchResult(client, request, true))
+			}
+		} else {
+			results = append(results, ui.Element("p", ui.Text("Results are hidden.")))
+		}
+		toggleResults := ui.Element("button", ui.Text("Toggle results")).Attr("type", "button").Attr("data-toggle-results", "").On("click", func(ui.Event) {
+			visible.Set(!visible.Get())
+		})
+		toggleMirror := ui.Element("button", ui.Text("Toggle shared view")).Attr("type", "button").Attr("data-toggle-mirror", "").On("click", func(ui.Event) {
+			mirror.Set(!mirror.Get())
+		})
+		return ui.Element("section", ui.Element("h2", ui.Text("Search as you type")), ui.Element("label", ui.Text("Search query")).Attr("for", "remote-search"), input, ui.Element("div", results...), ui.Element("div", retry, toggleMirror, toggleResults).Class("actions")).Class("card")
+	})
+}

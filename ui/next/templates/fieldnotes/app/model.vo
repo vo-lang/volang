@@ -1,0 +1,164 @@
+package app
+
+import (
+	"net/url"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/web"
+)
+
+type Note struct {
+	ID string `json:"id"`
+	Title string `json:"title"`
+	Author string `json:"author"`
+	Topic string `json:"topic"`
+	Minutes int `json:"minutes"`
+	Summary string `json:"summary"`
+	Body string `json:"body"`
+}
+
+type NotePage struct {
+	Notes []Note `json:"notes"`
+	Total int `json:"total"`
+	Page int `json:"page"`
+	Pages int `json:"pages"`
+}
+
+type Preferences struct {
+	Name string `json:"name"`
+	Density string `json:"density"`
+	Digest bool `json:"digest"`
+	Frequency string `json:"frequency"`
+	Topics []string `json:"topics"`
+}
+
+type SavedPreferences struct {
+	Message string `json:"message"`
+	Errors forms.Errors `json:"errors"`
+}
+
+type Startup struct {
+	Submission *forms.Submission
+	MissingNote string
+	Location string
+	BasePath string
+	Data string
+}
+
+type Filter struct {
+	Search string
+	Topic string
+	Sort string
+	Page int
+}
+
+func Topics() []string {
+	return []string{"Design", "Engineering", "Writing", "Research"}
+}
+
+func DefaultPreferences() Preferences {
+	return Preferences{
+		Name: "My collection", Density: "comfortable", Frequency: "weekly",
+		Topics: []string{"Design", "Writing"},
+	}
+}
+
+func ValidTopic(value string) bool {
+	for _, topic := range Topics() {
+		if topic == value {
+			return true
+		}
+	}
+	return false
+}
+
+func ReadFilter(query url.Values) Filter {
+	result := Filter{
+		Search: strings.TrimSpace(query.Get("q")), Topic: query.Get("topic"), Sort: query.Get("sort"),
+		Page: 1,
+	}
+	// Bound search by Unicode characters without splitting a UTF-8 sequence.
+	count := 0
+	for index := range result.Search {
+		if count == 80 {
+			result.Search = result.Search[:index]
+			break
+		}
+		count++
+	}
+	if !ValidTopic(result.Topic) {
+		result.Topic = ""
+	}
+	if result.Sort != "title" && result.Sort != "reading" {
+		result.Sort = "recent"
+	}
+	page, err := strconv.Atoi(query.Get("page"))
+	if err == nil && page >= 1 && page <= 1000 {
+		result.Page = page
+	}
+	return result
+}
+
+func (filter Filter) Query() string {
+	values := url.Values{}
+	if filter.Search != "" {
+		values.Set("q", filter.Search)
+	}
+	if filter.Topic != "" {
+		values.Set("topic", filter.Topic)
+	}
+	if filter.Sort != "recent" && filter.Sort != "" {
+		values.Set("sort", filter.Sort)
+	}
+	if filter.Page > 1 {
+		values.Set("page", strconv.Itoa(filter.Page))
+	}
+	query := values.Encode()
+	if query != "" {
+		return "?" + query
+	}
+	return ""
+}
+
+func NotesRequest(base string, filter Filter) ui.Request {
+	return web.FetchText(base + "api/notes" + filter.Query()).WithTimeout(5000)
+}
+
+func NoteRequest(base string, id string) ui.Request {
+	return web.FetchText(base + "api/notes/" + url.PathEscape(id)).WithTimeout(5000)
+}
+
+func PreferencesRequest(base string) ui.Request {
+	return web.FetchText(base + "api/preferences").WithTimeout(5000)
+}
+
+func ValidatePreferences(value Preferences) forms.Errors {
+	errors := forms.Errors{}
+	name := strings.TrimSpace(value.Name)
+	if utf8.RuneCountInString(name) < 3 || utf8.RuneCountInString(name) > 40 {
+		errors["name"] = "Use a collection name between 3 and 40 characters."
+	}
+	if value.Density != "comfortable" && value.Density != "compact" {
+		errors["density"] = "Choose a reading density."
+	}
+	if value.Frequency != "weekly" && value.Frequency != "monthly" {
+		errors["frequency"] = "Choose weekly or monthly."
+	}
+	if len(value.Topics) > 4 {
+		errors["topics"] = "Choose topics from the list."
+	}
+	seen := map[string]bool{}
+	for _, topic := range value.Topics {
+		if !ValidTopic(topic) || seen[topic] {
+			errors["topics"] = "Choose topics from the list."
+		}
+		seen[topic] = true
+	}
+	if value.Digest && len(value.Topics) == 0 {
+		errors["topics"] = "Choose at least one topic for your digest."
+	}
+	return errors
+}

@@ -1901,9 +1901,9 @@ func main() {
     )));
 }
 
-#[cfg(all(feature = "aot-native", feature = "aot-wasm"))]
+#[cfg(feature = "aot-native")]
 #[test]
-fn official_ui_and_system_externs_lower_to_native_and_core_wasm_aot() {
+fn official_ui_and_system_externs_lower_to_native_aot() {
     let workspace = UiTestWorkspace::create_with_main(
         r#"
 package main
@@ -1926,13 +1926,6 @@ func main() {
 "#,
     );
     let compiled = workspace.compile();
-    let target = vo_engine::TargetSpec::parse(vo_engine::WASM32_UNKNOWN_UNKNOWN).unwrap();
-    let image = engine().compile_wasm_aot_image(&compiled, &target).unwrap();
-    assert!(image.bytes.starts_with(b"\0asm"));
-    assert_eq!(
-        image.manifest.target_triple,
-        vo_engine::WASM32_UNKNOWN_UNKNOWN
-    );
     let native_target = vo_engine::TargetSpec::host().unwrap();
     let object = engine()
         .compile_native_aot_object(&compiled, &native_target, false)
@@ -1941,9 +1934,9 @@ func main() {
     assert_eq!(object.target_triple, native_target.triple());
 }
 
-#[cfg(all(feature = "aot-native", feature = "aot-wasm"))]
+#[cfg(feature = "aot-native")]
 #[test]
-fn component_bundle_evaluators_lower_to_native_and_core_wasm_aot() {
+fn component_bundle_evaluators_lower_to_native_aot() {
     let workspace = UiTestWorkspace::create_with_main(
         r#"
 package main
@@ -1966,16 +1959,6 @@ func main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }
         .artifact(vo_ui_artifact::COMPONENT_BUNDLE_ARTIFACT_NAME)
         .is_some());
 
-    let wasm_target = vo_engine::TargetSpec::parse(vo_engine::WASM32_UNKNOWN_UNKNOWN).unwrap();
-    let image = engine()
-        .compile_wasm_aot_image(&compiled, &wasm_target)
-        .unwrap();
-    let artifacts = vo_wasm_aot::decode_wasm_aot_artifacts(&image.bytes).unwrap();
-    assert!(artifacts.iter().any(|artifact| {
-        artifact.name == vo_ui_artifact::COMPONENT_BUNDLE_ARTIFACT_NAME
-            && artifact.version == vo_ui_artifact::COMPONENT_BUNDLE_ARTIFACT_VERSION
-    }));
-
     let native_target = vo_engine::TargetSpec::host().unwrap();
     let object = engine()
         .compile_native_aot_object(&compiled, &native_target, false)
@@ -1984,9 +1967,9 @@ func main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }
     assert!(object.functions.len() >= compiled.module.module().functions.len());
 }
 
-#[cfg(all(feature = "aot-native", feature = "aot-wasm"))]
+#[cfg(feature = "aot-native")]
 #[test]
-fn component_dynamic_scopes_lower_to_native_and_core_wasm_aot() {
+fn component_dynamic_scopes_lower_to_native_aot() {
     let workspace = UiTestWorkspace::create_with_main(
         r#"
 package main
@@ -2014,12 +1997,6 @@ func main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }
         }));
     }
 
-    let wasm_target = vo_engine::TargetSpec::parse(vo_engine::WASM32_UNKNOWN_UNKNOWN).unwrap();
-    let image = engine()
-        .compile_wasm_aot_image(&compiled, &wasm_target)
-        .unwrap();
-    assert!(image.bytes.starts_with(b"\0asm"));
-
     let native_target = vo_engine::TargetSpec::host().unwrap();
     let object = engine()
         .compile_native_aot_object(&compiled, &native_target, false)
@@ -2028,9 +2005,9 @@ func main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }
     assert!(object.functions.len() >= compiled.module.module().functions.len());
 }
 
-#[cfg(all(feature = "aot-native", feature = "aot-wasm"))]
+#[cfg(feature = "aot-native")]
 #[test]
-fn official_motion_and_gesture_packages_lower_to_native_and_core_wasm_aot() {
+fn official_motion_and_gesture_packages_lower_to_native_aot() {
     let workspace = UiTestWorkspace::create_with_main(
         r#"
 package main
@@ -2056,11 +2033,6 @@ func main() {
 "#,
     );
     let compiled = workspace.compile();
-    let wasm_target = vo_engine::TargetSpec::parse(vo_engine::WASM32_UNKNOWN_UNKNOWN).unwrap();
-    let image = engine()
-        .compile_wasm_aot_image(&compiled, &wasm_target)
-        .unwrap();
-    assert!(image.bytes.starts_with(b"\0asm"));
     let native_target = vo_engine::TargetSpec::host().unwrap();
     let object = engine()
         .compile_native_aot_object(&compiled, &native_target, false)
@@ -2541,7 +2513,7 @@ func main() {
     )));
 }
 
-#[cfg(all(feature = "aot-native", feature = "aot-wasm"))]
+#[cfg(feature = "aot-native")]
 #[test]
 fn official_data_application_compiles_and_bounds_vm_jit_materialization() {
     let workspace = UiTestWorkspace::create_with_main(include_str!(
@@ -2570,11 +2542,6 @@ fn official_data_application_compiles_and_bounds_vm_jit_materialization() {
             if property.id == vo_ui_core::PropertyId::ROLE
                 && property.value == vo_ui_core::Value::Text("grid".to_string())
     )));
-    let wasm_target = vo_engine::TargetSpec::parse(vo_engine::WASM32_UNKNOWN_UNKNOWN).unwrap();
-    let wasm = engine()
-        .compile_wasm_aot_image(&compiled, &wasm_target)
-        .unwrap();
-    assert!(wasm.bytes.starts_with(b"\0asm"));
     let native_target = vo_engine::TargetSpec::host().unwrap();
     let native = engine()
         .compile_native_aot_object(&compiled, &native_target, false)
@@ -2636,9 +2603,8 @@ fn official_e5_web_and_desktop_models_are_vm_jit_equivalent() {
     }
 }
 
-#[cfg(all(feature = "aot-native", feature = "aot-wasm"))]
 #[test]
-fn browser_aot_rejects_server_authority() {
+fn browser_target_rejects_server_authority() {
     let workspace = UiTestWorkspace::create_with_main(
         r#"
 package main
@@ -2649,22 +2615,24 @@ func main() { _ = server.NewAuthority(nil, nil, nil) }
     let compiled = workspace.compile();
     let target = vo_engine::TargetSpec::parse(vo_engine::WASM32_UNKNOWN_UNKNOWN).unwrap();
     let error = engine()
-        .compile_wasm_aot_image(&compiled, &target)
+        .verify_compile_output_for_target(&compiled, &target)
         .unwrap_err();
     assert!(
         error.to_string().contains("web/server authority"),
         "{error}"
     );
-    let native_target = vo_engine::TargetSpec::host().unwrap();
-    let native = engine()
-        .compile_native_aot_object(&compiled, &native_target, false)
-        .unwrap();
-    assert!(!native.bytes.is_empty());
+    #[cfg(feature = "aot-native")]
+    {
+        let native_target = vo_engine::TargetSpec::host().unwrap();
+        let native = engine()
+            .compile_native_aot_object(&compiled, &native_target, false)
+            .unwrap();
+        assert!(!native.bytes.is_empty());
+    }
 }
 
-#[cfg(feature = "aot-wasm")]
 #[test]
-fn official_content_site_renders_distinct_useful_routes_and_web_aot() {
+fn official_content_site_renders_distinct_useful_routes_and_web_target() {
     let workspace = UiTestWorkspace::create_with_main(include_str!(
         "../../../../ui/showcases/content-site/main.vo"
     ));
@@ -2687,7 +2655,7 @@ fn official_content_site_renders_distinct_useful_routes_and_web_aot() {
     let article = render_initial_ui_document_at(
         compiled.clone(),
         RunMode::Jit,
-        "/articles/wasm-aot",
+        "/articles/wasm-vm",
         &metadata,
         vo_ui_web::SsrLimits::default(),
     )
@@ -2695,18 +2663,19 @@ fn official_content_site_renders_distinct_useful_routes_and_web_aot() {
     assert!(home.html.contains("zero JavaScript application code"));
     assert!(article
         .html
-        .contains("Wasm AOT without a JavaScript framework"));
+        .contains("Wasm VM without a JavaScript framework"));
     assert!(!article.html.contains("zero JavaScript application code"));
     assert!(!article.activation.is_empty());
     let chunks = vo_ui_web::stream_document(&article, 1024).unwrap();
     assert!(chunks.len() > 1);
     assert_eq!(chunks.concat(), article.html);
     let target = vo_engine::TargetSpec::parse(vo_engine::WASM32_UNKNOWN_UNKNOWN).unwrap();
-    let image = engine().compile_wasm_aot_image(&compiled, &target).unwrap();
-    assert!(image.bytes.starts_with(b"\0asm"));
+    engine()
+        .verify_compile_output_for_target(&compiled, &target)
+        .unwrap();
 }
 
-#[cfg(all(feature = "aot-native", feature = "aot-wasm"))]
+#[cfg(feature = "aot-native")]
 #[test]
 fn official_advanced_packs_are_vm_jit_and_aot_equivalent() {
     let workspace = UiTestWorkspace::create_with_main(include_str!(
@@ -2728,12 +2697,6 @@ fn official_advanced_packs_are_vm_jit_and_aot_equivalent() {
         vo_ui_protocol::Mutation::SetProperty { property, .. }
             if property.id == vo_ui_core::PropertyId::GRAPHICS_PROGRAM
     )));
-    let web_target = vo_engine::TargetSpec::parse(vo_engine::WASM32_UNKNOWN_UNKNOWN).unwrap();
-    assert!(!engine()
-        .compile_wasm_aot_image(&compiled, &web_target)
-        .unwrap()
-        .bytes
-        .is_empty());
     let native_target = vo_engine::TargetSpec::host().unwrap();
     assert!(!engine()
         .compile_native_aot_object(&compiled, &native_target, false)
@@ -2742,7 +2705,6 @@ fn official_advanced_packs_are_vm_jit_and_aot_equivalent() {
         .is_empty());
 }
 
-#[cfg(feature = "aot-wasm")]
 #[test]
 fn official_media_and_studio_showcases_use_public_advanced_packs() {
     for (name, source) in [
@@ -2761,12 +2723,6 @@ fn official_media_and_studio_showcases_use_public_advanced_packs() {
         let jit = ui_initial_batch_for(compiled.module.clone(), RunMode::Jit);
         assert_eq!(vm.mutations, jit.mutations, "{name} VM/JIT tree");
         assert!(vm.mutations.len() > 20, "{name} should render useful UI");
-        let web_target = vo_engine::TargetSpec::parse(vo_engine::WASM32_UNKNOWN_UNKNOWN).unwrap();
-        assert!(!engine()
-            .compile_wasm_aot_image(&compiled, &web_target)
-            .unwrap()
-            .bytes
-            .is_empty());
     }
 }
 
@@ -2788,7 +2744,7 @@ fn official_multi_window_editor_preserves_shared_document_and_native_aot() {
         .is_empty());
 }
 
-#[cfg(all(feature = "aot-native", feature = "aot-wasm"))]
+#[cfg(feature = "aot-native")]
 #[test]
 fn official_ui_testing_and_observability_are_vm_jit_and_aot_equivalent() {
     let workspace = UiTestWorkspace::create_with_main(include_str!(
@@ -2803,12 +2759,6 @@ fn official_ui_testing_and_observability_are_vm_jit_and_aot_equivalent() {
         vo_ui_protocol::Mutation::SetText { text, .. }
             if text == "tooling-resilience: ok"
     )));
-    let web_target = vo_engine::TargetSpec::parse(vo_engine::WASM32_UNKNOWN_UNKNOWN).unwrap();
-    assert!(!engine()
-        .compile_wasm_aot_image(&compiled, &web_target)
-        .unwrap()
-        .bytes
-        .is_empty());
     let native_target = vo_engine::TargetSpec::host().unwrap();
     assert!(!engine()
         .compile_native_aot_object(&compiled, &native_target, false)

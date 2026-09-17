@@ -268,8 +268,8 @@ mod tests {
                 }
             }
             if cycle > 0 {
-                for key in 0..4 {
-                    assert_eq!(hits[key], cycle);
+                for &hit in hits.iter().take(4) {
+                    assert_eq!(hit, cycle);
                 }
             }
         }

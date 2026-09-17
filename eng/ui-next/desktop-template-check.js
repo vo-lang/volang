@@ -1,0 +1,69 @@
+// Real system WebView DOM/media contracts. No physical input or paint claim.
+const template = document.currentScript.dataset.template;
+(async () => {
+  let host;
+  const wait = async predicate => {
+    const deadline = performance.now() + 20_000;
+    while (!predicate()) {
+      if (performance.now() >= deadline) throw new Error(`Desktop ${template} condition timed out`);
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  };
+  const button = name => [...document.querySelectorAll('button')].find(value => value.textContent.trim() === name);
+  const require = (condition, message) => { if (!condition) throw new Error(message); };
+  try {
+    await wait(() => host = window.__volangDesktop);
+    require(await host.ready, 'Application closed before becoming ready');
+    require(document.querySelector('#root').textContent.trim(), 'Empty application');
+    if (template === 'canvas') {
+      await wait(() => document.querySelector('canvas'));
+      const canvas = document.querySelector('canvas');
+      const pixels = canvas.toDataURL();
+      require(canvas.width === 96 && canvas.height === 64, 'Incorrect canvas backing size');
+      button('Change palette').click();
+      await wait(() => canvas.toDataURL() !== pixels);
+      require(canvas === document.querySelector('canvas'), 'Palette update replaced canvas');
+      button('Show or hide').click();
+      await wait(() => !document.querySelector('canvas'));
+      require(canvas.width === 0 && canvas.height === 0, 'Canvas backing was retained');
+    } else if (template === 'plot') {
+      require(!document.querySelector('canvas'), 'Chart mounted before it was requested');
+      button('Show chart').click();
+      await wait(() => document.querySelector('canvas'));
+      const canvas = document.querySelector('canvas');
+      button('Change week').click();
+      await wait(() => [...document.querySelectorAll('td')].some(cell => cell.textContent === '20 cm'));
+      require(canvas === document.querySelector('canvas'), 'Data update replaced chart');
+      button('Hide chart').click();
+      await wait(() => !document.querySelector('canvas'));
+      require(!document.querySelector('style[data-ui-plot]'), 'Removed chart retained stylesheet');
+    } else if (template === 'listening') {
+      const audio = document.querySelector('audio');
+      require(audio, 'Missing native audio');
+      audio.preload = 'metadata'; audio.load();
+      await wait(() => audio.readyState >= 1 || audio.error);
+      require(!audio.error && audio.duration > 6, 'Native media metadata failed');
+      audio.currentTime = 5;
+      await wait(() => !audio.seeking && audio.currentTime >= 5);
+      button('Put the player away').click();
+      await wait(() => !document.querySelector('audio'));
+      require(audio.paused, 'Removed media retained playback');
+      button('Bring the player back').click();
+      await wait(() => document.querySelector('audio'));
+      require(audio !== document.querySelector('audio'), 'Media remount retained old instance');
+    } else if (template === 'variable-list') {
+      await wait(() => document.querySelectorAll('[data-row]').length > 0);
+      const list = document.querySelector('#variable-list');
+      button('Jump ahead').click();
+      await wait(() => list.scrollTop > 4000);
+      require(document.querySelectorAll('[data-row]').length < 40, 'List mounted its whole data set');
+      button('Five notes').click();
+      await wait(() => document.querySelector('[data-range]').textContent.includes('of 5'));
+      require(document.querySelectorAll('[data-row]').length <= 5, 'Shrunk list retained excess rows');
+    }
+    host.close();
+  } catch (error) {
+    if (host) host.fail(String(error));
+    else throw error;
+  }
+})();

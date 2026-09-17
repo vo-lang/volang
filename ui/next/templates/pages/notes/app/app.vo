@@ -1,0 +1,36 @@
+package app
+
+import (
+	"encoding/json"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+)
+
+var appType = ui.Define("pages.Notebook")
+
+const heading = "A little room to write."
+
+type startup struct {
+	Note string `json:"note"`
+	Home string `json:"home"`
+}
+
+func View(initial string) ui.View {
+	data := startup{Home: "../"}
+	if initial != "" {
+		if err := json.Unmarshal([]byte(initial), &data); err != nil {
+			panic(err)
+		}
+	}
+	return ui.Component(appType, func(scope *ui.Scope) ui.View {
+		form := forms.Use(scope, "notebook", forms.Options{
+			Initial: forms.Values{"note": []string{data.Note}},
+		})
+		saved := ui.String(scope, "saved", "")
+		return ui.Element("main", ui.DataBlock("application/json", map[string]string{
+			"name": heading, "saved": saved.Get(),
+		}).Attr("id", "page-data"), ui.Element("p", ui.Text("SMALL PAGES / NOTEBOOK")).Class("eyebrow"), ui.Element("h1", ui.Text(heading)), ui.Element("p", ui.Text("Capture a passing thought. Try it out, change your mind, begin again.")).Class("intro"), ui.Element("section", ui.Element("label", ui.Text("Your note")).Attr("for", "note"), form.Input("note", ui.Element("textarea").Attr("id", "note").Attr("rows", "7")), ui.Element("p", ui.Text("Your draft stays here while this page is open.")).Class("hint"), ui.Element("button", ui.Text("Keep this thought")).Attr("type", "button").On("click", func(event ui.Event) {
+			saved.Set(form.Values().Get("note"))
+		}), ui.Element("output", ui.Text(saved.Get())).Attr("data-saved", "").Attr("aria-live", "polite")).Class("page-card"), ui.Element("nav", ui.Element("a", ui.Text("Back to the beginning")).Attr("href", data.Home))).Class("vui", "small-pages")
+	})
+}

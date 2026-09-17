@@ -12,16 +12,14 @@ publish = false
 [features]
 execution-profile = ["vo-vm/execution-profile"]
 compiler-profile = ["vo-common/compiler-profile", "vo-analysis/compiler-profile", "vo-codegen/compiler-profile"]
-default = ["jit", "aot-native", "aot-wasm"]
+default = ["jit", "aot-native"]
 aot-native = ["dep:vo-jit"]
-aot-wasm = ["dep:vo-wasm-aot"]
 jit = ["vo-vm/jit"]
 
 [dependencies]
 vo-stdlib = { path = "../vo-stdlib", features = ["std"] }
 vo-jit = { path = "../vo-jit", optional = true }
 vo-target = { workspace = true }
-vo-wasm-aot = { path = "../vo-wasm-aot", optional = true }
 vo-vm = { path = "../vo-vm" }
 vo-runtime = { path = "../vo-runtime" }
 vo-common = { path = "../vo-common" }

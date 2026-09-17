@@ -1,0 +1,79 @@
+package app
+
+import (
+	"encoding/json"
+	"github.com/vo-lang/studio/next/examples"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/navigation"
+)
+
+var playgroundType = ui.Define("studio.Playground")
+
+// Execution state shares its task's lifetime; only the editor draft survives
+// development reload. A cancelled task cannot leave a restored busy indicator.
+type consoleExecution struct {
+	task *ui.Task
+	output string
+	source string
+	diagnostics sourceDiagnostics
+}
+
+type consoleResult struct {
+	Output string `json:"output"`
+	Diagnostics sourceDiagnostics `json:"diagnostics"`
+}
+
+func Playground() ui.View {
+	return ui.Component(playgroundType, func(scope *ui.Scope) ui.View {
+		draft := useEditorDraft(scope, examples.Console()[0].Source, "studio.draft")
+		execution := ui.State(scope, "execution", func() any {
+			return consoleExecution{output: "Your output will appear here."}
+		})
+		run := func() {
+			if execution.Get().(consoleExecution).task != nil {
+				return
+			}
+			source := draft.source.Get()
+			pending := ui.Start(scope, ui.Request{Service: "studio.run", Value: source}.WithTimeout(10000), func(result ui.Result) {
+				execution.Update(func(any) any {
+					if result.Error != "" {
+						return consoleExecution{output: result.Error}
+					}
+					var response consoleResult
+					if json.Unmarshal([]byte(result.Value), &response) != nil {
+						return consoleExecution{output: "The runner returned an unreadable result."}
+					}
+					return consoleExecution{
+						output: response.Output, source: source, diagnostics: response.Diagnostics,
+					}
+				})
+			})
+			execution.Update(func(any) any {
+				return consoleExecution{task: pending, output: "Running your program…"}
+			})
+		}
+		stop := func() {
+			execution.Get().(consoleExecution).task.Cancel()
+			execution.Update(func(any) any {
+				return consoleExecution{output: "Stopped. Your code is ready whenever you are."}
+			})
+		}
+		replace := func(source string) {
+			stop()
+			draft.Replace(source)
+		}
+		current := execution.Get().(consoleExecution)
+		actions := ui.Element("div", kit.Button(kit.ButtonProps{
+			Disabled: current.task != nil, OnPress: run,
+		}, ui.Text("Run code")).Attr("data-run", ""), kit.Button(kit.ButtonProps{
+			Variant: "secondary", Disabled: current.task == nil, OnPress: stop,
+		}, ui.Text("Stop")).Attr("data-stop", ""), kit.Button(kit.ButtonProps{
+			Variant: "quiet",
+			OnPress: func() {
+				replace(examples.Console()[0].Source)
+			},
+		}, ui.Text("Reset code")).Attr("data-reset-code", "")).Class("studio-actions")
+		return ui.Element("section", ui.Element("header", ui.Element("p", ui.Text("A LITTLE ROOM TO EXPERIMENT")).Class("studio-eyebrow"), ui.Element("h1", ui.Text("What will you make?")), paragraph("Try a little Volang. Edit, run, and follow your curiosity. Your draft stays in this browser."), navigation.Link("/studio/playground/ui", ui.Text("Try UI components →")).Class("studio-text-link")).Class("studio-intro"), ExamplePicker(scope, "console-example", draft, examples.Console(), replace, stop), SourceEditor("playground-source", draft, actions, run), SourceDiagnostics(draft, current.source, current.diagnostics), ui.Element("section", ui.Element("h2", ui.Text("Output")), sourceDiagnosticOutput(current.diagnostics, ui.Element("pre", ui.Text(current.output)).Attr("data-output", "").Attr("aria-live", "polite"))).Class("studio-output"), ui.Element("p", ui.Text(draft.error.Get())).Attr("role", "alert"))
+	})
+}

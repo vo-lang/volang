@@ -1,0 +1,246 @@
+package main
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func orderPosition(values []int, value int) int {
+	for i, found := range values {
+		if found == value {
+			return i
+		}
+	}
+	panic("missing value")
+}
+
+func replayOrderMove(values []int, id int, before int) []int {
+	index := orderPosition(values, id)
+	values = append(values[:index], values[index + 1:]...)
+	index = len(values)
+	if before != 0 {
+		index = orderPosition(values, before)
+	}
+	values = append(values, 0)
+	copy(values[index + 1:], values[index:len(values) - 1])
+	values[index] = id
+	return values
+}
+
+// Exhaustive subsequences provide an independent lower bound for small lists.
+func minimumRetainedMoves(previous []int, desired []int) int {
+	best := 0
+	for mask := 0; mask < (1 << uint(len(desired))); mask++ {
+		last, count, valid := -1, 0, true
+		for i, value := range desired {
+			if mask & (1 << uint(i)) != 0 {
+				index := orderPosition(previous, value)
+				if index <= last {
+					valid = false
+					break
+				}
+				last = index
+				count++
+			}
+		}
+		if valid && count > best {
+			best = count
+		}
+	}
+	return len(desired) - best
+}
+
+func largeKeyedRotation() {
+	var shifted *ui.BoolState
+	root := ui.NewRoot(ui.Component(ui.Define("order.Large"), func(scope *ui.Scope) ui.View {
+		shifted = ui.Bool(scope, "shifted", false)
+		start := 0
+		if shifted.Get() {
+			start = 1
+		}
+		views := make([]ui.View, 0, 1000)
+		for index := 0; index < 1000; index++ {
+			key := fmt.Sprint((index + start) % 1000)
+			views = append(views, ui.Element("li", ui.Text(key)).Key(key))
+		}
+		return ui.Element("ol", views...)
+	}))
+	flush(root)
+	shifted.Set(true)
+	count := 0
+	for _, mutation := range flush(root).Mutations {
+		require(mutation.Op != "create" && mutation.Op != "remove", "large rotation replaced nodes")
+		if mutation.Op == "insert" {
+			count++
+		}
+	}
+	require(count == 1, "large rotation must replayOrderMove one retained range")
+	root.Close()
+}
+
+func keyedMinimumMoves() {
+	mixedKeyedMembership()
+	largeKeyedRotation()
+	order := []int{0, 1, 2, 3, 4}
+	var revision *ui.IntState
+	root := ui.NewRoot(ui.Component(ui.Define("order.Probe"), func(scope *ui.Scope) ui.View {
+		revision = ui.Int(scope, "revision", 0)
+		_ = revision.Get()
+		views := []ui.View{}
+		for _, value := range order {
+			key := fmt.Sprint(value)
+			views = append(views, ui.Element("li", ui.Text(key)).Key(key).Attr("data-key", key))
+		}
+		return ui.Element("ol", views...).Attr("data-list", "")
+	}))
+	initial := flush(root)
+	parent := 0
+	ids := make(map[string]int)
+	for _, mutation := range initial.Mutations {
+		if mutation.Name == "data-list" {
+			parent = mutation.ID
+		}
+		if mutation.Name == "data-key" {
+			ids[mutation.Value] = mutation.ID
+		}
+	}
+	model := []int{}
+	for _, value := range order {
+		model = append(model, ids[fmt.Sprint(value)])
+	}
+	cases, totalMoves, minimum, excess := 0, 0, 0, 0
+	verify := func(desired []int) {
+		next := []int{}
+		for _, value := range desired {
+			next = append(next, ids[fmt.Sprint(value)])
+		}
+		expected := minimumRetainedMoves(model, next)
+		order = append([]int{}, desired...)
+		revision.Set(revision.Get() + 1)
+		batch := flush(root)
+		moves := 0
+		for _, mutation := range batch.Mutations {
+			require(mutation.Op != "create" && mutation.Op != "remove", "reorder replaced a node")
+			if mutation.Op == "insert" && mutation.Parent == parent {
+				model = replayOrderMove(model, mutation.ID, mutation.Before)
+				moves++
+			}
+		}
+		require(fmt.Sprint(model) == fmt.Sprint(next), "mutation stream has the wrong sibling order")
+		require(moves == expected, "reorder did not achieve the minimum replayOrderMove count")
+		cases++
+		totalMoves += moves
+		minimum += expected
+		if moves > expected {
+			excess++
+		}
+	}
+	var permute func([]int, int)
+	permute = func(values []int, index int) {
+		if index == len(values) {
+			verify(values)
+			return
+		}
+		for i := index; i < len(values); i++ {
+			values[index], values[i] = values[i], values[index]
+			permute(values, index + 1)
+			values[index], values[i] = values[i], values[index]
+		}
+	}
+	permute([]int{0, 1, 2, 3, 4}, 0)
+	verify([]int{0, 1, 2, 3, 4})
+	before := totalMoves
+	verify([]int{1, 2, 3, 4, 0})
+	require(cases == 122 && totalMoves == minimum && excess == 0 && totalMoves - before == 1, "exhaustive order coverage")
+	root.Close()
+}
+
+func orderIndex(values []int, value int) int {
+	for i, found := range values {
+		if found == value {
+			return i
+		}
+	}
+	return -1
+}
+
+func mixedKeyedMembership() {
+	var revision *ui.IntState
+	desired := []int{}
+	round := 0
+	root := ui.NewRoot(ui.Component(ui.Define("order.Mixed"), func(scope *ui.Scope) ui.View {
+		revision = ui.Int(scope, "revision", 0)
+		_ = revision.Get()
+		views := []ui.View{}
+		for _, value := range desired {
+			key := fmt.Sprint(value)
+			kind := "div"
+			if round % 3 == 0 && value % 2 == 0 {
+				kind = "article"
+			}
+			views = append(views, ui.Element(kind, ui.Text(key)).Key(key).Attr("data-key", key))
+		}
+		return ui.Element("section", views...).Attr("data-list", "")
+	}))
+	parent := 0
+	for _, mutation := range flush(root).Mutations {
+		if mutation.Name == "data-list" {
+			parent = mutation.ID
+		}
+	}
+	ids := make(map[string]int)
+	model := []int{}
+	seed := 193
+	for round = 1; round <= 250; round++ {
+		values := []int{0, 1, 2, 3, 4, 5}
+		for index := len(values) - 1; index > 0; index-- {
+			seed = (seed * 48271) % 2147483647
+			other := seed % (index + 1)
+			values[index], values[other] = values[other], values[index]
+		}
+		seed = (seed * 48271) % 2147483647
+		desired = values[:seed % 7]
+		revision.Set(round)
+		batch := flush(root)
+		for _, mutation := range batch.Mutations {
+			if mutation.Op == "attr" && mutation.Name == "data-key" {
+				ids[mutation.Value] = mutation.ID
+			}
+		}
+		before := append([]int{}, model...)
+		next, retained := []int{}, []int{}
+		for _, value := range desired {
+			id := ids[fmt.Sprint(value)]
+			next = append(next, id)
+			if orderIndex(before, id) >= 0 {
+				retained = append(retained, id)
+			}
+		}
+		expected := minimumRetainedMoves(before, retained)
+		moves := 0
+		for _, mutation := range batch.Mutations {
+			index := orderIndex(model, mutation.ID)
+			if mutation.Op == "remove" && index >= 0 {
+				model = append(model[:index], model[index + 1:]...)
+			}
+			if mutation.Op == "insert" && mutation.Parent == parent {
+				if orderIndex(before, mutation.ID) >= 0 {
+					moves++
+				}
+				if index >= 0 {
+					model = append(model[:index], model[index + 1:]...)
+				}
+				index = len(model)
+				if mutation.Before != 0 {
+					index = orderPosition(model, mutation.Before)
+				}
+				model = append(model, 0)
+				copy(model[index + 1:], model[index:len(model) - 1])
+				model[index] = mutation.ID
+			}
+		}
+		require(fmt.Sprint(model) == fmt.Sprint(next), "mixed insertion/removal/replacement produced the wrong order")
+		require(moves == expected, "mixed update moved more retained nodes than necessary")
+	}
+	root.Close()
+}

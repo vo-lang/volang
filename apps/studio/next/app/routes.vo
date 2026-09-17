@@ -1,0 +1,64 @@
+package app
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/navigation"
+)
+
+var studioRoutes = navigation.NewRoutes([]navigation.Route{
+	{
+		ID: "studio", Path: "studio", Render: StudioLayout,
+		Children: []navigation.Route{
+			{ID: "home", Render: GalleryRoute}, {ID: "gallery", Path: "gallery", Render: GalleryRoute},
+			{
+				ID: "recover", Path: "recover",
+				Render: func(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {
+					return Recovery()
+				},
+			},
+			{
+				ID: "playground", Path: "playground",
+				Render: func(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {
+					return Playground()
+				},
+			},
+			{
+				ID: "ui-playground", Path: "playground/ui",
+				Render: func(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {
+					return UIPlayground()
+				},
+			},
+			{
+				ID: "docs", Path: "docs", Render: DocsLayout,
+				Children: []navigation.Route{
+					{ID: "docs-start", Render: DocsRoute}, {ID: "docs-topic", Path: ":topic", Render: DocsRoute},
+				},
+			},
+			{
+				ID: "missing", Path: "*rest",
+				Render: func(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {
+					return NotFound()
+				},
+			},
+		},
+	},
+})
+
+func GalleryRoute(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {
+	return Gallery()
+}
+
+func NotFound() ui.View {
+	return ui.Element("section", ui.Element("h1", ui.Text("A little off the path.")), ui.Element("p", ui.Text("This page could not be found.")), navigation.Link("/studio/gallery", ui.Text("Back to the gallery"))).Class("studio-intro")
+}
+
+func docTopic(match navigation.Match) string {
+	if match.ID == "docs-topic" {
+		return match.Param("topic")
+	}
+	return match.Location.Query.Get("topic")
+}
+
+func DocsRoute(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {
+	return Docs(scope, docTopic(match))
+}

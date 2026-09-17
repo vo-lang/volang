@@ -28,6 +28,7 @@ pub use obj::{Builtin, ConstValue, EntityType, LangObj};
 pub use objects::*;
 pub use operand::*;
 pub use package::Package;
+pub use project::editor;
 pub use project::{
     analyze_project, analyze_project_with_identity, analyze_project_with_options, AnalysisError,
     AnalysisOptions, AnalyzedPackage, PackageIdentity, Project,

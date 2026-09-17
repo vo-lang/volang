@@ -48,7 +48,7 @@ pub(in crate::translate) fn array_new<'a>(
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
     let elem_bytes_i32 = emit_elem_bytes_i32(e, inst.opcode())?;
     let len = e.read_var(inst.c);
-    let out_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, (8) as usize);
+    let out_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, 8);
     let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
     let call = emit_runtime_helper_call(
         e,
@@ -189,7 +189,7 @@ pub(in crate::translate) fn emit_typed_write_barrier_single_by_meta<'a>(
     e.builder().switch_to_block(barrier_block);
     e.builder().seal_block(barrier_block);
     let typed_barrier = e.helper(HelperKind::typed_write_barrier_by_meta);
-    let vals_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, (8) as usize);
+    let vals_slot = e.native_scratch_slot(NativeScratchKind::CollectionValue, 8);
     e.builder().ins().stack_store(types::I64, val, vals_slot, 0);
     let vals_ptr = e.builder().ins().stack_addr(types::I64, vals_slot, 0);
     let ctx = e.ctx_param();

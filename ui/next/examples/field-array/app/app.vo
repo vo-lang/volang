@@ -1,0 +1,146 @@
+package app
+
+import (
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/forms/schema"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/web"
+)
+
+var appType = ui.Define("field-array.App")
+
+var personType = ui.Define("field-array.Person")
+
+// The rules produce schema-style positional paths. The adapter binds those
+// positions to the current snapshot's stable row identities for form errors.
+func validatePeople(data forms.Data) []schema.Issue {
+	values := data.Values
+	rows, err := forms.ArrayRows(values, "people")
+	if err != nil {
+		return []schema.Issue{{Message: "The contact list could not be read."}}
+	}
+	issues := []schema.Issue{}
+	for index, row := range rows {
+		if strings.TrimSpace(values.Get(row.Field("name"))) == "" {
+			issues = append(issues, schema.Issue{
+				Path: schema.Field("people").Index(index).Field("name"),
+				Message: "Enter a name for this person.",
+			})
+		}
+	}
+	return issues
+}
+
+func personValues(name string, number string) forms.Values {
+	phones := []forms.Values{}
+	if number != "" {
+		phones = append(phones, forms.Values{"number": []string{number}})
+	}
+	return forms.WithArray(forms.Values{"name": []string{name}}, "phones", phones)
+}
+
+func Person(form *forms.Form, people *forms.FieldArray, row forms.Row, index int, total int) ui.View {
+	return ui.Component(personType, func(scope *ui.Scope) ui.View {
+		checks := ui.Int(scope, "checks", 0)
+		phones := form.Array(row.Field("phones"))
+		name := row.Field("name")
+		phoneViews := []ui.View{phones.OrderInputs()}
+		for _, phone := range phones.Items() {
+			phoneViews = append(phoneViews, ui.Element("div", kit.FormField(kit.FieldProps{
+				ID: "phone-" + row.Key + "-" + phone.Key, Label: "Phone number",
+			}, form.Input(phone.Field("number"), ui.Element("input").Attr("type", "tel"))), kit.Button(kit.ButtonProps{
+				Variant: "quiet",
+				OnPress: func() {
+					phones.Remove(phone.Key)
+				},
+			}, ui.Text("Remove phone"))).Class("phone").Attr("data-phone", phone.Key).Key(phone.Key))
+		}
+		return ui.Element("section", ui.Element("header", ui.Element("h2", ui.Text(fmt.Sprintf("Person %d", index +
+			1))), ui.Element("div", kit.Button(kit.ButtonProps{
+			Variant: "quiet", Disabled: index == 0,
+			OnPress: func() {
+				people.Move(row.Key, index - 1)
+			},
+		}, ui.Text("Move up")), kit.Button(kit.ButtonProps{
+			Variant: "quiet", Disabled: index == total - 1,
+			OnPress: func() {
+				people.Move(row.Key, index + 1)
+			},
+		}, ui.Text("Move down")), kit.Button(kit.ButtonProps{
+			Variant: "quiet",
+			OnPress: func() {
+				people.Remove(row.Key)
+			},
+		}, ui.Text("Remove person"))).Class("row-actions")), kit.FormField(kit.FieldProps{
+			ID: "name-" + row.Key, Label: "Full name", Error: form.Error(name),
+		}, form.Input(name, ui.Element("input").Attr("autocomplete", "name")).OnWith("keydown", ui.EventOptions{
+			PreventDefault: true, Keys: []string{"ArrowUp", "ArrowDown"},
+			Modifiers: []ui.KeyboardModifiers{{Alt: true}},
+		}, func(event ui.Event) {
+			if event.Key == "ArrowUp" && index > 0 {
+				people.Move(row.Key, index - 1)
+			}
+			if event.Key == "ArrowDown" && index < total - 1 {
+				people.Move(row.Key, index + 1)
+			}
+		})), ui.Element("div", phoneViews...).Class("phones"), ui.Element("footer", kit.Button(kit.ButtonProps{
+			Variant: "secondary",
+			OnPress: func() {
+				phones.Append(forms.Values{"number": []string{""}})
+			},
+		}, ui.Text("Add phone")), kit.Button(kit.ButtonProps{
+			Variant: "quiet",
+			OnPress: func() {
+				checks.Set(checks.Get() + 1)
+			},
+		}, ui.Text("Check contact")), ui.Element("output", ui.Text(fmt.Sprintf("%d checks", checks.Get()))).Attr("data-checks", ""))).Class("person", "vui-card").Attr("data-person", row.Key)
+	}).Key(row.Key)
+}
+
+func View(initial string) ui.View {
+	return ui.Component(appType, func(scope *ui.Scope) ui.View {
+		form := forms.Use(scope, "contacts", forms.Options{
+			Initial: forms.WithArray(nil, "people", []forms.Values{
+				personValues("Ada Lovelace", "+44 20 7946 0000"), personValues("Grace Hopper", ""),
+			}),
+			Arrays: []string{"people"}, Validate: schema.Adapt(validatePeople),
+		})
+		people := form.Array("people")
+		rows := people.Items()
+		children := []ui.View{people.OrderInputs()}
+		for index, row := range rows {
+			children = append(children, Person(form, people, row, index, len(rows)))
+		}
+		message := form.Message()
+		if form.Pending() {
+			message = "Saving contacts…"
+		}
+		state := "All changes saved"
+		if form.Dirty() {
+			state = "Unsaved changes"
+		}
+		children = append(children, ui.Element("div", kit.Button(kit.ButtonProps{
+			Variant: "secondary",
+			OnPress: func() {
+				people.Append(personValues("New person", ""))
+			},
+		}, ui.Text("Add person"))).Class("add-person"), ui.Element("footer", kit.Button(kit.ButtonProps{
+			Disabled: form.Pending(),
+		}, ui.Text("Save contacts")).Attr("type", "submit"), kit.Button(kit.ButtonProps{Variant: "quiet"}, ui.Text("Reset original")).Attr("type", "reset"), kit.Button(kit.ButtonProps{
+			Variant: "quiet",
+			OnPress: func() {
+				form.Revert()
+			},
+		}, ui.Text("Discard edits")), ui.Element("span", ui.Text(state)).Class("dirty").Attr("data-dirty", "")).Class("save-actions"), ui.Element("p", ui.Text(message)).Attr("role", "status").Attr("id", "save-status"))
+		return ui.Element("main", ui.Element("header", ui.Element("p", ui.Text("VOLANG UI / DYNAMIC FORMS")).Class("eyebrow"), ui.Element("h1", ui.Text("Keep your people close.")), ui.Element("p", ui.Text("A small address book that makes room for everyone.")), ui.Element("p", ui.Text("Add a person or a phone. Use Alt + ↑ / ↓ in a name field to change the order."))).Class("intro"), form.View(func(data forms.Data) ui.Request {
+			values := data.Values
+			rows, _ := forms.ArrayRows(values, "people")
+			return web.After(600, fmt.Sprintf("Saved %d people.", len(rows)))
+		}, func(result ui.Result) forms.Outcome {
+			return forms.Outcome{Message: result.Value}
+		}, children...).Attr("id", "contacts-form")).Class("vui", "field-array-example")
+	})
+}

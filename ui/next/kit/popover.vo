@@ -1,0 +1,84 @@
+package kit
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type PopoverProps struct {
+	ID string
+	Label string
+	Title string
+	Open func() bool
+	OnOpenChange func(bool)
+	Disabled bool
+	Placement string
+	// Motion uses native CSS entry/exit transitions where overlay is supported.
+	Motion bool
+	Class string
+	TriggerClass string
+	TriggerRef *ui.ElementRef
+	// Trigger supplies noninteractive content inside the native trigger button.
+	Trigger func(bool) ui.View
+}
+
+var popoverType = ui.Define("kit.Popover")
+
+func Popover(props PopoverProps, content ...ui.View) ui.View {
+	if props.ID == "" || props.Label == "" || props.Open == nil || props.OnOpenChange == nil {
+		panic("kit: popover requires an ID, label, open reader and change handler")
+	}
+	return ui.Component(popoverType, func(scope *ui.Scope) ui.View {
+		anchor := props.TriggerRef
+		if anchor == nil {
+			anchor = ui.Ref(scope, "trigger")
+		}
+		open := props.Open()
+		label := ui.Text(props.Label)
+		if props.Trigger != nil {
+			label = props.Trigger(open)
+		}
+		trigger := Button(ButtonProps{Variant: "secondary", Disabled: props.Disabled}, label).Ref(anchor).Class(props.TriggerClass).Attr("id", props.ID +
+			"-trigger").Attr("aria-label", props.Label).Attr("aria-haspopup", "dialog").Attr("aria-expanded", fmt.Sprint(open)).Attr("aria-controls", props.ID).OnWith("click", ui.EventOptions{
+			PreventDefault: true,
+		}, func(ui.Event) {
+			if props.Disabled {
+				return
+			}
+			current := props.Open()
+			props.OnOpenChange(!current)
+			if current {
+				anchor.Focus()
+			}
+		})
+		close := Button(ButtonProps{
+			Variant: "quiet",
+			OnPress: func() {
+				if props.Open() {
+					props.OnOpenChange(false)
+					anchor.Focus()
+				}
+			},
+		}, ui.Text("×")).Attr("aria-label", "Close popover")
+		title := props.Title
+		if title == "" {
+			title = props.Label
+		}
+		children := []ui.View{
+			ui.Element("div", ui.Element("h2", ui.Text(title)).Attr("id", props.ID + "-title"), close).Class("vui-popover-heading"),
+		}
+		children = append(children, content...)
+		popup := ui.Element("div", children...).Popover(ui.PopoverOptions{
+			Open: open, Anchor: anchor, Placement: props.Placement,
+		}).Attr("id", props.ID).Attr("role", "dialog").Attr("aria-labelledby", props.ID + "-title").Class("vui-popover").Class(props.Class).On("toggle", func(event ui.Event) {
+			if event.Value == "closed" && props.Open() {
+				props.OnOpenChange(false)
+			}
+		})
+		popup = popup.Attr("inert", fmt.Sprint(!open)).Attr("aria-hidden", fmt.Sprint(!open))
+		if props.Motion {
+			popup = popup.Class("vui-popover-motion")
+		}
+		return ui.Fragment(trigger, popup)
+	})
+}

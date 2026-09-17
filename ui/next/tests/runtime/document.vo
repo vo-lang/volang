@@ -1,0 +1,63 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/document"
+	"github.com/vo-lang/ui/next/host"
+)
+
+func documentContracts() {
+	source := `{"version":1,"headingID":"doc-intro","nodes":[{"tag":"p","children":[{"tag":"#text","text":"<literal> & 中文 "},{"tag":"a","attrs":{"href":"/studio/docs/tour#doc-types"},"children":[{"tag":"strong","children":[{"tag":"#text","text":"Explore"}]}]}]},{"tag":"table","children":[{"tag":"thead","children":[{"tag":"tr","children":[{"tag":"th","attrs":{"scope":"col"},"children":[{"tag":"#text","text":"Name"}]}]}]},{"tag":"tbody","children":[{"tag":"tr","children":[{"tag":"td","children":[{"tag":"#text","text":"Ada"}]}]}]}]},{"tag":"ul","children":[{"tag":"li","children":[{"tag":"input","attrs":{"type":"checkbox","disabled":"true","checked":"true","aria-label":"Completed"}},{"tag":"#text","text":"Done"}]}]}]}`
+	decoded, err := document.Decode(source)
+	require(err == nil, "semantic document did not decode")
+	prepared, err := document.Prepare(decoded)
+	require(err == nil && prepared.HeadingID() == "doc-intro", "prepared document lost metadata")
+	view := prepared.View()
+	decoded.Nodes[0].Children[0].Text = "Changed after rendering"
+	decoded.Nodes[0].Children[1].Attrs["href"] = "/changed"
+	html := host.HTML(view)
+	require(strings.Contains(html, "&lt;literal&gt; &amp; 中文") &&
+		strings.Contains(html, `href="/studio/docs/tour#doc-types"`) &&
+		!strings.Contains(html, "Changed after rendering"), "document views did not snapshot source data")
+	require(host.HTML(prepared.View()) == html, "prepared document was not reusable across roots")
+	require(strings.Contains(html, "<thead") && strings.Contains(html, "<tbody") &&
+		strings.Contains(html, `scope="col"`) &&
+		strings.Contains(html, `disabled="true"`), "document lost semantic table or task content")
+	for _, invalid := range []string{
+		`{"version":2}`, `{"version":1,"nodes":[{"tag":"script"}]}`,
+		`{"version":1,"nodes":[{"tag":"p","children":[{"tag":"div"}]}]}`,
+		`{"version":1,"nodes":[{"tag":"p","attrs":{"onclick":"anything"}}]}`,
+		`{"version":1,"headingID":"repeat","nodes":[{"tag":"h2","attrs":{"id":"repeat"}}]}`,
+		`{"version":1,"nodes":[{"tag":"a","attrs":{"href":"javascript:bad"}}]}`,
+		`{"version":1,"nodes":[{"tag":"img","attrs":{"src":"https://"}}]}`,
+		`{"version":1,"nodes":[{"tag":"a","attrs":{"href":"//example.com"}}]}`,
+		`{"version":1,"nodes":[{"tag":"a","attrs":{"href":"/a"},"children":[{"tag":"a","attrs":{"href":"/b"}}]}]}`,
+		`{"version":1,"nodes":[{"tag":"table","children":[{"tag":"tr"}]}]}`,
+		`{"version":1,"nodes":[{"tag":"ul","children":[{"tag":"p"}]}]}`,
+		`{"version":1,"nodes":[{"tag":"input","attrs":{"type":"checkbox"}}]}`,
+		`{"version":1,"nodes":[{"tag":"#text","text":"\u0000"}]}`,
+	} {
+		_, err = document.Decode(invalid)
+		require(err != nil, "invalid semantic document accepted: " + invalid)
+	}
+	nodes := []document.Node{{Tag: "blockquote"}}
+	nodes[0].Children = nodes
+	err = document.Validate(document.Document{Version: 1, Nodes: nodes})
+	require(err != nil, "cyclic manual document escaped its depth bound")
+	nodes = make([]document.Node, document.MaxNodes + 1)
+	for index := range nodes {
+		nodes[index] = document.Node{Tag: "#text"}
+	}
+	require(document.Validate(document.Document{Version: 1, Nodes: nodes}) != nil, "document node budget ignored")
+	require(document.Validate(document.Document{
+		Version: 1,
+		Nodes: []document.Node{{Tag: "#text", Text: strings.Repeat("a", document.MaxBytes + 1)}},
+	}) !=
+		nil, "document byte budget ignored")
+	_, err = document.Decode(strings.Repeat(" ", document.MaxBytes + 1))
+	require(err != nil, "encoded document input budget ignored")
+	root := ui.NewRoot(document.View(document.Document{Version: 1}))
+	flush(root)
+	root.Close()
+}

@@ -3,6 +3,6 @@ package main
 // Each other disallowed expression form has an independent diagnostic assertion
 // in vo-analysis/tests/frontend_contracts.rs.
 func main() {
-    x := 1
-    int64(x)
+	x := 1
+	int64(x)
 }

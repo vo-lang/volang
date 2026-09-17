@@ -1,0 +1,56 @@
+package app
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var appType = ui.Define("listening.App")
+
+func recording() ui.View {
+	caption := ui.Element("figcaption", ui.Text("Four notes, a little space")).Attr("id", "recording-title")
+	audio := ui.Element("audio", ui.Text("Your browser can download this recording to listen.")).Attr("controls", "true").Attr("preload", "none").Attr("src", "./four-notes.wav").Attr("aria-labelledby", "recording-title")
+	description := ui.Element("p", ui.Text("An original four-note chime. Use the native controls to play, pause and explore."))
+	download := ui.Element("a", ui.Text("Download the recording")).Attr("href", "./four-notes.wav").Attr("download", "four-notes.wav")
+	return ui.Element("figure", caption, audio, description, download).Class("recording").Key("recording")
+}
+
+func App(scope *ui.Scope, initial string) ui.View {
+	note := ui.String(scope, "note", initial)
+	shown := ui.Bool(scope, "shown", true)
+	night := ui.Bool(scope, "night", false)
+	player := ui.Fragment()
+	toggle := "Bring the player back"
+	if shown.Get() {
+		toggle = "Put the player away"
+		player = recording()
+	}
+	theme := "light"
+	if night.Get() {
+		theme = "dark"
+	}
+	eyebrow := ui.Element("p", ui.Text("THE LISTENING ROOM")).Class("eyebrow")
+	title := ui.Element("h1", ui.Text("A moment to listen."))
+	intro := ui.Element("p", ui.Text("Press play. Change the light. Keep a thought."))
+	togglePlayer := kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			shown.Set(!shown.Get())
+		},
+	}, ui.Text(toggle))
+	toggleTheme := kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			night.Set(!night.Get())
+		},
+	}, ui.Text("Change the light"))
+	actions := ui.Element("div", togglePlayer, toggleTheme).Class("actions")
+	field := kit.Field("listening-note", "A thought to keep", "Your note stays here while the player comes and goes.", ui.Element("textarea").Attr("value", note.Get()).On("input", func(event ui.Event) {
+		note.Set(event.Value)
+	}))
+	return ui.Element("main", eyebrow, title, intro, player, actions, field).Class("vui", "listening-room").Attr("data-theme", theme).StyleScope("listening-room")
+}
+
+func View(initial string) ui.View {
+	return ui.Component(appType, func(scope *ui.Scope) ui.View {
+		return App(scope, initial)
+	})
+}

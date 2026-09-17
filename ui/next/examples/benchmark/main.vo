@@ -1,0 +1,54 @@
+package main
+
+import (
+	"strconv"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/host"
+)
+
+var appType = ui.Define("benchmark.App")
+
+var rowType = ui.Define("benchmark.Row")
+
+func Row(id int, bulk *ui.IntState) ui.View {
+	return ui.Component(rowType, func(scope *ui.Scope) ui.View {
+		count := ui.Int(scope, "count", 0)
+		value := count.Get()
+		if id % 10 == 0 {
+			value += bulk.Get()
+		}
+		return ui.Element("li", ui.Element("span", ui.Text("Row " + strconv.Itoa(id))), ui.Element("button", ui.Text(strconv.Itoa(value))).Attr("type", "button").Attr("aria-label", "Increment row " +
+			strconv.Itoa(id)).On("click", func(event ui.Event) {
+			count.Set(count.Get() + 1)
+		})).Attr("data-row", strconv.Itoa(id))
+	}).Memo(id, bulk).Key(strconv.Itoa(id))
+}
+
+func App(scope *ui.Scope) ui.View {
+	reverse := ui.Bool(scope, "reverse", false)
+	query := ui.String(scope, "query", "")
+	bulk := ui.Int(scope, "bulk", 0)
+	rows := []ui.View{}
+	for index := 0; index < 1000; index++ {
+		id := index
+		if reverse.Get() {
+			id = 999 - index
+		}
+		if strings.Contains(strconv.Itoa(id), query.Get()) {
+			rows = append(rows, Row(id, bulk))
+		}
+	}
+	controls := ui.Element("div", ui.Element("button", ui.Text("Reverse")).Attr("id", "reverse").Attr("type", "button").On("click", func(event ui.Event) {
+		reverse.Set(!reverse.Get())
+	}), ui.Element("button", ui.Text("Update every tenth")).Attr("id", "update").Attr("type", "button").On("click", func(event ui.Event) {
+		bulk.Set(bulk.Get() + 1)
+	}), ui.Element("label", ui.Text("Filter")).Attr("for", "filter"), ui.Element("input").Attr("id", "filter").Attr("value", query.Get()).On("input", func(event ui.Event) {
+		query.Set(event.Value)
+	}))
+	return ui.Element("main", controls, ui.Element("ul", rows...))
+}
+
+func main() {
+	host.Run(ui.Component(appType, App))
+}

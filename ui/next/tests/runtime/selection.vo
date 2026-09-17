@@ -1,0 +1,139 @@
+package main
+
+import (
+	"slices"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/wire"
+)
+
+func nativeSelection() {
+	options := []ui.View{
+		ui.Element("option", ui.Text("First")).Attr("value", "a").Attr("selected", "true"),
+		ui.Element("optgroup", ui.Element("option", ui.Text("Second")).Attr("value", "b"), ui.Element("option", ui.Text("Empty")).Attr("value", "")).Attr("label", "Group"),
+	}
+	values := []string{"b", ""}
+	base := ui.Element("select", options...).SelectedValues(values)
+	values[0] = "a"
+	root := ui.NewRoot(base)
+	batch := flush(root)
+	selection := ""
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "selection" {
+			selection = mutation.Value
+		}
+	}
+	require(selection == `["b",""]`, "selected-values builder retained a caller-owned list")
+	html := root.HTML()
+	require(strings.Count(html, ` selected=""`) == 2 && strings.Contains(html, "data-vo-selected=") &&
+		strings.Contains(html, `multiple="true"`), "multiple selection was not represented in server HTML")
+	root.Close()
+	root = ui.NewRoot(ui.Fragment(base, base.SelectedValues([]string{"a"})))
+	flush(root)
+	require(strings.Count(root.HTML(), ` selected=""`) == 3, "selection builder changed a prior view")
+	root.Close()
+	var removed *ui.BoolState
+	root = ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		removed = ui.Bool(scope, "removed", false)
+		view := ui.Element("select", options...).Attr("multiple", "true")
+		if !removed.Get() {
+			view = view.SelectedValues(nil)
+		}
+		return view
+	}))
+	batch = flush(root)
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "selection" {
+			require(mutation.Value == "[]", "empty controlled selection became uncontrolled")
+		}
+	}
+	removed.Set(true)
+	batch = flush(root)
+	require(len(batch.Mutations) == 1 && batch.Mutations[0].Op == "selection" &&
+		batch.Mutations[0].Value == "", "removing selection did not release native ownership")
+	root.Close()
+	expectPanic(func() {
+		ui.Element("input").SelectedValues(nil)
+	}, "requires a select")
+	expectPanic(func() {
+		ui.Element("select").Attr("VALUE", "a").SelectedValues(nil)
+	}, "cannot be combined")
+	expectPanic(func() {
+		base.Attr("VaLuE", "a")
+	}, "owns multiple selection")
+	expectPanic(func() {
+		base.Attr("MULTIPLE", "false")
+	}, "owns multiple selection")
+	expectPanic(func() {
+		ui.Element("select").SelectedValues(make([]string, wire.MaxSelectedValues + 1))
+	}, "at most 4096")
+	expectPanic(func() {
+		ui.Element("select").SelectedValues([]string{string([]byte{255})})
+	}, "valid UTF-8")
+	expectPanic(func() {
+		ui.NewRoot(ui.Element("svg", base)).Flush()
+	}, "require HTML controls")
+}
+
+func multipleSelectBinding() {
+	var form *forms.Form
+	options := []ui.View{
+		ui.Element("option", ui.Text("A")).Attr("value", "a"),
+		ui.Element("option", ui.Text("B")).Attr("value", "b"),
+		ui.Element("option", ui.Text("C")).Attr("value", "c"),
+	}
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		form = forms.Use(scope, "form", forms.Options{
+			Initial: forms.Values{"choices": []string{"a", "b"}},
+		})
+		return form.MultipleSelect("choices", ui.Element("select", options...).Attr("data-name", "multiple"))
+	}))
+	batch := flush(root)
+	id := target(batch, "multiple")
+	root.Dispatch(ui.Event{
+		Target: id, Kind: "input", Value: "a", SelectedValues: []string{"a", "c"}, Sequence: 1,
+	})
+	require(slices.EqualString(form.All("choices"), []string{"a", "c"}) && form.Dirty(), "multiple binder discarded a changed second value")
+	root.Dispatch(ui.Event{Target: id, Kind: "input", SelectedValues: []string{}, Sequence: 2})
+	require(len(form.All("choices")) == 0, "multiple binder did not clear selection")
+	form.Reset()
+	require(slices.EqualString(form.All("choices"), []string{"a", "b"}) && !form.Dirty(), "multiple binder reset lost initial values")
+	root.Close()
+	var received []string
+	view := kit.MultiSelect(kit.MultiSelectProps{
+		ID: "multi-kit", Label: "Choices", Name: "choice", Form: "external", Required: true,
+		Options: []kit.ChoiceOption{{Value: "a", Label: "A"}, {Value: "b", Label: "B", Disabled: true}},
+		DefaultValues: []string{"a", "b"},
+		OnChange: func(values []string) {
+			received = values
+		},
+	})
+	root = ui.NewRoot(view)
+	batch = flush(root)
+	html := root.HTML()
+	require(strings.Count(html, ` selected=`) == 2 && strings.Contains(html, `form="external"`) &&
+		!strings.Contains(html, "data-vo-selected"), "multiple defaults lost native form semantics")
+	id = 0
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "listen" && mutation.Name == "change" {
+			id = mutation.ID
+		}
+	}
+	root.Dispatch(ui.Event{Target: id, Kind: "change", SelectedValues: []string{"a", "b"}, Sequence: 1})
+	require(slices.EqualString(received, []string{"a", "b"}), "multiple select callback dropped selected disabled values")
+	root.Close()
+	expectPanic(func() {
+		kit.MultiSelect(kit.MultiSelectProps{
+			ID: "a", Label: "A",
+			Value: func() []string {
+				return nil
+			},
+			DefaultValues: []string{},
+		})
+	}, "cannot be combined")
+	expectPanic(func() {
+		kit.MultiSelect(kit.MultiSelectProps{ID: "a", Label: "A", DefaultValues: []string{"unknown"}})
+	}, "unique declared")
+}

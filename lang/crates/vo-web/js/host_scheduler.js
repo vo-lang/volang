@@ -1,6 +1,6 @@
 /** Give timers, I/O and rendering a task turn without a timer's minimum delay.
  * Each outstanding turn owns its ports; delivery closes them before resuming
- * guest work, including when several VM/AOT instances share the host.
+ * guest work, including when several VM instances share the host.
  * @returns {Promise<void>}
  */
 export function yieldHost() {
