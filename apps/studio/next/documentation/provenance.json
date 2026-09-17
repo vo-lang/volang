@@ -56,12 +56,12 @@
   ],
   "outputs": [
     {
-      "digest": "sha256:ef9fd1b9ac8dd29b324305edaf6ce79cb704510fab39b83f12d8161bb46db308",
+      "digest": "sha256:6cf6a0973c8e44fb6b6b52373782e8a3e1cacf07f990eba0a4c6c346ac68ed3a",
       "path": "catalog.vo",
       "size": 10190
     },
     {
-      "digest": "sha256:0a7bd41dd76035d629bdc46aeb851f11ef5a0ad8338329d483f47224122ed6d1",
+      "digest": "sha256:f6c35671216b1594b05ac665629779f1fcd5c5233796a096b00b9f805351f6dd",
       "path": "index.json",
       "size": 9127
     },
@@ -141,9 +141,9 @@
       "size": 6702
     },
     {
-      "digest": "sha256:45366c8283e551c8073b21d66cc08690073159249941aef0c65cd3e552626d8e",
+      "digest": "sha256:f54a82d0ff67df2a3c7de48d8b4d4cbbf049391b85249872f1b938260f116f24",
       "path": "page-migration.json",
-      "size": 22522
+      "size": 23267
     },
     {
       "digest": "sha256:d2119b162a3b3568bb5ef542c8d6b6f4f8665e10dde57ccd87c0260e7a0cc554",
@@ -181,9 +181,9 @@
       "size": 14955
     },
     {
-      "digest": "sha256:bd6c5ed38b6fe97e39510d4ea5d67b91afb6ddc04b4d5c7d278afab5d062af9b",
+      "digest": "sha256:2d7d5939e35c8036bde06019cc8eb44e991c03eb6980bae7ffaf9d90ec5e7885",
       "path": "search.json",
-      "size": 269297
+      "size": 269796
     }
   ],
   "path": "apps/studio/next/documentation",
@@ -224,7 +224,7 @@
     "ui/docs/web-desktop-products.md": "sha256:f564e8cae39f8cd83ce3e0b9f5d5e9fa3ee2a1052ee7359eeefbdb7bf4f33f58",
     "ui/next/guides/first-steps.md": "sha256:92f247e6209f008d9f48f1bc1d66c1ca119f6adc5dd2ad74189a9f55c574d41c",
     "ui/next/guides/lifecycle.md": "sha256:878225cdf34328fc2b9f447f3683712d8ccdea02a2d20498c276b852c26ddf9f",
-    "ui/next/guides/migration.md": "sha256:7b0a65c1a362db85943fe7b6b6bfeb48d35fd96f4a1fa7bddd05fb94ca165a32",
+    "ui/next/guides/migration.md": "sha256:708a906a2201463ab6808ab740a51f7a6f13dfc8913f0432a5b8e0f06e1f3008",
     "ui/next/guides/state.md": "sha256:f4b1c64d6ee18bf382326bddb3b484b53b08c5a07d7af05e2dde88285bb8b76c"
   },
   "toolchain": {

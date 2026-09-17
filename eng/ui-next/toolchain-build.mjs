@@ -62,7 +62,7 @@ export async function buildToolchain(directory,{signal,compiler=toolchain.compil
       const sdk = await readDesktopSdk(desktop);
       const schema = JSON.parse(await readFile(join(toolchain.ui,'next/wire.schema.json'),'utf8'));
       if (sdk.wireVersion !== schema.version) throw new Error('Desktop SDK wire version does not match this toolchain.');
-      for (const path of ['desktop-sdk.json',sdk.runner.path,...(sdk.runtime ? [sdk.runtime.path] : [])]) await copy(join(desktop,path),join('desktop',path));
+      for (const path of ['desktop-sdk.json',sdk.runner.path,...(sdk.runtime ? [sdk.runtime.path] : []),...sdk.libraries.map(resource=>resource.path)]) await copy(join(desktop,path),join('desktop',path));
     }
     await copy(compiler,process.platform === 'win32' ? 'bin/vo.exe' : 'bin/vo');
     const authoring = await buildAuthoringExtension(join(stage,'.authoring'),{signal});

@@ -1,4 +1,5 @@
 import {sourceEditor} from './editor-controls.mjs';
+import {waitStudioDraft} from './studio-draft-contracts.mjs';
 import assert from 'node:assert/strict';
 
 export const shortcutContracts = ['editor-native-enter', 'editor-exact-control-meta-shortcut',
@@ -55,7 +56,7 @@ export async function checkStudioShortcuts(browser, url) {
         return { bypass, repeated };
       });
       assert.deepEqual(results, { bypass: Array(6).fill(false), repeated: true });
-      await page.waitForFunction(() => localStorage.getItem('volang.studio.next.draft.v1') === 'repeat was ignored');
+      await waitStudioDraft(page,'repeat was ignored');
       assert.equal(await page.evaluate(() => window.__studioNext.workers.started), 0);
 
       const source = 'package main\nfunc main() { println("Shortcut 中文") }\n';

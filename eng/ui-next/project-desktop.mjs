@@ -63,7 +63,7 @@ export async function buildDesktopProject(directory,{backend='aot',signal,sdkDir
     const thirdParty=await thirdPartyNotices({inputs:bundled.metafile.inputs,workingDirectory:directory,directory:resources});
     const env={...process.env,VOWORK:join(directory,'vo.work')};
     if(backend==='aot') {
-      await execute(compilerPath(),desktopAotArguments({entry,runtime:join(sdkDirectory,sdk.runtime.path),output:executable,nativeLink:sdk.nativeLink}),{cwd:directory,env,signal});
+      await execute(compilerPath(),desktopAotArguments({entry,runtime:join(sdkDirectory,sdk.runtime.path),output:executable,nativeLink:sdk.nativeLink,libraries:sdk.libraries,sdkDirectory}),{cwd:directory,env,signal});
     } else {
       await execute(compilerPath(),['emit','bytecode',entry,'-o',join(resources,'app.vob')],{cwd:directory,env,signal});
       await copyFile(join(sdkDirectory,sdk.runner.path),executable);

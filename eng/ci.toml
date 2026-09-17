@@ -1811,7 +1811,7 @@ failure_kind = "product"
 
 [[command]]
 id = "ui-desktop-link-contracts"
-argv = ["node", "--test", "eng/ui-next/desktop-link.test.mjs", "eng/ui-next/desktop-ci-report.test.mjs", "eng/ui-next/project-desktop.test.mjs", "eng/ui-next/publish-directory.test.mjs"]
+argv = ["node", "--test", "eng/ui-next/desktop-link.test.mjs", "eng/ui-next/desktop-native-libraries.test.mjs", "eng/ui-next/desktop-ci-report.test.mjs", "eng/ui-next/project-desktop.test.mjs", "eng/ui-next/publish-directory.test.mjs"]
 timeout_seconds = 120
 failure_kind = "product"
 

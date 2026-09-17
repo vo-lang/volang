@@ -67,11 +67,34 @@ Changing the identifier creates a separate profile; it never imports or deletes
 another application's data. Sharing an identifier deliberately shares its profile.
 Embedders that omit `WindowOptions.application_id` use an ephemeral WebView.
 
-The desktop SDK and application manifest now use format v2. Rebuild the SDK and
-repackage applications together; v1/v2 mixing is rejected. Earlier preview bundles
+The desktop SDK uses format v3, with authenticated native import libraries; the
+application manifest uses v2. Rebuild the matching SDK/toolchain and repackage
+applications together; older SDK formats are rejected. Earlier preview bundles
 used platform default storage with no application identity. Export important drafts
 from the old application before upgrading. The new profile starts empty and leaves
 old storage untouched; see [migration notes](guides/migration.md).
+
+For saved drafts and preferences, import `createPersistentStorage` from
+`@volang/ui-next` in the authored boot and pass the owned task's cancellation
+signal to `get`, `set` or `remove`. The same optional adapter works on Web and
+desktop. It uses IndexedDB transactions with strict durability; `set` resolves
+after the transaction commits, including when the window immediately closes.
+Cancelled operations abort uncommitted writes and release their connections.
+
+```js
+import {createPersistentStorage} from '@volang/ui-next';
+const drafts = createPersistentStorage('my-application.drafts.v1');
+const tasks = {
+  'draft.read': async (_value, signal) => (await drafts.get('current', signal)) ?? '',
+  'draft.write': async (value, signal) => { await drafts.set('current', value, signal); return ''; },
+};
+```
+
+The system's `localStorage` follows its browser's asynchronous disk-flush policy;
+a completed `setItem` does not acknowledge durable storage before process exit.
+Studio uses the transaction adapter and imports existing localStorage drafts only
+when the corresponding committed key is absent. Existing browser profiles and
+legacy draft values remain available.
 
 The build reuses `web/index.html` and its canonical
 `<script type="module" src="<!--ui-next:assets-->assets/app.js"></script>` slot.

@@ -7,6 +7,7 @@ import { checkDomContracts } from './dom-contracts.mjs';
 import {checkKeyedOrder} from './keyed-order-contracts.mjs';
 import { checkWorkbench } from './workbench-contracts.mjs';
 import { checkStudio } from './studio-contracts.mjs';
+import {checkPersistentStorage} from './storage-contracts.mjs';
 import {checkStudioEditor} from './studio-editor-contracts.mjs';
 import {checkStudioLanguageService} from './studio-language-contracts.mjs';
 import {checkEditorLanguageBoundary} from './editor-language-boundary.mjs';
@@ -221,6 +222,7 @@ try {
   report.styles = await checkStyles(browser, application.url, outputDirectory);
   report.workbench = await checkWorkbench(browser, application.url, outputDirectory);
   report.lazyWidgetApplications = await checkLazyWidgetApplications(browser, application.url);
+  report.storage = await checkPersistentStorage(browser);
   report.studioEditor = await checkStudioEditor(browser, application.url);
   report.studioLanguage = await checkStudioLanguageService(browser,application.url);
   report.studioRecovery = await checkStudioRecovery(browser, application.url, resolve(outputDirectory, 'recovery'), {createOrigin:serve});

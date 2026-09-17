@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {sourceEditor} from './editor-controls.mjs';
+import {waitStudioDraft} from './studio-draft-contracts.mjs';
 
 export async function checkStudioEditor(browser, url) {
   const reports = [];
@@ -14,8 +15,8 @@ export async function checkStudioEditor(browser, url) {
     }, restored);
     const checkRestored = async (id, key, action) => {
       const control = sourceEditor(page, id);
-      await page.waitForFunction(({id, source, key}) => document.getElementById(id)?.value === source
-        && localStorage.getItem(key) === source, {id, source:normalized, key});
+      await page.waitForFunction(({id, source}) => document.getElementById(id)?.value === source, {id, source:normalized});
+      await waitStudioDraft(page,normalized,key);
       await page.getByRole('button', {name:action, exact:true}).click();
       const diagnostic = page.locator('[data-source-diagnostic]').filter({hasText:'missingName'});
       await diagnostic.waitFor({timeout:35000}); await diagnostic.click();
@@ -71,7 +72,7 @@ export async function checkStudioEditor(browser, url) {
       if (restoredDraft) await checkRestored('playground-source', 'volang.studio.next.draft.v1', 'Run code');
       const source = 'package main\nfunc main() { println("Editor 中文") }\n';
       await editor.fill(source);
-      await page.waitForFunction(source => localStorage.getItem('volang.studio.next.draft.v1') === source, source);
+      await waitStudioDraft(page,source);
       if (mode === 'delayed') {
         await editor.input.evaluate(input => input.setSelectionRange(2, 8, 'backward'));
         release();

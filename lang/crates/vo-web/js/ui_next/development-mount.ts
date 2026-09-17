@@ -8,6 +8,7 @@ import { closeOnPageExit } from './page.js';
 export type { MountOptions, UiApplication } from './mount.js';
 export { createNavigationServices } from './navigation.js';
 export { createLazyWidget } from './lazy-widget.js';
+export { createPersistentStorage } from './storage.js';
 
 export function mountUi(container: HTMLElement, options: MountOptions): UiApplication {
   const window = container.ownerDocument.defaultView!;

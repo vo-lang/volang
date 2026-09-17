@@ -6,6 +6,7 @@ export type { UiVmRuntime } from './vm.js';
 // their adapters from the bundle. Factories bind to the actual mounted root.
 export { createNavigationServices } from './navigation.js';
 export { createLazyWidget } from './lazy-widget.js';
+export { createPersistentStorage } from './storage.js';
 
 const mountedRoots = new WeakMap<HTMLElement, UiTransport>();
 

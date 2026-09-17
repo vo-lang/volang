@@ -9,8 +9,10 @@ export async function checkDesktopStorage({project,work,stamp,compiler,run}) {
   const configPath=join(project,'ui-next.json');
   const bytes=await readFile(configPath),config=JSON.parse(bytes);
   const scriptPath=join(project,'web/check.js'),script=await readFile(scriptPath);
+  const bootPath=join(project,'web/boot.js'),boot=await readFile(bootPath);
   const first=`dev.volang.storage-a-${stamp}`,second=`dev.volang.storage-b-${stamp}`;
   try {
+    await writeFile(bootPath,boot+"\nimport {createPersistentStorage} from '@volang/ui-next';\nwindow.storageProbe=createPersistentStorage('volang-storage-contract-owned');\n");
     for(const [phase,identifier] of [['seed',first],['reopen',first],['isolate',second]]) {
       await writeFile(configPath,JSON.stringify({...config,desktop:{...config.desktop,identifier}}));
       await writeFile(scriptPath,`(async()=>{
@@ -18,12 +20,12 @@ export async function checkDesktopStorage({project,work,stamp,compiler,run}) {
         try {
           if(!await host.ready)throw new Error('storage application closed before activation');
           const key='volang.storage.contract',value='Saved 中文 🌿';
-          const actual=localStorage.getItem(key);
+          const actual=await window.storageProbe.get(key);
           if(${JSON.stringify(phase)}==='reopen') {
             if(actual!==value)throw new Error('draft did not survive reopening and relocation: '+actual);
           } else {
             if(actual!==null)throw new Error('application inherited another storage profile: '+actual);
-            localStorage.setItem(key,value);
+            await window.storageProbe.set(key,value);
           }
           const db=await new Promise((resolve,reject)=>{
             const request=indexedDB.open('volang-storage-contract',1);
@@ -59,6 +61,6 @@ export async function checkDesktopStorage({project,work,stamp,compiler,run}) {
       await run(`window-storage-${phase}`,join(moved,receipt.executable),['--exit-on-failure'],{cwd:tmpdir(),env:{VO_UI_TOOLCHAIN:'missing'}});
     }
   } finally {
-    await writeFile(configPath,bytes);await writeFile(scriptPath,script);
+    await writeFile(configPath,bytes);await writeFile(scriptPath,script);await writeFile(bootPath,boot);
   }
 }

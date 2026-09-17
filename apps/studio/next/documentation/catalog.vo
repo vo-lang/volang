@@ -53,7 +53,7 @@ func Pages() []Page {
 			Summary: "Move existing state and controls into an owned component and test startup interactions.",
 			SectionID: "web-ui", Section: "Web UI framework", SourcePath: "ui/next/guides/migration.md",
 			Asset: "page-migration.json",
-			SHA256: "45366c8283e551c8073b21d66cc08690073159249941aef0c65cd3e552626d8e",
+			SHA256: "f54a82d0ff67df2a3c7de48d8b4d4cbbf049391b85249872f1b938260f116f24",
 			HeadingID: "doc-move-a-legacy-web-screen-to-the-new-component-api",
 		},
 		{
@@ -216,5 +216,5 @@ func SearchAsset() string {
 }
 
 func SearchSHA256() string {
-	return "bd6c5ed38b6fe97e39510d4ea5d67b91afb6ddc04b4d5c7d278afab5d062af9b"
+	return "2d7d5939e35c8036bde06019cc8eb44e991c03eb6980bae7ffaf9d90ec5e7885"
 }

@@ -4,6 +4,7 @@ import {studioLanguageService} from './language-service.js';
 import { previewWidget } from './preview-widget.js';
 import {createRecoveryWatch} from './recovery-watch.js';
 import {updateLegacyRegistration} from './legacy-registration.js';
+import {createPersistentStorage} from '/host/ui_next/storage.js';
 
 export async function startStudio(mountUi, { artifact = 'studio', defaultBackend = 'vm', reload = () => location.reload() } = {}) {
   const container = document.getElementById('root');
@@ -11,6 +12,7 @@ export async function startStudio(mountUi, { artifact = 'studio', defaultBackend
   const query = new URL(location.href).searchParams;
   const backend = query.get('backend') ?? defaultBackend;
   const state = window.__studioNext = { error: null, ready: false, close: null, done: null, workers: { started: 0, stopped: 0 } };
+  const drafts = createPersistentStorage('volang.studio.next.drafts.v1');
 
   function showError(error) {
     const wasReady = state.ready;
@@ -32,11 +34,11 @@ export async function startStudio(mountUi, { artifact = 'studio', defaultBackend
 
   function draftTasks(service, key) {
     return {
-      async [`${service}-read`]() {
-        const source = localStorage.getItem(key);
+      async [`${service}-read`](_value, signal) {
+        const source = await drafts.get(key, signal, () => localStorage.getItem(key));
         return JSON.stringify({ found: source !== null, source: source ?? '' });
       },
-      async [`${service}-write`](value) { localStorage.setItem(key, value); return ''; },
+      async [`${service}-write`](value, signal) { await drafts.set(key, value, signal); return ''; },
     };
   }
 

@@ -18,6 +18,7 @@ import type {MountOptions, UiApplication} from './mount.js';
 import type {MediaSources} from './media-sources.js';
 export {createDesktopNavigationServices as createNavigationServices} from './navigation.js';
 export {createLazyWidget} from './lazy-widget.js';
+export {createPersistentStorage} from './storage.js';
 
 /** Native execution uses the same authored boot/services and one document root. */
 export function mountUi(container: HTMLElement, options: Pick<MountOptions, 'hydrate' | 'services'> = {}): UiApplication {

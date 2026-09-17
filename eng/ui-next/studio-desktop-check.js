@@ -3,7 +3,7 @@
   let host;
   const wait = async (predicate, label) => {
     const deadline = performance.now() + 45_000;
-    while (!predicate()) {
+    while (!await predicate()) {
       if (window.__studioNext?.error) throw new Error(window.__studioNext.error);
       if (performance.now() >= deadline) throw new Error(`Studio desktop timed out: ${label}; ${['#status','[data-output]','[data-preview-status]'].map(selector=>document.querySelector(selector)?.textContent??'').join('; ')}`);
       await new Promise(resolve => setTimeout(resolve, 25));
@@ -32,7 +32,20 @@
     source('package main\nimport "fmt"\nfunc main() { fmt.Println("Desktop 中文") }\n');
     click('[data-run]');
     await wait(() => document.querySelector('[data-output]')?.textContent === 'Desktop 中文\n', 'compiler Worker output');
-    await wait(() => localStorage.getItem('volang.studio.next.draft.v1')?.includes('Desktop 中文'), 'saved draft');
+    await wait(async () => {
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('volang.studio.next.drafts.v1', 1);
+        request.onupgradeneeded = () => request.transaction.abort();
+        request.onsuccess = () => resolve(request.result); request.onerror = () => request.error?.name === 'AbortError' ? resolve(null) : reject(request.error);
+      });
+      try {
+        if (!db?.objectStoreNames.contains('values')) return false;
+        return await new Promise((resolve, reject) => {
+          const tx = db.transaction('values', 'readonly'), request = tx.objectStore('values').get('volang.studio.next.draft.v1');
+          tx.oncomplete = () => resolve(request.result?.includes('Desktop 中文')); tx.onabort = () => reject(tx.error);
+        });
+      } finally { db?.close(); }
+    }, 'saved draft');
     source('package main\nfunc main() { missingDesktopName() }\n');
     click('[data-run]');
     await wait(() => document.querySelector('[data-output]')?.textContent.includes('missingDesktopName'), 'compile failure');

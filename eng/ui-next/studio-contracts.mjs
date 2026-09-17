@@ -1,4 +1,5 @@
 import {sourceEditor} from './editor-controls.mjs';
+import {waitStudioDraft} from './studio-draft-contracts.mjs';
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import { root } from './repository-paths.mjs';
@@ -109,7 +110,7 @@ export async function checkStudio(browser, url, outputDirectory = resolve(root, 
     await page.locator('[data-stop]').click();
     await page.waitForFunction(() => document.querySelector('[data-output]').textContent.startsWith('Stopped.'));
     await sourceEditor(page).fill(source);
-    await page.waitForFunction(value => localStorage.getItem('volang.studio.next.draft.v1') === value, source);
+    await waitStudioDraft(page,source);
     await page.getByRole('link', { name: 'Gallery', exact: true }).click();
     await page.getByRole('link', { name: 'Playground', exact: true }).click();
     await page.waitForFunction(value => document.querySelector('#playground-source')?.value === value, source);

@@ -56,9 +56,9 @@
   ],
   "outputs": [
     {
-      "digest": "sha256:1057228de74d9752001ebf303609f984a5c6d2068bcc5620f696392c23187ddb",
+      "digest": "sha256:c21b30457a15824578467912e06fdfc0685a4e719767be142fcbd3373df969ea",
       "path": "catalog.vo",
-      "size": 330555
+      "size": 331066
     }
   ],
   "path": "apps/studio/documentation",
@@ -99,7 +99,7 @@
     "ui/docs/web-desktop-products.md": "sha256:f564e8cae39f8cd83ce3e0b9f5d5e9fa3ee2a1052ee7359eeefbdb7bf4f33f58",
     "ui/next/guides/first-steps.md": "sha256:92f247e6209f008d9f48f1bc1d66c1ca119f6adc5dd2ad74189a9f55c574d41c",
     "ui/next/guides/lifecycle.md": "sha256:878225cdf34328fc2b9f447f3683712d8ccdea02a2d20498c276b852c26ddf9f",
-    "ui/next/guides/migration.md": "sha256:7b0a65c1a362db85943fe7b6b6bfeb48d35fd96f4a1fa7bddd05fb94ca165a32",
+    "ui/next/guides/migration.md": "sha256:708a906a2201463ab6808ab740a51f7a6f13dfc8913f0432a5b8e0f06e1f3008",
     "ui/next/guides/state.md": "sha256:f4b1c64d6ee18bf382326bddb3b484b53b08c5a07d7af05e2dde88285bb8b76c"
   },
   "toolchain": {

@@ -45,8 +45,9 @@ for bundle layout, prerequisites and current platform evidence.
 
 ### Desktop preview storage migration
 
-The desktop SDK and application manifest advance from v1 to v2 to carry a stable
-application identifier. Rebuild the matching SDK/toolchain and repackage each
+The application manifest advances from v1 to v2 to carry a stable application
+identifier. The desktop SDK uses v3 to carry authenticated native import libraries
+needed for standalone Windows AOT linking. Rebuild the matching SDK/toolchain and repackage each
 application. Set `desktop.identifier` once in `ui-next.json` (for example
 `dev.example.my-app`); new single-application templates generate a unique value.
 Retain it across updates and relocation. Give independent applications different
@@ -56,8 +57,13 @@ Earlier desktop previews used platform default browser profiles. Export or copy
 important drafts from the old application before replacing it. The new identified
 profile starts empty and does not delete or automatically import old storage.
 Existing old bundles keep their previous runtime and profile behavior. Web-origin
-storage is unchanged by this desktop migration. New desktop bundles preserve
-localStorage and IndexedDB independently of the executable's installation path.
+storage profiles are unchanged by this desktop migration. New desktop profiles
+keep localStorage and IndexedDB independently of the executable's installation
+path. For acknowledged saves, use `createPersistentStorage` from `@volang/ui-next`:
+its writes resolve after an IndexedDB transaction commits. Browser localStorage
+can flush later than `setItem` returns and can lose the last write on immediate
+process exit. Studio now uses committed transactions and imports an old draft
+only when its new key is absent; it leaves the original localStorage value intact.
 
 | Previous pattern | Replacement |
 | --- | --- |

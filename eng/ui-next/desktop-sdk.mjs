@@ -6,6 +6,7 @@ import {execute} from './project.mjs';
 import {desktopArtifact,readDesktopSdk} from './desktop-sdk-manifest.mjs';
 import {desktopRuntimeName} from './desktop-link.mjs';
 import {publishNewDirectory} from './publish-directory.mjs';
+import {nativeBuildRequirements,bundleNativeLibraries} from './desktop-native-libraries.mjs';
 
 // Built once by the distributor. End-user projects need neither Rust nor Cargo.
 export async function buildDesktopSdk(directory,{profile='release-native',signal}={}) {
@@ -23,10 +24,10 @@ export async function buildDesktopSdk(directory,{profile='release-native',signal
     const runner=process.platform==='win32'?'vo-ui-desktop.exe':'vo-ui-desktop';
     await copyFile(join(output,runner),join(stage,runner));
     console.log('Building Native AOT desktop runtime…');
-    const log=await execute('cargo',['rustc',...cargo,'--features','aot','--lib','--','--print','native-static-libs'],{env,signal});
+    const log=await execute('cargo',['rustc',...cargo,'--color','never','--message-format=json','--features','aot','--lib','--','--print','native-static-libs'],{env,signal});
     await writeFile(join(stage,'aot-build.log'),log);
-    const nativeLink=log.match(/native-static-libs: ([^\n]+)/)?.[1].trim().split(/\s+/);
-    if(!nativeLink?.length)throw new Error('Rust did not report native static link requirements.');
+    const requirements=nativeBuildRequirements(log),{nativeLink}=requirements;
+    const libraries=await bundleNativeLibraries(stage,requirements);
     const tree=await execute('cargo',['tree','--locked','--offline','-p','vo-ui-desktop-runtime','--features','aot','-e','normal'],{env,signal});
     for(const dependency of ['vo-ui-runtime ','vo-ui-vm ','vo-ui-integration ','vo-codegen ','cranelift-codegen ']) {
       if(tree.includes(dependency))throw new Error(`Desktop AOT unexpectedly depends on ${dependency}`);
@@ -36,8 +37,8 @@ export async function buildDesktopSdk(directory,{profile='release-native',signal
     await copyFile(join(output,name),join(stage,name));
     const runtime=await desktopArtifact(stage,name);
     const wire=JSON.parse(await readFile(join(toolchain.ui,'next/wire.schema.json'),'utf8'));
-    await writeFile(join(stage,'desktop-sdk.json'),JSON.stringify({schema:'volang.ui-desktop-sdk.v2',platform:process.platform,arch:process.arch,profile,wireVersion:wire.version,
-      runner:await desktopArtifact(stage,runner),runtime,nativeLink},null,2)+'\n');
+    await writeFile(join(stage,'desktop-sdk.json'),JSON.stringify({schema:'volang.ui-desktop-sdk.v3',platform:process.platform,arch:process.arch,profile,wireVersion:wire.version,
+      runner:await desktopArtifact(stage,runner),runtime,nativeLink,libraries},null,2)+'\n');
     await readDesktopSdk(stage);signal?.throwIfAborted();
     await publishNewDirectory(stage,directory);
     return directory;

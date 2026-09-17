@@ -32,8 +32,8 @@ test('SDK integrity is checked before native tools execute',async()=>{
   const directory=await mkdtemp(join(tmpdir(),'vo-desktop-sdk-'));
   try {
     await writeFile(join(directory,'runner'),'binary');
-    const sdk={schema:'volang.ui-desktop-sdk.v2',platform:process.platform,arch:process.arch,profile:'dev',wireVersion:25,
-      runner:await desktopArtifact(directory,'runner'),runtime:null,nativeLink:[]};
+    const sdk={schema:'volang.ui-desktop-sdk.v3',platform:process.platform,arch:process.arch,profile:'dev',wireVersion:25,
+      runner:await desktopArtifact(directory,'runner'),runtime:null,nativeLink:[],libraries:[]};
     await writeFile(join(directory,'desktop-sdk.json'),JSON.stringify(sdk));
     assert.equal((await readDesktopSdk(directory)).runtime,null);
     await writeFile(join(directory,'desktop-sdk.json'),JSON.stringify({...sdk,schema:'volang.ui-desktop-sdk.v1'}));
