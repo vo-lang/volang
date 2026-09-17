@@ -58,6 +58,19 @@ const template = document.currentScript.dataset.template;
         readyState: audio.readyState, duration: audio.duration,
         source: audio.currentSrc.slice(0, 120), wav: audio.canPlayType('audio/wav'),
       }));
+      // A cold system decoder may advertise seekable metadata before its
+      // playback clock is ready. Verify real playback before paused seeking.
+      audio.muted = true;
+      const play = async () => {
+        const start = audio.currentTime;
+        let failure;
+        audio.play().catch(error => { failure = error; });
+        await wait(() => failure || (!audio.paused && audio.currentTime > start + .1), 'media playback');
+        require(!failure, 'Native media playback failed: ' + failure);
+      };
+      await play();
+      audio.pause();
+      require(audio.paused, 'Native media pause failed');
       // Metadata can arrive before the seekable ranges. Seeking outside them
       // may clamp the requested position, even after the resource gains data.
       await wait(() => Array.from({length: audio.seekable.length}, (_, i) =>
@@ -66,6 +79,7 @@ const template = document.currentScript.dataset.template;
         audio.currentTime = position;
         await wait(() => !audio.seeking && Math.abs(audio.currentTime - position) < .05, 'media seeking to ' + position);
       }
+      await play();
       button('Put the player away').click();
       await wait(() => !document.querySelector('audio'), 'media disposal');
       require(audio.paused, 'Removed media retained playback');
