@@ -15,6 +15,7 @@ interface DesktopWindow extends Window {
 }
 
 import type {MountOptions, UiApplication} from './mount.js';
+import type {MediaSources} from './media-sources.js';
 export {createDesktopNavigationServices as createNavigationServices} from './navigation.js';
 export {createLazyWidget} from './lazy-widget.js';
 
@@ -25,11 +26,12 @@ export function mountUi(container: HTMLElement, options: Pick<MountOptions, 'hyd
   const root = container;
   if (owner.__volangDesktop) throw new Error('Desktop document already has an application');
   if (!configuration || !root) throw new Error('Missing desktop document bootstrap');
-  const {token} = JSON.parse(configuration.textContent ?? '{}') as {token: unknown};
+  const {token, media} = JSON.parse(configuration.textContent ?? '{}') as {token: unknown; media?: MediaSources};
   configuration.remove();
   if (typeof token !== 'string' || !/^[a-f0-9]{32}$/.test(token)) throw new Error('Invalid desktop document identity');
   const services = typeof options.services === 'function' ? options.services(root) : options.services;
-  const transport = createUiTransport(root, options.hydrate ?? false, services);
+  const transport = createUiTransport(root, options.hydrate ?? false, services,
+    media && Object.keys(media).length ? media : undefined);
   let finish!: () => void;
   let reject!: (error: Error) => void;
   const done = new Promise<void>((resolve, failure) => { finish = resolve; reject = failure; });

@@ -9,6 +9,7 @@ import { motionTasks } from './motion.js';
 import { runVmUi, type UiVm } from './vm.js';
 import type { TaskProviders, WatchProviders } from './tasks.js';
 import type { WidgetProviders } from './widgets.js';
+import type { MediaSources } from './media-sources.js';
 
 // Optional lab counters; applications pay no timing/aggregation cost by default.
 export interface UiMetrics { exchanges: number; batches: number; mutations: number; guestBytes: number; inputBytes: number; hostMs: number }
@@ -30,8 +31,8 @@ export interface UiTransport {
 }
 
 /** One serialized, bounded wire connection to an owned renderer root. */
-export function createUiTransport(container: HTMLElement, hydrate = false, services: UiServices = {}): UiTransport {
-  return new HostBoundary(container, hydrate, services);
+export function createUiTransport(container: HTMLElement, hydrate = false, services: UiServices = {}, mediaSources?: MediaSources): UiTransport {
+  return new HostBoundary(container, hydrate, services, mediaSources);
 }
 
 class HostBoundary {
@@ -48,8 +49,8 @@ class HostBoundary {
   // guest first waits for input. Closing before that point resolves false.
   readonly ready = new Promise<boolean>(resolve => { this.finishReady = resolve; });
 
-  constructor(container: HTMLElement, hydrate: boolean, private readonly services: UiServices) {
-    this.renderer = new DomRenderer(container, (event, latest) => this.input.push(event, latest), hydrate, {...this.files.widgets, ...services.widgets});
+  constructor(container: HTMLElement, hydrate: boolean, private readonly services: UiServices, mediaSources?: MediaSources) {
+    this.renderer = new DomRenderer(container, (event, latest) => this.input.push(event, latest), hydrate, {...this.files.widgets, ...services.widgets}, mediaSources);
     this.tasks = new TaskHost((id, value, error) => this.renderer.post('@task', id, value, error),
       { ...this.files.tasks, ...motionTasks(container), 'ui.measure': async value => this.renderer.measure(value), ...services.tasks },
       { ...pageWatches(container.ownerDocument), ...services.watches });

@@ -70,6 +70,7 @@ impl Default for WindowOptions {
 enum Wake {
     Ipc,
     Execution,
+    DocumentClosed,
     #[cfg(target_os = "macos")]
     HostTerminated,
     #[cfg(target_os = "macos")]
@@ -144,6 +145,10 @@ pub fn run(
         .map(std::rc::Rc::new);
     let navigation_links = external.clone();
     let popup_links = external.clone();
+    let unloading = Arc::new(AtomicBool::new(false));
+    let navigation_unloading = unloading.clone();
+    let document_unloading = unloading.clone();
+    let document_proxy = proxy.clone();
     let mut web_context = wry::WebContext::new(directory);
     let builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_initialization_script(include_str!("window/locale.js"))
@@ -176,6 +181,9 @@ pub fn run(
                 .unwrap()
         })
         .with_navigation_handler(move |url| {
+            if url == "about:blank" && navigation_unloading.load(Ordering::Relaxed) {
+                return true;
+            }
             if local_url(&url) {
                 return true;
             }
@@ -183,6 +191,14 @@ pub fn run(
                 links.open(&url);
             }
             false
+        })
+        .with_on_page_load_handler(move |event, url| {
+            if matches!(event, wry::PageLoadEvent::Finished)
+                && url == "about:blank"
+                && document_unloading.load(Ordering::Relaxed)
+            {
+                let _ = document_proxy.send_event(Wake::DocumentClosed);
+            }
         })
         .with_new_window_req_handler(move |url, _| {
             if !local_url(&url) {
@@ -246,7 +262,9 @@ pub fn run(
                 if closing {
                     *flow = ControlFlow::Exit;
                 }
-                return Err(if closing {
+                return Err(if unloading.load(Ordering::Relaxed) {
+                    "desktop document teardown timed out"
+                } else if closing {
                     "desktop close timed out; interruption requested"
                 } else {
                     "desktop host did not start before its deadline"
@@ -254,10 +272,12 @@ pub fn run(
                 .into());
             }
             match event {
+                Event::UserEvent(Wake::DocumentClosed) => *flow = ControlFlow::Exit,
                 #[cfg(target_os = "macos")]
                 Event::UserEvent(Wake::HostTerminated) => {
                     // The rendering process cannot display recovery controls.
                     // Close the shell and release the native execution owner.
+                    unloading.store(true, Ordering::Relaxed);
                     *flow = ControlFlow::Exit;
                     return Err(
                         "desktop rendering process terminated; reopen the application".into(),
@@ -379,6 +399,19 @@ pub fn run(
             result = Some(Err(error));
             if options.exit_on_failure || closing {
                 *flow = ControlFlow::Exit;
+            }
+        }
+        if matches!(flow, ControlFlow::ExitWithCode(_))
+            && options.application_id.is_some()
+            && !unloading.swap(true, Ordering::Relaxed)
+        {
+            // Finish the document's lifecycle before the native process exits.
+            // replace() discards its history entry instead of retaining storage
+            // connections in a page cache. No fixed sleep guesses disk timing.
+            closing = true;
+            deadline = Some(Instant::now() + options.close_timeout);
+            if webview.evaluate_script("try{window.__volangDesktop?.dispose()}finally{location.replace('about:blank')}").is_ok() {
+                *flow = ControlFlow::Wait;
             }
         }
         if !matches!(flow, ControlFlow::ExitWithCode(_)) {

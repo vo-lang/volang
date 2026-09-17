@@ -1,10 +1,11 @@
 import {createHash} from 'node:crypto';
 import {createRequire} from 'node:module';
-import {cp,mkdir,mkdtemp,readFile,readdir,rename,rm,rmdir,stat,writeFile} from 'node:fs/promises';
+import {cp,mkdir,mkdtemp,readFile,readdir,rm,stat,writeFile} from 'node:fs/promises';
 import {dirname,join,relative,resolve} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {spawn} from 'node:child_process';
 import {build} from 'esbuild';
+import {publishNewDirectory} from '../../../eng/ui-next/publish-directory.mjs';
 
 const directory = dirname(fileURLToPath(import.meta.url));
 const root = resolve(directory,'../../..');
@@ -70,7 +71,7 @@ export async function buildAuthoringExtension(destination,{signal} = {}) {
     const bytes = await readFile(vsix);
     const report = {version:1,extensionVersion:metadata.version,sha256:hash(bytes),bytes:bytes.length,
       dependencies:dependencies.map(({text,...entry}) => entry),inputs:[]};
-    const inputs = new Set([...Object.keys(bundle.metafile.inputs),'package.json','package-lock.json','README.md','language-configuration.json','build.mjs',relative(directory,join(root,'LICENSE'))]);
+    const inputs = new Set([...Object.keys(bundle.metafile.inputs),'package.json','package-lock.json','README.md','language-configuration.json','build.mjs',relative(directory,join(root,'LICENSE')),relative(directory,join(root,'eng/ui-next/publish-directory.mjs'))]);
     for (const folder of ['syntaxes','snippets']) for (const entry of await readdir(join(directory,folder),{withFileTypes:true})) {
       if (!entry.isFile()) throw new Error(`Unexpected authoring resource: ${folder}/${entry.name}`);
       inputs.add(join(folder,entry.name));
@@ -81,9 +82,7 @@ export async function buildAuthoringExtension(destination,{signal} = {}) {
     }
     await writeFile(join(stage,'report.json'),JSON.stringify(report,null,2)+'\n');
     signal?.throwIfAborted();
-    await mkdir(destination);
-    try {await rename(stage,destination);}
-    catch (error) {await rmdir(destination).catch(() => {});throw error;}
+    await publishNewDirectory(stage,destination);
     return {...report,directory:destination,vsix:join(destination,'volang-ui-authoring.vsix')};
   } finally {await rm(stage,{recursive:true,force:true});}
 }

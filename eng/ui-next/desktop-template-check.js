@@ -53,7 +53,11 @@ const template = document.currentScript.dataset.template;
       require(audio, 'Missing native audio');
       audio.preload = 'auto'; audio.load();
       await wait(() => audio.readyState >= 1 || audio.error, 'media metadata');
-      require(!audio.error && audio.duration > 6, 'Native media metadata failed');
+      require(!audio.error && audio.duration > 6, 'Native media metadata failed: ' + JSON.stringify({
+        code: audio.error?.code, message: audio.error?.message,
+        readyState: audio.readyState, duration: audio.duration,
+        source: audio.currentSrc.slice(0, 120), wav: audio.canPlayType('audio/wav'),
+      }));
       // Metadata can arrive before the seekable ranges. Seeking outside them
       // may clamp the requested position, even after the resource gains data.
       await wait(() => Array.from({length: audio.seekable.length}, (_, i) =>

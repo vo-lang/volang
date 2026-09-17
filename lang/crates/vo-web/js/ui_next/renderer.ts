@@ -17,6 +17,7 @@ import { LayoutObserverHost } from './layout-observer.js';
 import { activeElement, captureContentSelection, composedContains, focusAvailable } from './focus.js';
 import { selectedValues, applySelection } from './selection.js';
 import {applyTextSelection} from './text-selection.js';
+import {mediaSource, type MediaSources} from './media-sources.js';
 export type { Mutation, Batch, Event as UiEvent } from './generated/protocol.js';
 export { decodeBatch } from './generated/codec.js';
 export { InputQueue } from './input.js';
@@ -53,7 +54,7 @@ export class DomRenderer {
   private readonly formReset: EventListener;
   private readonly unhandledControlEdit: EventListener;
 
-  constructor(private readonly container: HTMLElement, private readonly send: (event: UiEvent, latest?: boolean) => void, hydrate = false, widgets: WidgetProviders = {}) {
+  constructor(private readonly container: HTMLElement, private readonly send: (event: UiEvent, latest?: boolean) => void, hydrate = false, widgets: WidgetProviders = {}, private readonly mediaSources?: MediaSources) {
     if (container.childNodes.length !== 0 && !hydrate) throw new Error('UI root must be empty before mounting');
     this.widgets = new WidgetHost((id, value, error) => this.post('@widget', id, value, error), widgets);
     this.dialogs = new DialogHost(container.ownerDocument);
@@ -427,12 +428,15 @@ export class DomRenderer {
     // Native mute is separate from its reflected default. Preserve a pre-boot
     // choice when adopting that same default; later declaration changes own it.
     const retainMute = mediaMute && this.hydrating && element.hasAttribute(name) === !remove;
+    const value = !remove && this.mediaSources && name === 'src'
+      ? mediaSource(mutation.value, entry.kind, name, element.ownerDocument.baseURI, this.mediaSources)
+      : mutation.value;
     if (remove) {
       element.removeAttribute(name);
-    } else if (!this.hydrating || element.getAttribute(name) !== mutation.value) {
+    } else if (!this.hydrating || element.getAttribute(name) !== value) {
       // Replaying an unchanged src reloads native media/frames. Adoption also
       // avoids repeating custom-element callbacks for already-present values.
-      element.setAttribute(name, mutation.value);
+      element.setAttribute(name, value);
     }
     if (mediaMute && !retainMute) (element as HTMLMediaElement).muted = !remove;
   }

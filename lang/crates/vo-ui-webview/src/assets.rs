@@ -118,7 +118,14 @@ impl Assets {
         if token.len() != 32 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("invalid desktop bootstrap identity".into());
         }
-        let bootstrap = format!("<script id=\"volang-desktop-config\" type=\"application/json\">{{\"token\":\"{token}\"}}</script><script type=\"module\" src=\"{HOST_PATH}\"></script>");
+        let mut configuration = serde_json::json!({"token": token});
+        if cfg!(target_os = "linux") {
+            // GStreamer's WebKit source cannot consume our custom URI scheme.
+            // Bundled media is already bounded and resident; native data URLs
+            // retain browser playback/seek controls without a loopback server.
+            configuration["media"] = serde_json::to_value(self.media_sources()).unwrap();
+        }
+        let bootstrap = format!("<script id=\"volang-desktop-config\" type=\"application/json\">{configuration}</script><script type=\"module\" src=\"{HOST_PATH}\"></script>");
         let html = self.index.replace(BOOTSTRAP_MARKER, &bootstrap);
         self.files.insert(
             "/index.html".into(),
@@ -131,6 +138,29 @@ impl Assets {
     pub(crate) fn get(&self, path: &str) -> Option<&Asset> {
         self.files
             .get(if path == "/" { "/index.html" } else { path })
+    }
+
+    fn media_sources(&self) -> BTreeMap<&str, String> {
+        use base64::Engine;
+        self.files
+            .iter()
+            .filter(|(_, asset)| {
+                matches!(
+                    asset.media_type,
+                    MediaType::Wav | MediaType::Mp3 | MediaType::Mp4 | MediaType::Webm
+                )
+            })
+            .map(|(path, asset)| {
+                (
+                    path.as_str(),
+                    format!(
+                        "data:{};base64,{}",
+                        asset.media_type.content_type(),
+                        base64::engine::general_purpose::STANDARD.encode(&asset.bytes)
+                    ),
+                )
+            })
+            .collect()
     }
 }
 
@@ -175,6 +205,29 @@ mod tests {
         assert!(ready
             .with_token("0123456789abcdef0123456789abcdef")
             .is_err());
+    }
+
+    #[test]
+    fn native_media_sources_contain_only_typed_bundled_media() {
+        let assets = bundle(vec![
+            (
+                "/chime.wav".into(),
+                Asset::new(MediaType::Wav, b"wave".as_slice()),
+            ),
+            (
+                "/movie.mp4".into(),
+                Asset::new(MediaType::Mp4, b"movie".as_slice()),
+            ),
+            (
+                "/app.js".into(),
+                Asset::new(MediaType::JavaScript, b"code".as_slice()),
+            ),
+        ])
+        .unwrap();
+        let media = assets.media_sources();
+        assert_eq!(media.len(), 2);
+        assert_eq!(media["/chime.wav"], "data:audio/wav;base64,d2F2ZQ==");
+        assert_eq!(media["/movie.mp4"], "data:video/mp4;base64,bW92aWU=");
     }
     #[test]
     fn paths_duplicates_and_byte_limits_fail_before_window_creation() {
