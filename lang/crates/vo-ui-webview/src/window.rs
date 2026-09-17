@@ -3,7 +3,6 @@ use crate::{
     local_url, ApplicationId, Assets, ORIGIN,
 };
 use std::{
-    borrow::Cow,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc,
@@ -24,6 +23,7 @@ use vo_vm::vm::Vm;
 use wry::{WebView, WebViewBuilder};
 
 mod external;
+mod protocol;
 
 #[cfg(target_os = "macos")]
 mod menu;
@@ -151,29 +151,7 @@ pub fn run(
         .with_clipboard(true)
         .with_devtools(cfg!(debug_assertions))
         .with_custom_protocol("volang".into(), move |_, request| {
-            let supported = matches!(request.method().as_str(), "GET" | "HEAD");
-            let asset = supported
-                .then(|| assets.get(request.uri().path()))
-                .flatten();
-            let (status, mime, bytes) = match asset {
-                Some(asset) => (200, asset.media_type.content_type(), asset.bytes.as_ref()),
-                None => (
-                    if supported { 404 } else { 405 },
-                    "text/plain; charset=utf-8",
-                    b"Unavailable".as_slice(),
-                ),
-            };
-            wry::http::Response::builder()
-                .status(status)
-                .header("Content-Type", mime)
-                .header("X-Content-Type-Options", "nosniff")
-                .header("Cache-Control", "no-store")
-                .body(Cow::Owned(if request.method() == "HEAD" {
-                    vec![]
-                } else {
-                    bytes.to_vec()
-                }))
-                .unwrap()
+            protocol::respond(&assets, &request)
         })
         .with_navigation_handler(move |url| {
             if local_url(&url) {

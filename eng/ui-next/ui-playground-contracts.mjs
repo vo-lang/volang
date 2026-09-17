@@ -1,4 +1,5 @@
 import {sourceEditor} from './editor-controls.mjs';
+import {readStudioDraft,waitStudioDraft} from './studio-draft-contracts.mjs';
 import assert from 'node:assert/strict';
 
 export const uiPlaygroundContracts = ['ui-source-lazy-compile', 'ui-source-interactive-worker', 'ui-preview-rerun-reset',
@@ -7,7 +8,7 @@ export const uiPlaygroundContracts = ['ui-source-lazy-compile', 'ui-source-inter
 
 export async function checkUiPlayground(page, screenshot) {
   await page.getByRole('link', { name: 'Playground', exact: true }).click();
-  const consoleDraft = await page.evaluate(() => localStorage.getItem('volang.studio.next.draft.v1'))
+  const consoleDraft = await readStudioDraft(page)
     ?? await page.locator('#playground-source').inputValue();
   await page.waitForFunction(source => document.querySelector('#playground-source')?.value === source, consoleDraft);
   await page.getByRole('link', { name: 'Try UI components →', exact: true }).click();
@@ -64,7 +65,7 @@ export async function checkUiPlayground(page, screenshot) {
   assert.match(await status.textContent(), /^Stopped/);
   assert.equal(await page.locator('iframe').count(), 0);
   await editor.fill(sample);
-  await page.waitForFunction(source => localStorage.getItem('volang.studio.next.ui-draft.v1') === source, sample);
+  await waitStudioDraft(page,sample,'volang.studio.next.ui-draft.v1');
   await start();
   await page.getByRole('link', { name: 'Back to console examples →', exact: true }).click();
   await page.locator('#playground-source').waitFor();
@@ -73,13 +74,13 @@ export async function checkUiPlayground(page, screenshot) {
   await page.getByRole('link', { name: 'Try UI components →', exact: true }).click();
   await page.waitForFunction(source => document.querySelector('#ui-playground-source')?.value === source, sample);
   await editor.fill('');
-  await page.waitForFunction(() => localStorage.getItem('volang.studio.next.ui-draft.v1') === '');
+  await waitStudioDraft(page,'','volang.studio.next.ui-draft.v1');
   await page.getByRole('link', { name: 'Back to console examples →', exact: true }).click();
   await page.locator('#playground-source').waitFor();
   await page.getByRole('link', { name: 'Try UI components →', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#ui-playground-source')?.value === '');
   await editor.fill(sample);
-  await page.waitForFunction(source => localStorage.getItem('volang.studio.next.ui-draft.v1') === source, sample);
+  await waitStudioDraft(page,sample,'volang.studio.next.ui-draft.v1');
   await page.getByRole('link', { name: 'Gallery', exact: true }).click();
 }
 
@@ -108,7 +109,7 @@ export async function checkUiPlaygroundSsr(browser, url) {
       release();
       await page.waitForFunction(() => window.__studioNext?.ready || window.__studioNext?.error);
       assert.equal(await page.evaluate(() => window.__studioNext.error), null);
-      await page.waitForFunction(source => localStorage.getItem('volang.studio.next.ui-draft.v1') === source, source);
+      await waitStudioDraft(page,source,'volang.studio.next.ui-draft.v1');
       assert.equal(await editor.inputValue(), source, 'late draft restore replaced pre-boot editing');
       assert.equal(await page.evaluate(() => window.earlyUiEditor === document.querySelector('#ui-playground-source')), true);
       assert.equal(await page.evaluate(() => localStorage.getItem('volang.studio.next.draft.v1')), 'independent console draft');

@@ -62,8 +62,10 @@ const template = document.currentScript.dataset.template;
       // may clamp the requested position, even after the resource gains data.
       await wait(() => Array.from({length: audio.seekable.length}, (_, i) =>
         audio.seekable.start(i) <= 5 && audio.seekable.end(i) >= 5).some(Boolean), 'media seekable range');
-      audio.currentTime = 5;
-      await wait(() => !audio.seeking && Math.abs(audio.currentTime - 5) < .05, 'media seeking');
+      for (const position of [5, 1, 6]) {
+        audio.currentTime = position;
+        await wait(() => !audio.seeking && Math.abs(audio.currentTime - position) < .05, 'media seeking to ' + position);
+      }
       button('Put the player away').click();
       await wait(() => !document.querySelector('audio'), 'media disposal');
       require(audio.paused, 'Removed media retained playback');

@@ -43,6 +43,13 @@ immediate error return. macOS installs standard editing shortcuts and routes
 Command-Q through the same orderly close path. Clipboard access is enabled on
 the system WebView, including Linux and Windows.
 
+The bundled-resource protocol serves exact byte ranges with `206`,
+`Content-Range` and `Content-Length` so native media can seek forward and back.
+HEAD keeps the full resource length without a body; unsatisfiable ranges return
+`416`. Unsupported range forms use the complete resource. Linux's GStreamer
+backend additionally uses native data URLs for bounded bundled media, because it
+cannot read the application's custom scheme.
+
 `WindowOptions.application_id` selects an application-specific persistent browser
 profile. `ApplicationId` validates the portable identifier and derives stable,
 versioned storage keys; the identifier must survive repackaging and relocation.
