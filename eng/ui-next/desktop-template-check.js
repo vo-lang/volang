@@ -8,6 +8,12 @@ const template = document.currentScript.dataset.template;
       if (performance.now() >= deadline) throw new Error(`Desktop ${template} timed out at ${stage}: ${JSON.stringify({
         readyState: document.readyState,
         canvases: document.querySelectorAll('canvas').length,
+        media: [...document.querySelectorAll('audio,video')].map(media => ({
+          readyState: media.readyState, networkState: media.networkState,
+          currentTime: media.currentTime, duration: media.duration, seeking: media.seeking,
+          error: media.error?.message,
+          seekable: Array.from({length: media.seekable.length}, (_, i) => [media.seekable.start(i), media.seekable.end(i)]),
+        })),
         text: document.querySelector('#root')?.textContent.slice(0, 2000),
       })}`);
       await new Promise(resolve => setTimeout(resolve, 25));
@@ -18,6 +24,7 @@ const template = document.currentScript.dataset.template;
   try {
     await wait(() => host = window.__volangDesktop);
     require(await host.ready, 'Application closed before becoming ready');
+    require(Intl.getCanonicalLocales(navigator.language).length === 1, 'Invalid host language');
     require(document.querySelector('#root').textContent.trim(), 'Empty application');
     if (template === 'canvas') {
       await wait(() => document.querySelector('canvas'), 'canvas mounting');
@@ -44,11 +51,15 @@ const template = document.currentScript.dataset.template;
     } else if (template === 'listening') {
       const audio = document.querySelector('audio');
       require(audio, 'Missing native audio');
-      audio.preload = 'metadata'; audio.load();
+      audio.preload = 'auto'; audio.load();
       await wait(() => audio.readyState >= 1 || audio.error, 'media metadata');
       require(!audio.error && audio.duration > 6, 'Native media metadata failed');
+      // Metadata can arrive before the seekable ranges. Seeking outside them
+      // may clamp the requested position, even after the resource gains data.
+      await wait(() => Array.from({length: audio.seekable.length}, (_, i) =>
+        audio.seekable.start(i) <= 5 && audio.seekable.end(i) >= 5).some(Boolean), 'media seekable range');
       audio.currentTime = 5;
-      await wait(() => !audio.seeking && audio.currentTime >= 5, 'media seeking');
+      await wait(() => !audio.seeking && Math.abs(audio.currentTime - 5) < .05, 'media seeking');
       button('Put the player away').click();
       await wait(() => !document.querySelector('audio'), 'media disposal');
       require(audio.paused, 'Removed media retained playback');

@@ -146,6 +146,7 @@ pub fn run(
     let popup_links = external.clone();
     let mut web_context = wry::WebContext::new(directory);
     let builder = WebViewBuilder::new_with_web_context(&mut web_context)
+        .with_initialization_script(include_str!("window/locale.js"))
         .with_incognito(options.application_id.is_none())
         .with_clipboard(true)
         .with_devtools(cfg!(debug_assertions))

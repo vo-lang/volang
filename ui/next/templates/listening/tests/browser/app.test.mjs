@@ -1,8 +1,10 @@
 import {test,expect} from './fixtures.mjs';
 
 test('native playback survives activation and updates; removal stops playback',async({page,appURL})=>{
-  const requests=[];
-  page.on('request',request=>requests.push(request.url()));
+  // preload is a browser hint: WebKit may request metadata before play().
+  // Observe responses before navigation so either loading policy is covered.
+  let recording;
+  page.on('response',response=>{if(response.url().endsWith('four-notes.wav'))recording=response;});
   let release;
   const gate=new Promise(resolve=>{release=resolve;});
   await page.route('**/assets/app.*',async route=>{await gate;await route.continue();});
@@ -11,15 +13,13 @@ test('native playback survives activation and updates; removal stops playback',a
     const audio=page.locator('audio'),note=page.getByRole('textbox',{name:'A thought to keep'});
     await expect(audio).toBeVisible();
     expect(await audio.getAttribute('preload')).toBe('none');
-    expect(requests.some(url=>url.endsWith('four-notes.wav'))).toBe(false);
-    const recording=page.waitForResponse(response=>response.url().endsWith('four-notes.wav'));
     await audio.evaluate(async element=>{
       window.beforeMedia=element;window.mediaReloads=0;
       element.muted=true;element.loop=true;
       await element.play();
       element.addEventListener('emptied',()=>window.mediaReloads++);
     });
-    expect((await recording).headers()['content-type']).toBe('audio/wav');
+    await expect.poll(()=>recording?.headers()['content-type']).toBe('audio/wav');
     await expect.poll(()=>audio.evaluate(element=>element.currentTime)).toBeGreaterThan(.1);
     await note.fill('A thought before the page wakes 中文');
     release();
