@@ -73,7 +73,14 @@ pub(crate) fn run_command(
     if !cwd.starts_with(root.canonicalize()?) {
         bail!("CI command cwd resolves outside repository");
     }
-    let mut command = Command::new(&spec.argv[0]);
+    // npm's Windows distribution uses batch launchers. Rust only infers the
+    // .exe suffix, so select the launcher explicitly and retain argv quoting.
+    let program = match spec.argv[0].as_str() {
+        "npm" if cfg!(windows) => "npm.cmd",
+        "npx" if cfg!(windows) => "npx.cmd",
+        program => program,
+    };
+    let mut command = Command::new(program);
     // Rust on Windows searches System32 before an inherited PATH, but gives
     // an explicit child PATH precedence. Honor the runner's selected tools.
     #[cfg(windows)]

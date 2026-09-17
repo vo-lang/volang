@@ -176,7 +176,7 @@ evidence_kind = "rust-quality"
 
 [[task]]
 id = "language-native-smoke"
-commands = ["language-native-smoke-run"]
+commands = ["language-native-smoke-run", "language-native-aot-smoke-run"]
 inputs = ["*"]
 resource_group = "cargo"
 artifacts = ["target/ci/test-runs"]
@@ -202,7 +202,7 @@ capabilities = ["vm", "jit", "gc", "native-aot", "compile"]
 timeout_minutes = 20
 budget_minutes = 10
 evidence_kind = "language-test"
-results = ["target/ci/results/language-native-smoke.json"]
+results = ["target/ci/results/language-native-smoke.json", "target/ci/results/language-native-aot-smoke.json"]
 
 [[task]]
 id = "language-native-1"
@@ -987,7 +987,7 @@ failure_kind = "product"
 
 [[command]]
 id = "language-native-smoke-run"
-argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "native,native-aot,gc-vm,gc-osr,compile", "--tags", "smoke", "--format", "json"]
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "native,gc-vm,gc-osr,compile", "--tags", "smoke", "--format", "json"]
 timeout_seconds = 1100
 failure_kind = "product"
 stdout_result = "target/ci/results/language-native-smoke.json"

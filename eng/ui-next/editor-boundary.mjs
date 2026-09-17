@@ -145,17 +145,26 @@ export async function checkCodeEditorBoundary(page, url) {
       editor.contentDOM.dispatchEvent(new CompositionEvent('compositionstart', {bubbles:true}));
       editor.dispatch({changes:{from:0, to:editor.state.doc.length, insert:'IME 中文'}});
       const event = new KeyboardEvent('keydown', {key:'Enter', ctrlKey:true, bubbles:true, cancelable:true});
+      // Synthetic composition does not activate the platform IME in CodeMirror.
+      // Exercise the application's ancestor capture handler without invoking
+      // the editor's platform-specific keymap for this artificial key event.
+      editor.contentDOM.addEventListener('keydown', event => event.stopImmediatePropagation(), {capture:true, once:true});
       editor.contentDOM.dispatchEvent(event);
       const commands = events.filter(event => event.kind === 'keydown').length;
       source('pending application update');
       const native = input.value;
       editor.contentDOM.dispatchEvent(new CompositionEvent('compositionend', {bubbles:true}));
-      return {commands, native};
+      return {commands, native, prevented:event.defaultPrevented};
     });
-    assert.deepEqual(composition, {commands:0, native:'IME 中文'}, 'a captured command or render interrupted composition');
+    assert.deepEqual(composition, {commands:0, native:'IME 中文', prevented:false}, 'a captured command or render interrupted composition');
     await page.waitForFunction(() => editorBoundary.events.some(event => event.kind === 'input' && !event.isComposing && event.value === 'IME 中文'));
     await page.evaluate(() => editorBoundary.acknowledge());
     assert.equal(await content.textContent(), 'IME 中文');
+    assert.deepEqual(await page.evaluate(() => {
+      const event = new KeyboardEvent('keydown', {key:'Enter', ctrlKey:true, bubbles:true, cancelable:true});
+      editorBoundary.view().contentDOM.dispatchEvent(event);
+      return {commands:editorBoundary.events.filter(event => event.kind === 'keydown').length, prevented:event.defaultPrevented};
+    }), {commands:1, prevented:true}, 'composition end did not restore the ancestor command');
     await page.evaluate(() => {
       const input = editorBoundary.input;
       input.defaultValue = 'native reset value';
@@ -195,7 +204,7 @@ export async function checkCodeEditorBoundary(page, url) {
       'single-visible-editor', 'native-ref-focus', 'input-projection', 'stale-frame-protection',
       'ack-preserves-undo', 'native-form-value', 'range-move-selection', 'fieldset-disabled', 'native-label-dependencies',
       'readonly', 'maximum-length', 'overlimit-deletion', 'native-input-synchronization',
-      'source-selection-projection', 'stale-source-selection', 'composition-command-bypass', 'composition-projection', 'native-reset', 'cancelled-reset',
+      'source-selection-projection', 'stale-source-selection', 'composition-command-bypass', 'composition-command-restored', 'composition-projection', 'native-reset', 'cancelled-reset',
       'reload-focus-selection', 'focus-projection-disposal', 'fallback-disposal']};
   } finally {await page.evaluate(() => editorBoundary.renderer.close());}
 }

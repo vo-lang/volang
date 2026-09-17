@@ -274,8 +274,10 @@ The debug profile optimizes the SHA-256 helper with debug assertions and overflo
 checks enabled. Debug executable receipts can cover hundreds of megabytes, so
 verification must remain practical on CPUs without SHA instruction acceleration;
 the compiler, runtime and test runner retain their debug profiles.
-The merge Native AOT smoke lane uses the release profile, matching the nightly
-AOT lanes. Large imported packages otherwise spend most of their case deadline
+Pull-request and merge Native AOT smoke checks use the same release-profile
+command, matching the nightly AOT lanes. Pull requests retain a separate debug
+VM/JIT/GC/compile smoke command and require both result receipts.
+Large imported packages otherwise spend most of their case deadline
 in unoptimized native code generation; the deadline and VM differential remain
 unchanged. Debug AOT execution remains available through `vo-dev test run`.
 Differential failures retain the logs and executable digest. The case deadline includes
