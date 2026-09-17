@@ -42,5 +42,5 @@ pub use extern_call::jit_call_extern;
 pub use invoke::dispatch_jit_frame;
 pub(crate) use osr::{try_loop_osr, OsrResult};
 
-#[cfg(all(test, feature = "jit"))]
+#[cfg(all(test, feature = "native"))]
 mod test_support;

@@ -1,0 +1,126 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+var fragileType = ui.Define("contract.Fragile")
+
+func renderBoundaries() {
+	var absent *ui.RenderError
+	empty := &ui.RenderError{}
+	require(!absent.Retry() && !empty.Retry(), "unowned failure accepted a retry")
+	var brokenState *ui.BoolState
+	var latest *ui.RenderError
+	var task *ui.Task
+	starts := 0
+	stops := 0
+	transientStarts := 0
+	transient := ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		ui.Effect(scope, "must-not-start", func() func() {
+			transientStarts++
+			return nil
+		})
+		return ui.Text("unpublished")
+	})
+	fragile := ui.Component(fragileType, func(scope *ui.Scope) ui.View {
+		brokenState = ui.Bool(scope, "brokenState", false)
+		ui.Effect(scope, "active", func() func() {
+			starts++
+			task = ui.Start(scope, ui.Request{Service: "test", Value: "pending"}, func(result ui.Result) {
+				panic("disposed task callback")
+			})
+			return func() {
+				stops++
+			}
+		})
+		if brokenState.Get() {
+			// Mount a sibling and edit an existing node before a later child
+			// fails: recovery must discard all three partial operations.
+			return ui.Fragment(ui.Text("edited").Key("text"), transient.Key("new"), ui.Component(branchType, func(scope *ui.Scope) ui.View {
+				panic("broken child")
+			}).Key("crash"))
+		}
+		return ui.Fragment(ui.Text("healthy").Key("text"), ui.Element("button", ui.Text("break")).Key("button").Attr("data-name", "break").On("click", func(event ui.Event) {
+			brokenState.Set(true)
+		}))
+	})
+	boundary := ui.ErrorBoundary(func() ui.View {
+		return fragile
+	}, func(failure *ui.RenderError) ui.View {
+		latest = failure
+		require(failure.Value == "broken child", "lost render failure")
+		frames := failure.Components()
+		require(len(frames) == 3 && frames[0].Name == "contract.Branch" && frames[0].Key == "crash" &&
+			frames[1].Name == "contract.Fragile" &&
+			frames[2].Name == "ui.ErrorBoundary", "component trace lost owner order")
+		require(strings.HasSuffix(frames[0].File, "main.vo") && frames[0].Line > 0 &&
+			strings.HasSuffix(frames[1].File, "boundaries.vo"), "definition source locations missing")
+		frames[0].Name = "edited snapshot"
+		require(failure.Components()[0].Name == "contract.Branch", "diagnostic snapshots share mutable storage")
+		return ui.Text("fallback")
+	})
+	root := ui.NewRoot(ui.Fragment(counter("left"), boundary, counter("right")))
+	model := map[int]*modelNode{0: &modelNode{parent: -1}}
+	initial := flush(root)
+	applyModel(model, initial)
+	left := target(initial, "left")
+	broken := target(initial, "break")
+	flush(root) // publish the post-commit task start
+	brokenState.Set(true)
+	root.Dispatch(ui.Event{Target: left, Kind: "click", Sequence: 1})
+	batch := root.Flush()
+	require(stops == 0, "boundary cleaned up before host commit")
+	applyModel(model, batch)
+	require(modelText(model, 0) == "1fallback0", "partial DOM delta escaped boundary")
+	require(strings.Contains(root.HTML(), "fallback"), "SSR cannot serialize fallback")
+	require(len(batch.Commands) == 1 && batch.Commands[0].Op == "cancel", "failed subtree task not canceled")
+	root.Commit(batch.Revision)
+	require(starts == 1 && stops == 1 && transientStarts == 0, "failed subtree effects leaked")
+	require(!root.Dispatch(ui.Event{Target: broken, Kind: "click", Sequence: 2}), "failed DOM handler remained live")
+	task.Cancel()
+	require(!root.Pending(), "failed subtree task remained live")
+	oldFailure := latest
+	require(latest.Retry() && !latest.Retry(), "retry must be exactly once per failure")
+	applyModel(model, flush(root))
+	require(modelText(model, 0) == "1healthybreak0" && starts == 2, "retry did not remount content")
+	flush(root)
+	brokenState.Set(true)
+	applyModel(model, flush(root))
+	require(!oldFailure.Retry() && latest != oldFailure, "stale retry reset a newer failure")
+	root.Close()
+	require(starts == stops && !latest.Retry(), "boundary close leaked resources")
+	require(latest.Components()[0].Name == "contract.Branch", "disposal invalidated captured diagnostic metadata")
+	// A fallback panic reaches the outer boundary on both first mount and
+	// an independently scheduled descendant update.
+	for _, initialFailure := range []bool{true, false} {
+		var trigger *ui.BoolState
+		inner := ui.ErrorBoundary(func() ui.View {
+			return ui.Component(fragileType, func(scope *ui.Scope) ui.View {
+				trigger = ui.Bool(scope, "trigger", initialFailure)
+				if trigger.Get() {
+					panic("inner")
+				}
+				return ui.Text("nested healthy")
+			})
+		}, func(failure *ui.RenderError) ui.View {
+			panic("fallback failed")
+		})
+		outer := ui.ErrorBoundary(func() ui.View {
+			return inner
+		}, func(failure *ui.RenderError) ui.View {
+			require(failure.Value == "fallback failed", "fallback failure did not bubble")
+			return ui.Text("outer recovered")
+		})
+		root = ui.NewRoot(outer)
+		model = map[int]*modelNode{0: &modelNode{parent: -1}}
+		applyModel(model, flush(root))
+		if !initialFailure {
+			trigger.Set(true)
+			applyModel(model, flush(root))
+		}
+		require(modelText(model, 0) == "outer recovered", "nested boundary topology diverged")
+		root.Close()
+	}
+}

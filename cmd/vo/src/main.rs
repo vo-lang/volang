@@ -24,19 +24,18 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 
 use vo_engine::{
-    compile_native_aot_object, compile_path_with_auto_install,
-    compile_path_with_generated_sources_and_auto_install, compile_wasm_aot_image, format_text,
-    render_run_observation_json, run, run_with_byte_args_and_memory,
-    run_with_byte_args_and_memory_observed, AotArtifactCache, AotCacheArtifactKind, AotCacheKey,
+    format_text, render_run_observation_json, AotArtifactCache, AotCacheArtifactKind, AotCacheKey,
     ArtifactKind, CompileOutput, GcMode, HostSurface, Module, ObjectFormat, OomPolicy, RunError,
-    RunMode, TargetFamily, TargetSpec, VmMemoryConfig, WASM32_UNKNOWN_UNKNOWN,
+    RunMode, TargetFamily, TargetSpec, VmMemoryConfig,
 };
 use vo_release::{ArtifactInput, StageReleaseOptions};
 use vo_syntax::format_source;
 
 mod generate;
+mod lsp;
 mod ui_dev;
 mod ui_registry;
+mod ui_web;
 
 fn main() {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
@@ -68,6 +67,7 @@ fn run_cli(args: &[OsString]) -> i32 {
         "work" => cmd_work(rest),
         "cache" => cmd_cache(rest),
         "generate" => generate::cmd_generate(rest),
+        "lsp" => lsp::cmd_lsp(rest),
         "release" => cmd_release(rest),
         "ui" => ui_dev::cmd_ui(rest),
         "-h" | "--help" | "help" => {
@@ -94,17 +94,20 @@ fn print_usage() {
     println!("Usage: vo <command> [arguments]");
     println!();
     println!("Common commands:");
+    println!("  lsp --stdio              Start the editor language server");
     println!("  run <file|dir> [args...]  Run a Vo program");
     println!("  build [path] [-o out]     Compile a native AOT executable");
     println!("  check [path]              Type-check without running");
     println!("  test [path]               Run tests");
     println!("  fmt [file|dir...]         Format Vo source files");
     println!("  init <module-path>        Initialize a new module");
-    println!("  ui new <path>             Create an official Volang UI project");
-    println!("  ui dev [path]             Run a live Web UI development server");
+    println!("  ui create <path>          Create a Web UI preview project");
+    println!("  ui dev [path]            Run a ui-next.json project's Web development server");
+    println!("  ui build [path]          Build its deployable Web UI application");
+    println!("  ui test [path]           Run its browser tests");
+    println!("  ui --help                Show Web and existing UI project commands");
     println!("  ui run [path]             Run the native UI in VM or JIT mode");
-    println!("  ui build [path]           Build a deployable Web UI AOT bundle");
-    println!("  ui package [path]         Build a standalone signed-policy desktop package");
+    println!("  ui package [path]         Build a standalone desktop application");
     println!();
     println!("Module commands:");
     println!("  mod add <module[@constraint]>");
@@ -235,13 +238,15 @@ fn parse_memory_bytes(value: &str) -> Result<usize, String> {
 fn print_build_usage() {
     println!(
         "usage: vo build [path] [-o output] [--target=TRIPLE] \
-         [--kind=bin|object|wasm|bytecode] [--runtime=PATH] \
-         [--link-extension=ARCHIVE]... [--debug-ir] [--no-cache]"
+         [--kind=bin|object|bytecode] [--runtime=PATH] \
+         [--link-extension=ARCHIVE]... [--link-arg=ARG]... \
+         [--windows-gui] [--debug-ir] [--no-cache]"
     );
 }
 
 fn print_check_usage() {
-    println!("usage: vo check [path]");
+    println!("usage: vo check [path] [--read-only]");
+    println!("  --read-only  Check existing sources without generators, downloads or compilation cache writes");
 }
 
 fn print_test_usage() {
@@ -279,7 +284,6 @@ fn artifact_stem(module_name: &str) -> String {
 enum BuildKind {
     Binary,
     Object,
-    Wasm,
     Bytecode,
 }
 
@@ -287,10 +291,10 @@ fn parse_build_kind(value: &str) -> Result<BuildKind, String> {
     match value {
         "bin" => Ok(BuildKind::Binary),
         "object" => Ok(BuildKind::Object),
-        "wasm" | "web" => Ok(BuildKind::Wasm),
+        "wasm" | "web" => Err("Wasm AOT has been removed; build bytecode for the Web VM with --kind=bytecode --target=wasm32-unknown-unknown".to_string()),
         "bytecode" => Ok(BuildKind::Bytecode),
         _ => Err(format!(
-            "invalid build kind {value:?}; expected bin, object, wasm, or bytecode"
+            "invalid build kind {value:?}; expected bin, object, or bytecode"
         )),
     }
 }
@@ -306,7 +310,6 @@ fn default_aot_output_path(module_name: &str, kind: BuildKind, target: &TargetSp
             PathBuf::from(format!("{stem}.obj"))
         }
         BuildKind::Object => PathBuf::from(format!("{stem}.o")),
-        BuildKind::Wasm => PathBuf::from(format!("{stem}.wasm")),
         BuildKind::Bytecode => default_module_output_path(module_name),
     }
 }
@@ -314,7 +317,6 @@ fn default_aot_output_path(module_name: &str, kind: BuildKind, target: &TargetSp
 fn cache_artifact_kind(kind: BuildKind) -> Option<AotCacheArtifactKind> {
     match kind {
         BuildKind::Binary | BuildKind::Object => Some(AotCacheArtifactKind::NativeObject),
-        BuildKind::Wasm => Some(AotCacheArtifactKind::CoreWasm),
         BuildKind::Bytecode => None,
     }
 }
@@ -360,11 +362,12 @@ fn default_emit_output_path(input: &Path, module_name: &str) -> PathBuf {
 
 fn compile_cli_path(path: &Path) -> Result<CompileOutput, String> {
     match generate::generate_for_build(path)? {
-        Some(generated_sources) => {
-            compile_path_with_generated_sources_and_auto_install(path, generated_sources)
-                .map_err(|error| error.to_string())
-        }
-        None => compile_path_with_auto_install(path).map_err(|error| error.to_string()),
+        Some(generated_sources) => vo_ui_integration::engine()
+            .compile_path_with_generated_sources_and_auto_install(path, generated_sources)
+            .map_err(|error| error.to_string()),
+        None => vo_ui_integration::engine()
+            .compile_path_with_auto_install(path)
+            .map_err(|error| error.to_string()),
     }
 }
 
@@ -395,7 +398,15 @@ fn cmd_run_os(args: &[OsString]) -> i32 {
     let mut print_codegen = false;
     let mut jit_stats_json = None;
     let mut memory_config = VmMemoryConfig::default();
-    let mut program_args: Vec<Vec<u8>> = Vec::new();
+    // The executed path is argv[0]; flag.Parse consumes the arguments after it.
+    let program_name = match os_arg_into_bytes(file.as_os_str().to_os_string()) {
+        Ok(name) => name,
+        Err(error) => {
+            eprintln!("{error}");
+            return 1;
+        }
+    };
+    let mut program_args = vec![program_name];
     let mut saw_dashdash = false;
 
     for arg in command_args {
@@ -533,9 +544,13 @@ fn cmd_run_os(args: &[OsString]) -> i32 {
     }
 
     let run_result = if jit_stats_json.is_some() {
-        run_with_byte_args_and_memory_observed(output, mode, program_args, memory_config).map(Some)
+        vo_ui_integration::engine()
+            .run_with_byte_args_and_memory_observed(output, mode, program_args, memory_config)
+            .map(Some)
     } else {
-        run_with_byte_args_and_memory(output, mode, program_args, memory_config).map(|()| None)
+        vo_ui_integration::engine()
+            .run_with_byte_args_and_memory(output, mode, program_args, memory_config)
+            .map(|()| None)
     };
     match run_result {
         Ok(Some(observation)) => {
@@ -702,11 +717,16 @@ fn msvc_aot_link_arguments(
     output: &Path,
     extension_archives: &[PathBuf],
     ui: bool,
+    windows_gui: bool,
 ) -> Vec<OsString> {
     let mut arguments = vec![
         OsString::from("/NOLOGO"),
         OsString::from("/INCREMENTAL:NO"),
-        OsString::from("/SUBSYSTEM:CONSOLE"),
+        OsString::from(if windows_gui {
+            "/SUBSYSTEM:WINDOWS"
+        } else {
+            "/SUBSYSTEM:CONSOLE"
+        }),
         // MSVC executables reserve only 1 MiB for the main thread by default,
         // while the equivalent Unix launchers normally receive 8 MiB. Volang
         // programs can build substantial UI trees during their first VM
@@ -718,6 +738,11 @@ fn msvc_aot_link_arguments(
         runtime.as_os_str().to_owned(),
         msvc_path_argument("/OUT:", output),
     ];
+    if windows_gui {
+        // The generated object exports main(argc, argv), including GUI hosts.
+        // Select its CRT startup explicitly instead of requiring WinMain.
+        arguments.push(OsString::from("/ENTRY:mainCRTStartup"));
+    }
     arguments.extend(
         extension_archives
             .iter()
@@ -764,16 +789,29 @@ fn msvc_aot_link_arguments(
     arguments
 }
 
+struct NativeLinkOptions<'a> {
+    runtime: Option<PathBuf>,
+    extension_archives: &'a [PathBuf],
+    extra_args: &'a [OsString],
+    ui: bool,
+    compiler_host: bool,
+    windows_gui: bool,
+}
+
 fn link_native_aot(
     object: &[u8],
     output: &Path,
     target: &TargetSpec,
-    runtime: Option<PathBuf>,
-    extension_archives: &[PathBuf],
-    ui: bool,
-    // Additional system libraries differ on macOS and Windows.
-    _compiler_host: bool,
+    options: NativeLinkOptions<'_>,
 ) -> Result<(), String> {
+    let NativeLinkOptions {
+        runtime,
+        extension_archives,
+        extra_args,
+        ui,
+        compiler_host: _compiler_host,
+        windows_gui: _windows_gui,
+    } = options;
     let host = TargetSpec::host().map_err(|error| error.to_string())?;
     if target != &host {
         return Err(format!(
@@ -810,6 +848,7 @@ fn link_native_aot(
         &linked_file.0,
         extension_archives,
         ui || _compiler_host,
+        _windows_gui,
     ));
     #[cfg(not(windows))]
     command
@@ -870,6 +909,7 @@ fn link_native_aot(
         command.args(["-ldl", "-lpthread", "-lm", "-lrt", "-lutil"]);
     }
     let result = command
+        .args(extra_args)
         .output()
         .map_err(|error| format!("failed to start AOT linker {:?}: {error}", linker))?;
     if !result.status.success() {
@@ -898,6 +938,8 @@ fn cmd_build(args: &[OsString]) -> i32 {
     let mut kind_explicit = false;
     let mut runtime: Option<PathBuf> = None;
     let mut extension_archives = Vec::new();
+    let mut link_args = Vec::new();
+    let mut windows_gui = false;
     let mut debug_ir = false;
     let mut use_aot_cache = true;
     let mut options = true;
@@ -955,6 +997,21 @@ fn cmd_build(args: &[OsString]) -> i32 {
                 eprintln!("--runtime requires one non-empty path");
                 return 1;
             }
+            i += 1;
+        } else if options && args[i].as_encoded_bytes().starts_with(b"--link-arg=") {
+            let value = strip_os_prefix(&args[i], "--link-arg=").unwrap();
+            if value.is_empty() {
+                eprintln!("--link-arg requires a non-empty linker argument");
+                return 1;
+            }
+            link_args.push(value.to_owned());
+            i += 1;
+        } else if options && args[i] == OsStr::new("--windows-gui") {
+            if windows_gui {
+                eprintln!("--windows-gui may be specified once");
+                return 1;
+            }
+            windows_gui = true;
             i += 1;
         } else if options && args[i].as_encoded_bytes().starts_with(b"--link-extension=") {
             let value = strip_os_prefix(&args[i], "--link-extension=").unwrap();
@@ -1019,13 +1076,6 @@ fn cmd_build(args: &[OsString]) -> i32 {
                 return 1;
             }
         },
-        None if kind == BuildKind::Wasm => match TargetSpec::parse(WASM32_UNKNOWN_UNKNOWN) {
-            Ok(target) => target,
-            Err(error) => {
-                eprintln!("{error}");
-                return 1;
-            }
-        },
         None => match TargetSpec::host() {
             Ok(target) => target,
             Err(error) => {
@@ -1037,7 +1087,7 @@ fn cmd_build(args: &[OsString]) -> i32 {
 
     if !kind_explicit {
         kind = match target.host_surface() {
-            HostSurface::BareWasm => BuildKind::Wasm,
+            HostSurface::BareWasm => BuildKind::Bytecode,
             HostSurface::Native => BuildKind::Binary,
         };
     }
@@ -1048,7 +1098,7 @@ fn cmd_build(args: &[OsString]) -> i32 {
                     && target.supports_artifact(ArtifactKind::Executable))
         }
         TargetFamily::WebAssembly => match target.host_surface() {
-            HostSurface::BareWasm => matches!(kind, BuildKind::Wasm | BuildKind::Bytecode),
+            HostSurface::BareWasm => kind == BuildKind::Bytecode,
             HostSurface::Native => false,
         },
     };
@@ -1066,6 +1116,14 @@ fn cmd_build(args: &[OsString]) -> i32 {
     }
     if !extension_archives.is_empty() && !matches!(kind, BuildKind::Binary) {
         eprintln!("--link-extension is only valid for native executable linking");
+        return 1;
+    }
+    if !link_args.is_empty() && kind != BuildKind::Binary {
+        eprintln!("--link-arg is only valid for native executable linking");
+        return 1;
+    }
+    if windows_gui && (kind != BuildKind::Binary || target.object_format() != ObjectFormat::Coff) {
+        eprintln!("--windows-gui requires a Windows native executable target");
         return 1;
     }
     if debug_ir && !matches!(kind, BuildKind::Binary | BuildKind::Object) {
@@ -1105,19 +1163,24 @@ fn cmd_build(args: &[OsString]) -> i32 {
     };
 
     if kind == BuildKind::Bytecode {
+        if let Err(error) = vo_engine::verify_compile_output_for_target(&output, &target) {
+            eprintln!("[VO:TARGET] {error}");
+            return 1;
+        }
         if let Err(error) = write_file_atomically(&output_path, &module_bytes) {
             eprintln!("[VO:IO] {error}");
             return 1;
         }
     } else if matches!(kind, BuildKind::Binary | BuildKind::Object) {
-        let cache_key = AotCacheKey::new(
+        let cache_key = vo_ui_integration::engine().aot_cache_key(
             &module_bytes,
             &target,
             AotCacheArtifactKind::NativeObject,
             debug_ir,
         );
         let object_bytes = match build_cached_aot_artifact(aot_cache.as_ref(), &cache_key, || {
-            compile_native_aot_object(&output, &target, debug_ir)
+            vo_ui_integration::engine()
+                .compile_native_aot_object(&output, &target, debug_ir)
                 .map(|object| object.bytes)
                 .map_err(|error| error.to_string())
         }) {
@@ -1134,37 +1197,21 @@ fn cmd_build(args: &[OsString]) -> i32 {
                 &object_bytes,
                 &output_path,
                 &target,
-                runtime,
-                &extension_archives,
-                ui_application,
-                vo_engine::native_aot_requires_toolchain_host(output.module.module()),
+                NativeLinkOptions {
+                    runtime,
+                    extension_archives: &extension_archives,
+                    extra_args: &link_args,
+                    ui: ui_application,
+                    compiler_host: vo_engine::native_aot_requires_toolchain_host(
+                        output.module.module(),
+                    ),
+                    windows_gui,
+                },
             ),
-            BuildKind::Wasm | BuildKind::Bytecode => unreachable!(),
+            BuildKind::Bytecode => unreachable!(),
         };
         if let Err(error) = result {
             eprintln!("[VO:AOT] {error}");
-            return 1;
-        }
-    } else {
-        let cache_key = AotCacheKey::new(
-            &module_bytes,
-            &target,
-            cache_artifact_kind(kind).expect("WebAssembly AOT has a cache kind"),
-            false,
-        );
-        let artifact_bytes = match build_cached_aot_artifact(aot_cache.as_ref(), &cache_key, || {
-            compile_wasm_aot_image(&output, &target)
-                .map(|artifact| artifact.bytes)
-                .map_err(|error| error.to_string())
-        }) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                eprintln!("[VO:AOT] {error}");
-                return 1;
-            }
-        };
-        if let Err(error) = write_file_atomically(&output_path, &artifact_bytes) {
-            eprintln!("[VO:IO] {error}");
             return 1;
         }
     }
@@ -1179,7 +1226,27 @@ fn cmd_check(args: &[OsString]) -> i32 {
         return 0;
     }
 
-    let path = match args {
+    let read_only = args
+        .iter()
+        .take_while(|arg| *arg != OsStr::new("--"))
+        .filter(|arg| *arg == OsStr::new("--read-only"))
+        .count();
+    if read_only > 1 {
+        eprintln!("repeated check option: --read-only");
+        return 1;
+    }
+    let mut options = true;
+    let paths: Vec<_> = args
+        .iter()
+        .filter(|arg| {
+            if **arg == OsStr::new("--") {
+                options = false;
+            }
+            !(options && **arg == OsStr::new("--read-only"))
+        })
+        .cloned()
+        .collect();
+    let path = match paths.as_slice() {
         [] => PathBuf::from("."),
         [path] if !starts_with_dash(path) => PathBuf::from(path),
         [separator, path] if separator == OsStr::new("--") => PathBuf::from(path),
@@ -1196,7 +1263,14 @@ fn cmd_check(args: &[OsString]) -> i32 {
     };
 
     println!("Checking project: {}", path.display());
-    match compile_cli_path(&path) {
+    let result = if read_only == 1 {
+        vo_ui_integration::engine()
+            .compile_path(&path)
+            .map_err(|error| error.to_string())
+    } else {
+        compile_cli_path(&path)
+    };
+    match result {
         Ok(_) => 0,
         Err(e) => {
             eprintln!("{}", e);
@@ -1266,7 +1340,7 @@ fn cmd_test(args: &[OsString]) -> i32 {
         }
     };
 
-    match run(output, mode, Vec::new()) {
+    match vo_ui_integration::engine().run(output, mode, Vec::new()) {
         Ok(()) => 0,
         Err(RunError::Exited(code)) => code,
         Err(error) => {
@@ -2777,6 +2851,39 @@ mod tests {
     }
 
     #[test]
+    fn readonly_check_validates_sources_without_running_generators_or_writing_cache() {
+        let root = unique_temp_dir("readonly-check");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("main.vo");
+        fs::write(
+            &source,
+            "package main\n\nfunc main() { panic(\"must not run\") }\n",
+        )
+        .unwrap();
+        // Any attempt to invoke generation would fail before checking the source.
+        fs::write(
+            root.join("vo.generate.toml"),
+            "invalid generator configuration",
+        )
+        .unwrap();
+        let args = [
+            OsString::from("--read-only"),
+            OsString::from("--"),
+            source.into_os_string(),
+        ];
+        assert_eq!(cmd_check(&args), 0);
+        fs::write(
+            root.join("main.vo"),
+            "package main\n\nfunc main() { var n int = \"bad\"; println(n) }\n",
+        )
+        .unwrap();
+        assert_eq!(cmd_check(&args), 1);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        assert_eq!(cmd_check(&os_strings(&["--read-only", "--read-only"])), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn formatter_write_replaces_atomically_and_cleans_temp_file() {
         let root = unique_temp_dir("fmt-atomic");
         fs::create_dir_all(&root).unwrap();
@@ -2819,8 +2926,9 @@ mod tests {
         let temporary = unique_temp_dir("bytecode-skip-generation");
         fs::create_dir_all(&temporary).unwrap();
         let root = temporary.canonicalize().unwrap();
-        let expected =
-            vo_engine::compile_source_at("package main\nfunc main() {}\n", &root).unwrap();
+        let expected = vo_ui_integration::engine()
+            .compile_source_at("package main\nfunc main() {}\n", &root)
+            .unwrap();
         let artifact = root.join("program.vob");
         fs::write(&artifact, expected.module.serialize().unwrap()).unwrap();
         fs::write(root.join("vo.generate.toml"), "invalid generator config").unwrap();
@@ -3248,15 +3356,17 @@ mod tests {
     fn aot_build_kind_and_default_output_contract_is_stable() {
         assert_eq!(parse_build_kind("bin"), Ok(BuildKind::Binary));
         assert_eq!(parse_build_kind("object"), Ok(BuildKind::Object));
-        assert_eq!(parse_build_kind("wasm"), Ok(BuildKind::Wasm));
+        assert!(parse_build_kind("wasm")
+            .unwrap_err()
+            .contains("Wasm AOT has been removed"));
         assert_eq!(parse_build_kind("bytecode"), Ok(BuildKind::Bytecode));
         assert!(parse_build_kind("component").is_err());
         assert!(parse_build_kind("dynamic").is_err());
 
-        let web = TargetSpec::parse(WASM32_UNKNOWN_UNKNOWN).unwrap();
+        let web = TargetSpec::parse(vo_engine::WASM32_UNKNOWN_UNKNOWN).unwrap();
         assert_eq!(
-            default_aot_output_path("github.com/acme/app", BuildKind::Wasm, &web),
-            PathBuf::from("app.wasm")
+            default_aot_output_path("github.com/acme/app", BuildKind::Bytecode, &web),
+            PathBuf::from("github.com/acme/app.vob")
         );
 
         let native = TargetSpec::host().unwrap();
@@ -3291,6 +3401,7 @@ mod tests {
             Path::new("program.exe"),
             &extensions,
             true,
+            false,
         );
         assert_eq!(
             &arguments[..9],
@@ -3336,28 +3447,44 @@ mod tests {
             Path::new("program.exe"),
             &[],
             false,
+            false,
         );
         assert!(!core_arguments.contains(&OsString::from("d3dcompiler.lib")));
         assert!(!core_arguments.contains(&OsString::from("user32.lib")));
         for library in ["ole32.lib", "shell32.lib"] {
             assert!(core_arguments.contains(&OsString::from(library)));
         }
+        assert!(!core_arguments
+            .iter()
+            .any(|arg| arg.to_string_lossy().starts_with("/ENTRY:")));
+        let gui_arguments = msvc_aot_link_arguments(
+            Path::new("Project 中文/program.obj"),
+            Path::new("SDK folder/runtime.lib"),
+            Path::new("Application 中文/program.exe"),
+            &[],
+            false,
+            true,
+        );
+        assert!(gui_arguments.contains(&OsString::from("/SUBSYSTEM:WINDOWS")));
+        assert!(gui_arguments.contains(&OsString::from("/ENTRY:mainCRTStartup")));
+        assert!(gui_arguments.contains(&OsString::from("/OUT:Application 中文/program.exe")));
+        assert!(!gui_arguments.contains(&OsString::from("/SUBSYSTEM:CONSOLE")));
     }
 
     #[test]
     fn cli_aot_cache_hit_skips_backend_work() {
         let root = unique_temp_dir("aot-cache");
         let cache = AotArtifactCache::new(root.clone()).unwrap();
-        let target = TargetSpec::parse(WASM32_UNKNOWN_UNKNOWN).unwrap();
-        let key = AotCacheKey::new(
+        let target = TargetSpec::parse(vo_engine::WASM32_UNKNOWN_UNKNOWN).unwrap();
+        let key = vo_ui_integration::engine().aot_cache_key(
             b"verified-module",
             &target,
-            AotCacheArtifactKind::CoreWasm,
+            AotCacheArtifactKind::NativeObject,
             false,
         );
-        let first =
-            build_cached_aot_artifact(Some(&cache), &key, || Ok(b"wasm-image".to_vec())).unwrap();
-        assert_eq!(first, b"wasm-image");
+        let first = build_cached_aot_artifact(Some(&cache), &key, || Ok(b"native-object".to_vec()))
+            .unwrap();
+        assert_eq!(first, b"native-object");
         let second = build_cached_aot_artifact(Some(&cache), &key, || {
             panic!("cache hit must skip backend work")
         })
@@ -3508,6 +3635,46 @@ mod tests {
             strip_os_prefix(option, "--jit-stats-json=").unwrap(),
             OsStr::from_bytes(b"a\xffz")
         );
+    }
+
+    #[test]
+    fn run_command_preserves_program_name_and_first_flag() {
+        let root = unique_temp_dir("program-arguments");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("main.vo");
+        fs::write(
+            &source,
+            r#"package main
+import "flag"
+import "os"
+import "path/filepath"
+func main() {
+    message := flag.String("message", "unset", "test value")
+    flag.Parse()
+    assert(filepath.Base(os.Args[0]) == "main.vo")
+    assert(flag.CommandLine.Name() == os.Args[0])
+    if len(os.Args) == 1 {
+        assert(message.Value == "unset")
+        assert(flag.NArg() == 0)
+    } else {
+        assert(message.Value == "first")
+        assert(flag.NArg() == 1 && flag.Arg(0) == "")
+    }
+}
+"#,
+        )
+        .unwrap();
+        let mut modes = vec!["--mode=vm"];
+        if cfg!(feature = "jit") {
+            modes.push("--mode=jit");
+        }
+        for mode in modes {
+            let mut args = vec![source.as_os_str().to_os_string(), OsString::from(mode)];
+            assert_eq!(cmd_run_os(&args), 0);
+            args.extend(os_strings(&["--", "--message=first", ""]));
+            assert_eq!(cmd_run_os(&args), 0);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

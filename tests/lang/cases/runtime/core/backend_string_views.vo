@@ -1,0 +1,53 @@
+package main
+
+func view() string {
+	source := "prefix:" + string([]byte{'x', 0, 255, 'b', 'c', 'y'}) + ":suffix"
+	middle := source[7:13]
+	return middle[1:5]
+}
+
+func check() int {
+	s := view()
+	assert(len(s) == 4)
+	assert(s[0] == 0 && s[1] == 255 && s[2] == 'b' && s[3] == 'c')
+	assert(s[:] == s && s[1:1] == "")
+	var boxed any = s
+	var same any = view()
+	assert(boxed == same)
+	restored, ok := boxed.(string)
+	assert(ok && restored == s)
+	assert("a" + s == string([]byte{'a', 0, 255, 'b', 'c'}))
+	var empty []byte
+	a := append(empty, s...)
+	assert(string(a) == s)
+	a[0] = 'q'
+	assert(s[0] == 0)
+	b := make([]byte, 1, 8)
+	b[0] = 'a'
+	old := b
+	b = append(b, s...)
+	assert(len(old) == 1 && string(b) == string([]byte{'a', 0, 255, 'b', 'c'}))
+	var fixed [8]byte
+	flat := fixed[:1]
+	flat[0] = 'z'
+	flat = append(flat, s...)
+	assert(string(flat) == string([]byte{'z', 0, 255, 'b', 'c'}))
+	assert(fixed[1] == 0 && fixed[2] == 255 && fixed[4] == 'c')
+	assert(copy(flat[:2], s) == 2)
+	assert(fixed[0] == 0 && fixed[1] == 255)
+	grown := append([]byte{'g'}, s...)
+	assert(string(grown) == string([]byte{'g', 0, 255, 'b', 'c'}))
+	data := []byte(s)
+	data[0] = 'w'
+	assert(s[0] == 0)
+	return len(a) + len(b) + len(flat) + len(grown)
+}
+
+func main() {
+	total := 0
+	for i := 0; i < 500; i++ {
+		total += check()
+	}
+	assert(total == 9500)
+	println("string views ok")
+}

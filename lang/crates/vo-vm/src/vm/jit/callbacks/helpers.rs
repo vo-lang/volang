@@ -2,7 +2,6 @@
 
 use vo_runtime::bytecode::{InstructionMetadata, Module, ModuleRuntimeMetadata};
 use vo_runtime::jit_api::{set_jit_infra_error, JitContext, JitResult, JitRuntimeTrapKind};
-use vo_runtime::objects::interface::InterfaceSlot;
 use vo_runtime::SlotType;
 
 use crate::fiber::Fiber;
@@ -41,6 +40,7 @@ impl JitCallbackVm<'_> {
     pub(super) fn refill_execution_budget(&self, required_budget: u32) -> u32 {
         let vm = &self.vm;
         if required_budget == 0
+            || vm.bounded_scheduling
             || vm.interrupt_requested()
             || vm.pending_exit_code.is_some()
             || vm.terminal_memory_error.is_some()
@@ -65,7 +65,7 @@ impl JitCallbackVm<'_> {
         active_fiber: &Fiber,
         frame: *mut JitNativeFrame,
         ctx: *mut JitContext,
-    ) -> Result<(), vo_jit::JitError> {
+    ) -> Result<bool, vo_jit::JitError> {
         unsafe { self.vm.gc_step_while_native(active_fiber, ctx, frame) }
     }
 
@@ -94,7 +94,12 @@ impl JitCallbackVm<'_> {
             .ok_or_else(|| {
                 vo_jit::JitError::Internal("tier-up requested without a JIT manager".into())
             })?
-            .compile_optimizing(func_id, loaded.verified_module(), env)
+            .compile_optimizing_with_feedback(
+                func_id,
+                loaded.verified_module(),
+                env,
+                &self.vm.state.dynamic_call_ic,
+            )
             .map(|_| ());
         match result {
             Err(_) if best_effort => Ok(()),
@@ -378,10 +383,14 @@ pub fn validate_callback_raw_slot_span<T>(
 }
 
 /// Helper: set panic message on fiber and return JitResult::Panic.
-pub fn set_jit_panic(gc: &mut vo_runtime::gc::Gc, fiber: &mut Fiber, msg: &str) -> JitResult {
-    let panic_str = vo_runtime::objects::string::new_from_string(gc, msg.to_string());
-    let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-    fiber.set_recoverable_panic(InterfaceSlot::new(slot0, panic_str as u64));
+pub fn set_jit_panic(
+    gc: &mut vo_runtime::gc::Gc,
+    fiber: &mut Fiber,
+    module: &Module,
+    msg: &str,
+) -> JitResult {
+    let value = vo_runtime::objects::interface::diagnostic_string(gc, module, msg.to_string());
+    fiber.set_recoverable_panic(value);
     JitResult::Panic
 }
 
@@ -389,11 +398,11 @@ pub fn set_jit_trap(
     gc: &mut vo_runtime::gc::Gc,
     fiber: &mut Fiber,
     kind: RuntimeTrapKind,
+    module: &Module,
     msg: &str,
 ) -> JitResult {
-    let panic_str = vo_runtime::objects::string::new_from_string(gc, msg.to_string());
-    let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-    fiber.set_recoverable_trap(kind, InterfaceSlot::new(slot0, panic_str as u64));
+    let value = vo_runtime::objects::interface::diagnostic_string(gc, module, msg.to_string());
+    fiber.set_recoverable_trap(kind, value);
     JitResult::Panic
 }
 
@@ -403,6 +412,7 @@ pub fn record_runtime_trap(ctx: &mut JitContext, kind: JitRuntimeTrapKind, pc: u
         *ctx.is_user_panic = false;
     }
     ctx.runtime_trap_kind = kind as u8;
+    ctx.runtime_trap_origin = 0;
     ctx.runtime_trap_arg0 = 0;
     ctx.runtime_trap_arg1 = 0;
     ctx.runtime_trap_pc = pc;
@@ -436,7 +446,7 @@ mod scheduler_poll_tests {
         module
             .functions
             .push(crate::vm::jit::test_support::function(1));
-        let mut vm = Vm::try_with_jit_config(crate::vm::JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(crate::vm::JitConfig::default()).expect("jit vm");
         vm.load(module).expect("load module");
         let mut fiber = Fiber::new(7);
         fiber.push_frame(0, 1, 0, 0);

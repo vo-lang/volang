@@ -1,0 +1,38 @@
+package main
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+var focusType = ui.Define("interaction.Focus")
+
+func FocusExample() ui.View {
+	return ui.Component(focusType, func(scope *ui.Scope) ui.View {
+		open := ui.Bool(scope, "open", false)
+		draft := ui.String(scope, "draft", "")
+		field := ui.Ref(scope, "field")
+		trigger := ui.Ref(scope, "trigger")
+		close := func() {
+			open.Set(false)
+			trigger.Focus()
+		}
+		button := ui.Element("button", ui.Text("Write a quick note")).Ref(trigger).Attr("type", "button").Attr("data-focus-open", "").On("click", func(event ui.Event) {
+			open.Set(true)
+			field.Focus()
+		})
+		editor := ui.Fragment()
+		if open.Get() {
+			input := ui.Element("input").Ref(field).Attr("id", "quick-note").Attr("value", draft.Get()).On("input", func(event ui.Event) {
+				draft.Set(event.Value)
+			}).On("keydown", func(event ui.Event) {
+				if event.Key == "Escape" {
+					close()
+				}
+			})
+			editor = ui.Element("div", ui.Element("label", ui.Text("Quick note")).Attr("for", "quick-note"), input, ui.Element("button", ui.Text("Done")).Attr("type", "button").Attr("data-focus-close", "").On("click", func(event ui.Event) {
+				close()
+			})).Attr("class", "actions")
+		}
+		return ui.Element("section", ui.Element("h2", ui.Text("Focus follows the task")), ui.Element("p", ui.Text("Open a note, then press Escape or Done to return to the button.")), button, editor).Attr("class", "card")
+	})
+}

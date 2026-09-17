@@ -312,6 +312,10 @@ fn build_function_map(
     for (pc, inst) in func.code.iter().copied().enumerate() {
         let metadata = func.instruction_metadata.get(pc);
         let mut effect = RootEffects::default();
+        for root in func.unwind_root_slots() {
+            add_range_roots(func_id, pc, func, root, 1, &mut effect.reads, budget)?;
+        }
+
         let mut range_error = None;
         visit_instruction_register_reads(&inst, metadata, &module.functions, |start, count| {
             if range_error.is_none() {
@@ -899,6 +903,55 @@ mod tests {
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),
         }
+    }
+
+    #[test]
+    fn named_return_cells_are_roots_at_panic_and_suspended_calls() {
+        let mut module = Module::new("unwind-return-roots".into());
+        let mut caller = function(
+            "caller",
+            vec![
+                Instruction::new(Opcode::Call, 1, 0, 0),
+                Instruction::new(Opcode::Panic, 0, 0, 0),
+            ],
+            vec![SlotType::Interface0, SlotType::Interface1, SlotType::GcBase],
+            0,
+            0,
+        );
+        caller.has_defer = true;
+        caller.heap_ret_gcref_start = 2;
+        caller.heap_ret_gcref_count = 1;
+        caller.heap_ret_slots = vec![1];
+        let callee = function(
+            "callee",
+            vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+            Vec::new(),
+            0,
+            0,
+        );
+        module.functions = vec![caller, callee];
+        let maps = FrameRootMaps::build(&module).unwrap();
+        let map = maps.function(0).unwrap();
+        assert!(map
+            .roots(map.before(0).unwrap())
+            .unwrap()
+            .direct
+            .contains(&2));
+        assert!(map
+            .roots(map.suspended_call(0).unwrap())
+            .unwrap()
+            .direct
+            .contains(&2));
+        assert!(map
+            .roots(map.before(1).unwrap())
+            .unwrap()
+            .direct
+            .contains(&2));
+        assert!(map
+            .initialization_roots_to_clear()
+            .unwrap()
+            .direct
+            .contains(&2));
     }
 
     #[test]

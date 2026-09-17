@@ -1,0 +1,172 @@
+package kit
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+type ToastMessage struct {
+	Key string
+	Title string
+	Description string
+	Variant string
+	Urgent bool
+	// Zero keeps the notification until explicitly dismissed. Timed messages
+	// require 5000..86400000ms and should repeat information available elsewhere.
+	DurationMilliseconds int
+	ActionLabel string
+	OnAction func()
+}
+
+type ToastOptions struct {
+	// Maximum retained notifications, including those waiting for visible space.
+	// Zero uses 32. The bound can be between 1 and 64 and initializes once.
+	Capacity int
+}
+
+type toastEntry struct {
+	message ToastMessage
+	revision int
+}
+
+type toastSnapshot struct {
+	entries []toastEntry
+	next int
+}
+
+type ToastQueue struct {
+	scope *ui.Scope
+	state *ui.Store
+	capacity int
+	region *toastRegionOwner
+}
+
+type toastRegionOwner struct {
+	scope *ui.Scope
+	focused *ui.StringState
+	first *ui.ElementRef
+	returnFocus *ui.ElementRef
+}
+
+// NewToasts declares a queue owned by scope. Pass it directly or through context
+// to descendants. One mounted ToastRegion presents the queue; no global state.
+func NewToasts(scope *ui.Scope, key string, options ToastOptions) *ToastQueue {
+	if options.Capacity < 0 || options.Capacity > 64 {
+		panic("kit: toast capacity must be within 1..64")
+	}
+	state := ui.State(scope, key + "/items", func() any {
+		return toastSnapshot{}
+	})
+	stored := ui.State(scope, key, func() any {
+		capacity := options.Capacity
+		if capacity == 0 {
+			capacity = 32
+		}
+		return &ToastQueue{scope: scope, state: state, capacity: capacity}
+	})
+	return stored.Get().(*ToastQueue)
+}
+
+// Show appends a notification or replaces the same key in place, resetting its
+// countdown. A full queue returns false; existing notifications are retained.
+func (queue *ToastQueue) Show(message ToastMessage) bool {
+	if message.Key == "" || message.Title == "" || len(message.Key) > 128 || len(message.Title) > 512 ||
+		len(message.Description) > 8192 {
+		panic("kit: toast requires a key and title within the supported text limits")
+	}
+	if message.DurationMilliseconds != 0 &&
+		(message.DurationMilliseconds < 5000 || message.DurationMilliseconds > 86400000) {
+		panic("kit: toast duration must be zero or within 5000..86400000 milliseconds")
+	}
+	if (message.OnAction == nil) != (message.ActionLabel == "") {
+		panic("kit: toast action requires both a label and handler")
+	}
+	message.Variant = feedbackVariant(message.Variant)
+	current := queue.state.Get().(toastSnapshot)
+	index := -1
+	for i, entry := range current.entries {
+		if entry.message.Key == message.Key {
+			index = i
+			break
+		}
+	}
+	if index < 0 && len(current.entries) >= queue.capacity {
+		return false
+	}
+	queue.state.Update(func(value any) any {
+		snapshot := value.(toastSnapshot)
+		next := snapshot.next + 1
+		if next <= snapshot.next {
+			panic("kit: toast revision exhausted")
+		}
+		entries := append([]toastEntry{}, snapshot.entries...)
+		entry := toastEntry{message: message, revision: next}
+		if index < 0 {
+			entries = append(entries, entry)
+		} else {
+			entries[index] = entry
+		}
+		return toastSnapshot{entries: entries, next: next}
+	})
+	return true
+}
+
+func (queue *ToastQueue) Len() int {
+	return len(queue.state.Get().(toastSnapshot).entries)
+}
+
+func (queue *ToastQueue) find(key string) (toastEntry, bool) {
+	for _, entry := range queue.state.Get().(toastSnapshot).entries {
+		if entry.message.Key == key {
+			return entry, true
+		}
+	}
+	return toastEntry{}, false
+}
+
+func (queue *ToastQueue) Close(key string) bool {
+	_, exists := queue.find(key)
+	if !exists {
+		return false
+	}
+	queue.state.Update(func(value any) any {
+		snapshot := value.(toastSnapshot)
+		entries := make([]toastEntry, 0, len(snapshot.entries) - 1)
+		for _, entry := range snapshot.entries {
+			if entry.message.Key != key {
+				entries = append(entries, entry)
+			}
+		}
+		return toastSnapshot{entries: entries, next: snapshot.next}
+	})
+	if queue.region != nil && queue.region.focused.Get() == key {
+		queue.returnFocus()
+	}
+	return true
+}
+
+func (queue *ToastQueue) Clear() {
+	queue.state.Update(func(value any) any {
+		return toastSnapshot{next: value.(toastSnapshot).next}
+	})
+	if queue.region != nil && queue.region.focused.Get() != "" {
+		queue.returnFocus()
+	}
+}
+
+func (queue *ToastQueue) returnFocus() {
+	queue.region.focused.Set("")
+	if queue.Len() > 0 {
+		queue.region.first.Focus()
+	} else {
+		queue.region.returnFocus.Focus()
+	}
+}
+
+// Focus offers a visible command or application shortcut an entry into the
+// notifications. It never changes focus automatically when a message arrives.
+func (queue *ToastQueue) Focus() bool {
+	if queue.region == nil || queue.Len() == 0 {
+		return false
+	}
+	return queue.region.first.Focus()
+}

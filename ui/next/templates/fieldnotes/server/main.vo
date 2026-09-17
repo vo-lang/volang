@@ -1,0 +1,208 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"strings"
+	"time"
+	"{{module}}/app"
+	"github.com/vo-lang/ui/next/data"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/server"
+)
+
+func currentPreferences(request server.Request) app.Preferences {
+	for _, header := range request.Headers["cookie"] {
+		for _, entry := range strings.Split(header, ";") {
+			parts := strings.SplitN(strings.TrimSpace(entry), "=", 2)
+			if len(parts) != 2 || parts[0] != "fieldnotes_preferences" || len(parts[1]) > 4096 {
+				continue
+			}
+			decoded, err := url.QueryUnescape(parts[1])
+			if err != nil {
+				continue
+			}
+			var value app.Preferences
+			if err := json.Unmarshal([]byte(decoded), &value); err == nil &&
+				len(app.ValidatePreferences(value)) == 0 {
+				return value
+			}
+		}
+	}
+	return app.DefaultPreferences()
+}
+
+func preferenceEndpoint(request server.Request) (server.Page, error) {
+	if request.Method == "GET" || request.Method == "HEAD" {
+		return server.JSON(200, currentPreferences(request))
+	}
+	if request.Method != "PATCH" {
+		page, err := server.JSON(405, app.SavedPreferences{Message: "Use PATCH to update preferences."})
+		page.Headers = map[string][]string{"allow": {"GET, HEAD, PATCH"}}
+		return page, err
+	}
+	if len(request.Headers["content-type"]) != 1 ||
+		strings.ToLower(strings.TrimSpace(strings.Split(request.Headers["content-type"][0], ";")[0])) !=
+			"application/json" {
+		return server.JSON(415, app.SavedPreferences{Message: "Expected a JSON request."})
+	}
+	var value app.Preferences
+	if err := json.Unmarshal([]byte(request.Body), &value); err != nil {
+		return server.JSON(400, app.SavedPreferences{Message: "The preferences could not be read."})
+	}
+	if errors := app.ValidatePreferences(value); len(errors) > 0 {
+		return server.JSON(422, app.SavedPreferences{Errors: errors})
+	}
+	cookie, err := preferenceCookie(value, request.BasePath)
+	if err != nil {
+		return server.Page{}, err
+	}
+	page, err := server.JSON(200, app.SavedPreferences{Message: "Your preferences are saved."})
+	page.Headers = map[string][]string{"set-cookie": {cookie}}
+	return page, err
+}
+
+func preferenceCookie(value app.Preferences, base string) (string, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	cookie := "fieldnotes_preferences=" + url.QueryEscape(string(encoded)) + "; Path=" + base +
+		"; Max-Age=31536000; HttpOnly; SameSite=Lax"
+	if len(cookie) > 4096 {
+		return "", fmt.Errorf("preferences exceeded their storage budget")
+	}
+	return cookie, nil
+}
+
+func handle(request server.Request) (server.Page, error) {
+	parsed, err := url.Parse(request.URL)
+	if err != nil {
+		return server.Page{}, err
+	}
+	path := strings.TrimPrefix(parsed.EscapedPath(), request.BasePath)
+	if path == "api/preferences" {
+		return preferenceEndpoint(request)
+	}
+	match := app.MatchRoute(request.URL, request.BasePath)
+	var submission *forms.Submission
+	formStatus := 0
+	if request.Method == "POST" && match.ID == "preferences" {
+		fields, err := request.PostForm()
+		proposed := currentPreferences(request)
+		var errors forms.Errors
+		if err != nil {
+			errors = forms.Errors{"": "The form could not be read. Please try again."}
+			formStatus = 400
+		} else {
+			proposed = app.PreferencesFromValues(fields)
+			errors = app.ValidatePreferences(proposed)
+			formStatus = 422
+		}
+		if len(errors) == 0 {
+			cookie, err := preferenceCookie(proposed, request.BasePath)
+			if err != nil {
+				return server.Page{}, err
+			}
+			target := request.BasePath + "preferences?saved=1"
+			if backend := parsed.Query().Get("backend"); backend != "" {
+				target += "&backend=" + url.QueryEscape(backend)
+			}
+			return server.Page{
+				Status: 303, Headers: map[string][]string{"location": {target}, "set-cookie": {cookie}},
+			}, nil
+		}
+		submission = &forms.Submission{Values: app.PreferenceValues(proposed), Errors: errors}
+	} else if request.Method != "GET" && request.Method != "HEAD" {
+		page, err := server.JSON(405, app.SavedPreferences{Message: "This page accepts GET and HEAD."})
+		page.Headers = map[string][]string{"allow": {"GET, HEAD"}}
+		return page, err
+	}
+	if path == "" {
+		target := request.BasePath + "library"
+		if parsed.RawQuery != "" {
+			target += "?" + parsed.RawQuery
+		}
+		return server.Page{Status: 307, Headers: map[string][]string{"location": {target}}}, nil
+	}
+	filter := app.ReadFilter(parsed.Query())
+	if path == "api/notes" {
+		return server.JSON(200, selectNotes(filter))
+	}
+	if strings.HasPrefix(path, "api/notes/") {
+		id, err := url.PathUnescape(strings.TrimPrefix(path, "api/notes/"))
+		if err != nil {
+			return server.Page{}, err
+		}
+		note, found := findNote(id)
+		if !found {
+			return server.JSON(404, app.SavedPreferences{Message: "Note not found."})
+		}
+		return server.JSON(200, note)
+	}
+	values := []data.InitialValue{}
+	seed := func(requestValue data.InitialValue, value any) error {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		requestValue.Value = string(encoded)
+		requestValue.UpdatedAtMilliseconds = time.Now().UnixMilli()
+		values = append(values, requestValue)
+		return nil
+	}
+	if err := seed(data.InitialValue{Request: app.PreferencesRequest(request.BasePath)}, currentPreferences(request)); err !=
+		nil {
+		return server.Page{}, err
+	}
+	id, title, status := match.ID, "Library", 200
+	missingNote := ""
+	if id == "library" {
+		if err := seed(data.InitialValue{Request: app.NotesRequest(request.BasePath, filter)}, selectNotes(filter)); err !=
+			nil {
+			return server.Page{}, err
+		}
+	} else if id == "note" {
+		noteID := match.Param("id")
+		note, found := findNote(noteID)
+		if found {
+			title = "Reading room"
+			if err := seed(data.InitialValue{Request: app.NoteRequest(request.BasePath, noteID)}, note); err !=
+				nil {
+				return server.Page{}, err
+			}
+		} else {
+			status = 404
+			title = "Page not found"
+			missingNote = noteID
+		}
+	} else if id == "preferences" {
+		title = "Preferences"
+	} else {
+		title = "Page not found"
+		status = 404
+	}
+	if formStatus != 0 {
+		status = formStatus
+	}
+	initial, err := data.EncodeInitial(values)
+	if err != nil {
+		return server.Page{}, err
+	}
+	encoded, err := json.Marshal(app.Startup{
+		Location: request.URL, BasePath: request.BasePath, Data: initial, Submission: submission,
+		MissingNote: missingNote,
+	})
+	if err != nil {
+		return server.Page{}, err
+	}
+	return server.Page{
+		Render: app.View, InitialData: string(encoded), Status: status, Title: title + " · Fieldnotes",
+		Description: "A thoughtful collection on design, building and the work in between.",
+	}, nil
+}
+
+func main() {
+	server.Run(handle)
+}

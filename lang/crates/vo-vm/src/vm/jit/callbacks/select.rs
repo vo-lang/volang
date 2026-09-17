@@ -171,7 +171,7 @@ pub extern "C" fn jit_select_send(
     let module =
         unsafe { (*ctx).module_ref() }.expect("validated JIT callback context must carry a module");
     let elem_layout = match queue_layout_for_current_pc(unsafe { &*ctx }, module) {
-        Ok(layout) => layout.map(|layout| layout.to_vec()),
+        Ok(layout) => layout,
         Err(msg) => {
             return set_jit_infra_error_with_message(
                 ctx,
@@ -185,7 +185,7 @@ pub extern "C" fn jit_select_send(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
         u64::from(queue_reg),
-        elem_layout.as_deref(),
+        elem_layout,
         usize::from(elem_slots),
     ) {
         return result;
@@ -205,16 +205,29 @@ pub extern "C" fn jit_select_send(
             u64::from(queue_reg),
         );
     }
-    if exec::exec_select_send_with_layout(
+    if let Err(error) = exec::exec_select_send_with_layout(
         &mut fiber.select_state,
         queue_reg,
         val_reg,
         elem_slots,
-        elem_layout,
+        unsafe { (*ctx).loaded_module.as_ref() }
+            .and_then(|loaded| {
+                loaded
+                    .select_layout_maps()
+                    .get(unsafe { (*ctx).current_func_id }, unsafe {
+                        (*ctx).runtime_trap_pc
+                    })
+            })
+            .cloned()
+            // Standalone ABI embeddings may provide a verified Module without
+            // a LoadedModule owner. Preserve their precise element layout.
+            .or_else(|| elem_layout.map(|layout| std::sync::Arc::new(layout.to_vec()))),
         case_idx,
-    )
-    .is_err()
-    {
+    ) {
+        if let exec::InstructionError::Capacity(error) = error {
+            fiber.pending_resource_error = Some(error);
+            return JitResult::RuntimeTransition;
+        }
         return set_jit_infra_error(
             ctx,
             JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -279,7 +292,7 @@ pub extern "C" fn jit_select_recv(
     let module =
         unsafe { (*ctx).module_ref() }.expect("validated JIT callback context must carry a module");
     let elem_layout = match queue_layout_for_current_pc(unsafe { &*ctx }, module) {
-        Ok(layout) => layout.map(|layout| layout.to_vec()),
+        Ok(layout) => layout,
         Err(msg) => {
             return set_jit_infra_error_with_message(
                 ctx,
@@ -293,7 +306,7 @@ pub extern "C" fn jit_select_recv(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
         u64::from(queue_reg),
-        elem_layout.as_deref(),
+        elem_layout,
         usize::from(elem_slots),
     ) {
         return result;
@@ -320,17 +333,28 @@ pub extern "C" fn jit_select_recv(
             u64::from(queue_reg),
         );
     }
-    if exec::exec_select_recv_with_layout(
+    if let Err(error) = exec::exec_select_recv_with_layout(
         &mut fiber.select_state,
         dst_reg,
         queue_reg,
         elem_slots,
-        elem_layout,
+        unsafe { (*ctx).loaded_module.as_ref() }
+            .and_then(|loaded| {
+                loaded
+                    .select_layout_maps()
+                    .get(unsafe { (*ctx).current_func_id }, unsafe {
+                        (*ctx).runtime_trap_pc
+                    })
+            })
+            .cloned()
+            .or_else(|| elem_layout.map(|layout| std::sync::Arc::new(layout.to_vec()))),
         has_ok,
         case_idx,
-    )
-    .is_err()
-    {
+    ) {
+        if let exec::InstructionError::Capacity(error) = error {
+            fiber.pending_resource_error = Some(error);
+            return JitResult::RuntimeTransition;
+        }
         return set_jit_infra_error(
             ctx,
             JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -370,16 +394,17 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
     let (mut vm, fiber) = unsafe { extract_context(ctx) };
 
     if fiber.select_state.is_none() {
-        return set_jit_infra_error(
+        return set_jit_infra_error_with_message(
             ctx,
             JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
             result_reg as u64,
+            "SelectExec without active SelectBegin",
         );
     }
     let stack = fiber.stack.as_mut_ptr() as *mut Slot;
     let bp = unsafe { (*ctx).jit_bp as usize };
 
-    match exec::exec_select_exec(
+    match exec::exec_select_exec_reusing(
         exec::SelectExecContext {
             stack,
             bp,
@@ -389,8 +414,13 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
             module: Some(module_metadata),
         },
         &mut fiber.select_state,
+        &mut fiber.select_scratch,
         result_reg,
     ) {
+        SelectResult::Resource(error) => {
+            fiber.pending_resource_error = Some(error);
+            JitResult::RuntimeTransition
+        }
         SelectResult::Continue => {
             vm.state_mut().mark_gc_fiber_roots_dirty(fiber.id);
             JitResult::Ok
@@ -400,6 +430,7 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
             &mut vm.state_mut().gc,
             fiber,
             RuntimeTrapKind::SendOnClosedChannel,
+            module,
             helpers::ERR_SEND_ON_CLOSED,
         ),
         SelectResult::UnsupportedRemotePort => {
@@ -409,16 +440,18 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
             set_jit_panic(
                 &mut vm.state_mut().gc,
                 fiber,
+                module,
                 helpers::ERR_SELECT_REMOTE_UNSUPPORTED,
             )
         }
         SelectResult::Queue(action) => {
             super::queue::commit_queue_action(ctx, &mut vm, fiber, action, u64::from(result_reg))
         }
-        SelectResult::Malformed(_) => set_jit_infra_error(
+        SelectResult::Malformed(message) => set_jit_infra_error_with_message(
             ctx,
             JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
             result_reg as u64,
+            message,
         ),
     }
 }

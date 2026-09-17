@@ -1,0 +1,148 @@
+package main
+
+import (
+	"slices"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+func multipleFormValues() {
+	var form *forms.Form
+	var shown *ui.BoolState
+	initial := forms.Values{"tags": []string{"a", "b"}, "name": []string{"Ada"}, "empty": nil}
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		shown = ui.Bool(scope, "shown", true)
+		fields := []string{"name", "empty"}
+		if shown.Get() {
+			fields = append(fields, "tags")
+		}
+		form = forms.Use(scope, "multi", forms.Options{
+			Initial: initial, Fields: fields,
+			Validate: func(data forms.Data) forms.Errors {
+				values := data.Values
+				if len(values["tags"]) > 0 {
+					values["tags"][0] = "validator edit"
+				}
+				return nil
+			},
+		})
+		return ui.Text(form.Value("name"))
+	}))
+	flush(root)
+	initial["tags"][0] = "caller edit"
+	values := form.Values()
+	values["tags"][1] = "snapshot edit"
+	all := form.All("tags")
+	all[0] = "read edit"
+	require(slices.EqualString(form.All("tags"), []string{"a", "b"}) && !form.Dirty(), "multi-value lists escaped snapshot ownership")
+	changed := []string{"c", "d"}
+	form.ChangeAll("tags", changed)
+	changed[0] = "later caller edit"
+	require(slices.EqualString(form.All("tags"), []string{"c", "d"}) && form.Dirty(), "ChangeAll or validation retained a caller-owned list")
+	form.ChangeAll("tags", []string{"a", "b"})
+	require(!form.Dirty(), "equal ordered values stayed dirty")
+	form.ChangeAll("tags", []string{"b", "a"})
+	require(form.Dirty(), "value order did not participate in dirty comparison")
+	form.ChangeAll("empty", []string{})
+	form.ChangeAll("tags", []string{"a", "b"})
+	require(!form.Dirty(), "nil and empty value lists were treated as different values")
+	form.Change("empty", "")
+	require(form.Dirty() && len(form.All("empty")) == 1, "one empty value collapsed into no values")
+	form.Reset()
+	requestValues := ""
+	request := func(data forms.Data) ui.Request {
+		values := data.Values
+		requestValues = strings.Join(values["tags"], ",")
+		values["tags"][0] = "request edit"
+		return ui.Request{Service: "save", Value: requestValues}
+	}
+	decode := func(result ui.Result) forms.Outcome {
+		return forms.Outcome{Message: result.Value}
+	}
+	form.Submit(request, decode)
+	pending := startCommand(flush(root))
+	form.ChangeAll("tags", []string{"a", "new"})
+	root.Dispatch(ui.Event{Kind: "@task", Target: pending, Sequence: 1})
+	require(requestValues == "a,b" && form.Dirty() && form.All("tags")[1] == "new", "submission did not preserve its own multi-value snapshot and newer edits")
+	form.ChangeAll("tags", []string{"a", "b"})
+	require(!form.Dirty(), "multi-value submission baseline retained a request callback mutation")
+	form.Submit(request, func(ui.Result) forms.Outcome {
+		return forms.Outcome{Errors: forms.Errors{"tags": "Old server error"}}
+	})
+	pending = startCommand(flush(root))
+	form.ChangeAll("tags", []string{"a", "different second value"})
+	root.Dispatch(ui.Event{Kind: "@task", Target: pending, Sequence: 2})
+	require(form.Error("tags") == "", "response compared only a multi-value field's first item")
+	shown.Set(false)
+	flush(root)
+	_, included := form.Values()["tags"]
+	require(!included, "hidden multi-value field entered the submission snapshot")
+	shown.Set(true)
+	flush(root)
+	require(form.All("tags")[1] == "different second value", "conditional field lost repeated values")
+	form.Reset()
+	require(slices.EqualString(form.All("tags"), []string{"a", "b"}) && !form.Dirty(), "reset did not restore copied initial arrays")
+	expectPanic(func() {
+		form.Input("tags", ui.Element("input"))
+	}, "at most one value")
+	expectPanic(func() {
+		form.Checkbox("tags", ui.Element("input"))
+	}, "true or false")
+	root.Close()
+}
+
+func checkboxGroupContracts() {
+	var selected *ui.Store
+	options := []kit.ChoiceOption{
+		{Value: "", Label: "Empty"}, {Value: "b", Label: "Second"}, {Value: "c", Label: "Third"},
+		{Value: "d", Label: "Disabled", Disabled: true},
+	}
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		selected = ui.State(scope, "selected", func() any {
+			return []string{""}
+		})
+		return kit.CheckboxGroup(kit.CheckboxGroupProps{
+			ID: "tags", Label: "Your interests", Name: "interest", Form: "external", Options: options,
+			Value: func() []string {
+				return selected.Get().([]string)
+			},
+			OnChange: func(values []string) {
+				selected.Update(func(any) any {
+					return values
+				})
+			},
+			Hint: "Choose a few", Error: "Choose at least one",
+		})
+	}))
+	batch := flush(root)
+	html := root.HTML()
+	require(strings.Contains(html, "<fieldset") && strings.Contains(html, "<legend") &&
+		(strings.Contains(html, "tags-hint tags-error") || strings.Contains(html, "tags-error tags-hint")), "checkbox group lost its native label or descriptions")
+	require(strings.Contains(html, "value=\"\"") && strings.Count(html, "name=\"interest\"") == 4 &&
+		strings.Count(html, "form=\"external\"") == 4, "checkbox group lost empty values or repeated native names")
+	ids := map[string]int{}
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "id" {
+			ids[mutation.Value] = mutation.ID
+		}
+	}
+	root.Dispatch(ui.Event{Target: ids["tags-option-2"], Kind: "change", Checked: true, Sequence: 1})
+	root.Dispatch(ui.Event{Target: ids["tags-option-1"], Kind: "change", Checked: true, Sequence: 2})
+	root.Dispatch(ui.Event{Target: ids["tags-option-0"], Kind: "change", Checked: false, Sequence: 3})
+	root.Dispatch(ui.Event{Target: ids["tags-option-3"], Kind: "change", Checked: true, Sequence: 4})
+	require(slices.EqualString(selected.Get().([]string), []string{"b", "c"}), "checkbox burst read stale selection or changed a disabled option")
+	flush(root)
+	root.Close()
+	for _, values := range [][]string{[]string{"unknown"}, []string{"b", "b"}} {
+		expectPanic(func() {
+			kit.CheckboxGroup(kit.CheckboxGroupProps{
+				ID: "bad", Label: "Bad", Options: options,
+				Value: func() []string {
+					return values
+				},
+			})
+		}, "unique declared")
+	}
+}

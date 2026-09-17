@@ -1,7 +1,8 @@
 //! Immutable filesystem snapshots used by cache-aware compilation.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io;
+use std::ops::Bound::{Excluded, Unbounded};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -26,6 +27,16 @@ pub(super) struct CompileInputSnapshot {
 }
 
 impl CompileInputSnapshot {
+    /// Path ordering compares components, so strict descendants form the
+    /// contiguous range immediately after a directory. The existing file map
+    /// supplies the index; this view owns no paths or additional metadata.
+    fn descendant_files<'a>(&'a self, directory: &'a Path) -> impl Iterator<Item = &'a Path> {
+        self.files
+            .range::<Path, _>((Excluded(directory), Unbounded))
+            .map(|(file, _)| file.as_path())
+            .take_while(move |file| file.starts_with(directory))
+    }
+
     pub(super) fn contains_file(&self, path: &Path) -> bool {
         self.files.contains_key(&normalize_fs_path(path))
     }
@@ -73,9 +84,21 @@ impl CompileInputSnapshot {
         };
         let parent = normalize_fs_path(parent);
         let generation = super::host_input::validate_stable_directory_path(&parent)?;
+        self.record_directory_identity(&parent, &generation.identity)
+    }
+
+    /// Retain the identity of the directory capability used for a tree read.
+    /// The collector validates that capability's generation against its live
+    /// path before returning the completed tree to the compiler.
+    pub(super) fn record_directory_identity(
+        &mut self,
+        parent: &Path,
+        observed: &super::host_input::HostEntryIdentity,
+    ) -> io::Result<()> {
+        let parent = normalize_fs_path(parent);
         let mut identity = [0; 24];
-        identity[..8].copy_from_slice(&generation.identity.volume.to_le_bytes());
-        identity[8..].copy_from_slice(&generation.identity.file);
+        identity[..8].copy_from_slice(&observed.volume.to_le_bytes());
+        identity[8..].copy_from_slice(&observed.file);
         if let Some(existing) = self.directory_identities.get(&parent) {
             if existing != &identity {
                 return Err(io::Error::new(
@@ -293,63 +316,50 @@ impl FileSystem for CompileInputSnapshot {
                 format!("path is not a directory in compile snapshot: {path:?}"),
             ));
         }
-        let mut entries = BTreeSet::new();
-        for file in self.files.keys() {
-            let Ok(relative) = file.strip_prefix(&path) else {
+        let mut entries: Vec<PathBuf> = Vec::new();
+        for file in self.descendant_files(&path) {
+            // All files below one immediate child are adjacent in the map.
+            // Allocate its output path once, even for a large nested package.
+            if entries.last().is_some_and(|entry| file.starts_with(entry)) {
                 continue;
-            };
-            let Some(first) = relative.components().next() else {
-                continue;
-            };
-            let entry = normalize_fs_path(&path.join(first.as_os_str()));
-            entries.insert(entry);
+            }
+            let relative = file.strip_prefix(&path).expect("descendant prefix");
+            let first = relative.components().next().expect("strict descendant");
+            entries.push(normalize_fs_path(&path.join(first.as_os_str())));
+            if entries.len() > MAX_DIRECTORY_ENTRIES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "compile snapshot directory contains more than {MAX_DIRECTORY_ENTRIES} entries"
+                    ),
+                ));
+            }
         }
-        if entries.is_empty() && !self.is_dir(&path) {
+        if entries.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("directory not found in compile snapshot: {path:?}"),
             ));
         }
-        if entries.len() > MAX_DIRECTORY_ENTRIES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "compile snapshot directory contains more than {MAX_DIRECTORY_ENTRIES} entries"
-                ),
-            ));
-        }
-        let mut entries = entries.into_iter().collect::<Vec<_>>();
         sort_fs_paths(&mut entries);
         Ok(entries)
     }
 
     fn exists(&self, path: &Path) -> bool {
         let path = normalize_fs_path(path);
-        self.files.contains_key(&path)
-            || self
-                .files
-                .keys()
-                .any(|file| file != &path && file.starts_with(&path))
+        self.files.contains_key(&path) || self.descendant_files(&path).next().is_some()
     }
 
     fn is_dir(&self, path: &Path) -> bool {
         let path = normalize_fs_path(path);
-        !self.files.contains_key(&path)
-            && self
-                .files
-                .keys()
-                .any(|file| file != &path && file.starts_with(&path))
+        !self.files.contains_key(&path) && self.descendant_files(&path).next().is_some()
     }
 
     fn entry_kind(&self, path: &Path) -> io::Result<FileSystemEntryKind> {
         let path = normalize_fs_path(path);
         Ok(if self.files.contains_key(&path) {
             FileSystemEntryKind::RegularFile
-        } else if self
-            .files
-            .keys()
-            .any(|file| file != &path && file.starts_with(&path))
-        {
+        } else if self.descendant_files(&path).next().is_some() {
             FileSystemEntryKind::Directory
         } else {
             FileSystemEntryKind::Missing
@@ -458,6 +468,193 @@ impl FileSystem for ResolverFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scan_directory(
+        snapshot: &CompileInputSnapshot,
+        path: &Path,
+    ) -> Result<Vec<PathBuf>, io::ErrorKind> {
+        use std::collections::BTreeSet;
+        let path = normalize_fs_path(path);
+        if snapshot.files.contains_key(&path) {
+            return Err(io::ErrorKind::NotADirectory);
+        }
+        let mut entries = BTreeSet::new();
+        for file in snapshot.files.keys() {
+            if let Ok(relative) = file.strip_prefix(&path) {
+                if let Some(first) = relative.components().next() {
+                    entries.insert(normalize_fs_path(&path.join(first.as_os_str())));
+                }
+            }
+        }
+        if entries.is_empty() {
+            return Err(io::ErrorKind::NotFound);
+        }
+        if entries.len() > MAX_DIRECTORY_ENTRIES {
+            return Err(io::ErrorKind::InvalidData);
+        }
+        let mut entries: Vec<_> = entries.into_iter().collect();
+        sort_fs_paths(&mut entries);
+        Ok(entries)
+    }
+
+    fn assert_scan_equivalent(snapshot: &CompileInputSnapshot, paths: &[PathBuf]) {
+        for path in paths {
+            let normalized = normalize_fs_path(path);
+            let is_file = snapshot.files.contains_key(&normalized);
+            let has_children = snapshot
+                .files
+                .keys()
+                .any(|file| file != &normalized && file.starts_with(&normalized));
+            assert_eq!(snapshot.exists(path), is_file || has_children, "{path:?}");
+            assert_eq!(snapshot.is_dir(path), !is_file && has_children, "{path:?}");
+            let expected_kind = if is_file {
+                FileSystemEntryKind::RegularFile
+            } else if has_children {
+                FileSystemEntryKind::Directory
+            } else {
+                FileSystemEntryKind::Missing
+            };
+            assert_eq!(
+                snapshot.entry_kind(path).unwrap(),
+                expected_kind,
+                "{path:?}"
+            );
+            assert_eq!(
+                snapshot.read_dir(path).map_err(|error| error.kind()),
+                scan_directory(snapshot, path),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn directory_ranges_preserve_component_boundaries_and_normalization() {
+        let mut snapshot = CompileInputSnapshot::default();
+        let roots = [
+            "/project",
+            "/project-2",
+            "project",
+            "project-2",
+            "..",
+            "../..",
+        ];
+        let suffixes = [
+            "a.vo",
+            "a.vo/child.vo",
+            "a/b.vo",
+            "a/nested/c.vo",
+            "a-2/d.vo",
+            "a0/e.vo",
+            "z.vo",
+            "中文/源码.vo",
+            "space name/one.vo",
+        ];
+        let mut probes = vec![
+            PathBuf::from(""),
+            PathBuf::from("."),
+            PathBuf::from("/"),
+            PathBuf::from("missing"),
+        ];
+        for root in roots {
+            for suffix in suffixes {
+                let path = Path::new(root).join(suffix);
+                snapshot.insert(path.clone(), vec![0, 255]).unwrap();
+                probes.extend(path.ancestors().map(Path::to_path_buf));
+                probes.push(path.with_extension("missing"));
+            }
+            probes.push(Path::new(root).join("a/../a/./"));
+            probes.push(Path::new(root).join("a"));
+            probes.push(Path::new(root).join("a-"));
+        }
+        snapshot
+            .insert(PathBuf::from("project/a/../z.vo"), vec![1])
+            .unwrap();
+        // Identity records do not synthesize filesystem entries or override a file.
+        snapshot
+            .directory_identities
+            .insert(PathBuf::from("empty"), [7; 24]);
+        snapshot
+            .directory_identities
+            .insert(PathBuf::from("project/a.vo"), [9; 24]);
+        probes.push(PathBuf::from("empty"));
+        assert_scan_equivalent(&snapshot, &probes);
+        assert_eq!(
+            snapshot
+                .opaque_directory_identity(Path::new("empty"))
+                .unwrap(),
+            Some(vec![7; 24])
+        );
+        assert_eq!(
+            snapshot.read_bytes(Path::new("project/z.vo")).unwrap(),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn directory_ranges_match_full_scan_across_generated_package_trees() {
+        let mut snapshot = CompileInputSnapshot::default();
+        let mut probes = Vec::new();
+        for package in 0..97 {
+            let root = PathBuf::from(format!("/workspace/pkg{package:03}"));
+            probes.push(root.clone());
+            probes.push(root.with_extension("missing"));
+            for file in 0..17 {
+                let path = root.join(format!("dir{}/nested{}/file{file}.vo", file % 7, file % 3));
+                snapshot.insert(path.clone(), Vec::new()).unwrap();
+                probes.extend(path.ancestors().take(3).map(Path::to_path_buf));
+            }
+        }
+        probes.sort();
+        probes.dedup();
+        assert_scan_equivalent(&snapshot, &probes);
+    }
+
+    #[test]
+    fn directory_range_keeps_entry_limit_and_deduplicates_nested_files() {
+        let mut snapshot = CompileInputSnapshot::default();
+        let root = Path::new("/directory-limit");
+        // Construct an oversized internal image to exercise the defensive
+        // directory limit independently of the normal snapshot file limit.
+        for n in 0..MAX_DIRECTORY_ENTRIES {
+            snapshot
+                .files
+                .insert(root.join(format!("child{n}/first.vo")), Vec::new());
+        }
+        snapshot
+            .files
+            .insert(root.join("child0/second.vo"), Vec::new());
+        assert_eq!(
+            snapshot.read_dir(root).unwrap().len(),
+            MAX_DIRECTORY_ENTRIES
+        );
+        snapshot.files.insert(root.join("one-more.vo"), Vec::new());
+        assert_eq!(
+            snapshot.read_dir(root).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            snapshot.read_dir(Path::new("/absent")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_ranges_preserve_non_utf8_names() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let mut snapshot = CompileInputSnapshot::default();
+        let mut probes = vec![PathBuf::from("/binary")];
+        for byte in [0x7f, 0x80, 0xfe, 0xff] {
+            let directory = Path::new("/binary").join(OsString::from_vec(vec![b'p', byte]));
+            snapshot.insert(directory.join("a.vo"), Vec::new()).unwrap();
+            snapshot
+                .insert(directory.join("b/c.vo"), Vec::new())
+                .unwrap();
+            probes.push(directory);
+        }
+        assert_scan_equivalent(&snapshot, &probes);
+    }
 
     fn canonical_temp_dir() -> PathBuf {
         std::env::temp_dir()

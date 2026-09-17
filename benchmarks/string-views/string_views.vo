@@ -1,0 +1,22 @@
+package main
+
+func view(source string, offset int) string {
+	middle := source[offset:]
+	return middle[1:17]
+}
+
+func main() {
+	source := "abcdefghijklmnopqrstuvwxyz012345"
+	var retained [8]string
+	sum := 0
+	for i := 0; i < 200000; i++ {
+		s := view(source, i & 15)
+		retained[i & 7] = s
+		sum += int(s[0]) + len(s)
+	}
+	for _, s := range retained {
+		sum += len(s) + int(s[1])
+	}
+	assert(sum == 24301012)
+	println(sum)
+}

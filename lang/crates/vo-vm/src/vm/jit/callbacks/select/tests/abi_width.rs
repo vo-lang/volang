@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn vm_select_send_callback_rejects_u16_elem_slot_width_overflow() {
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     vm.finish_load(Module::new(
         "jit-select-send-callback-contract-test".to_string(),
     ));
@@ -18,7 +18,7 @@ fn vm_select_send_callback_rejects_u16_elem_slot_width_overflow() {
 
 #[test]
 fn vm_select_recv_callback_rejects_u16_elem_slot_width_overflow() {
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     vm.finish_load(Module::new(
         "jit-select-recv-callback-contract-test".to_string(),
     ));
@@ -34,7 +34,7 @@ fn vm_select_recv_callback_rejects_u16_elem_slot_width_overflow() {
 
 #[test]
 fn vm_jit_select_callback_abi_006_rejects_send_register_width_drift() {
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     vm.finish_load(Module::new(
         "jit-select-send-register-contract-test".to_string(),
     ));
@@ -51,7 +51,7 @@ fn vm_jit_select_callback_abi_006_rejects_send_register_width_drift() {
 
 #[test]
 fn vm_jit_select_callback_abi_006_rejects_recv_register_width_drift() {
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     vm.finish_load(Module::new(
         "jit-select-recv-register-contract-test".to_string(),
     ));
@@ -69,7 +69,7 @@ fn vm_jit_select_callback_abi_006_rejects_recv_register_width_drift() {
 #[test]
 fn vm_jit_select_callback_abi_013_rejects_exec_result_register_width_drift_before_select_mutation()
 {
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     vm.finish_load(Module::new(
         "jit-select-exec-register-contract-test".to_string(),
     ));

@@ -1,0 +1,7 @@
+const CACHE_NAMESPACE = "volang-ui-d7559a3ca207bb8c";
+const CACHE = "volang-ui-d7559a3ca207bb8c-volang-studio-v1-test";
+const PRECACHE = ["/","/offline/"];
+const OFFLINE = "/offline/";
+self.addEventListener('install', event => { event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(PRECACHE)).then(() => self.skipWaiting())); });
+self.addEventListener('activate', event => { event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith(CACHE_NAMESPACE) && key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim())); });
+self.addEventListener('fetch', event => { const url = new URL(event.request.url); if (event.request.method !== 'GET' || url.origin !== self.location.origin || url.search) return; event.respondWith((async () => { const cache = await caches.open(CACHE); const cached = await cache.match(event.request); if (cached) return cached; if (event.request.mode === 'navigate') { const shell = await cache.match('/'); if (shell) return shell; } try { const response = await fetch(event.request); if (response.ok && response.type === 'basic') { const copy = response.clone(); event.waitUntil(cache.put(event.request, copy).catch(() => undefined)); } return response; } catch (error) { const fallback = await cache.match(event.request) || (event.request.mode === 'navigate' ? await cache.match(OFFLINE) : undefined); if (fallback) return fallback; throw error; } })()); });

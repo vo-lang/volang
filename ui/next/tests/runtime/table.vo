@@ -1,0 +1,157 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var tableNoteType = ui.Define("contract.TableNote")
+
+func createdTextParent(batch ui.Batch, value string) int {
+	id := 0
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "create" && mutation.Name == "#text" && mutation.Value == value {
+			id = mutation.ID
+			break
+		}
+	}
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "insert" && mutation.ID == id {
+			return mutation.Parent
+		}
+	}
+	panic("missing text parent " + value)
+}
+
+func tableContracts() {
+	var descending *ui.BoolState
+	var empty *ui.BoolState
+	notes := make(map[string]*ui.StringState)
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		descending = ui.Bool(scope, "descending", false)
+		empty = ui.Bool(scope, "empty", false)
+		keys := []string{"a", "b", "c"}
+		if descending.Get() {
+			keys = []string{"c", "b", "a"}
+		}
+		rows := []kit.TableRow{}
+		if !empty.Get() {
+			for _, key := range keys {
+				note := ui.Component(tableNoteType, func(scope *ui.Scope) ui.View {
+					value := ui.String(scope, "value", key)
+					notes[key] = value
+					return ui.Element("input").Attr("data-name", key).Attr("value", value.Get())
+				})
+				rows = append(rows, kit.TableRow{Key: key, Cells: []ui.View{ui.Text(key), note}})
+			}
+		}
+		return kit.Table(kit.TableProps{
+			Caption: "Notes", Rows: rows,
+			Columns: []kit.TableColumn{
+				{Key: "name", Label: "Name", Sortable: true, RowHeader: true}, {Key: "note", Label: "Note"},
+			},
+			Sort: func() kit.TableSort {
+				return kit.TableSort{Column: "name", Descending: descending.Get()}
+			},
+			OnSortChange: func(order kit.TableSort) {
+				descending.Set(order.Descending)
+			},
+		})
+	}))
+	first := flush(root)
+	header := createdTextParent(first, "Name")
+	b := notes["b"]
+	b.Set("Retained")
+	flush(root)
+	root.Dispatch(ui.Event{Target: header, Kind: "click", Sequence: 1})
+	batch := flush(root)
+	require(descending.Get() && notes["b"] == b && b.Get() == "Retained", "sorting replaced keyed row state")
+	for _, mutation := range batch.Mutations {
+		require(mutation.Op != "create" && mutation.Op != "remove", "sorting remounted table content")
+	}
+	require(strings.Contains(root.HTML(), `aria-sort="descending"`) &&
+		strings.Count(root.HTML(), `scope="row"`) == 3, "table header or sort semantics missing")
+	root.Dispatch(ui.Event{Target: header, Kind: "click", Sequence: 2})
+	root.Dispatch(ui.Event{Target: header, Kind: "click", Sequence: 3})
+	flush(root)
+	require(descending.Get(), "batched sort buttons read stale order")
+	empty.Set(true)
+	flush(root)
+	require(strings.Contains(root.HTML(), `colspan="2"`) &&
+		strings.Contains(root.HTML(), "No items to display."), "empty table lost column span or feedback")
+	root.Close()
+	expectPanic(func() {
+		kit.Table(kit.TableProps{
+			Caption: "Bad", Columns: []kit.TableColumn{{Key: "a", Label: "A", Sortable: true}},
+		})
+	}, "sort reader")
+	expectPanic(func() {
+		kit.Table(kit.TableProps{
+			Caption: "Bad", Columns: []kit.TableColumn{{Key: "a", Label: "A"}},
+			Rows: []kit.TableRow{{Key: "a"}},
+		})
+	}, "cells must match")
+}
+
+func paginationContracts() {
+	var page *ui.IntState
+	var count *ui.IntState
+	var disabled *ui.BoolState
+	changes := 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		page = ui.Int(scope, "page", 1)
+		count = ui.Int(scope, "count", 1000000)
+		disabled = ui.Bool(scope, "disabled", false)
+		return kit.Pagination(kit.PaginationProps{
+			Page: func() int {
+				return page.Get()
+			},
+			PageCount: count.Get(), Disabled: disabled.Get(),
+			OnChange: func(value int) {
+				changes++
+				page.Set(value)
+			},
+		})
+	}))
+	first := flush(root)
+	next, previous := createdTextParent(first, "Next"), createdTextParent(first, "Previous")
+	sequence := 0
+	click := func(id int) {
+		sequence++
+		root.Dispatch(ui.Event{Target: id, Kind: "click", Sequence: sequence})
+	}
+	click(previous)
+	require(page.Get() == 1 && changes == 0, "pagination moved before the first page")
+	click(next)
+	click(next)
+	click(next)
+	flush(root)
+	require(page.Get() == 4 && changes == 3, "pagination burst read a stale page")
+	page.Set(500000)
+	flush(root)
+	require(strings.Count(root.HTML(), "<button") <= 7 &&
+		strings.Contains(root.HTML(), `aria-current="page"`), "pagination rendered an unbounded page list")
+	disabled.Set(true)
+	flush(root)
+	click(next)
+	click(previous)
+	require(page.Get() == 500000 && changes == 3, "disabled pagination changed page")
+	disabled.Set(false)
+	maximum := int(^uint(0) >> 1)
+	count.Set(maximum)
+	page.Set(maximum)
+	flush(root)
+	require(strings.Count(root.HTML(), "<button") <= 7, "maximum page count overflowed the window")
+	click(next)
+	require(page.Get() == maximum, "pagination overflowed after the last page")
+	root.Close()
+	expectPanic(func() {
+		kit.Pagination(kit.PaginationProps{
+			Page: func() int {
+				return 0
+			},
+			PageCount: 1, OnChange: func(int) {},
+		})
+	}, "outside its range")
+}

@@ -1,0 +1,206 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func eventContracts() {
+	pointerEventContracts()
+	expectPanic(func() {
+		ui.Element("button").OnWith("click", ui.EventOptions{Latest: true}, func(ui.Event) {})
+	}, "latest delivery requires")
+	latest := ui.NewRoot(ui.Element("div").OnWith("pointermove", ui.EventOptions{Latest: true}, func(ui.Event) {}))
+	flush(latest)
+	require(strings.Contains(latest.HTML(), "pointermove=32"), "SSR lost latest delivery")
+	latest.Close()
+	var stopped *ui.BoolState
+	log := ""
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		stopped = ui.Bool(scope, "stopped", false)
+		return ui.Element("button", ui.Text("phases")).Attr("data-name", "phases").OnWith("click", ui.EventOptions{
+			Capture: true,
+		}, func(event ui.Event) {
+			log += "capture;"
+		}).OnWith("click", ui.EventOptions{StopPropagation: stopped.Get()}, func(event ui.Event) {
+			log += "bubble;"
+		})
+	}))
+	first := flush(root)
+	id := target(first, "phases")
+	require(strings.Contains(root.HTML(), "click:capture=1 click=0"), "SSR lost event options or phase identity")
+	root.Dispatch(ui.Event{Target: id, Kind: "click", Capture: true, Sequence: 1})
+	root.Dispatch(ui.Event{Target: id, Kind: "click", Sequence: 2})
+	require(log == "capture;bubble;", "phase handlers replaced one another")
+	stopped.Set(true)
+	batch := flush(root)
+	rebound := 0
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "listen" {
+			require(mutation.Name == "click" && mutation.Value == "4", "wrong phase rebound after option change")
+			rebound++
+		}
+	}
+	require(rebound == 1, "event option change did not reach native listener")
+	root.Close()
+	expectPanic(func() {
+		ui.Element("button").OnWith("click", ui.EventOptions{Passive: true, PreventDefault: true}, func(event ui.Event) {})
+	}, "passive listener")
+	expectPanic(func() {
+		ui.Element("button").On("unknown-event", func(event ui.Event) {})
+	}, "supported event")
+}
+
+func pointerEventContracts() {
+	var capture *ui.BoolState
+	var received *ui.PointerData
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		capture = ui.Bool(scope, "capture", true)
+		return ui.Element("div").Attr("data-name", "drag").OnWith("pointerdown", ui.EventOptions{
+			CapturePointer: capture.Get(), Capture: true,
+		}, func(event ui.Event) {
+			received = event.Pointer
+		})
+	}))
+	first := flush(root)
+	id := target(first, "drag")
+	require(strings.Contains(root.HTML(), "pointerdown:capture=17"), "SSR lost pointer capture options")
+	point := ui.PointerData{
+		ID: 5, ClientX: 10.25, ClientY: -0.5, Buttons: 1, Pressure: 0.5, IsPrimary: true,
+	}
+	require(root.Dispatch(ui.Event{
+		Target: id, Kind: "pointerdown", Capture: true, Sequence: 1, Pointer: &point,
+	}), "pointer event rejected")
+	require(received != nil && *received == point, "guest lost typed pointer data")
+	capture.Set(false)
+	batch := flush(root)
+	rebound := false
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "listen" {
+			require(mutation.Name == "pointerdown:capture" && mutation.Value == "1", "capture removal changed propagation")
+			rebound = true
+		}
+	}
+	require(rebound, "capture option changes did not rebind")
+	root.Close()
+	require(!root.Dispatch(ui.Event{
+		Target: id, Kind: "pointerdown", Capture: true, Sequence: 2, Pointer: &point,
+	}), "disposed pointer target accepted input")
+	for _, kind := range []string{"pointermove", "pointerup", "click", "keydown", "viewport"} {
+		expectPanic(func() {
+			ui.Element("div").OnWith(kind, ui.EventOptions{CapturePointer: true}, func(ui.Event) {})
+		}, "pointerdown listener")
+	}
+}
+
+func keyboardFilters() {
+	keys := []string{"ArrowRight", " ", "=", "中", "\""}
+	log := ""
+	view := ui.Element("button").Attr("data-name", "keys").OnWith("keydown", ui.EventOptions{
+		PreventDefault: true, Keys: keys,
+	}, func(event ui.Event) {
+		log += event.Key
+	})
+	keys[0] = "changed"
+	root := ui.NewRoot(view)
+	first := flush(root)
+	id := target(first, "keys")
+	for sequence, key := range []string{"Tab", "changed", "ArrowRight", " ", "=", "中", "\""} {
+		root.Dispatch(ui.Event{Target: id, Kind: "keydown", Key: key, Sequence: sequence + 1})
+	}
+	root.Dispatch(ui.Event{
+		Target: id, Kind: "keydown", Key: "ArrowRight", IsComposing: true, Sequence: 8,
+	})
+	require(log == "ArrowRight =中\"", "key filter lost immutability, matching or composition semantics")
+	require(strings.Contains(root.HTML(), "\\u0020") && strings.Contains(root.HTML(), "\\u003d"), "SSR key filter broke listener token boundaries")
+	require(strings.Contains(root.HTML(), "keydown=2|[&quot;ArrowRight&quot;"), "SSR listener quotes broke the HTML attribute")
+	root.Close()
+	for _, invalid := range [][]string{
+		{""}, {"a", "a"}, {strings.Repeat("a", 129)}, {string([]byte{255})},
+	} {
+		expectPanic(func() {
+			ui.Element("button").OnWith("keydown", ui.EventOptions{Keys: invalid}, func(event ui.Event) {})
+		}, "unique nonempty UTF-8 keys")
+	}
+	expectPanic(func() {
+		ui.Element("button").OnWith("click", ui.EventOptions{Keys: []string{"Enter"}}, func(event ui.Event) {})
+	}, "keyboard event")
+	var current *ui.StringState
+	root = ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		current = ui.String(scope, "key", "ArrowLeft")
+		return ui.Element("button").OnWith("keydown", ui.EventOptions{Keys: []string{current.Get()}}, func(event ui.Event) {})
+	}))
+	flush(root)
+	current.Set("ArrowRight")
+	updated := flush(root)
+	require(len(updated.Mutations) == 1 && updated.Mutations[0].Op == "listen" &&
+		strings.Contains(updated.Mutations[0].Value, "ArrowRight"), "key filter change was not rebound")
+	root.Close()
+}
+
+func modifierFilters() {
+	alternatives := []ui.KeyboardModifiers{{Ctrl: true}, {Meta: true}}
+	count := 0
+	view := ui.Element("textarea").Attr("data-name", "shortcut").OnWith("keydown", ui.EventOptions{
+		Keys: []string{"Enter", "| =\""}, Modifiers: alternatives, PreventDefault: true,
+	}, func(event ui.Event) {
+		count++
+	})
+	alternatives[0] = ui.KeyboardModifiers{Shift: true}
+	root := ui.NewRoot(view)
+	id := target(flush(root), "shortcut")
+	for index, modifiers := range []ui.KeyboardModifiers{
+		{}, {Shift: true}, {Ctrl: true, Shift: true}, {Ctrl: true, Alt: true}, {Ctrl: true, Meta: true},
+		{Ctrl: true}, {Meta: true},
+	} {
+		root.Dispatch(ui.Event{
+			Target: id, Kind: "keydown", Key: "Enter", Sequence: index + 1, AltKey: modifiers.Alt,
+			CtrlKey: modifiers.Ctrl, MetaKey: modifiers.Meta, ShiftKey: modifiers.Shift,
+		})
+	}
+	root.Dispatch(ui.Event{
+		Target: id, Kind: "keydown", Key: "Enter", CtrlKey: true, IsComposing: true, Sequence: 8,
+	})
+	root.Dispatch(ui.Event{Target: id, Kind: "keydown", Key: "x", CtrlKey: true, Sequence: 9})
+	root.Dispatch(ui.Event{Target: id, Kind: "keydown", Key: "| =\"", MetaKey: true, Sequence: 10})
+	require(count == 3, "exact modifier alternatives lost snapshot, key or composition semantics")
+	html := root.HTML()
+	require(strings.Contains(html, "&quot;modifiers&quot;:[2,4]") &&
+		strings.Contains(html, "|\\u0020\\u003d"), "SSR modifier binding lost masks or token escaping")
+	root.Close()
+	root.Dispatch(ui.Event{Target: id, Kind: "keydown", Key: "Enter", CtrlKey: true, Sequence: 11})
+	require(count == 3, "closed modifier listener retained handler")
+	var control *ui.BoolState
+	count = 0
+	root = ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		control = ui.Bool(scope, "control", false)
+		return ui.Element("textarea").Attr("data-name", "modifier-only").OnWith("keyup", ui.EventOptions{
+			Modifiers: []ui.KeyboardModifiers{{Ctrl: control.Get()}},
+		}, func(event ui.Event) {
+			count++
+		})
+	}))
+	id = target(flush(root), "modifier-only")
+	root.Dispatch(ui.Event{Target: id, Kind: "keyup", Key: "x", Sequence: 1})
+	root.Dispatch(ui.Event{Target: id, Kind: "keyup", Key: "x", ShiftKey: true, Sequence: 2})
+	require(count == 1, "zero modifier alternative did not match only unmodified input")
+	control.Set(true)
+	updated := flush(root)
+	require(len(updated.Mutations) == 1 && updated.Mutations[0].Op == "listen" &&
+		strings.Contains(updated.Mutations[0].Value, "\"modifiers\":[2]"), "modifier change was not rebound")
+	root.Dispatch(ui.Event{Target: id, Kind: "keyup", Key: "x", Sequence: 3})
+	root.Dispatch(ui.Event{Target: id, Kind: "keyup", Key: "anything", CtrlKey: true, Sequence: 4})
+	require(count == 2, "modifier-only update kept the old filter")
+	root.Close()
+	expectPanic(func() {
+		ui.Element("button").OnWith("click", ui.EventOptions{Modifiers: []ui.KeyboardModifiers{{}}}, func(ui.Event) {})
+	}, "keyboard event")
+	expectPanic(func() {
+		ui.Element("button").OnWith("keydown", ui.EventOptions{Modifiers: []ui.KeyboardModifiers{{}, {}}}, func(ui.Event) {})
+	}, "unique alternatives")
+	expectPanic(func() {
+		ui.Element("button").OnWith("keydown", ui.EventOptions{
+			Modifiers: make([]ui.KeyboardModifiers, 17),
+		}, func(ui.Event) {})
+	}, "at most 16 alternatives")
+}

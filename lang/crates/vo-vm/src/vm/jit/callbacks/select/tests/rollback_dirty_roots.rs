@@ -17,7 +17,7 @@ fn callback_module(local_slots: u16) -> Module {
 
 #[test]
 fn vm_jit_select_continue_marks_current_fiber_roots_dirty() {
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     let module = callback_module(1);
     vm.finish_load(module);
     let mut fiber = Fiber::new(7);
@@ -38,7 +38,7 @@ fn vm_jit_select_continue_marks_current_fiber_roots_dirty() {
 
 #[test]
 fn vm_jit_select_remote_ack_rolls_back_queue_after_late_route_failure() {
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     vm.state.current_island_id = 0;
     vm.state.external_island_transport = true;
     let ch = queue::create(

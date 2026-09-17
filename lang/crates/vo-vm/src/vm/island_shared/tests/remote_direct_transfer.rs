@@ -1145,6 +1145,7 @@ fn vm_select_recv_remote_ack_reservation_failure_rolls_back_sender_stack_and_sel
     let fid = vm.scheduler.spawn(Fiber::new(0));
     let initial_select = Some(SelectState {
         cases: vec![SelectCase {
+            _storage: None,
             kind: SelectCaseKind::Recv,
             result_index: 41,
             queue_reg: 0,
@@ -1152,13 +1153,14 @@ fn vm_select_recv_remote_ack_reservation_failure_rolls_back_sender_stack_and_sel
             elem_slots: 1,
             elem_layout: None,
             has_ok: false,
-        }],
+        }]
+        .into(),
         expected_cases: 1,
         has_default: false,
         woken_index: None,
         woken_result: None,
         select_id: 99,
-        registered_queues: Vec::new(),
+        registered_queues: Default::default(),
     });
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);

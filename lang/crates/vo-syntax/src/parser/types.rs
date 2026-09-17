@@ -19,8 +19,9 @@ impl<'a> Parser<'a> {
             TokenKind::Ident => {
                 let ident = self.parse_ident()?;
                 // Check for qualified type: pkg.Type
-                if self.eat(TokenKind::Dot) {
-                    let sel = self.parse_ident()?;
+                if self.at(TokenKind::Dot) {
+                    let member_start = self.advance().span.end;
+                    let sel = self.parse_selector_ident(member_start)?;
                     TypeExprKind::Selector(Box::new(SelectorTypeExpr { pkg: ident, sel }))
                 } else {
                     TypeExprKind::Ident(ident)

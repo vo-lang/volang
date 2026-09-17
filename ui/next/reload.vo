@@ -1,0 +1,344 @@
+package ui
+
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+)
+
+// ReloadValue opts application Store snapshots into development reload. Encode
+// and decode only pure data. The fresh value decodes the previous version and
+// supplies new ownership/lifecycle metadata. An incompatible schema resets the
+// state; a decode error also resets it and appears in the reload report.
+type ReloadValue interface {
+	ReloadSchema() string
+	SaveReload() (string, error)
+	RestoreReload(string) (any, error)
+}
+
+type ReloadReport struct {
+	Restored int `json:"restored"`
+	Reset int `json:"reset"`
+	Messages []string `json:"messages"`
+}
+
+const reloadMaxBytes = 4 * 1024 * 1024
+
+const reloadMaxStates = 2048
+
+const reloadMaxNodes = 20000
+
+const reloadMaxPath = 8192
+
+type reloadField struct {
+	Path string `json:"path"`
+	Key string `json:"key"`
+	Kind string `json:"kind"`
+	Value string `json:"value"`
+}
+
+type reloadEnvelope struct {
+	Version int `json:"version"`
+	States []reloadField `json:"states"`
+}
+
+type reloadRestore struct {
+	paths map[int]string
+	fields map[string]map[string]reloadField
+	types map[string]*Type
+	report *ReloadReport
+	visited int
+}
+
+func reloadPath(parent string, view View, index int) string {
+	part := view.kind
+	if view.component != nil {
+		part += ":" + view.component.name
+	}
+	path := parent + strconv.Itoa(len(part)) + ":" + part
+	if view.key != "" {
+		return path + "k" + strconv.Itoa(len(view.key)) + ":" + view.key
+	}
+	return path + "i" + strconv.Itoa(index) + ":"
+}
+
+func reloadType(types map[string]*Type, definition *Type) error {
+	if definition == nil {
+		return nil
+	}
+	if previous, found := types[definition.name]; found && previous != definition {
+		return fmt.Errorf("ui: reload requires unique component definition names: %s", definition.name)
+	}
+	types[definition.name] = definition
+	return nil
+}
+
+func validReloadSchema(schema string) bool {
+	return schema != "" && len(schema) <= 256 && utf8.ValidString(schema)
+}
+
+func reloadEncode(value any) (kind string, encoded string, err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			err = fmt.Errorf("ui: reload encoder failed: %v", failure)
+		}
+	}()
+	switch state := value.(type) {
+		case *IntState:
+			return "int", strconv.Itoa(state.value), nil
+		case *StringState:
+			return "string", state.value, nil
+		case *BoolState:
+			return "bool", strconv.FormatBool(state.value), nil
+		case *Store:
+			codec, ok := state.value.(ReloadValue)
+			if !ok {
+				return "opaque", "", nil
+			}
+			schema := codec.ReloadSchema()
+			if !validReloadSchema(schema) {
+				return "", "", fmt.Errorf("ui: reload codec requires a bounded nonempty schema")
+			}
+			encoded, err := codec.SaveReload()
+			return "store:" + schema, encoded, err
+	}
+	// Derived values, refs, resources and subscriptions always get fresh owners.
+	return "", "", nil
+}
+
+// SaveReload captures an idle committed root without running getters or derived
+// computations. Ordinary scalar state is copied automatically. Stores require
+// ReloadValue; tasks, effects, refs and opaque values never cross runtimes.
+// Component definition names must be unique in this root for reload identity.
+func (root *Root) SaveReload() (string, error) {
+	if root.closed || root.node == nil || root.flushing || root.committing || root.awaiting != 0 ||
+		len(root.dirty) != 0 {
+		return "", fmt.Errorf("ui: reload capture requires an idle committed root")
+	}
+	root.computing++
+	root.flushing = true
+	previous := root.tracking
+	root.tracking = nil
+	defer func() {
+		root.computing--
+		root.flushing = false
+		root.tracking = previous
+	}()
+	type entry struct {
+		node *mounted
+		parent string
+		index int
+	}
+	stack := []entry{{node: root.node}}
+	types := make(map[string]*Type)
+	envelope := reloadEnvelope{Version: 1}
+	visited, budget := 0, 0
+	for len(stack) > 0 {
+		current := stack[len(stack) - 1]
+		stack = stack[:len(stack) - 1]
+		visited++
+		if visited > reloadMaxNodes {
+			return "", fmt.Errorf("ui: reload capture exceeds its node budget")
+		}
+		node := current.node
+		path := reloadPath(current.parent, node.view, current.index)
+		if len(path) > reloadMaxPath {
+			return "", fmt.Errorf("ui: reload identity exceeds its path budget")
+		}
+		if err := reloadType(types, node.view.component); err != nil {
+			return "", err
+		}
+		if node.scope != nil {
+			keys := []string{}
+			for key := range node.scope.states {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				kind, value, err := reloadEncode(node.scope.states[key])
+				if err != nil {
+					return "", err
+				}
+				if kind == "" {
+					continue
+				}
+				budget += len(path) + len(key) + len(kind) + len(value)
+				if len(key) > 256 || !utf8.ValidString(path) || !utf8.ValidString(key) ||
+					!utf8.ValidString(value) ||
+					len(envelope.States) >= reloadMaxStates ||
+					budget > reloadMaxBytes {
+					return "", fmt.Errorf("ui: reload state exceeds its text or count budget")
+				}
+				envelope.States = append(envelope.States, reloadField{
+					Path: path, Key: key, Kind: kind, Value: value,
+				})
+			}
+		}
+		for i := len(node.children) - 1; i >= 0; i-- {
+			stack = append(stack, entry{node: node.children[i], parent: path, index: i})
+		}
+	}
+	bytes, err := json.Marshal(envelope)
+	if err != nil {
+		return "", err
+	}
+	if len(bytes) > reloadMaxBytes {
+		return "", fmt.Errorf("ui: encoded reload state exceeds its byte budget")
+	}
+	return string(bytes), nil
+}
+
+// RestoreReload prepares one initial render. Sibling keys retain identity across
+// reordering; unkeyed children retain their position. Changed types/paths reset.
+// The report is populated as declarations are initialized and finalized by Flush.
+// Restoration is consumed once, so a later conditional mount cannot revive old
+// state. Invalid envelopes leave the fresh root unmodified.
+func (root *Root) RestoreReload(encoded string) (*ReloadReport, error) {
+	if root.closed || root.node != nil || root.nextID != 1 || root.flushing || root.reload != nil {
+		return nil, fmt.Errorf("ui: reload restoration requires a fresh root")
+	}
+	if len(encoded) > reloadMaxBytes || !utf8.ValidString(encoded) {
+		return nil, fmt.Errorf("ui: invalid reload envelope size or text")
+	}
+	var envelope reloadEnvelope
+	if err := json.Unmarshal([]byte(encoded), &envelope); err != nil {
+		return nil, err
+	}
+	if envelope.Version != 1 || len(envelope.States) > reloadMaxStates {
+		return nil, fmt.Errorf("ui: invalid reload version or state count")
+	}
+	restore := &reloadRestore{
+		paths: make(map[int]string), fields: make(map[string]map[string]reloadField),
+		types: make(map[string]*Type), report: &ReloadReport{},
+	}
+	for _, field := range envelope.States {
+		if field.Path == "" || len(field.Path) > reloadMaxPath || field.Key == "" || len(field.Key) > 256 ||
+			!utf8.ValidString(field.Path) ||
+			!utf8.ValidString(field.Key) ||
+			!utf8.ValidString(field.Value) {
+			return nil, fmt.Errorf("ui: invalid reload field identity or text")
+		}
+		switch field.Kind {
+			case "int":
+				value, err := strconv.Atoi(field.Value)
+				if err != nil || strconv.Itoa(value) != field.Value {
+					return nil, fmt.Errorf("ui: invalid reload integer")
+				}
+			case "bool":
+				if field.Value != "true" && field.Value != "false" {
+					return nil, fmt.Errorf("ui: invalid reload boolean")
+				}
+			case "string":
+			case "opaque":
+				if field.Value != "" {
+					return nil, fmt.Errorf("ui: invalid opaque reload state")
+				}
+			default:
+				if !strings.HasPrefix(field.Kind, "store:") ||
+					!validReloadSchema(strings.TrimPrefix(field.Kind, "store:")) {
+					return nil, fmt.Errorf("ui: invalid reload state kind")
+				}
+		}
+		if restore.fields[field.Path] == nil {
+			restore.fields[field.Path] = make(map[string]reloadField)
+		}
+		if _, exists := restore.fields[field.Path][field.Key]; exists {
+			return nil, fmt.Errorf("ui: duplicate reload state identity")
+		}
+		restore.fields[field.Path][field.Key] = field
+	}
+	root.reload = restore
+	return restore.report, nil
+}
+
+func (restore *reloadRestore) mount(root *Root, node *mounted, parent int) {
+	restore.visited++
+	if restore.visited > reloadMaxNodes {
+		return
+	}
+	path, index := "", 0
+	if parent != 0 {
+		var found bool
+		path, found = restore.paths[parent]
+		if !found {
+			return
+		}
+		index = len(root.nodes[parent].children) - 1
+	}
+	path = reloadPath(path, node.view, index)
+	if len(path) > reloadMaxPath {
+		return
+	}
+	if err := reloadType(restore.types, node.view.component); err != nil {
+		panic(err)
+	}
+	restore.paths[node.id] = path
+}
+
+func reloadDecode(stored any, field reloadField) (restored bool, err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			err = fmt.Errorf("ui: reload decoder failed: %v", failure)
+		}
+	}()
+	switch state := stored.(type) {
+		case *IntState:
+			if field.Kind == "int" {
+				state.value, _ = strconv.Atoi(field.Value)
+				return true, nil
+			}
+		case *StringState:
+			if field.Kind == "string" {
+				state.value = field.Value
+				return true, nil
+			}
+		case *BoolState:
+			if field.Kind == "bool" {
+				state.value = field.Value == "true"
+				return true, nil
+			}
+		case *Store:
+			if codec, ok := state.value.(ReloadValue); ok && field.Kind == "store:" + codec.ReloadSchema() {
+				value, err := codec.RestoreReload(field.Value)
+				if err != nil {
+					return false, err
+				}
+				state.value = value
+				return true, nil
+			}
+	}
+	return false, nil
+}
+
+func (restore *reloadRestore) restoreState(scope *Scope, key string, stored any) {
+	fields := restore.fields[restore.paths[scope.node.id]]
+	field, found := fields[key]
+	if !found {
+		return
+	}
+	delete(fields, key)
+	ok, err := reloadDecode(stored, field)
+	if ok {
+		restore.report.Restored++
+	} else {
+		restore.report.Reset++
+	}
+	if err != nil && len(restore.report.Messages) < 32 {
+		message := err.Error()
+		message = inspectionText(message, 1024)
+		restore.report.Messages = append(restore.report.Messages, message)
+	}
+}
+
+func (root *Root) finishReload() {
+	if root.reload == nil {
+		return
+	}
+	for _, fields := range root.reload.fields {
+		root.reload.report.Reset += len(fields)
+	}
+	root.reload = nil
+}

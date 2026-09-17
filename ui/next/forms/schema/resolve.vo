@@ -1,0 +1,142 @@
+package schema
+
+import (
+	"fmt"
+	"slices"
+	"github.com/vo-lang/ui/next/forms"
+)
+
+type arrayResult struct {
+	rows []forms.Row
+	err error
+}
+
+// Resolver owns a frozen snapshot. Construct it from the values being validated,
+// including for a server response, before any subsequent form edits or reordering.
+// It has no form state or task lifetime. Use one per validation operation.
+type Resolver struct {
+	values forms.Values
+	files map[string]bool
+	arrays map[string]arrayResult
+}
+
+func From(data forms.Data) *Resolver {
+	copied := make(forms.Values)
+	for name, entries := range data.Values {
+		copied[name] = slices.CloneString(entries)
+	}
+	fields := make(map[string]bool)
+	for name := range data.Files {
+		fields[name] = true
+	}
+	return &Resolver{values: copied, files: fields, arrays: make(map[string]arrayResult)}
+}
+
+func (resolver *Resolver) rows(name string) ([]forms.Row, error) {
+	result, exists := resolver.arrays[name]
+	if !exists {
+		result.rows, result.err = forms.ArrayRows(resolver.values, name)
+		resolver.arrays[name] = result
+	}
+	return result.rows, result.err
+}
+
+// Resolve maps numeric array positions to the native names of stable rows.
+// Unknown fields, malformed arrays and incomplete row paths return a diagnostic.
+// An empty path resolves to the form-level error name "".
+func (resolver *Resolver) Resolve(path Path) (string, error) {
+	if resolver == nil || resolver.arrays == nil {
+		return "", fmt.Errorf("schema: a resolver requires a value snapshot")
+	}
+	name := ""
+	var row *forms.Row
+	for position, part := range path.parts {
+		if part.isValue {
+			if name == "" || row != nil || position != len(path.parts) - 1 {
+				return "", fmt.Errorf("schema: a value index must finish a field path")
+			}
+			values, exists := resolver.values[name]
+			if !exists || part.index < 0 || part.index >= len(values) {
+				return "", fmt.Errorf("schema: value index is outside the validation snapshot: %s", name)
+			}
+			return name, nil
+		}
+		if part.isIndex {
+			if name == "" || row != nil {
+				return "", fmt.Errorf("schema: an array index must follow its field name")
+			}
+			rows, err := resolver.rows(name)
+			if err != nil {
+				return "", err
+			}
+			if part.index < 0 || part.index >= len(rows) {
+				return "", fmt.Errorf("schema: array index is outside the validation snapshot: %s", name)
+			}
+			selected := rows[part.index]
+			row = &selected
+		} else {
+			if part.field == "" {
+				return "", fmt.Errorf("schema: field path segments must not be empty")
+			}
+			if row != nil {
+				name = row.Field(part.field)
+				row = nil
+			} else if name == "" {
+				name = part.field
+			} else {
+				name += "." + part.field
+			}
+		}
+	}
+	if row != nil {
+		return "", fmt.Errorf("schema: a row path must select a field inside that row")
+	}
+	if len(path.parts) != 0 {
+		if _, exists := resolver.values[name]; !exists && !resolver.files[name] {
+			return "", fmt.Errorf("schema: unknown field in the validation snapshot: %s", name)
+		}
+	}
+	return name, nil
+}
+
+// Errors preserves issue order, joining distinct messages for each field. An
+// unresolvable path retains its message at form level instead of guessing a row.
+func (resolver *Resolver) Errors(issues []Issue) forms.Errors {
+	errors := make(forms.Errors)
+	seen := make(map[string]map[string]bool)
+	for _, issue := range issues {
+		if issue.Message == "" {
+			continue
+		}
+		name, err := resolver.Resolve(issue.Path)
+		if err != nil {
+			name = ""
+		}
+		if seen[name] == nil {
+			seen[name] = make(map[string]bool)
+		}
+		if seen[name][issue.Message] {
+			continue
+		}
+		seen[name][issue.Message] = true
+		if errors[name] != "" {
+			errors[name] += "\n"
+		}
+		errors[name] += issue.Message
+	}
+	return errors
+}
+
+// Adapt connects an application or schema library's issue list to Options.Validate.
+// Validation rules and value decoding stay in that function. The resolver freezes
+// row identities before calling it, so a library's local transformations cannot
+// change the field to which a returned positional error belongs.
+func Adapt(validate func(forms.Data) []Issue) func(forms.Data) forms.Errors {
+	if validate == nil {
+		panic("schema: a validation adapter requires a validator")
+	}
+	return func(data forms.Data) forms.Errors {
+		resolver := From(data)
+		return resolver.Errors(validate(data))
+	}
+}

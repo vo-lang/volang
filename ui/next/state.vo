@@ -1,0 +1,188 @@
+package ui
+
+// Signal owns dependency bookkeeping, independently of the stored value type.
+type Signal struct {
+	owner *Scope
+	readers map[*observation]bool
+}
+
+func newSignal(owner *Scope) Signal {
+	return Signal{owner: owner, readers: make(map[*observation]bool)}
+}
+
+func (signal *Signal) read() {
+	if signal.owner.disposed {
+		panic("ui: reading state from a disposed component")
+	}
+	reader := signal.owner.root.tracking
+	if reader != nil && !reader.dependencies[signal] {
+		if reader.dependencies == nil {
+			reader.dependencies = make(map[*Signal]bool)
+		}
+		signal.readers[reader] = true
+		reader.dependencies[signal] = true
+	}
+}
+
+func (signal *Signal) write() {
+	if signal.owner.disposed {
+		panic("ui: writing state from a disposed component")
+	}
+	if signal.owner.root.reading != nil || signal.owner.root.computing > 0 {
+		panic("ui: state cannot change during render")
+	}
+}
+
+func (signal *Signal) changed() {
+	for reader := range signal.readers {
+		if reader.derived == nil && signal.owner.root.observer != nil {
+			signal.owner.root.observer.Invalidate(reader.scope, signal)
+		}
+		reader.invalidate()
+	}
+}
+
+// IntState, StringState and BoolState avoid boxing values on reads and writes.
+// A key is local to a component and remains stable across conditional branches.
+type IntState struct {
+	signal Signal
+	value int
+}
+
+func Int(scope *Scope, key string, initial int) *IntState {
+	scope.requireState(key)
+	if stored, ok := scope.states[key]; ok {
+		state, valid := stored.(*IntState)
+		if !valid {
+			panic("ui: state key changed type: " + key)
+		}
+		return state
+	}
+	state := &IntState{signal: newSignal(scope), value: initial}
+	scope.storeState(key, state)
+	return state
+}
+
+func (state *IntState) Get() int {
+	state.signal.read()
+	return state.value
+}
+
+func (state *IntState) Set(value int) {
+	state.signal.write()
+	if state.value != value {
+		state.value = value
+		state.signal.changed()
+	}
+}
+
+type StringState struct {
+	signal Signal
+	value string
+}
+
+func String(scope *Scope, key string, initial string) *StringState {
+	scope.requireState(key)
+	if stored, ok := scope.states[key]; ok {
+		state, valid := stored.(*StringState)
+		if !valid {
+			panic("ui: state key changed type: " + key)
+		}
+		return state
+	}
+	state := &StringState{signal: newSignal(scope), value: initial}
+	scope.storeState(key, state)
+	return state
+}
+
+func (state *StringState) Get() string {
+	state.signal.read()
+	return state.value
+}
+
+func (state *StringState) Set(value string) {
+	state.signal.write()
+	if state.value != value {
+		state.value = value
+		state.signal.changed()
+	}
+}
+
+type BoolState struct {
+	signal Signal
+	value bool
+}
+
+func Bool(scope *Scope, key string, initial bool) *BoolState {
+	scope.requireState(key)
+	if stored, ok := scope.states[key]; ok {
+		state, valid := stored.(*BoolState)
+		if !valid {
+			panic("ui: state key changed type: " + key)
+		}
+		return state
+	}
+	state := &BoolState{signal: newSignal(scope), value: initial}
+	scope.storeState(key, state)
+	return state
+}
+
+func (state *BoolState) Get() bool {
+	state.signal.read()
+	return state.value
+}
+
+func (state *BoolState) Set(value bool) {
+	state.signal.write()
+	if state.value != value {
+		state.value = value
+		state.signal.changed()
+	}
+}
+
+// Store holds application-defined values. Updates replace the stored snapshot;
+// application code must copy mutable collections before changing them.
+type Store struct {
+	signal Signal
+	value any
+	selections map[*observation][]*storeSelection
+}
+
+func State(scope *Scope, key string, initial func() any) *Store {
+	scope.requireState(key)
+	if stored, ok := scope.states[key]; ok {
+		state, valid := stored.(*Store)
+		if !valid {
+			panic("ui: state key changed type: " + key)
+		}
+		return state
+	}
+	if initial == nil {
+		panic("ui: state requires an initializer")
+	}
+	state := &Store{signal: newSignal(scope), value: initial()}
+	scope.storeState(key, state)
+	return state
+}
+
+func (state *Store) Get() any {
+	state.signal.read()
+	return state.value
+}
+
+func (state *Store) Update(update func(any) any) {
+	state.signal.write()
+	if update == nil {
+		panic("ui: state update requires a function")
+	}
+	value := update(state.value)
+	changed := state.changedSelections(value)
+	state.value = value
+	state.signal.changed()
+	for _, reader := range changed {
+		if reader.derived == nil && state.signal.owner.root.observer != nil {
+			state.signal.owner.root.observer.Invalidate(reader.scope, &state.signal)
+		}
+		reader.invalidate()
+	}
+}

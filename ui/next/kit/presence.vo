@@ -1,0 +1,70 @@
+package kit
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/web"
+)
+
+type PresenceProps struct {
+	ID string
+	Visible func() bool
+	Class string
+	// A logical return target for interactive content that loses focus on exit.
+	ReturnFocus *ui.ElementRef
+	// Maximum exit wait. Zero uses 5000ms; valid overrides are 1..60000ms.
+	TimeoutMilliseconds int
+}
+
+var presenceType = ui.Define("kit.Presence")
+
+// Presence retains ordinary flow content until its wrapper's finite CSS motion
+// settles. Reopening during exit preserves the live subtree and cancels the old
+// wait. Completed exit disposes the subtree; subsequent opening starts fresh.
+func Presence(props PresenceProps, content ...ui.View) ui.View {
+	if props.ID == "" || props.Visible == nil {
+		panic("kit: presence requires an ID and visibility reader")
+	}
+	if props.TimeoutMilliseconds == 0 {
+		props.TimeoutMilliseconds = 5000
+	}
+	request := web.MotionFinished(props.ID, props.TimeoutMilliseconds)
+	return ui.Component(presenceType, func(scope *ui.Scope) ui.View {
+		visible := props.Visible()
+		mounted := ui.Bool(scope, "mounted", visible)
+		focused := ui.Bool(scope, "focused", false)
+		ui.Effect(scope, "presentation", func() func() {
+			if visible {
+				mounted.Set(true)
+				return nil
+			}
+			if !mounted.Get() {
+				return nil
+			}
+			if focused.Get() {
+				props.ReturnFocus.Focus()
+				focused.Set(false)
+			}
+			task := ui.Start(scope, request, func(ui.Result) {
+				// Timeout or a host error also releases the closing subtree.
+				if !props.Visible() {
+					mounted.Set(false)
+				}
+			})
+			return func() {
+				task.Cancel()
+			}
+		}, visible, props.ID, props.TimeoutMilliseconds)
+		if !visible && !mounted.Get() {
+			return ui.Fragment()
+		}
+		state, inert := "open", "false"
+		if !visible {
+			state, inert = "closed", "true"
+		}
+		return ui.Element("div", content...).Attr("id", props.ID).Class("vui-presence").Class(props.Class).Attr("data-state", state).Attr("inert", inert).Attr("aria-hidden", inert).On("focusin", func(ui.Event) {
+			focused.Set(true)
+		}).On("focusout", func(ui.Event) {
+			focused.Set(false)
+		})
+	})
+}

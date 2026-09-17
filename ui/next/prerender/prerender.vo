@@ -1,0 +1,29 @@
+// Package prerender provides an isolated native entry for static HTML builds.
+package prerender
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"unicode/utf8"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/host"
+)
+
+// Run reads one bounded initial-data string from stdin and renders one fresh
+// root. The builder embeds the same data for host.RunWithData on the client.
+// Standard output belongs exclusively to HTML; diagnostics belong on stderr.
+func Run(render func(string) ui.View) {
+	if render == nil {
+		panic("ui: prerender requires an application renderer")
+	}
+	const maximum = 1024 * 1024
+	data, err := io.ReadAll(io.LimitReader(os.Stdin, maximum + 1))
+	if err != nil {
+		panic(err)
+	}
+	if len(data) > maximum || !utf8.Valid(data) {
+		panic("ui: prerender initial data must be valid UTF-8 within 1 MiB")
+	}
+	fmt.Print(host.HTML(render(string(data))))
+}

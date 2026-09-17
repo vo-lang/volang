@@ -1,0 +1,88 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/data"
+	"github.com/vo-lang/ui/next/examples/workbench/catalog"
+	"github.com/vo-lang/ui/next/host"
+	"github.com/vo-lang/ui/next/web/plot"
+)
+
+var appType = ui.Define("workbench.App")
+
+var theme = ui.NewContext("workbench.theme", "light")
+
+func App(scope *ui.Scope, initial []data.InitialValue) ui.View {
+	ui.Provide(scope, theme, "sage")
+	show := ui.Bool(scope, "chart", true)
+	shift := ui.Int(scope, "shift", 0)
+	cursor := ui.Int(scope, "cursor", -1)
+	chartError := ui.String(scope, "chart-error", "")
+	items := []catalog.Item{
+		{ID: "ada", Name: "Ada", Score: 18}, {ID: "grace", Name: "Grace", Score: 32},
+		{ID: "linus", Name: "Linus", Score: 26},
+	}
+	content := func(item catalog.Item) ui.View {
+		return ui.Element("span", ui.Element("strong", ui.Text(item.Name)), ui.Element("small", ui.Text(fmt.Sprint(item.Score) +
+			" sessions")))
+	}
+	chart := ui.Element("p", ui.Text("Chart hidden"))
+	if show.Get() {
+		chart = plot.Chart(plot.Props{
+			Data: plot.Data{
+				X: []float64{1, 2, 3, 4, 5}, Y: []float64{18, 32, float64(26 + shift.Get()), 45, 37},
+			},
+			OnCursor: func(index int) {
+				cursor.Set(index)
+			},
+			OnError: func(message string) {
+				chartError.Set(message)
+			},
+		}).Attr("data-chart", "").Attr("aria-label", "Sessions across five days")
+	}
+	chartActions := ui.Element("div", ui.Element("button", ui.Text("Update chart")).Attr("type", "button").Attr("data-chart-update", "").On("click", func(event ui.Event) {
+		shift.Set(shift.Get() + 5)
+	}), ui.Element("button", ui.Text("Toggle chart")).Attr("type", "button").Attr("data-chart-toggle", "").On("click", func(event ui.Event) {
+		show.Set(!show.Get())
+	})).Attr("class", "actions")
+	cursorLabel := "Move over the chart to inspect a day."
+	if cursor.Get() >= 0 {
+		cursorLabel = fmt.Sprint("Day ", cursor.Get() + 1)
+	}
+	chartCard := ui.Element("section", ui.Element("h2", ui.Text("A little perspective")), chart, chartActions, ui.Element("output", ui.Text(cursorLabel)).Attr("data-cursor", "").Attr("data-index", fmt.Sprint(cursor.Get())), ui.Element("p", ui.Text(chartError.Get())).Attr("data-chart-error", "").Attr("role", "alert")).Attr("class", "card wide")
+	header := ui.Element("header", ui.Element("p", ui.Text("VOLANG / UI LAB")).Attr("class", "eyebrow"), ui.Element("h1", ui.Text("A place for everything.")), ui.Element("p", ui.Text("Independent lists, thoughtful forms, and a live view of your data.")))
+	return ui.Element("main", header, ui.Element("div", catalog.List(catalog.Props{
+		ID: "team", Title: "Your team", Items: items, Content: content,
+	}), catalog.List(catalog.Props{ID: "guests", Title: "Guests", Items: items}), Settings(), Search(initial), chartCard, CustomElementExample(), Interests(), Destinations()).Attr("class", "grid"))
+}
+
+func Application(encoded string) ui.View {
+	var initial []data.InitialValue
+	if encoded != "" {
+		values, err := data.DecodeInitial(encoded)
+		if err != nil {
+			panic(err)
+		}
+		initial = values
+	}
+	return ui.Component(appType, func(scope *ui.Scope) ui.View {
+		return App(scope, initial)
+	})
+}
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--ssr" {
+		encoded := ""
+		if len(os.Args) > 2 {
+			encoded = os.Args[2]
+		}
+		root := ui.NewRoot(Application(encoded))
+		root.Flush()
+		fmt.Print(root.HTML())
+		root.Close()
+		return
+	}
+	host.RunWithData(Application)
+}

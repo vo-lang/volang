@@ -1,0 +1,271 @@
+package kit
+
+import (
+	"fmt"
+	"strings"
+	"time"
+	"unicode/utf8"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/collection"
+)
+
+type ListboxProps struct {
+	ID string
+	Label string
+	Items *collection.Items
+	Selected func() []string
+	OnSelectionChange func([]string)
+	Multiple bool
+	Disabled bool
+	Height int
+	RowHeight int
+	Overscan int
+	Virtual bool
+	Hint string
+	EmptyLabel string
+	Class string
+	ListClass string
+	InputRef *ui.ElementRef
+	// Item supplies noninteractive option content; keep its height within the
+	// fixed row when Virtual is enabled. Store persistent row data in the owner.
+	Item func(collection.Item) ui.View
+}
+
+var listboxType = ui.Define("kit.Listbox")
+
+// Listbox separates active focus from selection. Arrow/Home/End/typeahead moves
+// focus; Space/Enter or clicking selects (toggles in Multiple mode). Selection
+// keys absent from the current snapshot are retained for filtering. One active
+// option stays mounted outside the virtual window for aria-activedescendant.
+func Listbox(props ListboxProps) ui.View {
+	if props.ID == "" || props.Label == "" || props.Items == nil || props.Selected == nil ||
+		props.OnSelectionChange == nil {
+		panic("kit: listbox requires an ID, label, collection, selection reader and change handler")
+	}
+	if props.Height == 0 {
+		props.Height = 240
+	}
+	if props.RowHeight == 0 {
+		props.RowHeight = 40
+	}
+	return ui.Component(listboxType, func(scope *ui.Scope) ui.View {
+		inputRef := props.InputRef
+		if inputRef == nil {
+			inputRef = ui.Ref(scope, "input")
+		}
+		activeRef := ui.Ref(scope, "active-option")
+		search := ui.String(scope, "search", "")
+		typedAt := ui.Int(scope, "typed-at", 0)
+		selected := make(map[string]bool)
+		keys := props.Selected()
+		if !props.Multiple && len(keys) > 1 {
+			panic("kit: single listbox accepts at most one selected key")
+		}
+		for _, key := range keys {
+			if key == "" || selected[key] {
+				panic("kit: selected keys must be unique and nonempty")
+			}
+			selected[key] = true
+		}
+		selectedIndex := func() int {
+			for _, key := range props.Selected() {
+				index := props.Items.Index(key)
+				if index >= 0 && !props.Items.At(index).Disabled {
+					return index
+				}
+			}
+			return props.Items.Next(-1, 1)
+		}
+		initial := ""
+		if index := selectedIndex(); index >= 0 && !props.Disabled {
+			initial = props.Items.At(index).Key
+		}
+		active := ui.String(scope, "active", initial)
+		activeIndex := func() int {
+			index := props.Items.Index(active.Get())
+			if index >= 0 && !props.Items.At(index).Disabled {
+				return index
+			}
+			return selectedIndex()
+		}
+		move := func(index int) {
+			if props.Disabled || index < 0 {
+				return
+			}
+			active.Set(props.Items.At(index).Key)
+			activeRef.ScrollIntoView()
+		}
+		choose := func(index int) {
+			if props.Disabled || index < 0 || props.Items.At(index).Disabled {
+				return
+			}
+			key := props.Items.At(index).Key
+			move(index)
+			current := props.Selected()
+			if !props.Multiple {
+				if len(current) != 1 || current[0] != key {
+					props.OnSelectionChange([]string{key})
+				}
+				return
+			}
+			next := []string{}
+			found := false
+			for _, existing := range current {
+				if existing == key {
+					found = true
+				} else {
+					next = append(next, existing)
+				}
+			}
+			if !found {
+				next = append(next, key)
+			}
+			props.OnSelectionChange(next)
+		}
+		index := activeIndex()
+		if props.Disabled {
+			index = -1
+		}
+		ui.Effect(scope, "repair-active", func() func() {
+			key := ""
+			if index >= 0 {
+				key = props.Items.At(index).Key
+			}
+			active.Set(key)
+			return nil
+		}, props.Items, props.Disabled, index)
+		window := collection.Window{Start: 0, End: props.Items.Len()}
+		var observe func(ui.Viewport)
+		if props.Virtual {
+			window, observe = collection.Virtual(scope, "window", collection.WindowOptions{
+				Count: props.Items.Len(), RowHeight: props.RowHeight, Height: props.Height,
+				Overscan: props.Overscan,
+			})
+		} else if props.Height < 1 {
+			panic("kit: listbox height must be positive")
+		}
+		optionID := func(index int) string {
+			return props.ID + "-option-" + fmt.Sprint(index)
+		}
+		option := func(position int) ui.View {
+			item := props.Items.At(position)
+			content := ui.Text(item.Label)
+			if props.Item != nil {
+				content = props.Item(item)
+			}
+			view := ui.Element("div", content).Key(item.Key).Attr("id", optionID(position))
+			view = view.Class("vui-listbox-option").Attr("role", "option").Attr("aria-label", item.Label)
+			view = view.Attr("aria-selected", fmt.Sprint(selected[item.Key])).Attr("aria-disabled", fmt.Sprint(item.Disabled))
+			view = view.Attr("data-active", fmt.Sprint(position == index))
+			if props.Virtual {
+				view = view.Attr("aria-posinset", fmt.Sprint(position + 1)).Attr("aria-setsize", fmt.Sprint(props.Items.Len()))
+				view = view.Attr("style", fmt.Sprint("position:absolute;inset-inline:0;top:", position *
+					props.RowHeight, "px;height:", props.RowHeight, "px;box-sizing:border-box;overflow:hidden"))
+			}
+			if position == index {
+				view = view.Ref(activeRef)
+			}
+			return view.OnWith("mousedown", ui.EventOptions{PreventDefault: true}, func(ui.Event) {}).On("click", func(ui.Event) {
+				if !props.Disabled && !item.Disabled {
+					choose(position)
+					inputRef.Focus()
+				}
+			})
+		}
+		rows := []ui.View{}
+		if index >= 0 && index < window.Start {
+			rows = append(rows, option(index))
+		}
+		for position := window.Start; position < window.End; position++ {
+			rows = append(rows, option(position))
+		}
+		if index >= window.End {
+			rows = append(rows, option(index))
+		}
+		if props.Virtual {
+			rows = []ui.View{
+				ui.Element("div", rows...).Attr("role", "presentation").Attr("style", fmt.Sprint("position:relative;height:", window.Total, "px")),
+			}
+		}
+		list := ui.Element("div", rows...).Ref(inputRef).Attr("id", props.ID).Attr("role", "listbox")
+		list = list.Attr("aria-labelledby", props.ID + "-label").Attr("aria-disabled", fmt.Sprint(props.Disabled))
+		list = list.Attr("aria-multiselectable", fmt.Sprint(props.Multiple)).Class("vui-listbox").Class(props.ListClass)
+		list = list.Attr("style", fmt.Sprint("height:", props.Height, "px;overflow:auto;position:relative;overflow-anchor:none"))
+		if props.Disabled {
+			list = list.Attr("tabindex", "-1")
+		} else {
+			list = list.Attr("tabindex", "0")
+		}
+		if index >= 0 {
+			list = list.Attr("aria-activedescendant", optionID(index))
+		}
+		if observe != nil {
+			list = list.OnViewport(observe)
+		}
+		list = list.On("focus", func(ui.Event) {
+			search.Set("")
+			typedAt.Set(0)
+			move(selectedIndex())
+		}).OnWith("keydown", ui.EventOptions{
+			Capture: true, PreventDefault: true,
+			Keys: []string{"ArrowDown", "ArrowUp", "Home", "End", " ", "Enter"},
+			Modifiers: []ui.KeyboardModifiers{{}},
+		}, func(event ui.Event) {
+			if props.Disabled {
+				return
+			}
+			current := activeIndex()
+			if event.Key == " " || event.Key == "Enter" {
+				choose(current)
+				return
+			}
+			next := -1
+			if event.Key == "Home" {
+				next = props.Items.Next(-1, 1)
+			} else if event.Key == "End" {
+				next = props.Items.Next(props.Items.Len(), -1)
+			} else if event.Key == "ArrowUp" {
+				next = props.Items.Next(current, -1)
+			} else {
+				next = props.Items.Next(current, 1)
+			}
+			move(next)
+		}).On("keydown", func(event ui.Event) {
+			if props.Disabled || event.IsComposing || event.CtrlKey || event.AltKey || event.MetaKey ||
+				event.Key == " " ||
+				utf8.RuneCountInString(event.Key) != 1 {
+				return
+			}
+			key := strings.ToLower(event.Key)
+			now := int(time.Now().UnixNano() / 1000000)
+			prefix := key
+			continuing := now >= typedAt.Get() && now - typedAt.Get() < 700 && search.Get() != key
+			if continuing {
+				prefix = search.Get() + key
+			}
+			typedAt.Set(now)
+			search.Set(prefix)
+			after := activeIndex()
+			if continuing {
+				after--
+			}
+			move(props.Items.Search(prefix, after))
+		})
+		children := []ui.View{
+			ui.Element("div", ui.Text(props.Label)).Attr("id", props.ID + "-label").Class("vui-field-label"),
+		}
+		if props.Hint != "" {
+			list = list.DescribedBy(props.ID + "-hint")
+			children = append(children, ui.Element("p", ui.Text(props.Hint)).Attr("id", props.ID + "-hint").Class("vui-hint"))
+		}
+		children = append(children, list)
+		if props.Items.Len() == 0 {
+			label := props.EmptyLabel
+			if label == "" {
+				label = "No items."
+			}
+			children = append(children, ui.Element("p", ui.Text(label)).Class("vui-hint").Attr("role", "status"))
+		}
+		return ui.Element("div", children...).Class("vui-listbox-field").Class(props.Class)
+	})
+}

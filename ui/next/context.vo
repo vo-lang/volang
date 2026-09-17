@@ -1,0 +1,76 @@
+package ui
+
+// ContextKey is an immutable definition shared by providers and typed consumers.
+// Values belong to mounted providers, independently in each root/SSR request.
+type ContextKey struct {
+	name string
+	fallback any
+}
+
+func NewContext(name string, fallback any) *ContextKey {
+	if name == "" {
+		panic("ui: context requires a name")
+	}
+	return &ContextKey{name: name, fallback: fallback}
+}
+
+func Provide(scope *Scope, key *ContextKey, value any) {
+	if key == nil {
+		panic("ui: context key is nil")
+	}
+	scope.requireState(key.name)
+	if _, exists := scope.context[key]; exists {
+		panic("ui: duplicate context provider: " + key.name)
+	}
+	if scope.context == nil {
+		scope.context = make(map[*ContextKey]any)
+	}
+	scope.context[key] = value
+}
+
+// UseContext reads the nearest ancestor provider; a provider can consume an
+// outer value before publishing its own override for descendants.
+func UseContext(scope *Scope, key *ContextKey) any {
+	if key == nil {
+		panic("ui: context key is nil")
+	}
+	scope.requireState(key.name)
+	for ancestor := scope.parent; ancestor != nil; ancestor = ancestor.parent {
+		// Observe absent providers too, so adding/removing an override reaches
+		// consumers behind a skipped component without traversing the tree.
+		signal := ancestor.contextSignals[key]
+		if signal == nil {
+			if ancestor.contextSignals == nil {
+				ancestor.contextSignals = make(map[*ContextKey]*Signal)
+			}
+			created := newSignal(ancestor)
+			signal = &created
+			ancestor.contextSignals[key] = signal
+		}
+		signal.read()
+		if value, exists := ancestor.context[key]; exists {
+			return value
+		}
+	}
+	return key.fallback
+}
+
+// Noncomparable context snapshots remain supported and conservatively notify.
+func sameContext(left any, right any) (same bool) {
+	defer func() {
+		if recover() != nil {
+			same = false
+		}
+	}()
+	return left == right
+}
+
+func (scope *Scope) publishContext(previous map[*ContextKey]any) {
+	for key, signal := range scope.contextSignals {
+		before, had := previous[key]
+		after, has := scope.context[key]
+		if had != has || has && !sameContext(before, after) {
+			signal.changed()
+		}
+	}
+}

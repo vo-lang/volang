@@ -31,7 +31,7 @@ and the relevant capability's implementation before changing its contract.
   and environment. Preserve the VUB1 component-bundle path and the certified
   VUA1 baseline; read versions and limits from their owning codecs.
 - Preserve render, atomic commit, post-commit effect, and cancel-before-cleanup
-  disposal phases across the affected VM, JIT, Native AOT, Core Wasm AOT,
+  disposal phases across the affected VM, JIT, Native AOT, Wasm VM,
   browser VM, and headless paths. External effects belong in handlers, tasks,
   or post-commit work; keep render replayable.
 - Route worker results through bounded, generation-checked `vo-ui-scheduler`

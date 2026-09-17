@@ -19,6 +19,7 @@ mod generate_protocol;
 mod lint_policy;
 mod lint_system;
 mod node_audit;
+mod process_tree;
 mod release_archive;
 mod release_config;
 mod release_homebrew;
@@ -118,6 +119,7 @@ fn print_usage() {
   vo-dev test explain --suite lang --case <id> [--format text|json]
   vo-dev test catalog --suite lang [--format text|json]
   vo-dev bench [all|vo|score|<name>] [--all-langs] [--runs N] [--warmup N] [--arch 32|64] [--jit-hot]
+  vo-dev bench diagnostics list|prepare|run|compare ...
   vo-dev gc-perf [--release] [--json] [--objects=N|--small|--large] [dead-sweep|live-chain|root-table|sparse-root-table|interior-root-table]
   vo-dev loc [--with-tests]
   vo-dev clean [all|vo|rust|bench|junk]"#

@@ -124,7 +124,9 @@ func test6() {
 	s := struct {
 		R io.Reader
 		Name string
-	}{R: &Buffer{data: []byte("anon_struct")}, Name: "test"}
+	}{
+		R: &Buffer{data: []byte("anon_struct")}, Name: "test",
+	}
 	buf := make([]byte, 32)
 	n, _ := s.R.Read(buf)
 	assert(string(buf[:n]) == "anon_struct", "test6: anonymous struct interface")
@@ -141,9 +143,13 @@ type Outer struct {
 }
 
 func test7() {
-	o := Outer{Inner: struct {
-		R io.Reader
-	}{R: &Buffer{data: []byte("nested")}}}
+	o := Outer{
+		Inner: struct {
+			R io.Reader
+		}{
+			R: &Buffer{data: []byte("nested")},
+		},
+	}
 	buf := make([]byte, 32)
 	n, _ := o.Inner.R.Read(buf)
 	assert(string(buf[:n]) == "nested", "test7: nested struct interface")

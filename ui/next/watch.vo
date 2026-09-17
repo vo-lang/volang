@@ -1,0 +1,37 @@
+package ui
+
+type watchState struct {
+	receive func(Result)
+}
+
+// Watch declares a managed subscription. A changed request or a removed
+// declaration cancels the old source. Rerendering refreshes its callback without
+// reinstalling an unchanged subscription. Errors terminate the subscription;
+// change the request or remount to restart it.
+func Watch(scope *Scope, key string, request Request, receive func(Result)) {
+	request.validate()
+	scope.requireState(key)
+	if receive == nil {
+		panic("ui: subscription requires a result handler")
+	}
+	var state *watchState
+	if stored, exists := scope.states[key]; exists {
+		var valid bool
+		state, valid = stored.(*watchState)
+		if !valid {
+			panic("ui: state key changed type: " + key)
+		}
+	} else {
+		state = &watchState{}
+		scope.storeState(key, state)
+	}
+	state.receive = receive
+	declareEffect(scope, effectKey{kind: "watch", name: key}, func() func() {
+		task := Subscribe(scope, request, func(result Result) {
+			state.receive(result)
+		})
+		return func() {
+			task.Cancel()
+		}
+	}, request.Service, request.Value, request.TimeoutMilliseconds)
+}

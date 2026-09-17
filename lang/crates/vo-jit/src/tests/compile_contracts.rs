@@ -86,6 +86,7 @@ fn gc_write_barrier_contract_matches_vm_and_lowering_matrix() {
         Opcode::PtrSet,
         Opcode::ArraySet,
         Opcode::SliceSet,
+        Opcode::SliceAppend,
         Opcode::MapSet,
     ];
     for opcode in opcode_semantic_matrix()

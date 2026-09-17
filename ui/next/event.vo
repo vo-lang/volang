@@ -1,0 +1,223 @@
+package ui
+
+import (
+	"encoding/json"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+	"github.com/vo-lang/ui/next/wire"
+)
+
+// EventOptions describes actions performed synchronously by the native listener.
+// Guest handlers run later through the root queue, after these actions occur.
+type EventOptions struct {
+	Capture bool
+	PreventDefault bool
+	StopPropagation bool
+	Passive bool
+	// CapturePointer requests native capture on this element during pointerdown.
+	// gotpointercapture confirms it; pointerup/cancel release it automatically.
+	CapturePointer bool
+	// Latest allows pending consecutive pointermove samples for this listener
+	// to merge. Use for absolute positions; drawing/history keeps the default FIFO.
+	Latest bool
+	// Keys limits a keyboard listener to these exact KeyboardEvent.key values.
+	// Composition events and unrelated keys retain their native behavior.
+	Keys []string
+	// Modifiers lists exact alternatives. Nil matches any modifiers; an empty
+	// KeyboardModifiers value in the list matches an unmodified key.
+	Modifiers []KeyboardModifiers
+}
+
+type KeyboardModifiers struct {
+	Alt bool
+	Ctrl bool
+	Meta bool
+	Shift bool
+}
+
+func (modifiers KeyboardModifiers) mask() int {
+	mask := 0
+	if modifiers.Alt {
+		mask |= wire.KeyAlt
+	}
+	if modifiers.Ctrl {
+		mask |= wire.KeyCtrl
+	}
+	if modifiers.Meta {
+		mask |= wire.KeyMeta
+	}
+	if modifiers.Shift {
+		mask |= wire.KeyShift
+	}
+	return mask
+}
+
+type keyboardFilter struct {
+	Keys []string `json:"keys"`
+	Modifiers []int `json:"modifiers"`
+}
+
+func (options EventOptions) same(other EventOptions) bool {
+	if options.flags() != other.flags() || len(options.Keys) != len(other.Keys) ||
+		len(options.Modifiers) != len(other.Modifiers) {
+		return false
+	}
+	for index, key := range options.Keys {
+		if key != other.Keys[index] {
+			return false
+		}
+	}
+	for index, modifiers := range options.Modifiers {
+		if modifiers != other.Modifiers[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func (options EventOptions) accepts(event Event) bool {
+	if len(options.Keys) == 0 && len(options.Modifiers) == 0 {
+		return true
+	}
+	if event.IsComposing {
+		return false
+	}
+	matched := len(options.Keys) == 0
+	for _, key := range options.Keys {
+		if key == event.Key {
+			matched = true
+			break
+		}
+	}
+	if !matched || len(options.Modifiers) == 0 {
+		return matched
+	}
+	current := KeyboardModifiers{
+		Alt: event.AltKey, Ctrl: event.CtrlKey, Meta: event.MetaKey, Shift: event.ShiftKey,
+	}
+	for _, modifiers := range options.Modifiers {
+		if modifiers == current {
+			return true
+		}
+	}
+	return false
+}
+
+func (options EventOptions) flags() int {
+	flags := 0
+	if options.Capture {
+		flags |= wire.EventCapture
+	}
+	if options.PreventDefault {
+		flags |= wire.EventPreventDefault
+	}
+	if options.StopPropagation {
+		flags |= wire.EventStopPropagation
+	}
+	if options.Passive {
+		flags |= wire.EventPassive
+	}
+	if options.CapturePointer {
+		flags |= wire.EventCapturePointer
+	}
+	if options.Latest {
+		flags |= wire.EventLatest
+	}
+	return flags
+}
+
+func (entry listener) name() string {
+	if entry.options.Capture {
+		return entry.kind + ":capture"
+	}
+	return entry.kind
+}
+
+func (entry listener) binding() string {
+	value := strconv.Itoa(entry.options.flags())
+	if len(entry.options.Keys) > 0 || len(entry.options.Modifiers) > 0 {
+		var filter any = entry.options.Keys
+		if len(entry.options.Modifiers) > 0 {
+			masks := make([]int, 0, len(entry.options.Modifiers))
+			for _, modifiers := range entry.options.Modifiers {
+				masks = append(masks, modifiers.mask())
+			}
+			filter = keyboardFilter{Keys: entry.options.Keys, Modifiers: masks}
+		}
+		encoded, err := json.Marshal(filter)
+		if err != nil {
+			panic(err)
+		}
+		// Keep each SSR listener one space-separated token, with one '='.
+		keys := strings.ReplaceAll(string(encoded), " ", "\\u0020")
+		keys = strings.ReplaceAll(keys, "=", "\\u003d")
+		value += "|" + keys
+	}
+	return value
+}
+
+// OnWith supports one handler per event kind and phase. Explicit options replace
+// On's defaults, including its managed-submit prevention of native navigation.
+func (view View) OnWith(kind string, options EventOptions, handler func(Event)) View {
+	if !wire.ValidEventKind(kind) || handler == nil || view.kind == "#text" || view.kind == "#fragment" ||
+		view.kind == "#component" {
+		panic("ui: listeners require an element, supported event kind and handler")
+	}
+	if options.Passive && options.PreventDefault {
+		panic("ui: a passive listener cannot prevent default")
+	}
+	if options.Latest && kind != "pointermove" {
+		panic("ui: latest delivery requires a pointermove listener")
+	}
+	if options.CapturePointer && kind != "pointerdown" {
+		panic("ui: pointer capture requires a pointerdown listener")
+	}
+	if layoutObservation(kind) && options.flags() != 0 {
+		panic("ui: " + kind + " observations do not support native event options")
+	}
+	if len(options.Modifiers) > 0 {
+		if kind != "keydown" && kind != "keyup" {
+			panic("ui: modifier filters require a keyboard event")
+		}
+		if len(options.Modifiers) > wire.MaxEventModifiers {
+			panic("ui: modifier filters support at most 16 alternatives")
+		}
+		seen := make(map[KeyboardModifiers]bool)
+		for _, modifiers := range options.Modifiers {
+			if seen[modifiers] {
+				panic("ui: modifier filters require unique alternatives")
+			}
+			seen[modifiers] = true
+		}
+		options.Modifiers = append([]KeyboardModifiers{}, options.Modifiers...)
+	}
+	if len(options.Keys) > 0 {
+		if (kind != "keydown" && kind != "keyup") || len(options.Keys) > wire.MaxEventKeys {
+			panic("ui: key filters require a keyboard event and at most 64 keys")
+		}
+		seen := make(map[string]bool)
+		for _, key := range options.Keys {
+			if key == "" || len(key) > wire.MaxEventKeyBytes || !utf8.ValidString(key) || seen[key] {
+				panic("ui: key filters require unique nonempty UTF-8 keys of at most 128 bytes")
+			}
+			seen[key] = true
+		}
+		options.Keys = append([]string{}, options.Keys...)
+	}
+	events := append([]listener{}, view.events...)
+	entry := listener{kind: kind, options: options, handler: handler}
+	for index := range events {
+		if events[index].kind == kind && events[index].options.Capture == options.Capture {
+			events[index] = entry
+			view.events = events
+			return view
+		}
+	}
+	view.events = append(events, entry)
+	return view
+}
+
+func layoutObservation(kind string) bool {
+	return kind == "viewport" || kind == "size"
+}

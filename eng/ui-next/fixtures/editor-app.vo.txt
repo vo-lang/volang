@@ -1,0 +1,40 @@
+package app
+
+import (
+ ui "github.com/vo-lang/ui/next"
+ "github.com/vo-lang/ui/next/kit"
+ "github.com/vo-lang/ui/next/web/editor"
+)
+
+var appType = ui.Define("scratchpad.App")
+
+func App(scope *ui.Scope, initial string) ui.View {
+ open := ui.Bool(scope, "open", initial == "open")
+ draft := ui.String(scope, "draft", "package main\nfunc main() { println(\"Hello\") }\n")
+ failure := ui.String(scope, "failure", "")
+ message := ""
+ if failure.Get() != "" { message = "The editor could not load. You can keep editing in the text field." }
+ label := "Show editor"
+ content := ui.Element("p", ui.Text("Your draft stays here while the editor is closed."))
+ if open.Get() {
+  label = "Hide editor"
+  control := ui.Element("textarea").Attr("value", draft.Get()).Attr("aria-label", "Source code").Attr("rows", "8").On("input", func(event ui.Event) {
+   draft.Set(event.Value)
+  }).Class("vui-input")
+  content = editor.Enhance(control, editor.Options{ID: "project-source", OnError: func(message string) {
+   failure.Set(message)
+  }})
+ }
+ return ui.Element("main",
+  ui.Element("h1", ui.Text("Scratchpad")),
+  ui.Element("p", ui.Text(initial)).Attr("data-initial", ""),
+  kit.Button(kit.ButtonProps{OnPress: func() { open.Set(!open.Get()) }}, ui.Text(label)),
+  content.Key("source"),
+  ui.Element("output", ui.Text(draft.Get())).Attr("data-source", ""),
+  ui.Element("p", ui.Text(message)).Attr("data-enhancement-error", ""),
+ ).Class("vui", "starter")
+}
+
+func View(initial string) ui.View {
+ return ui.Component(appType, func(scope *ui.Scope) ui.View { return App(scope, initial) })
+}

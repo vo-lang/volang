@@ -1,0 +1,132 @@
+package kit
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type TableColumn struct {
+	Key string
+	Label string
+	Sortable bool
+	RowHeader bool
+	Class string
+}
+
+type TableRow struct {
+	Key string
+	Cells []ui.View
+}
+
+type TableSort struct {
+	Column string
+	Descending bool
+}
+
+type TableProps struct {
+	Caption string
+	Columns []TableColumn
+	Rows []TableRow
+	Sort func() TableSort
+	OnSortChange func(TableSort)
+	SortHint string
+	EmptyLabel string
+	Class string
+	TableClass string
+}
+
+// Table preserves rows and cells by key. The caller owns data order and paging;
+// sort buttons request an order without mutating caller data. Interactive cells
+// retain ordinary native Tab behavior. This is a semantic HTML table.
+func Table(props TableProps) ui.View {
+	if props.Caption == "" || len(props.Columns) == 0 {
+		panic("kit: table requires a caption and columns")
+	}
+	columns := make(map[string]bool)
+	sortable := false
+	for _, column := range props.Columns {
+		if column.Key == "" || column.Label == "" || columns[column.Key] {
+			panic("kit: table columns require unique keys and nonempty labels")
+		}
+		columns[column.Key] = true
+		sortable = sortable || column.Sortable
+	}
+	order := TableSort{}
+	if props.Sort != nil {
+		order = props.Sort()
+	}
+	if sortable && (props.Sort == nil || props.OnSortChange == nil) {
+		panic("kit: sortable table requires a sort reader and change handler")
+	}
+	if order.Column != "" && !columns[order.Column] || order.Column == "" && order.Descending {
+		panic("kit: table sort must identify a column")
+	}
+	headings := []ui.View{}
+	for _, column := range props.Columns {
+		content := ui.Text(column.Label)
+		if column.Sortable {
+			icon := "↕"
+			if order.Column == column.Key {
+				if order.Descending {
+					icon = "▼"
+				} else {
+					icon = "▲"
+				}
+			}
+			content = ui.Element("button", content, ui.Element("span", ui.Text(icon)).Attr("aria-hidden", "true"))
+			content = content.Attr("type", "button").Class("vui-table-sort").On("click", func(ui.Event) {
+				current := props.Sort()
+				props.OnSortChange(TableSort{
+					Column: column.Key, Descending: current.Column == column.Key && !current.Descending,
+				})
+			})
+		}
+		heading := ui.Element("th", content).Key(column.Key).Attr("scope", "col").Class(column.Class)
+		if order.Column == column.Key {
+			direction := "ascending"
+			if order.Descending {
+				direction = "descending"
+			}
+			heading = heading.Attr("aria-sort", direction)
+		}
+		headings = append(headings, heading)
+	}
+	keys := make(map[string]bool)
+	rows := []ui.View{}
+	for _, row := range props.Rows {
+		if row.Key == "" || keys[row.Key] {
+			panic("kit: table rows require unique nonempty keys")
+		}
+		if len(row.Cells) != len(props.Columns) {
+			panic("kit: table cells must match its columns")
+		}
+		keys[row.Key] = true
+		cells := []ui.View{}
+		for index, column := range props.Columns {
+			cell := ui.Element("td", row.Cells[index])
+			if column.RowHeader {
+				cell = ui.Element("th", row.Cells[index]).Attr("scope", "row")
+			}
+			cells = append(cells, cell.Key(column.Key).Class(column.Class))
+		}
+		rows = append(rows, ui.Element("tr", cells...).Key(row.Key))
+	}
+	if len(rows) == 0 {
+		label := props.EmptyLabel
+		if label == "" {
+			label = "No items to display."
+		}
+		rows = append(rows, ui.Element("tr", ui.Element("td", ui.Element("p", ui.Text(label)).Attr("role", "status")).Attr("colspan", fmt.Sprint(len(props.Columns))).Class("vui-table-empty")))
+	}
+	caption := []ui.View{ui.Text(props.Caption)}
+	if sortable {
+		hint := props.SortHint
+		if hint == "" {
+			hint = "Use the column heading buttons to change the sort order."
+		}
+		caption = append(caption, ui.Element("span", ui.Text(" " + hint)).Class("vui-visually-hidden"))
+	}
+	table := ui.Element("table", ui.Element("caption", caption...), ui.Element("thead", ui.Element("tr", headings...)), ui.Element("tbody", rows...))
+	table = table.Class("vui-table").Class(props.TableClass)
+	return ui.Element("div", table).Class("vui-table-scroll").Class(props.Class).Attr("tabindex", "0").Attr("role", "region").Attr("aria-label", props.Caption)
+}

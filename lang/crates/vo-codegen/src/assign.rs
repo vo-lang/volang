@@ -16,8 +16,8 @@
 //! - Callers never need to check `is_interface` themselves
 
 use vo_analysis::objects::TypeKey;
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 use vo_syntax::ast::Expr;
 
 use crate::context::CodegenContext;
@@ -272,14 +272,14 @@ fn emit_assign_from_slot(
 /// Compute const_idx for IfaceAssign instruction.
 fn compute_iface_assign_const(
     src_type: TypeKey,
-    src_vk: vo_runtime::ValueKind,
+    src_vk: vo_common_core::ValueKind,
     iface_meta_id: u32,
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
 ) -> u16 {
-    if src_vk == vo_runtime::ValueKind::Interface {
+    if src_vk == vo_common_core::ValueKind::Interface {
         ctx.register_iface_assign_const_interface(iface_meta_id)
-    } else if src_vk == vo_runtime::ValueKind::Void {
+    } else if src_vk == vo_common_core::ValueKind::Void {
         ctx.const_int(0)
     } else {
         let rttid = ctx.intern_type_key(src_type, info);
@@ -317,7 +317,7 @@ fn emit_iface_to_iface(
         let const_idx = ctx.register_iface_assign_const_interface(iface_meta_id);
         func.emit_with_flags(
             Opcode::IfaceAssign,
-            vo_runtime::ValueKind::Interface as u8,
+            vo_common_core::ValueKind::Interface as u8,
             dst,
             src_slot,
             const_idx,
@@ -328,7 +328,7 @@ fn emit_iface_to_iface(
         let const_idx = ctx.register_iface_assign_const_interface(iface_meta_id);
         func.emit_with_flags(
             Opcode::IfaceAssign,
-            vo_runtime::ValueKind::Interface as u8,
+            vo_common_core::ValueKind::Interface as u8,
             dst,
             src_slot,
             const_idx,
@@ -352,7 +352,7 @@ fn emit_concrete_to_iface_from_slot(
     let const_idx = compute_iface_assign_const(src_type, src_vk, iface_meta_id, ctx, info);
 
     if src_vk.needs_boxing() {
-        if src_vk == vo_runtime::ValueKind::Array {
+        if src_vk == vo_common_core::ValueKind::Array {
             let array_ref =
                 crate::materialize_array_from_slots(src_slot, src_type, ctx, func, info)?;
             func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst, array_ref, const_idx);
@@ -397,7 +397,7 @@ fn compile_iface_assign_internal(
     let src_vk = info.type_value_kind(src_type);
 
     // Optimization: if src is any (empty interface), just copy - no itab rebuild needed
-    if src_vk == vo_runtime::ValueKind::Interface
+    if src_vk == vo_common_core::ValueKind::Interface
         && info.is_empty_interface(src_type)
         && info.is_empty_interface(iface_type)
     {
@@ -435,7 +435,7 @@ fn compile_iface_assign_internal(
                 );
             }
             ExprSource::Location(StorageKind::Global { index, slots: 1 })
-                if src_vk == vo_runtime::ValueKind::Array =>
+                if src_vk == vo_common_core::ValueKind::Array =>
             {
                 // Global array: stored as 1 slot GcRef, load and pass directly
                 let gcref_slot = func.alloc_slots(&[SlotType::GcBase]);
@@ -449,7 +449,7 @@ fn compile_iface_assign_internal(
                 );
             }
             ExprSource::Location(StorageKind::GlobalBoxed { index, .. })
-                if src_vk == vo_runtime::ValueKind::Struct =>
+                if src_vk == vo_common_core::ValueKind::Struct =>
             {
                 let gcref_slot = func.alloc_slots(&[SlotType::GcBase]);
                 func.emit_global_get(gcref_slot, index, 1);
@@ -474,7 +474,7 @@ fn compile_iface_assign_internal(
                     crate::expr::compile_expr_to(expr, tmp_data, ctx, func, info)?;
                 }
 
-                let gcref_slot = if src_vk == vo_runtime::ValueKind::Array {
+                let gcref_slot = if src_vk == vo_common_core::ValueKind::Array {
                     crate::materialize_array_from_slots(tmp_data, src_type, ctx, func, info)?
                 } else {
                     let gcref_slot = func.alloc_slots(&[SlotType::GcBase]);
@@ -565,7 +565,7 @@ pub fn emit_iface_assign_from_array_ref(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let src_vk = info.type_value_kind(src_type);
-    if src_vk != vo_runtime::ValueKind::Array {
+    if src_vk != vo_common_core::ValueKind::Array {
         return Err(CodegenError::Internal(
             "array-reference interface assignment requires an array source".to_string(),
         ));

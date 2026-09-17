@@ -426,7 +426,7 @@ pub(super) fn slot_get_n<'a>(
 ) -> Result<(), JitError> {
     let base = e.var_addr(inst.b);
     let idx = e.read_var(inst.c);
-    let elem_slots = e.slot_elem_slots(inst).ok_or(JitError::MissingJitLayout {
+    let elem_slots = e.slot_elem_slots().ok_or(JitError::MissingJitLayout {
         pc: e.current_pc(),
         opcode: inst.opcode(),
         layout: "SlotLayout",
@@ -450,7 +450,7 @@ pub(super) fn slot_set_n<'a>(
 ) -> Result<(), JitError> {
     let base = e.var_addr(inst.a);
     let idx = e.read_var(inst.b);
-    let elem_slots = e.slot_elem_slots(inst).ok_or(JitError::MissingJitLayout {
+    let elem_slots = e.slot_elem_slots().ok_or(JitError::MissingJitLayout {
         pc: e.current_pc(),
         opcode: inst.opcode(),
         layout: "SlotLayout",

@@ -1,0 +1,40 @@
+package app
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var menuPreviewType = ui.Define("studio.MenuPreview")
+
+func MenuPreview() ui.View {
+	return ui.Component(menuPreviewType, func(scope *ui.Scope) ui.View {
+		open := ui.Bool(scope, "open", false)
+		message := ui.String(scope, "message", "A few useful next steps for your idea.")
+		items := []kit.MenuItem{
+			{Key: "copy", Label: "Copy idea"}, {Key: "create", Label: "Create a collection"},
+			{Key: "separator", Separator: true}, {Key: "export", Label: "Export collection", Disabled: true},
+			{Key: "rename", Label: "Rename idea"},
+		}
+		return ui.Element("div", kit.Menu(kit.MenuProps{
+			ID: "idea-menu", Label: "Idea actions", Items: items,
+			Open: func() bool {
+				return open.Get()
+			},
+			OnOpenChange: func(value bool) {
+				open.Set(value)
+			},
+			OnAction: func(key string) {
+				if key == "copy" {
+					message.Set("An extra copy, ready to explore.")
+				}
+				if key == "create" {
+					message.Set("A new collection, with room to grow.")
+				}
+				if key == "rename" {
+					message.Set("Every good idea deserves a good name.")
+				}
+			},
+		}), ui.Element("p", ui.Text(message.Get())).Attr("role", "status").Attr("data-menu-result", ""))
+	})
+}

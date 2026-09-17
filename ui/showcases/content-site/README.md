@@ -5,7 +5,7 @@ selective activation, typed navigation, accessible forms, public assets,
 security headers, a Web App Manifest, and an offline service worker.
 
 The permanent product gates cover byte-identical VM/JIT navigation, search,
-validation, submission, and route snapshots plus six-route SSR, browser AOT
+validation, submission, and route snapshots plus six-route SSR, Wasm VM
 activation, deep links, deployment metadata, and service-worker registration.
 
 Build it with the repository Web runtime:

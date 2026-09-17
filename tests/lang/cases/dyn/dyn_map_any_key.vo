@@ -59,7 +59,9 @@ func main() {
 	// Test 6: map[any]any with struct value
 	m["struct"] = struct {
 		Val int
-	}{Val: 42}
+	}{
+		Val: 42,
+	}
 	sVal, err := a~>["struct"]
 	assert(err == nil, "struct value error")
 	val, err := sVal~>Val

@@ -1,0 +1,44 @@
+/* Normal application declarations override the optional UIKit layer. */
+@layer vui, components, application;
+@layer application {
+  .action { border-radius: 99px; }
+}
+@layer components {
+  @scope ([data-vui-scope="example-card"]) to ([data-vui-scope]) {
+    :scope { container: card / inline-size; padding: 28px; background: var(--vui-surface); border: 1px solid var(--vui-border); border-radius: 20px; min-width: 0; }
+    .title { color: var(--card-accent, #3c6549); font-size: 24px; letter-spacing: -.04em; margin: 0; }
+    .detail { color: var(--vui-secondary); border-inline-start: 3px solid var(--card-accent, #3c6549); padding-inline-start: 12px; line-height: 1.7; font-size: 13px; }
+    .note { display: grid; gap: 8px; color: var(--vui-secondary); font-size: 12px; margin-block: 24px; }
+    input { width: 100%; min-width: 0; padding: 12px; border: 1px solid var(--vui-border); border-radius: 8px; color: var(--vui-ink); background: var(--vui-bg); font: inherit; }
+    .action { background: var(--card-accent, #3c6549); color: var(--card-accent-ink, white); border-radius: 6px; }
+    .action:hover { filter: brightness(.88); }
+    .action:focus-visible { outline: 3px solid var(--vui-focus); outline-offset: 4px; }
+    output { margin-inline-start: 16px; color: var(--vui-secondary); font-size: 13px; }
+    @container card (max-width: 320px) { .title { font-size: 20px; } }
+    @media (max-width: 600px) { :scope { padding: 20px; } }
+  }
+  @scope ([data-vui-scope="example-guest"]) to ([data-vui-scope]) {
+    :scope { margin-top: 24px; padding: 18px; border-radius: 10px; background: var(--vui-muted); }
+    .title { font-size: 15px; font-weight: 650; color: var(--vui-ink); margin: 0; }
+    .detail { font-size: 12px; color: var(--vui-secondary); line-height: 1.6; }
+    .token { font-size: 11px; color: var(--card-accent, #3c6549); }
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #f7f8f4; font: 15px/1.5 system-ui, sans-serif; }
+.style-demo { max-width: 1080px; margin: 0 auto; padding: 60px 32px; border-radius: 0 0 24px 24px; }
+header { max-width: 680px; }
+.eyebrow { font-size: 11px; letter-spacing: .16em; font-weight: 700; color: var(--vui-secondary); }
+h1 { margin: 18px 0; font-size: clamp(36px, 5vw, 58px); font-weight: 550; letter-spacing: -.05em; line-height: 1.1; }
+.intro { color: var(--vui-secondary); }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; margin-block: 32px; }
+.cards { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+#night { --card-accent: #795c9b; }
+[data-theme=dark] #day { --card-accent: #8daa7a; }
+[data-theme=dark] #night { --card-accent: #b39bd0; }
+[data-theme=dark] { --card-accent-ink: #18231e; }
+#outside { margin-top: 40px; }
+#outside .title { font-size: 18px; font-weight: 550; }
+#outside .detail { font-size: 13px; color: var(--vui-secondary); }
+#status { max-width: 1080px; padding: 0 32px; margin: 24px auto; font-size: 12px; color: #68766d; }
+@media (max-width: 700px) { .style-demo { padding: 32px 20px; } .cards { grid-template-columns: minmax(0, 1fr); } }

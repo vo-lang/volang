@@ -33,18 +33,23 @@ use vo_runtime::value_layout::{
     ValidatedInterfaceValue,
 };
 
+#[cfg(feature = "execution-profile")]
+mod execution_profile;
 mod extern_call;
 pub(crate) mod helpers;
 mod island_shared;
 #[cfg(feature = "std")]
 pub mod island_thread;
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 mod jit;
 mod jit_stats;
+#[cfg(feature = "execution-profile")]
+pub use execution_profile::ExecutionProfile;
+
 mod types;
 
 pub(crate) use extern_call::prepare_extern_closure_replay_call;
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 pub(crate) use extern_call::prepare_typed_extern_closure_replay_setup;
 pub(crate) use helpers::{stack_get, stack_set};
 pub(crate) use island_shared::{
@@ -99,6 +104,8 @@ fn elem_slot_layout_for_pc(func: &FunctionDef, pc: usize) -> Option<&[vo_runtime
 }
 
 pub(crate) enum PreparedQueueAction {
+    /// The operation completed without changing the current frame or moving
+    /// its stack allocation. Interpreter register pointers remain valid.
     Continue,
     Block(QueueWaitMode),
     Trap(RuntimeTrapKind),
@@ -134,7 +141,7 @@ fn prepare_nontrivial_queue_action(
     use exec::QueueAction;
 
     let completed = |transition: RuntimeTransition| {
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         let transition = {
             let mut transition = transition;
             transition.set_pending_terminal_policy(
@@ -148,7 +155,7 @@ fn prepare_nontrivial_queue_action(
         }
     };
     let waiting = |transition: RuntimeTransition, wait, commit_on_terminal| {
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         let transition = {
             let mut transition = transition;
             transition.set_pending_terminal_policy(if commit_on_terminal {
@@ -158,7 +165,7 @@ fn prepare_nontrivial_queue_action(
             });
             transition
         };
-        #[cfg(not(feature = "jit"))]
+        #[cfg(not(feature = "native"))]
         let _ = commit_on_terminal;
         PreparedQueueAction::Transition {
             transition,
@@ -531,7 +538,7 @@ pub(crate) fn scheduler_error_to_vm_error(
     }
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 fn can_enter_materialized_frame_at_pc(
     func: &FunctionDef,
     pc: usize,
@@ -559,19 +566,19 @@ use crate::instruction::{Instruction, Opcode};
 use crate::scheduler::Scheduler;
 use vo_runtime::itab::{validate_interface_itab, ItabCache};
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 mod jit_mgr;
-#[cfg(feature = "jit")]
-pub use jit_mgr::AotFunctionEntry;
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
+pub use jit_mgr::{AotContinuationEntry, AotFunctionEntry};
+#[cfg(feature = "native")]
 pub(crate) use jit_mgr::{JitManager, NativeRootScanCursor, NativeRootScanStats};
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 pub use jit_mgr::JitConfig;
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 use jit_mgr::SharedJitCode;
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 #[derive(Default)]
 enum VmJitState {
     #[default]
@@ -580,7 +587,7 @@ enum VmJitState {
     Strict(JitManager),
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 #[derive(Clone)]
 enum ChildJitMode {
     Disabled,
@@ -594,7 +601,7 @@ enum ChildJitMode {
     },
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 impl VmJitState {
     fn manager(&self) -> Option<&JitManager> {
         match self {
@@ -679,7 +686,7 @@ impl VmJitState {
     }
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 impl Vm {
     pub(crate) fn jit_manager(&self) -> Option<&JitManager> {
         self.jit.manager()
@@ -691,6 +698,8 @@ impl Vm {
 }
 
 pub struct Vm {
+    #[cfg(feature = "execution-profile")]
+    execution_profile: ExecutionProfile,
     #[cfg(feature = "std")]
     extension_loader: Option<Arc<vo_runtime::ext_loader::ExtensionLoader>>,
     pub(crate) module: Option<Arc<LoadedModule>>,
@@ -702,12 +711,16 @@ pub struct Vm {
     /// Remains true after the first fiber begins execution, including after
     /// every scheduler slot has reached a terminal state.
     execution_started: bool,
-    #[cfg(feature = "jit")]
+    bounded_scheduling: bool,
+    /// Owned diagnostics from the most recent bounded panic outcome. This
+    /// contains no managed references and is cleared on the next scheduler run.
+    bounded_panic: Option<VmError>,
+    #[cfg(feature = "native")]
     pub(crate) pending_runtime_transitions: Vec<RuntimeTransition>,
     /// Declared last so executable memory outlives scheduler and VM state.
     /// Its shared code owner independently retains the exact module image until
     /// after the compiler and every published entry point are dropped.
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     jit: VmJitState,
 }
 
@@ -755,7 +768,14 @@ impl<'vm> DetachedFiberExecution<'vm> {
                 "detached fiber execution attempted after ownership was restored".to_string(),
             );
         };
-        self.vm.run_detached_fiber(self.fiber_id, fiber, module)
+        let result = self.vm.run_detached_fiber(self.fiber_id, fiber, module);
+        let result = match fiber.pending_resource_error.take() {
+            Some(error) => ExecResult::ResourceError(error),
+            None => result,
+        };
+        #[cfg(feature = "execution-profile")]
+        self.vm.execution_profile.slice(&result);
+        result
     }
 
     fn restore(&mut self) {
@@ -773,7 +793,7 @@ impl Drop for DetachedFiberExecution<'_> {
     }
 }
 
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 fn strict_jit_load_error(err: vo_jit::JitError) -> VmError {
     VmError::Jit(err.to_string())
 }
@@ -1003,8 +1023,13 @@ fn invoke_verified_extern(
     .with_host_services_v2(vm.state.host_services_v2.as_ref());
     #[cfg(feature = "std")]
     let world = world.with_io(&mut vm.state.io);
-    let (replay_results, replay_panic_message) =
-        fiber.closure_replay.snapshot_for_extern(fiber.frames.len());
+    let (replay_results, replay_panic_message, _replay_storage) = fiber
+        .closure_replay
+        .snapshot_for_extern(fiber.frames.len())
+        .map_err(|error| {
+            fiber.pending_resource_error = Some(error);
+            error.message()
+        })?;
     let resume_io_token = {
         #[cfg(feature = "std")]
         {
@@ -1260,7 +1285,9 @@ impl Vm {
         resource_limits: crate::fiber::VmResourceLimits,
     ) -> Self {
         let mut vm = Self {
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "execution-profile")]
+            execution_profile: ExecutionProfile::default(),
+            #[cfg(feature = "native")]
             jit: VmJitState::Disabled,
             #[cfg(feature = "std")]
             extension_loader: None,
@@ -1271,7 +1298,9 @@ impl Vm {
             pending_exit_code: None,
             terminal_memory_error: None,
             execution_started: false,
-            #[cfg(feature = "jit")]
+            bounded_scheduling: false,
+            bounded_panic: None,
+            #[cfg(feature = "native")]
             pending_runtime_transitions: Vec::new(),
         };
         vm.apply_gc_environment();
@@ -1302,12 +1331,27 @@ impl Vm {
         ))
     }
 
+    /// Work since construction or the last explicit reset, for this VM only.
+    #[cfg(feature = "execution-profile")]
+    pub fn execution_profile(&self) -> &ExecutionProfile {
+        &self.execution_profile
+    }
+
+    #[cfg(feature = "execution-profile")]
+    pub fn reset_execution_profile(&mut self) {
+        self.execution_profile = ExecutionProfile::default();
+    }
+
     pub fn resource_limits(&self) -> crate::fiber::VmResourceLimits {
         self.scheduler.resource_limits()
     }
 
     pub fn fiber_storage_bytes(&self) -> usize {
         self.scheduler.fiber_storage_bytes()
+    }
+
+    pub fn fiber_auxiliary_storage_bytes(&self) -> usize {
+        self.scheduler.fiber_auxiliary_storage_bytes()
     }
 
     /// Returns a point-in-time, mutation-free view of live Volang goroutines
@@ -1361,7 +1405,7 @@ impl Vm {
     ///
     /// JIT initialization errors are swallowed and the VM runs interpreter-only.
     /// Strict execution paths must call [`Vm::try_with_jit_config`] instead.
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub fn with_best_effort_jit_config(config: JitConfig) -> Self {
         let mut vm = Self::new();
         if let Ok(mgr) = JitManager::with_config(config) {
@@ -1370,7 +1414,16 @@ impl Vm {
         vm
     }
 
-    #[cfg(feature = "jit")]
+    /// Construct native dispatch for a precompiled image without creating a
+    /// compiler or reserving executable memory. Loading precedes publication.
+    #[cfg(feature = "native")]
+    pub fn try_for_aot() -> Result<Self, VmConstructionError> {
+        let mut vm = Self::try_new()?;
+        vm.jit.set_strict(JitManager::for_aot());
+        Ok(vm)
+    }
+
+    #[cfg(feature = "native")]
     #[allow(clippy::result_large_err)]
     pub fn try_with_jit_config(config: JitConfig) -> Result<Self, VmConstructionError> {
         let mut vm = Self::try_new()?;
@@ -1379,7 +1432,7 @@ impl Vm {
         Ok(vm)
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     #[allow(clippy::result_large_err)]
     pub fn try_with_jit_and_memory_config(
         jit_config: JitConfig,
@@ -1394,7 +1447,7 @@ impl Vm {
 
     /// Construct a strict-JIT VM with managed-heap and native-Fiber policies
     /// fixed before any runtime owner is allocated.
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     #[allow(clippy::result_large_err)]
     pub fn try_with_jit_memory_and_resource_limits(
         jit_config: JitConfig,
@@ -1407,7 +1460,7 @@ impl Vm {
         Ok(vm)
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     #[allow(clippy::result_large_err)]
     fn try_with_child_jit_mode(
         mode: ChildJitMode,
@@ -1438,7 +1491,7 @@ impl Vm {
     ///
     /// If a module is already loaded, binds its verifier certificate before the
     /// VM can enter JIT mode and sizes dispatch tables for the loaded module.
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     #[allow(clippy::result_large_err)]
     pub fn try_init_jit(&mut self) -> Result<(), vo_jit::JitError> {
         let module = self.module.clone();
@@ -1450,7 +1503,7 @@ impl Vm {
     /// Embedding callers may use this to opportunistically enable JIT. It
     /// prints a warning on failure and leaves the VM interpreter-only. Strict
     /// run paths must use [`Vm::try_init_jit`] or [`Vm::try_with_jit_config`].
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub fn init_jit_best_effort(&mut self) {
         if self.jit.is_enabled() {
             return;
@@ -1474,12 +1527,12 @@ impl Vm {
     }
 
     /// Check if JIT is available and enabled.
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub fn has_jit(&self) -> bool {
         self.jit.is_enabled()
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub fn jit_execution_stats(&self) -> JitExecutionStats {
         self.jit
             .manager()
@@ -1487,12 +1540,23 @@ impl Vm {
             .unwrap_or_default()
     }
 
-    #[cfg(not(feature = "jit"))]
+    #[cfg(not(feature = "native"))]
     pub fn jit_execution_stats(&self) -> JitExecutionStats {
         JitExecutionStats::default()
     }
 
-    #[cfg(feature = "jit")]
+    /// Snapshot an Island-local function's existing tier-training profile.
+    /// `entries` includes nested native calls while baseline training is eligible;
+    /// it stops at tier-up or rejection and does not count optimizing calls.
+    #[cfg(feature = "native")]
+    pub fn jit_function_profile(
+        &self,
+        func_id: u32,
+    ) -> Option<vo_runtime::jit_api::JitProfileCounters> {
+        self.jit.manager()?.function_profile(func_id)
+    }
+
+    #[cfg(feature = "native")]
     pub fn jit_code_memory_stats(&self) -> vo_jit::JitCodeMemoryStats {
         self.jit
             .manager()
@@ -1500,7 +1564,7 @@ impl Vm {
             .unwrap_or_default()
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub fn jit_analysis_memory_stats(&self) -> vo_jit::JitAnalysisMemoryStats {
         self.jit
             .manager()
@@ -1508,7 +1572,7 @@ impl Vm {
             .unwrap_or_default()
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub fn jit_metadata_memory_stats(&self) -> vo_jit::JitMetadataMemoryStats {
         self.jit
             .manager()
@@ -1516,7 +1580,7 @@ impl Vm {
             .unwrap_or_default()
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub fn jit_unsupported_function_count(&self) -> usize {
         self.jit
             .manager()
@@ -1524,7 +1588,7 @@ impl Vm {
             .unwrap_or(0)
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub fn jit_resource_rejected_function_count(&self) -> usize {
         self.jit
             .manager()
@@ -1532,7 +1596,7 @@ impl Vm {
             .unwrap_or(0)
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub fn jit_compiler_fault_function_count(&self) -> usize {
         self.jit
             .manager()
@@ -1540,14 +1604,14 @@ impl Vm {
             .unwrap_or(0)
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub fn jit_function_failure_kind(&self, func_id: u32) -> Option<vo_jit::JitFailureKind> {
         self.jit
             .manager()
             .and_then(|mgr| mgr.function_failure_kind(func_id))
     }
 
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub fn jit_function_compile_error(&self, func_id: u32) -> Option<&str> {
         self.jit
             .manager()
@@ -1556,8 +1620,13 @@ impl Vm {
 
     /// Publish the complete statically linked function table after module
     /// loading has frozen extern resolution and initialized runtime metadata.
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub fn install_aot_functions(&mut self, entries: Vec<AotFunctionEntry>) -> Result<(), VmError> {
+        if self.execution_started {
+            return Err(VmError::Jit(
+                "AOT entries must be published before execution".into(),
+            ));
+        }
         if self.module.is_none() {
             return Err(VmError::Jit(
                 "AOT functions can only be installed after loading a verified module".to_string(),
@@ -1572,7 +1641,7 @@ impl Vm {
             .map_err(|error| VmError::Jit(format!("invalid AOT function table: {error}")))
     }
 
-    #[cfg(not(feature = "jit"))]
+    #[cfg(not(feature = "native"))]
     pub fn has_jit(&self) -> bool {
         false
     }
@@ -1683,7 +1752,7 @@ impl Vm {
         self.state.outbound_commands.clear();
         self.state.endpoint_registry = EndpointRegistry::new();
         self.state.pending_island_responses = 0;
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         {
             self.pending_runtime_transitions.clear();
             self.state.jit_osr_borrow_lease_depth = 0;
@@ -1701,9 +1770,9 @@ impl Vm {
             return VmError::IslandMemory(existing);
         }
 
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         let collector_boundary_is_clean = self.pending_runtime_transitions.is_empty();
-        #[cfg(not(feature = "jit"))]
+        #[cfg(not(feature = "native"))]
         let collector_boundary_is_clean = true;
         if self.state.gc.oom_policy() == OomPolicy::CollectThenTerminateIsland
             && collector_boundary_is_clean
@@ -1922,7 +1991,7 @@ impl Vm {
             .resolve_and_freeze(&module.externs)
             .map_err(|err| VmError::Jit(format!("extern contract resolution failed: {err}")))?;
 
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         self.jit
             .init_for_module(&module)
             .map_err(strict_jit_load_error)?;
@@ -2054,7 +2123,7 @@ impl Vm {
             .resolve_and_freeze(&module.externs)
             .map_err(|err| VmError::Jit(format!("extern contract resolution failed: {err}")))?;
 
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         self.jit
             .init_for_module(&module)
             .map_err(strict_jit_load_error)?;
@@ -2077,7 +2146,7 @@ impl Vm {
                 "child Island requires a frozen parent extern registry".to_string(),
             ));
         }
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         self.jit
             .init_for_module(&image.module)
             .map_err(strict_jit_load_error)?;
@@ -2104,6 +2173,7 @@ impl Vm {
         self.state.dynamic_call_ic = vo_runtime::alloc_ic_table(module.dynamic_callsite_count());
         // Reset sentinel error cache for new module (prevents cross-module corruption)
         self.state.sentinel_errors = vo_runtime::SentinelErrorCache::new();
+        self.state.gc.bind_literal_module(&module);
 
         self.module = Some(module);
     }
@@ -2238,6 +2308,9 @@ impl Vm {
             return false;
         };
         island.lifecycle = types::IslandThreadLifecycle::Stopping;
+        if let Some(signal) = &self.state.island_event_signal {
+            signal.store(true, std::sync::atomic::Ordering::Release);
+        }
         island
             .interrupt_flag
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2329,86 +2402,77 @@ impl Vm {
             let (main_sender, main_transport) =
                 InThreadTransport::new_with_waker(self.state.runtime_waker.clone());
             let main_sender: std::sync::Arc<dyn IslandSender> = std::sync::Arc::new(main_sender);
-            let mut registry = std::collections::HashMap::new();
-            registry.insert(0u32, main_sender.clone());
-            self.state.island_registry = Some(std::sync::Arc::new(std::sync::Mutex::new(registry)));
+            let family = std::sync::Arc::new(types::IslandFamily::new(self.state.next_island_id));
+            family
+                .lock()
+                .expect("new Island family mutex")
+                .insert(0, main_sender.clone());
+            self.state.island_registry = Some(family);
             self.state.main_transport = Some(Box::new(main_transport));
             // Also register main island in island_senders
             self.state.island_senders.insert(0, main_sender);
         }
 
-        // Register this island's sender in the shared registry
-        let registry = self
-            .state
-            .island_registry
-            .as_ref()
-            .ok_or_else(|| VmError::Jit("create_island missing island registry".to_string()))?
-            .clone();
-        {
-            let mut guard = registry
-                .lock()
-                .map_err(|_| VmError::Jit("create_island island registry poisoned".to_string()))?;
-            guard.insert(next_id, island_sender.clone());
-        }
-        // Also register in island_senders
-        self.state
-            .island_senders
-            .insert(next_id, island_sender.clone());
-
-        // Spawn island thread with JIT config from main VM
-        let registry_clone = registry.clone();
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         let jit_mode = self.jit.child_mode();
         let child_memory_config = self.state.gc.memory_config_snapshot();
         let child_resource_limits = self.resource_limits();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let startup_interrupt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let child_interrupt = startup_interrupt.clone();
-        let terminal_waker = self.state.runtime_waker.clone();
-        let event_waker = terminal_waker.clone();
-        let join_handle = std::thread::spawn(move || {
-            #[cfg(feature = "jit")]
-            let result = island_thread::run_island_thread(
-                next_id,
-                image,
-                island_transport,
-                registry_clone,
-                host_services_v2,
-                jit_mode,
-                child_memory_config,
-                child_resource_limits,
-                child_interrupt,
-                event_waker,
-                &event_tx,
-            );
-            #[cfg(not(feature = "jit"))]
-            let result = island_thread::run_island_thread(
-                next_id,
-                image,
-                island_transport,
-                registry_clone,
-                host_services_v2,
-                child_memory_config,
-                child_resource_limits,
-                child_interrupt,
-                event_waker,
-                &event_tx,
-            );
-            let terminal = match result {
-                Ok(island_thread::IslandThreadOutcome::Shutdown) => {
-                    types::IslandThreadEvent::Exited
-                }
-                Ok(island_thread::IslandThreadOutcome::GuestExited(code)) => {
-                    types::IslandThreadEvent::GuestExited(code)
-                }
-                Err(error) => types::IslandThreadEvent::Failed(error),
-            };
-            if event_tx.send(terminal).is_ok() {
-                if let Some(wake) = terminal_waker {
-                    wake();
-                }
-            }
-        });
+        let event_signal = self
+            .state
+            .island_event_signal
+            .get_or_insert_with(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)))
+            .clone();
+        let event_tx = island_thread::EventSender::new(
+            event_tx,
+            event_signal,
+            self.state.runtime_waker.clone(),
+        );
+        let (registry, join_handle) = self.state.spawn_registered_island_thread(
+            next_id,
+            island_sender.clone(),
+            move |registry_clone| {
+                std::thread::Builder::new().spawn(move || {
+                    #[cfg(feature = "native")]
+                    let result = island_thread::run_island_thread(
+                        next_id,
+                        image,
+                        island_transport,
+                        registry_clone,
+                        host_services_v2,
+                        jit_mode,
+                        child_memory_config,
+                        child_resource_limits,
+                        child_interrupt,
+                        &event_tx,
+                    );
+                    #[cfg(not(feature = "native"))]
+                    let result = island_thread::run_island_thread(
+                        next_id,
+                        image,
+                        island_transport,
+                        registry_clone,
+                        host_services_v2,
+                        child_memory_config,
+                        child_resource_limits,
+                        child_interrupt,
+                        &event_tx,
+                    );
+                    let terminal = match result {
+                        Ok(island_thread::IslandThreadOutcome::Shutdown) => {
+                            types::IslandThreadEvent::Exited
+                        }
+                        Ok(island_thread::IslandThreadOutcome::GuestExited(code)) => {
+                            types::IslandThreadEvent::GuestExited(code)
+                        }
+                        Err(error) => types::IslandThreadEvent::Failed(error),
+                    };
+                    let _ = event_tx.send(terminal);
+                })
+            },
+        )?;
 
         let startup = event_rx.recv_timeout(startup_timeout);
         if !matches!(startup, Ok(types::IslandThreadEvent::Ready)) {
@@ -2423,6 +2487,9 @@ impl Vm {
             );
             let timed_out = matches!(startup, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
             if timed_out {
+                if let Some(signal) = &self.state.island_event_signal {
+                    signal.store(true, std::sync::atomic::Ordering::Release);
+                }
                 // Initialization may currently be inside a synchronous extern
                 // that cannot observe cancellation yet. Keep every ownership
                 // edge alive so later polling or VM shutdown can join it.
@@ -2510,11 +2577,22 @@ impl Vm {
     ///
     /// Callers decide whether `Blocked` is a deadlock error or expected behaviour (e.g. GUI host VM).
     pub fn run(&mut self) -> Result<SchedulingOutcome, VmError> {
+        self.run_entry(None)
+    }
+
+    /// Spawn the entry function and execute at most `quanta` scheduling turns.
+    /// Continue a suspended invocation with `run_scheduled_with_budget` so the
+    /// entry function is spawned exactly once.
+    pub fn run_with_budget(&mut self, quanta: usize) -> Result<SchedulingOutcome, VmError> {
+        self.run_entry(Some(quanta))
+    }
+
+    fn run_entry(&mut self, quanta: Option<usize>) -> Result<SchedulingOutcome, VmError> {
         if let Some(outcome) = self.terminal_outcome() {
             return Ok(outcome);
         }
         self.spawn_entry()?;
-        self.run_scheduling_loop(None)
+        self.run_scheduling_loop(quanta)
     }
 
     /// Run island initialization only (global vars + user init functions, no main).
@@ -2607,6 +2685,37 @@ impl Vm {
             return Ok(outcome);
         }
         self.run_scheduling_loop(None)
+    }
+
+    /// Run at most `quanta` scheduling turns, yielding ownership to the host
+    /// with `Suspended` when runnable work remains. Zero never executes guest code.
+    pub fn run_scheduled_with_budget(
+        &mut self,
+        quanta: usize,
+    ) -> Result<SchedulingOutcome, VmError> {
+        self.run_scheduling_loop(Some(quanta))
+    }
+
+    /// Whether another scheduling turn can execute a runnable Fiber. Async
+    /// hosts must keep driving these turns while also polling their own events.
+    pub fn has_runnable_fibers(&self) -> bool {
+        self.scheduler.has_work()
+    }
+
+    /// Whether native I/O can complete while the guest awaits host input.
+    /// Executors without an I/O notification hook only need a readiness poll
+    /// while this is true; an idle UI exchange alone needs no polling timer.
+    #[cfg(feature = "std")]
+    pub fn has_pending_io(&self) -> bool {
+        self.scheduler.has_io_waiters()
+    }
+
+    /// Take the structured error accompanying `SchedulingOutcome::Panicked`.
+    /// Bounded execution retains the ordinary panic/trap payload and source
+    /// location until consumed or another scheduler run begins. Unbounded
+    /// execution continues to return the error directly.
+    pub fn take_bounded_panic(&mut self) -> Option<VmError> {
+        self.bounded_panic.take()
     }
 
     /// Queues a command accepted by the owning trusted island transport.
@@ -2732,6 +2841,7 @@ impl Vm {
         &mut self,
         max_iterations: Option<usize>,
     ) -> Result<SchedulingOutcome, VmError> {
+        self.bounded_panic = None;
         if !self.scheduler.fibers.is_empty() {
             self.execution_started = true;
         }
@@ -2750,22 +2860,23 @@ impl Vm {
             if self.interrupt_requested() {
                 return Err(VmError::Interrupted);
             }
-            if let Some(max) = max_iterations {
-                iterations += 1;
-                if iterations > max {
-                    self.apply_runtime_transition(
-                        self.scheduler.current,
-                        RuntimeTransition::new(
-                            RuntimeBoundary::Yield,
-                            ResumePolicy::PreserveFramePc,
-                            GcRootEffect::None,
-                        ),
-                    )?;
-                    break;
-                }
+            if max_iterations.is_some_and(|max| iterations >= max) {
+                return Ok(self.nonblocking_scheduling_outcome());
             }
+            iterations += 1;
 
+            // A root cursor borrows the published VM state. Finish it across
+            // bounded turns before admitting another root mutation; each turn
+            // still checks cancellation and returns at the host's quantum limit.
+            if self.state.gc.should_step() && self.state.gc.root_scan_pending() {
+                self.gc_step_after_fiber(None);
+                continue;
+            }
             self.process_island_commands()?;
+            #[cfg(feature = "std")]
+            if self.scheduler.has_io_waiters() {
+                self.poll_io_ready_commands();
+            }
             if let Some(error) = self.state.gc.take_last_memory_error() {
                 return Err(self.terminate_island_for_memory_error(error));
             }
@@ -2774,6 +2885,9 @@ impl Vm {
             }
 
             if !self.scheduler.has_work() {
+                if max_iterations.is_some() {
+                    return Ok(self.nonblocking_scheduling_outcome());
+                }
                 match self.wait_for_work()? {
                     WaitResult::Retry => continue,
                     WaitResult::Done => return Ok(SchedulingOutcome::Completed),
@@ -2794,7 +2908,9 @@ impl Vm {
                 None => break,
             };
 
+            self.bounded_scheduling = max_iterations.is_some();
             let result = self.run_fiber(fiber_id);
+            self.bounded_scheduling = false;
             let _runtime_boundary = Self::runtime_boundary_for_exec_result(&result);
             let gc_after_boundary = exec_result_allows_gc_step(&result);
             let gc_root_effect = if exec_result_marks_gc_fiber_roots_dirty(&result) {
@@ -2803,7 +2919,7 @@ impl Vm {
                 GcRootEffect::None
             };
 
-            let handled = self.handle_exec_result(result, max_iterations.is_some());
+            let handled = self.handle_exec_result(result, false);
             // GC step at the scheduling boundary after the current fiber has
             // yielded/blocked/done. Stacks are stable here, and a newly-woken
             // fiber can handle latency-sensitive work (for example a render
@@ -2840,6 +2956,31 @@ impl Vm {
         Ok(SchedulingOutcome::Completed)
     }
 
+    fn nonblocking_scheduling_outcome(&mut self) -> SchedulingOutcome {
+        if !self.scheduler.has_work() {
+            self.scheduler.release_oversized_dead_fiber_storage();
+        }
+        if self.scheduler.has_work()
+            || !self.state.command_queue.is_empty()
+            || !self.state.outbound_commands.is_empty()
+            || self.state.pending_island_responses > 0
+        {
+            return SchedulingOutcome::Suspended;
+        }
+        if self.scheduler.has_host_event_waiters() {
+            return SchedulingOutcome::SuspendedForHostEvents;
+        }
+        #[cfg(feature = "std")]
+        if self.scheduler.has_io_waiters() {
+            return SchedulingOutcome::Suspended;
+        }
+        if self.scheduler.has_blocked() {
+            SchedulingOutcome::Blocked
+        } else {
+            SchedulingOutcome::Completed
+        }
+    }
+
     fn next_fiber_for_turn(&mut self) -> Option<crate::scheduler::FiberId> {
         if let Some(id) = self.scheduler.current {
             if self
@@ -2864,11 +3005,22 @@ impl Vm {
         let mut cmds = Vec::new();
         #[cfg(feature = "std")]
         if let Some(ref transport) = self.state.main_transport {
-            while let Ok(Some(envelope)) = transport.try_recv() {
-                cmds.push(envelope);
+            for _ in 0..32 {
+                match transport.try_recv() {
+                    Ok(Some(envelope)) => cmds.push(envelope),
+                    Ok(None) => break,
+                    Err(error) => {
+                        return Err(VmError::Jit(format!(
+                            "island transport receive failed: {error:?}"
+                        )))
+                    }
+                }
             }
         }
-        while let Some(envelope) = self.state.command_queue.pop_front() {
+        for _ in 0..32 {
+            let Some(envelope) = self.state.command_queue.pop_front() else {
+                break;
+            };
             cmds.push(envelope);
         }
         if !cmds.is_empty() {
@@ -2883,10 +3035,31 @@ impl Vm {
 
     #[cfg(feature = "std")]
     fn poll_island_thread_events(&mut self) -> Result<Option<i32>, VmError> {
+        if self.state.island_threads.is_empty() {
+            return Ok(None);
+        }
+        if self
+            .state
+            .island_event_signal
+            .as_ref()
+            .is_some_and(|signal| {
+                // A quiet parent only reads the shared line. Consume a published
+                // hint before scanning so a later publication stays armed.
+                !signal.load(std::sync::atomic::Ordering::Acquire)
+                    || !signal.swap(false, std::sync::atomic::Ordering::Acquire)
+            })
+        {
+            return Ok(None);
+        }
         let mut index = 0;
         while index < self.state.island_threads.len() {
             if self.state.island_threads[index].lifecycle == types::IslandThreadLifecycle::Stopping
             {
+                // Thread-exit notification may precede JoinHandle::is_finished.
+                // Keep polling until the existing nonblocking cleanup can join.
+                if let Some(signal) = &self.state.island_event_signal {
+                    signal.store(true, std::sync::atomic::Ordering::Release);
+                }
                 let mut guest_exit = None;
                 loop {
                     match self.state.island_threads[index].events.try_recv() {
@@ -2932,7 +3105,15 @@ impl Vm {
             }
 
             let island = &mut self.state.island_threads[index];
-            match island.events.try_recv() {
+            let event = island.events.try_recv();
+            if event.is_ok() {
+                // One event per child per turn is the existing fairness bound.
+                // Re-arm so an already queued second event cannot be stranded.
+                if let Some(signal) = &self.state.island_event_signal {
+                    signal.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+            match event {
                 Ok(types::IslandThreadEvent::Ready) => {
                     return Err(VmError::Jit(format!(
                         "island {} reported duplicate startup readiness",
@@ -3107,7 +3288,16 @@ impl Vm {
 
         self.scheduler.release_oversized_dead_fiber_storage();
 
-        if !self.state.outbound_commands.is_empty() || self.state.pending_island_responses > 0 {
+        // Native transport owns delivery of pending replies. Keep waiting on
+        // that transport; a host continuation is needed only for externally
+        // routed messages. This also lets standalone AOT entries finish.
+        #[cfg(feature = "std")]
+        let host_routes_responses = self.state.main_transport.is_none();
+        #[cfg(not(feature = "std"))]
+        let host_routes_responses = true;
+        if !self.state.outbound_commands.is_empty()
+            || (host_routes_responses && self.state.pending_island_responses > 0)
+        {
             return Ok(WaitResult::Suspended);
         }
 
@@ -3295,22 +3485,25 @@ impl Vm {
                 }
             }
             ExecResult::Panic => {
-                let (trap_kind, msg, loc_tuple) = self.scheduler.kill_current();
-                let loc = loc_tuple.map(|(func_id, pc)| ErrorLocation { func_id, pc });
-                if !is_bounded {
-                    if let Some(kind) = trap_kind {
-                        let Some(msg) = msg else {
-                            return Some(Err(VmError::Jit(format!(
-                                "runtime trap {:?} missing panic payload",
-                                kind
-                            ))));
-                        };
-                        return Some(Err(VmError::RuntimeTrap { kind, msg, loc }));
+                let (trap_kind, msg, source) = self.scheduler.kill_current();
+                let loc = source.map(ErrorLocation::from);
+                let error = match (trap_kind, msg) {
+                    (Some(kind), Some(msg)) => VmError::RuntimeTrap { kind, msg, loc },
+                    (Some(kind), None) => {
+                        VmError::Jit(format!("runtime trap {:?} missing panic payload", kind))
                     }
-                    return Some(Err(VmError::PanicUnwound { msg, loc }));
+                    (None, msg) => VmError::PanicUnwound { msg, loc },
+                };
+                return Some(if is_bounded {
+                    self.bounded_panic = Some(error);
+                    Ok(SchedulingOutcome::Panicked)
                 } else {
-                    return Some(Ok(SchedulingOutcome::Panicked));
-                }
+                    Err(error)
+                });
+            }
+            ExecResult::ResourceError(error) => {
+                self.scheduler.kill_current();
+                return Some(Err(fiber_capacity_error_to_vm_error(error)));
             }
             ExecResult::MemoryError(error) => {
                 return Some(Err(self.terminate_island_for_memory_error(error)));
@@ -3607,7 +3800,7 @@ impl Vm {
             execution.run()
         };
 
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         let result = self.attach_pending_runtime_transitions(result);
         result
     }
@@ -3623,7 +3816,7 @@ impl Vm {
         fiber: &mut Fiber,
         loaded_module: &LoadedModule,
     ) -> ExecResult {
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         if self.jit.is_enabled() {
             return self.run_detached_fiber_mode::<true>(fiber_id, fiber, loaded_module);
         }
@@ -3641,6 +3834,18 @@ impl Vm {
     ) -> ExecResult {
         let module = loaded_module.module();
         let runtime_metadata = loaded_module.runtime_metadata();
+        #[cfg(feature = "execution-profile")]
+        ExecutionProfile::increment(&mut self.execution_profile.interpreter_entries);
+        if let Some(kind) = fiber.entry_trap.take() {
+            let stack = fiber.stack_ptr();
+            match runtime_trap(&mut self.state.gc, fiber, stack, module, kind) {
+                ExecResult::FrameChanged if fiber.entry_trap.is_some() => {
+                    return ExecResult::TimesliceExpired
+                }
+                ExecResult::FrameChanged => {}
+                result => return result,
+            }
+        }
         // The interpreter owns its remaining budget while it is running.  Keep
         // that state in a register and publish it only when native execution
         // needs to take over the same scheduling lease.
@@ -3672,14 +3877,10 @@ impl Vm {
             }
         };
         let mut code: &[Instruction] = &func.code;
-        let mut pointer_layouts = loaded_module
-            .pointer_layout_maps()
+        let mut execution_layouts = loaded_module
+            .execution_layouts()
             .function(func_id)
-            .expect("verified function owns pointer-layout facts");
-        let mut element_layouts = loaded_module
-            .element_layout_maps()
-            .function(func_id)
-            .expect("verified function owns element-layout facts");
+            .expect("verified function owns execution layouts");
         if pc >= code.len() {
             return ExecResult::JitError(format!(
                 "pc {pc} out of bounds for function {} with {} instructions",
@@ -3688,9 +3889,18 @@ impl Vm {
             ));
         }
 
+        // Entry and every frame refetch invalidate a stale replay credit.
+        // Ordinary non-allocating instructions need no replay-state traffic.
+        fiber.retain_allocation_retry(func_id, pc, unsafe { code[pc].verified_opcode() });
+
         // Macro to refetch frame after Call/Return - only called when frame actually changes
         macro_rules! refetch {
             () => {{
+                #[cfg(feature = "execution-profile")]
+                ExecutionProfile::increment(&mut self.execution_profile.frame_refetch_attempts);
+                if fiber.entry_trap.is_some() {
+                    return ExecResult::TimesliceExpired;
+                }
                 let frames = unsafe { &mut *frames_ptr };
                 frame_ptr = match frames.last_mut() {
                     Some(f) => f as *mut _,
@@ -3710,14 +3920,10 @@ impl Vm {
                     }
                 };
                 code = &func.code;
-                pointer_layouts = loaded_module
-                    .pointer_layout_maps()
+                execution_layouts = loaded_module
+                    .execution_layouts()
                     .function(func_id)
-                    .expect("verified function owns pointer-layout facts");
-                element_layouts = loaded_module
-                    .element_layout_maps()
-                    .function(func_id)
-                    .expect("verified function owns element-layout facts");
+                    .expect("verified function owns execution layouts");
                 if pc >= code.len() {
                     return ExecResult::JitError(format!(
                         "pc {pc} out of bounds for function {} with {} instructions",
@@ -3725,6 +3931,7 @@ impl Vm {
                         code.len()
                     ));
                 }
+                fiber.retain_allocation_retry(func_id, pc, unsafe { code[pc].verified_opcode() });
             }};
         }
 
@@ -3764,7 +3971,7 @@ impl Vm {
                 sync_frame_pc!();
                 let r = $result;
                 if matches!(r, ExecResult::FrameChanged) {
-                    #[cfg(feature = "jit")]
+                    #[cfg(feature = "native")]
                     if !self.pending_runtime_transitions.is_empty() {
                         return ExecResult::FrameChanged;
                     }
@@ -3790,6 +3997,9 @@ impl Vm {
                     Err(exec::InstructionError::Malformed(message)) => {
                         return ExecResult::JitError(message);
                     }
+                    Err(exec::InstructionError::Capacity(error)) => {
+                        return ExecResult::ResourceError(error)
+                    }
                     Err(exec::InstructionError::Memory(error)) => {
                         return_memory_error!(error);
                     }
@@ -3798,7 +4008,7 @@ impl Vm {
         }
 
         // Macro to handle loop OSR result - used by both Jump and ForLoop
-        #[cfg(feature = "jit")]
+        #[cfg(feature = "native")]
         macro_rules! handle_loop_osr {
             ($target_pc:expr) => {{
                 if JIT_ENABLED {
@@ -3860,8 +4070,13 @@ impl Vm {
                     let action = $action;
                     prepare_queue_action(&mut self.state, fiber, action)
                 } {
-                    Ok(PreparedQueueAction::Continue) => refetch!(),
+                    Ok(PreparedQueueAction::Continue) => {
+                        #[cfg(feature = "execution-profile")]
+                        ExecutionProfile::increment(&mut self.execution_profile.queue_continues);
+                    }
                     Ok(PreparedQueueAction::Block(wait)) => {
+                        #[cfg(feature = "execution-profile")]
+                        ExecutionProfile::increment(&mut self.execution_profile.queue_blocks);
                         if wait == QueueWaitMode::Replay {
                             let resume = match replay_current_instruction_policy(
                                 fiber,
@@ -3891,6 +4106,8 @@ impl Vm {
                         mut transition,
                         wait,
                     }) => {
+                        #[cfg(feature = "execution-profile")]
+                        ExecutionProfile::increment(&mut self.execution_profile.queue_transitions);
                         match wait {
                             None => {
                                 transition.boundary = RuntimeBoundary::Yield;
@@ -3926,7 +4143,7 @@ impl Vm {
         }
 
         while execution_budget > 0 {
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             {
                 // JIT side exits may materialize a callee frame and return to
                 // this interpreter loop. This is not frame elision: the VM
@@ -3934,7 +4151,11 @@ impl Vm {
                 // unwind machine still need interpreter-owned ordering and
                 // recover eligibility checks.
                 if JIT_ENABLED
-                    && pc == 0
+                    && (pc == 0
+                        || self.jit.manager().is_some_and(|manager| {
+                            manager.continuation_entry(func_id, pc).is_some()
+                        }))
+                    && fiber.gc_allocation_permit != Some((func_id, pc))
                     && fiber.unwinding.is_none()
                     && can_enter_materialized_frame_at_pc(
                         func,
@@ -3948,7 +4169,11 @@ impl Vm {
                             externs: self.state.extern_registry.resolved_externs(),
                             backend_caps: Default::default(),
                         };
-                        match jit_mgr.resolve_call(func_id, loaded_module.verified_module(), env) {
+                        match if pc == 0 {
+                            jit_mgr.resolve_call(func_id, loaded_module.verified_module(), env)
+                        } else {
+                            Ok(jit_mgr.continuation_entry(func_id, pc))
+                        } {
                             Ok(entry) => entry,
                             Err(_) if best_effort => None,
                             Err(err) => {
@@ -3993,11 +4218,41 @@ impl Vm {
             // frame/JIT refetch. The verifier proves every branch target and
             // reachable fallthrough inside that function's code range.
             let inst = unsafe { *code.get_unchecked(fetched_pc) };
+            // LoadedModule verification admits the opcode once for both the
+            // effect check and dispatch. Non-allocating instructions need no
+            // collector-state reads; scheduler boundaries still advance GC.
+            let opcode = unsafe { inst.verified_opcode() };
+            // Poll before committing the instruction. A scheduler slice grants
+            // exactly one retry at this function/PC; failed allocations never
+            // reach this path and remain sticky IslandMemory failures.
+            if vo_common_core::execution_effects::opcode_may_allocate(opcode) {
+                #[cfg(feature = "execution-profile")]
+                ExecutionProfile::increment(&mut self.execution_profile.allocation_checks);
+                let allocation_permitted =
+                    fiber.gc_allocation_permit.take() == Some((func_id, fetched_pc));
+                #[cfg(feature = "execution-profile")]
+                if allocation_permitted {
+                    ExecutionProfile::increment(&mut self.execution_profile.allocation_retries);
+                }
+                if !allocation_permitted && self.state.gc.should_step() {
+                    #[cfg(feature = "execution-profile")]
+                    ExecutionProfile::increment(&mut self.execution_profile.allocation_yields);
+                    fiber.gc_allocation_permit = Some((func_id, fetched_pc));
+                    unsafe {
+                        (*frame_ptr).pc = fetched_pc;
+                    }
+                    return ExecResult::Transition(RuntimeTransition::new(
+                        RuntimeBoundary::Yield,
+                        ResumePolicy::PreserveFramePc,
+                        GcRootEffect::CurrentFiberDirty,
+                    ));
+                }
+            }
             pc = fetched_pc + 1;
+            #[cfg(feature = "execution-profile")]
+            self.execution_profile.instruction(opcode);
 
-            // Safety: LoadedModule verification rejects invalid opcode bytes
-            // before this execution path becomes reachable.
-            match unsafe { inst.verified_opcode() } {
+            match opcode {
                 // === SIMPLE INSTRUCTIONS: no frame change, just continue ===
                 Opcode::Hint => {
                     // HINT_LOOP is now a no-op in VM - provides metadata for JIT analysis only.
@@ -4072,7 +4327,7 @@ impl Vm {
 
                 Opcode::PtrNew => {
                     // Safety: verifier requires PtrLayout at every PtrNew.
-                    let layout = unsafe { pointer_layouts.get_verified(fetched_pc) };
+                    let layout = unsafe { execution_layouts.pointers().get_verified(fetched_pc) };
                     instruction_result!(exec::exec_ptr_new(
                         stack,
                         bp,
@@ -4095,7 +4350,7 @@ impl Vm {
                 Opcode::PtrSet => {
                     // Safety: verifier requires PtrLayout at every PtrSet and
                     // the compact fact includes its exact-base provenance.
-                    let layout = unsafe { pointer_layouts.get_verified(fetched_pc) };
+                    let layout = unsafe { execution_layouts.pointers().get_verified(fetched_pc) };
                     if !exec::exec_ptr_set(stack, bp, &inst, &mut self.state.gc, layout) {
                         handle_panic_result!(runtime_trap(
                             &mut self.state.gc,
@@ -4108,7 +4363,7 @@ impl Vm {
                 }
                 Opcode::PtrGetN => {
                     // Safety: verifier requires PtrLayout at every PtrGetN.
-                    let layout = unsafe { pointer_layouts.get_verified(fetched_pc) };
+                    let layout = unsafe { execution_layouts.pointers().get_verified(fetched_pc) };
                     if !exec::exec_ptr_get_n(stack, bp, &inst, layout.value_slots) {
                         handle_panic_result!(runtime_trap(
                             &mut self.state.gc,
@@ -4121,7 +4376,7 @@ impl Vm {
                 }
                 Opcode::PtrSetN => {
                     // Safety: verifier requires PtrLayout at every PtrSetN.
-                    let layout = unsafe { pointer_layouts.get_verified(fetched_pc) };
+                    let layout = unsafe { execution_layouts.pointers().get_verified(fetched_pc) };
                     if !exec::exec_ptr_set_n(stack, bp, &inst, layout.value_slots) {
                         handle_panic_result!(runtime_trap(
                             &mut self.state.gc,
@@ -4222,24 +4477,48 @@ impl Vm {
                     let b = f64::from_bits(stack_get(frame_base, inst.c as usize));
                     stack_set(frame_base, inst.a as usize, (a + b).to_bits());
                 }
+                Opcode::AddF32 => {
+                    let a = f32::from_bits(stack_get(frame_base, inst.b as usize) as u32);
+                    let b = f32::from_bits(stack_get(frame_base, inst.c as usize) as u32);
+                    stack_set(frame_base, inst.a as usize, (a + b).to_bits() as u64);
+                }
                 Opcode::SubF => {
                     let a = f64::from_bits(stack_get(frame_base, inst.b as usize));
                     let b = f64::from_bits(stack_get(frame_base, inst.c as usize));
                     stack_set(frame_base, inst.a as usize, (a - b).to_bits());
+                }
+                Opcode::SubF32 => {
+                    let a = f32::from_bits(stack_get(frame_base, inst.b as usize) as u32);
+                    let b = f32::from_bits(stack_get(frame_base, inst.c as usize) as u32);
+                    stack_set(frame_base, inst.a as usize, (a - b).to_bits() as u64);
                 }
                 Opcode::MulF => {
                     let a = f64::from_bits(stack_get(frame_base, inst.b as usize));
                     let b = f64::from_bits(stack_get(frame_base, inst.c as usize));
                     stack_set(frame_base, inst.a as usize, (a * b).to_bits());
                 }
+                Opcode::MulF32 => {
+                    let a = f32::from_bits(stack_get(frame_base, inst.b as usize) as u32);
+                    let b = f32::from_bits(stack_get(frame_base, inst.c as usize) as u32);
+                    stack_set(frame_base, inst.a as usize, (a * b).to_bits() as u64);
+                }
                 Opcode::DivF => {
                     let a = f64::from_bits(stack_get(frame_base, inst.b as usize));
                     let b = f64::from_bits(stack_get(frame_base, inst.c as usize));
                     stack_set(frame_base, inst.a as usize, (a / b).to_bits());
                 }
+                Opcode::DivF32 => {
+                    let a = f32::from_bits(stack_get(frame_base, inst.b as usize) as u32);
+                    let b = f32::from_bits(stack_get(frame_base, inst.c as usize) as u32);
+                    stack_set(frame_base, inst.a as usize, (a / b).to_bits() as u64);
+                }
                 Opcode::NegF => {
                     let a = f64::from_bits(stack_get(frame_base, inst.b as usize));
                     stack_set(frame_base, inst.a as usize, (-a).to_bits());
+                }
+                Opcode::NegF32 => {
+                    let a = f32::from_bits(stack_get(frame_base, inst.b as usize) as u32);
+                    stack_set(frame_base, inst.a as usize, (-a).to_bits() as u64);
                 }
 
                 // Integer comparison
@@ -4302,9 +4581,19 @@ impl Vm {
                     let b = f64::from_bits(stack_get(frame_base, inst.c as usize));
                     stack_set(frame_base, inst.a as usize, (a == b) as u64);
                 }
+                Opcode::EqF32 => {
+                    let a = f32::from_bits(stack_get(frame_base, inst.b as usize) as u32);
+                    let b = f32::from_bits(stack_get(frame_base, inst.c as usize) as u32);
+                    stack_set(frame_base, inst.a as usize, (a == b) as u64);
+                }
                 Opcode::NeF => {
                     let a = f64::from_bits(stack_get(frame_base, inst.b as usize));
                     let b = f64::from_bits(stack_get(frame_base, inst.c as usize));
+                    stack_set(frame_base, inst.a as usize, (a != b) as u64);
+                }
+                Opcode::NeF32 => {
+                    let a = f32::from_bits(stack_get(frame_base, inst.b as usize) as u32);
+                    let b = f32::from_bits(stack_get(frame_base, inst.c as usize) as u32);
                     stack_set(frame_base, inst.a as usize, (a != b) as u64);
                 }
                 Opcode::LtF => {
@@ -4312,9 +4601,19 @@ impl Vm {
                     let b = f64::from_bits(stack_get(frame_base, inst.c as usize));
                     stack_set(frame_base, inst.a as usize, (a < b) as u64);
                 }
+                Opcode::LtF32 => {
+                    let a = f32::from_bits(stack_get(frame_base, inst.b as usize) as u32);
+                    let b = f32::from_bits(stack_get(frame_base, inst.c as usize) as u32);
+                    stack_set(frame_base, inst.a as usize, (a < b) as u64);
+                }
                 Opcode::LeF => {
                     let a = f64::from_bits(stack_get(frame_base, inst.b as usize));
                     let b = f64::from_bits(stack_get(frame_base, inst.c as usize));
+                    stack_set(frame_base, inst.a as usize, (a <= b) as u64);
+                }
+                Opcode::LeF32 => {
+                    let a = f32::from_bits(stack_get(frame_base, inst.b as usize) as u32);
+                    let b = f32::from_bits(stack_get(frame_base, inst.c as usize) as u32);
                     stack_set(frame_base, inst.a as usize, (a <= b) as u64);
                 }
                 Opcode::GtF => {
@@ -4322,9 +4621,19 @@ impl Vm {
                     let b = f64::from_bits(stack_get(frame_base, inst.c as usize));
                     stack_set(frame_base, inst.a as usize, (a > b) as u64);
                 }
+                Opcode::GtF32 => {
+                    let a = f32::from_bits(stack_get(frame_base, inst.b as usize) as u32);
+                    let b = f32::from_bits(stack_get(frame_base, inst.c as usize) as u32);
+                    stack_set(frame_base, inst.a as usize, (a > b) as u64);
+                }
                 Opcode::GeF => {
                     let a = f64::from_bits(stack_get(frame_base, inst.b as usize));
                     let b = f64::from_bits(stack_get(frame_base, inst.c as usize));
+                    stack_set(frame_base, inst.a as usize, (a >= b) as u64);
+                }
+                Opcode::GeF32 => {
+                    let a = f32::from_bits(stack_get(frame_base, inst.b as usize) as u32);
+                    let b = f32::from_bits(stack_get(frame_base, inst.c as usize) as u32);
                     stack_set(frame_base, inst.a as usize, (a >= b) as u64);
                 }
 
@@ -4422,7 +4731,7 @@ impl Vm {
                     let offset = inst.imm32();
                     let target_pc = (pc as i64 + offset as i64 - 1) as usize;
 
-                    #[cfg(feature = "jit")]
+                    #[cfg(feature = "native")]
                     if offset < 0 {
                         handle_loop_osr!(target_pc);
                     }
@@ -4481,7 +4790,7 @@ impl Vm {
                     if continue_loop {
                         let target_pc = (pc as i64 + offset as i64) as usize;
 
-                        #[cfg(feature = "jit")]
+                        #[cfg(feature = "native")]
                         handle_loop_osr!(target_pc);
 
                         pc = target_pc;
@@ -4520,7 +4829,7 @@ impl Vm {
                             let result =
                                 exec::stack_overflow_panic(&mut self.state.gc, fiber, module, err);
                             if matches!(result, ExecResult::FrameChanged) {
-                                #[cfg(feature = "jit")]
+                                #[cfg(feature = "native")]
                                 if !self.pending_runtime_transitions.is_empty() {
                                     return ExecResult::FrameChanged;
                                 }
@@ -4558,14 +4867,10 @@ impl Vm {
                     pc = 0;
                     func = target_func;
                     code = &func.code;
-                    pointer_layouts = loaded_module
-                        .pointer_layout_maps()
+                    execution_layouts = loaded_module
+                        .execution_layouts()
                         .function(func_id)
-                        .expect("verified call target owns pointer-layout facts");
-                    element_layouts = loaded_module
-                        .element_layout_maps()
-                        .function(func_id)
-                        .expect("verified call target owns element-layout facts");
+                        .expect("verified function owns execution layouts");
                     debug_assert!(!code.is_empty());
                 }
                 Opcode::CallExtern => {
@@ -4691,14 +4996,10 @@ impl Vm {
                                     }
                                 };
                                 code = &func.code;
-                                pointer_layouts = loaded_module
-                                    .pointer_layout_maps()
+                                execution_layouts = loaded_module
+                                    .execution_layouts()
                                     .function(func_id)
-                                    .expect("verified caller owns pointer-layout facts");
-                                element_layouts = loaded_module
-                                    .element_layout_maps()
-                                    .function(func_id)
-                                    .expect("verified caller owns element-layout facts");
+                                    .expect("verified function owns execution layouts");
                                 if pc >= code.len() {
                                     return ExecResult::JitError(format!(
                                         "pc {pc} out of bounds for function {} with {} instructions",
@@ -4738,7 +5039,7 @@ impl Vm {
                         stack,
                         bp,
                         &inst,
-                        &module.constants,
+                        loaded_module,
                         &mut self.state.gc
                     ));
                 }
@@ -4849,7 +5150,7 @@ impl Vm {
 
                 // Array operations
                 Opcode::ArrayNew => {
-                    let Some(layout) = element_layouts.get(fetched_pc) else {
+                    let Some(layout) = execution_layouts.elements().get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "ArrayNew at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
@@ -4866,6 +5167,9 @@ impl Vm {
                                 RuntimeTrapKind::MakeSlice,
                                 message
                             ));
+                        }
+                        Err(exec::InstructionError::Capacity(error)) => {
+                            return ExecResult::ResourceError(error)
                         }
                         Err(exec::InstructionError::Memory(error)) => {
                             return_memory_error!(error);
@@ -4894,7 +5198,7 @@ impl Vm {
                     let dst = bp + inst.a as usize;
                     let off = idx as isize;
                     let base = unsafe { array::data_ptr_bytes(arr) };
-                    let Some(layout) = element_layouts.get(fetched_pc) else {
+                    let Some(layout) = execution_layouts.elements().get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "ArrayGet at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
@@ -4949,7 +5253,7 @@ impl Vm {
                     let off = idx as isize;
                     let base = unsafe { array::data_ptr_bytes(arr) };
                     let val = stack_get(stack, src);
-                    let Some(layout) = element_layouts.get(fetched_pc) else {
+                    let Some(layout) = execution_layouts.elements().get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "ArraySet at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
@@ -5037,7 +5341,7 @@ impl Vm {
                         ));
                     }
                     let idx = idx_raw as usize;
-                    let Some(layout) = element_layouts.get(fetched_pc) else {
+                    let Some(layout) = execution_layouts.elements().get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "ArrayAddr at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
@@ -5050,7 +5354,7 @@ impl Vm {
 
                 // Slice operations
                 Opcode::SliceNew => {
-                    let Some(layout) = element_layouts.get(fetched_pc) else {
+                    let Some(layout) = execution_layouts.elements().get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "SliceNew at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
@@ -5067,6 +5371,9 @@ impl Vm {
                                 RuntimeTrapKind::MakeSlice,
                                 message
                             ));
+                        }
+                        Err(exec::InstructionError::Capacity(error)) => {
+                            return ExecResult::ResourceError(error)
                         }
                         Err(exec::InstructionError::Memory(error)) => {
                             return_memory_error!(error);
@@ -5103,7 +5410,7 @@ impl Vm {
                         }
                         continue;
                     }
-                    let Some(layout) = element_layouts.get(fetched_pc) else {
+                    let Some(layout) = execution_layouts.elements().get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "SliceGet at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
@@ -5179,7 +5486,7 @@ impl Vm {
                         }
                         continue;
                     }
-                    let Some(layout) = element_layouts.get(fetched_pc) else {
+                    let Some(layout) = execution_layouts.elements().get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "SliceSet at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
@@ -5287,7 +5594,7 @@ impl Vm {
                     }
                 }
                 Opcode::SliceAppend => {
-                    let Some(layout) = element_layouts.get(fetched_pc) else {
+                    let Some(layout) = execution_layouts.elements().get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "SliceAppend at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
@@ -5482,6 +5789,9 @@ impl Vm {
                                 message
                             ));
                         }
+                        Err(exec::InstructionError::Capacity(error)) => {
+                            return ExecResult::ResourceError(error)
+                        }
                         Err(exec::InstructionError::Memory(error)) => {
                             return_memory_error!(error);
                         }
@@ -5625,7 +5935,10 @@ impl Vm {
                     }
                 }
                 Opcode::SelectSend => {
-                    let Some(elem_layout) = queue_layout_for_pc(func, fetched_pc) else {
+                    let Some(elem_layout) = loaded_module
+                        .select_layout_maps()
+                        .get(func_id, fetched_pc as u32)
+                    else {
                         return ExecResult::JitError(format!(
                             "SelectSend missing QueueLayout metadata at pc {fetched_pc}"
                         ));
@@ -5643,14 +5956,22 @@ impl Vm {
                         inst.a,
                         inst.b,
                         elem_slots,
-                        Some(elem_layout.to_vec()),
+                        Some(Arc::clone(elem_layout)),
                         inst.c,
                     ) {
-                        return ExecResult::JitError(msg);
+                        return match msg {
+                            exec::InstructionError::Capacity(error) => {
+                                ExecResult::ResourceError(error)
+                            }
+                            other => ExecResult::JitError(other.to_string()),
+                        };
                     }
                 }
                 Opcode::SelectRecv => {
-                    let Some(elem_layout) = queue_layout_for_pc(func, fetched_pc) else {
+                    let Some(elem_layout) = loaded_module
+                        .select_layout_maps()
+                        .get(func_id, fetched_pc as u32)
+                    else {
                         return ExecResult::JitError(format!(
                             "SelectRecv missing QueueLayout metadata at pc {fetched_pc}"
                         ));
@@ -5668,11 +5989,16 @@ impl Vm {
                         inst.a,
                         inst.b,
                         elem_slots,
-                        Some(elem_layout.to_vec()),
+                        Some(Arc::clone(elem_layout)),
                         inst.recv_has_ok(),
                         inst.c,
                     ) {
-                        return ExecResult::JitError(msg);
+                        return match msg {
+                            exec::InstructionError::Capacity(error) => {
+                                ExecResult::ResourceError(error)
+                            }
+                            other => ExecResult::JitError(other.to_string()),
+                        };
                     }
                 }
                 Opcode::SelectExec => {
@@ -5680,7 +6006,7 @@ impl Vm {
                     // Publish the instruction-entry PC until the transaction
                     // has produced its outputs or committed a replay point.
                     unsafe { (*frame_ptr).pc = fetched_pc };
-                    match exec::exec_select_exec(
+                    match exec::exec_select_exec_reusing(
                         exec::SelectExecContext {
                             stack,
                             bp,
@@ -5690,8 +6016,12 @@ impl Vm {
                             module: Some(runtime_metadata),
                         },
                         &mut fiber.select_state,
+                        &mut fiber.select_scratch,
                         inst.a,
                     ) {
+                        exec::SelectResult::Resource(error) => {
+                            return ExecResult::ResourceError(error)
+                        }
                         exec::SelectResult::Continue => {}
                         exec::SelectResult::Block => {
                             // Waiters have been registered on all channels by exec_select_exec.
@@ -5757,19 +6087,6 @@ impl Vm {
                 // Goroutine - spawn new fiber
                 Opcode::GoStart => {
                     sync_frame_pc!();
-                    if inst.call_shape_is_closure() {
-                        let closure_ref =
-                            stack_get(frame_base, inst.a as usize) as vo_runtime::gc::GcRef;
-                        if closure_ref.is_null() {
-                            handle_panic_result!(runtime_trap(
-                                &mut self.state.gc,
-                                fiber,
-                                stack,
-                                module,
-                                RuntimeTrapKind::NilFuncCall
-                            ));
-                        }
-                    }
                     let callsite_arg_layout =
                         match crate::frame_call::shared_call_arg_layout_for_callsite(
                             func, module, fetched_pc, &inst, "GoStart",

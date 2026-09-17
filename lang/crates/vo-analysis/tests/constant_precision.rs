@@ -56,6 +56,7 @@ fn converted_initializer_records_the_exact_folded_integer() {
     .expect("high-precision constant should pass analysis");
 
     let initializer = project
+        .main()
         .type_info
         .init_order
         .iter()
@@ -67,6 +68,7 @@ fn converted_initializer_records_the_exact_folded_integer() {
         })
         .expect("initializer for x");
     let typed_value = project
+        .main()
         .type_info
         .types
         .get(&initializer.rhs[0].id)
@@ -96,6 +98,7 @@ fn package_var_specs_are_single_dependency_and_initialization_units() {
     .expect("grouped package variables should pass analysis");
 
     let groups: Vec<(Vec<&str>, usize)> = project
+        .main()
         .type_info
         .init_order
         .iter()
@@ -143,6 +146,7 @@ fn package_initializer_dependencies_include_referenced_function_and_method_bodie
     .expect("transitive package dependencies should pass analysis");
 
     let names: Vec<&str> = project
+        .main()
         .type_info
         .init_order
         .iter()
@@ -231,6 +235,7 @@ fn recursive_function_scc_dependencies_are_complete_across_file_and_declaration_
         let project = analyze_files(sources)
             .expect("recursive function dependencies should be order independent");
         let names: Vec<&str> = project
+            .main()
             .type_info
             .init_order
             .iter()
@@ -278,6 +283,7 @@ fn package_initializer_order_uses_normalized_file_order_and_keeps_blank_targets_
     .expect("multi-file package variables should pass analysis");
 
     let groups: Vec<Vec<&str>> = project
+        .main()
         .type_info
         .init_order
         .iter()

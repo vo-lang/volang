@@ -41,7 +41,7 @@ fn package_analysis_does_not_require_an_executable_entry() {
         &ProjectContextOptions::default(),
     )
     .expect_err("library package must remain unavailable as an executable entry");
-    assert!(error.contains("package must be named `main`"));
+    assert!(error.to_string().contains("package must be named `main`"));
 }
 
 fn registry_module_fixture(path: &str) -> (LockedModule, String, String, String, Vec<u8>) {
@@ -424,7 +424,8 @@ fn browser_compile_allows_import_authorized_by_ready_module() {
     )
     .unwrap();
     let bytecode = compile_with_ready_fs_modules(input, build_stdlib_fs(), mod_fs, &[ready])
-        .expect("the ready module's selected capability should authorize the import");
+        .expect("the ready module's selected capability should authorize the import")
+        .value;
     assert!(!bytecode.is_empty());
 }
 
@@ -781,7 +782,7 @@ fn test_compile_entry_with_mod_fs_can_disable_workspace_discovery() {
 
     let error = result.unwrap_err();
     assert!(
-        error.contains("vo.lock is required"),
+        error.to_string().contains("vo.lock is required"),
         "expected missing lock error, got: {error}"
     );
 }

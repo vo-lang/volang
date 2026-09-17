@@ -1,0 +1,354 @@
+package ui
+
+import (
+	"sort"
+)
+
+type mounted struct {
+	id int
+	parent int
+	view View
+	children []*mounted
+	scope *Scope
+	owner *Scope
+	svg bool
+}
+
+// Scope belongs to a single mounted component, never a package-global stack.
+type Scope struct {
+	root *Root
+	node *mounted
+	states map[string]any
+	reader *observation
+	parent *Scope
+	context map[*ContextKey]any
+	contextSignals map[*ContextKey]*Signal
+	renderVersion int
+	effects map[effectKey]*effect
+	effectOrder []effectKey
+	tasks map[int]*Task
+	disposed bool
+	dirty bool
+	failure *RenderError
+}
+
+// Contains reports whether other is this live scope or one of its descendants.
+// Optional libraries use it to keep shared resources inside their owner's tree.
+func (scope *Scope) Contains(other *Scope) bool {
+	if scope == nil || scope.disposed || other == nil || other.disposed || scope.root == nil ||
+		scope.root.closed ||
+		other.root != scope.root {
+		return false
+	}
+	for current := other; current != nil; current = current.parent {
+		if current == scope {
+			return true
+		}
+	}
+	return false
+}
+
+type scopeOrder []*Scope
+
+func (scopes scopeOrder) Len() int {
+	return len(scopes)
+}
+
+func (scopes scopeOrder) Less(i int, j int) bool {
+	return scopes[i].node.id < scopes[j].node.id
+}
+
+func (scopes scopeOrder) Swap(i int, j int) {
+	scopes[i], scopes[j] = scopes[j], scopes[i]
+}
+
+func (scope *Scope) requireState(key string) {
+	if key == "" || scope.disposed || scope.root.reading != scope {
+		panic("ui: state must be declared in its live component render with a nonempty key")
+	}
+}
+
+func (scope *Scope) storeState(key string, value any) {
+	if scope.root.reload != nil {
+		scope.root.reload.restoreState(scope, key, value)
+	}
+	if scope.states == nil {
+		scope.states = make(map[string]any)
+	}
+	scope.states[key] = value
+}
+
+type Root struct {
+	view View
+	node *mounted
+	nextID int
+	revision int
+	inputSequence int
+	nodes map[int]*mounted
+	dirty []*Scope
+	reading *Scope
+	tracking *observation
+	computing int
+	mutations mutationBuffer
+	closed bool
+	flushing bool
+	committing bool
+	awaiting int
+	effects []*effect
+	cleanups []func()
+	mountSetups []func() func()
+	rootCleanups []func()
+	tasks map[int]*Task
+	nextTask int
+	commands []Command
+	refChecks map[*ElementRef]bool
+	elementRequests []elementRequest
+	popovers map[int]*popoverBinding
+	portals map[int]*portalBinding
+	observer RuntimeObserver
+	taskObserver RuntimeTaskObserver
+	propsObserver RuntimePropsObserver
+	reload *reloadRestore
+}
+
+func NewRoot(view View) *Root {
+	return &Root{view: view, nextID: 1, nodes: make(map[int]*mounted), tasks: make(map[int]*Task)}
+}
+
+func (root *Root) invalidate(scope *Scope) {
+	if !scope.dirty && !scope.disposed {
+		scope.dirty = true
+		root.dirty = append(root.dirty, scope)
+	}
+}
+
+// Dispatch applies events against the latest handler of a live DOM identity.
+// Unrelated render revisions do not invalidate queued events.
+func (root *Root) Dispatch(event Event) bool {
+	if root.closed || root.flushing || root.committing || root.awaiting != 0 {
+		return false
+	}
+	if event.Sequence <= root.inputSequence {
+		return false
+	}
+	root.inputSequence = event.Sequence
+	if event.Kind == "@task" {
+		return root.completeTask(event)
+	}
+	node := root.nodes[event.Target]
+	if node == nil {
+		return false
+	}
+	if event.Kind == "@widget" && node.view.widget != nil {
+		node.view.widget.receive(Result{Value: event.Value, Error: event.Error})
+		return true
+	}
+	for _, listener := range node.view.events {
+		if listener.kind == event.Kind && listener.options.Capture == event.Capture &&
+			listener.options.accepts(event) {
+			listener.handler(event)
+			return true
+		}
+	}
+	return false
+}
+
+// Flush batches pending writes and only reevaluates subscribed components.
+// Hosts apply the returned ordered batch before dispatching further events.
+func (root *Root) Flush() Batch {
+	if root.closed || root.flushing || root.committing {
+		panic("ui: cannot flush a closed or rendering root")
+	}
+	if root.awaiting != 0 {
+		panic("ui: the previous render needs commit acknowledgement")
+	}
+	root.flushing = true
+	succeeded := false
+	defer func() {
+		root.flushing = false
+		root.reading = nil
+		root.tracking = nil
+		if !succeeded {
+			// An uncaught render failure cannot publish a partial tree. The
+			// root terminates; the host retains its last valid DOM snapshot.
+			root.abort()
+		}
+	}()
+	root.mutations = mutationBuffer{}
+	if root.node == nil {
+		root.node = root.mount(root.view, 0, 0)
+	}
+	for len(root.dirty) > 0 {
+		pending := root.dirty
+		root.dirty = nil
+		if len(pending) > 1 {
+			sort.Sort(scopeOrder(pending))
+		}
+		for _, scope := range pending {
+			if scope.dirty && !scope.disposed {
+				root.renderPending(scope)
+			}
+		}
+	}
+	root.prepareRefs()
+	root.preparePortals()
+	root.preparePopovers()
+	root.finishReload()
+	root.revision++
+	root.awaiting = root.revision
+	batch := Batch{
+		Version: wireVersion, Revision: root.revision, InputSequence: root.inputSequence,
+		Mutations: root.mutations.take(), Commands: root.commands,
+	}
+	root.commands = nil
+	succeeded = true
+	return batch
+}
+
+func (root *Root) render(scope *Scope) {
+	if scope.node.view.fallback != nil && scope.failure == nil {
+		root.protect(scope, func() {
+			root.renderComponent(scope)
+		})
+		return
+	}
+	root.renderComponent(scope)
+}
+
+func (root *Root) renderComponent(scope *Scope) {
+	defer func() {
+		if value := recover(); value != nil {
+			panic(captureRenderFailure(value, scope))
+		}
+	}()
+	if root.observer != nil {
+		finish := root.observer.Render(scope)
+		if finish != nil {
+			defer finish()
+		}
+	}
+	scope.dirty = false
+	scope.reader.detach()
+	scope.renderVersion++
+	previousContext := scope.context
+	scope.context = nil
+	for _, key := range scope.effectOrder {
+		scope.effects[key].seen = false
+	}
+	previous := root.reading
+	previousTracking := root.tracking
+	root.reading = scope
+	root.tracking = scope.reader
+	var view View
+	func() {
+		defer func() {
+			root.reading = previous
+			root.tracking = previousTracking
+		}()
+		if scope.failure != nil {
+			view = scope.node.view.fallback(scope.failure)
+		} else {
+			view = scope.node.view.render(scope)
+		}
+	}()
+	scope.publishContext(previousContext)
+	retained := scope.effectOrder[:0]
+	for _, key := range scope.effectOrder {
+		current := scope.effects[key]
+		if current.seen {
+			retained = append(retained, key)
+		} else {
+			current.active = false
+			root.queueCleanup(current)
+			current.setup = nil
+			current.dependencies = nil
+			delete(scope.effects, key)
+		}
+	}
+	scope.effectOrder = retained
+	scope.node.children = root.reconcile(scope.node.id, scope.node.children, []View{view})
+}
+
+// Invalidate every owner before releasing any external resource. This also
+// handles partially mounted trees that are not yet reachable from root.node.
+func (root *Root) abort() {
+	root.closed = true
+	scopes := scopeOrder{}
+	for _, node := range root.nodes {
+		if node.scope != nil {
+			if root.observer != nil {
+				root.observer.Dispose(node.scope)
+			}
+			node.scope.disposed = true
+			node.scope.cancelTasks()
+			node.scope.releaseState()
+			node.scope.context = nil
+			scopes = append(scopes, node.scope)
+		}
+		root.unbindRef(node)
+		node.view = View{}
+		node.children = nil
+	}
+	sort.Sort(scopes)
+	for _, scope := range scopes {
+		scope.releaseEffects()
+	}
+	root.cancelTasks()
+	root.cleanups = append(root.cleanups, root.rootCleanups...)
+	root.rootCleanups = nil
+	root.mountSetups = nil
+	root.nodes = nil
+	root.node = nil
+	root.view = View{}
+	root.dirty = nil
+	root.effects = nil
+	root.mutations = mutationBuffer{}
+	root.awaiting = 0
+	root.tasks = nil
+	root.commands = nil
+	root.refChecks = nil
+	root.elementRequests = nil
+	root.popovers = nil
+	root.reload = nil
+	// Preserve the render/setup failure already unwinding through the caller.
+	root.runCleanups()
+}
+
+func (root *Root) Close() Batch {
+	if root.flushing || root.committing {
+		panic("ui: cannot close a rendering root")
+	}
+	if root.closed {
+		return Batch{Version: wireVersion, Revision: root.revision, InputSequence: root.inputSequence}
+	}
+	root.mutations = mutationBuffer{}
+	if root.node != nil {
+		root.remove(root.node)
+		root.node = nil
+	}
+	root.cancelTasks()
+	root.cleanups = append(root.cleanups, root.rootCleanups...)
+	root.rootCleanups = nil
+	root.mountSetups = nil
+	root.closed = true
+	root.awaiting = 0
+	root.dirty = nil
+	root.effects = nil
+	root.nodes = nil
+	root.view = View{}
+	root.refChecks = nil
+	root.elementRequests = nil
+	root.reload = nil
+	if root.mutations.length > 0 {
+		root.revision++
+	}
+	batch := Batch{
+		Version: wireVersion, Revision: root.revision, InputSequence: root.inputSequence,
+		Mutations: root.mutations.take(), Commands: root.commands,
+	}
+	root.commands = nil
+	if failure := root.runCleanups(); failure != nil {
+		panic(failure)
+	}
+	return batch
+}

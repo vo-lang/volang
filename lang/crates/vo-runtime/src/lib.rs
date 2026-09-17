@@ -36,7 +36,7 @@ pub mod ffi;
 pub mod builtins;
 
 mod dynamic_call_ic;
-pub use dynamic_call_ic::{alloc_ic_table, DynCallIC, DynamicCallTarget};
+pub use dynamic_call_ic::{alloc_ic_table, DynCallIC, DynCallICEntry, DynamicCallTarget};
 
 // Std-only modules
 #[cfg(feature = "std")]

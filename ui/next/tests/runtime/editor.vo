@@ -1,0 +1,66 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/web/editor"
+)
+
+func editorContracts() {
+	var source *ui.StringState
+	failure := ""
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		source = ui.String(scope, "source", "package main\n// 中文 <draft>")
+		control := ui.Element("textarea").Attr("data-name", "editor-source").Attr("name", "source").Attr("value", source.Get()).On("input", func(event ui.Event) {
+			source.Set(event.Value)
+		})
+		return editor.Enhance(control, editor.Options{
+			ID: "source",
+			OnError: func(message string) {
+				failure = message
+			},
+		})
+	}))
+	first := flush(root)
+	input := target(first, "editor-source")
+	widget := 0
+	for _, mutation := range first.Mutations {
+		if mutation.Op == "widget" {
+			widget = mutation.ID
+			require(mutation.Name == "code-editor" &&
+				mutation.Value == `{"version":1,"inputID":"source","language":"vo"}`, "editor duplicated its source or lost its configuration")
+		}
+	}
+	require(input > 0 && widget > 0 &&
+		strings.Contains(root.HTML(), "package main\n// 中文 &lt;draft&gt;"), "editor lost its native server-rendered fallback")
+	require(root.Dispatch(ui.Event{Kind: "input", Target: input, Sequence: 1, Value: "changed source"}), "editor native input rejected")
+	batch := flush(root)
+	require(source.Get() == "changed source", "editor input did not reach its existing binding")
+	for _, mutation := range batch.Mutations {
+		require(mutation.Op != "widget" && mutation.Op != "create", "editing source updated or recreated its optional widget")
+	}
+	require(root.Dispatch(ui.Event{
+		Kind: "@widget", Target: widget, Sequence: 2, Error: "library unavailable",
+	}), "editor fallback result rejected")
+	require(failure == "library unavailable" && source.Get() == "changed source", "editor failure damaged its source")
+	root.Close()
+	root = ui.NewRoot(editor.Enhance(ui.Element("textarea").DefaultValue("fallback"), editor.Options{
+		ID: "plain", Language: "plain",
+	}))
+	first = flush(root)
+	for _, mutation := range first.Mutations {
+		if mutation.Op == "widget" {
+			require(root.Dispatch(ui.Event{
+				Kind: "@widget", Target: mutation.ID, Sequence: 1, Error: "optional",
+			}), "optional editor failure escaped its boundary")
+		}
+	}
+	require(strings.Contains(root.HTML(), "fallback"), "optional editor error removed the fallback")
+	root.Close()
+	expectPanic(func() {
+		editor.Enhance(ui.Element("textarea"), editor.Options{})
+	}, "control ID")
+	expectPanic(func() {
+		editor.Enhance(ui.Element("textarea"), editor.Options{ID: "source", Language: "unknown"})
+	}, "language")
+}

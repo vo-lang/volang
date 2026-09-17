@@ -1,0 +1,70 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/collection"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var libraryType = ui.Define("interaction.VirtualLibrary")
+
+func libraryItems(count int) *collection.Items {
+	items := make([]collection.Item, count)
+	for index := range items {
+		items[index] = collection.Item{
+			Key: fmt.Sprint(index), Label: fmt.Sprintf("Note %06d", index + 1), Disabled: index == 1,
+		}
+	}
+	return collection.New(items)
+}
+
+func VirtualLibrary() ui.View {
+	return ui.Component(libraryType, func(scope *ui.Scope) ui.View {
+		items := ui.State(scope, "items", func() any {
+			return libraryItems(1000)
+		})
+		selected := ui.State(scope, "selected", func() any {
+			return []string{}
+		})
+		disabled := ui.Bool(scope, "disabled", false)
+		visible := ui.Bool(scope, "visible", true)
+		list := ui.Text("Library closed")
+		if visible.Get() {
+			list = kit.Listbox(kit.ListboxProps{
+				ID: "virtual-library", Label: "Your notes", Items: items.Get().(*collection.Items),
+				Selected: func() []string {
+					return selected.Get().([]string)
+				},
+				OnSelectionChange: func(keys []string) {
+					selected.Update(func(any) any {
+						return keys
+					})
+				},
+				Multiple: true, Disabled: disabled.Get(), Virtual: true, Height: 240, RowHeight: 40,
+				Overscan: 2, Hint: "Use the arrow keys to explore. Space selects a note.",
+			})
+		}
+		return ui.Element("section", ui.Element("h2", ui.Text("A library with room to grow")), list, ui.Element("button", ui.Text("Open the full library")).Attr("data-full-library", "").On("click", func(ui.Event) {
+			items.Update(func(any) any {
+				return libraryItems(100000)
+			})
+		}), ui.Element("button", ui.Text("Show selected notes")).Attr("data-filter-library", "").On("click", func(ui.Event) {
+			current := items.Get().(*collection.Items)
+			retained := []collection.Item{}
+			for _, key := range selected.Get().([]string) {
+				if index := current.Index(key); index >= 0 {
+					retained = append(retained, current.At(index))
+				}
+			}
+			items.Update(func(any) any {
+				return collection.New(retained)
+			})
+		}), ui.Element("button", ui.Text("Toggle library availability")).Attr("data-disable-library", "").On("click", func(ui.Event) {
+			disabled.Set(!disabled.Get())
+		}), ui.Element("button", ui.Text("Toggle library")).Attr("data-toggle-library", "").On("click", func(ui.Event) {
+			visible.Set(!visible.Get())
+		}), ui.Element("output", ui.Text(strings.Join(selected.Get().([]string), ","))).Attr("data-library-selected", "")).Class("card")
+	})
+}

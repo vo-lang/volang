@@ -1,0 +1,110 @@
+package collection
+
+import (
+	"math"
+)
+
+const maxWindowExtent = 8000000
+
+// An owned prefix-sum index. A measurement changes O(log n) fractional sums;
+// finding the visible row also takes O(log n), without scanning earlier rows.
+// Application/component ownership and native anchoring are separate concerns.
+type heightIndex struct {
+	heights []float64
+	sums []float64
+	total float64
+}
+
+func newHeightIndex(count int, estimate float64) *heightIndex {
+	if count < 0 || math.IsNaN(estimate) || math.IsInf(estimate, 0) || estimate < 1 ||
+		estimate > maxWindowExtent ||
+		float64(count) > maxWindowExtent / estimate {
+		panic("invalid height extent")
+	}
+	result := &heightIndex{
+		heights: make([]float64, count), sums: make([]float64, count + 1),
+		total: float64(count) * estimate,
+	}
+	for index := 1; index <= count; index++ {
+		result.heights[index - 1] = estimate
+		result.sums[index] = float64(index & -index) * estimate
+	}
+	return result
+}
+
+func (index *heightIndex) Set(row int, height float64) bool {
+	if row < 0 || row >= len(index.heights) || math.IsNaN(height) || math.IsInf(height, 0) ||
+		height < 1 ||
+		height > maxWindowExtent - index.total + index.heights[row] {
+		panic("invalid measured height")
+	}
+	delta := height - index.heights[row]
+	if delta == 0 {
+		return false
+	}
+	index.heights[row] = height
+	index.total += delta
+	for position := row + 1; position < len(index.sums); position += position & -position {
+		index.sums[position] += delta
+	}
+	return true
+}
+
+func (index *heightIndex) Offset(row int) float64 {
+	if row < 0 || row > len(index.heights) {
+		panic("invalid row")
+	}
+	sum := 0.0
+	for row > 0 {
+		sum += index.sums[row]
+		row -= row & -row
+	}
+	return sum
+}
+
+func (index *heightIndex) RowAt(position float64) int {
+	if math.IsNaN(position) || position <= 0 {
+		return 0
+	}
+	if position >= float64(index.total) {
+		return len(index.heights)
+	}
+	step := 1
+	for step <= len(index.heights) / 2 {
+		step *= 2
+	}
+	row, sum := 0, 0.0
+	for step > 0 {
+		next := row + step
+		if next < len(index.sums) && sum + index.sums[next] <= position + 0.0000001 {
+			row = next
+			sum += index.sums[next]
+		}
+		step /= 2
+	}
+	return row
+}
+
+func (index *heightIndex) Range(top float64, height int, overscan int) (int, int) {
+	if height < 1 || height > maxWindowExtent || overscan < 0 || overscan > 64 {
+		panic("invalid viewport")
+	}
+	if math.IsNaN(top) || top < 0 {
+		top = 0
+	}
+	last := index.total - float64(height)
+	if last < 0 {
+		last = 0
+	}
+	if top > float64(last) {
+		top = float64(last)
+	}
+	start, end := index.RowAt(top) - overscan, index.RowAt(top + float64(height)) + 1 + overscan
+	if start < 0 {
+		start = 0
+	}
+	if end > len(index.heights) {
+		end = len(index.heights)
+	}
+	return start, end
+}

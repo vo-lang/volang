@@ -918,7 +918,7 @@ pub fn analyze_file_set_with_current_module<R: Resolver, F: FileSystem>(
     local_root: impl Into<PathBuf>,
     current_module: Option<String>,
 ) -> Result<Project, AnalysisError> {
-    analyze_file_set_with_package_identity_inner(
+    prepare_file_set_analysis(
         file_set,
         resolver,
         local_fs,
@@ -926,7 +926,8 @@ pub fn analyze_file_set_with_current_module<R: Resolver, F: FileSystem>(
         current_module,
         None,
         FileSetAnalysisAuthority::project_module_root(),
-    )
+    )?
+    .check()
 }
 
 /// Analyze a compiler-synthesized ephemeral module whose captured `vo.mod`
@@ -942,6 +943,25 @@ pub fn analyze_file_set_with_synthesized_ephemeral_module<R: Resolver, F: FileSy
     local_root: impl Into<PathBuf>,
     current_module: String,
 ) -> Result<Project, AnalysisError> {
+    prepare_file_set_with_synthesized_ephemeral_module(
+        file_set,
+        resolver,
+        local_fs,
+        local_root,
+        current_module,
+    )?
+    .check()
+}
+
+/// Prepare a validated compiler-synthesized ephemeral module for checking or queries.
+/// The caller retains the same manifest validation obligation as the analysis API.
+pub fn prepare_file_set_with_synthesized_ephemeral_module<R: Resolver, F: FileSystem>(
+    file_set: FileSet,
+    resolver: R,
+    local_fs: F,
+    local_root: impl Into<PathBuf>,
+    current_module: String,
+) -> Result<PreparedAnalysis<R, F>, AnalysisError> {
     let identity = vo_module::identity::ModIdentity::parse(&current_module)
         .map_err(|error| AnalysisError::Import(error.to_string()))?;
     if !identity.is_local() {
@@ -949,7 +969,7 @@ pub fn analyze_file_set_with_synthesized_ephemeral_module<R: Resolver, F: FileSy
             "synthesized ephemeral analysis requires a local/* module identity".to_string(),
         ));
     }
-    analyze_file_set_with_package_identity_inner(
+    prepare_file_set_analysis(
         file_set,
         resolver,
         local_fs,
@@ -973,7 +993,54 @@ pub fn analyze_file_set_with_package_identity<R: Resolver, F: FileSystem>(
     current_module: Option<String>,
     current_package: Option<PackageIdentity>,
 ) -> Result<Project, AnalysisError> {
-    analyze_file_set_with_package_identity_inner(
+    prepare_file_set_analysis(
+        file_set,
+        resolver,
+        local_fs,
+        local_root,
+        current_module,
+        current_package,
+        FileSetAnalysisAuthority::explicit_project_package(),
+    )?
+    .check()
+}
+
+/// A captured source context with validated package and module authority.
+/// Both executable analysis and editor analysis consume this same context.
+/// Its fields remain private so callers cannot replace the validated resolver.
+pub struct PreparedAnalysis<R: Resolver, F: FileSystem> {
+    file_set: FileSet,
+    resolver: CurrentModuleResolver<R, F>,
+    identity: PackageIdentity,
+    root_extension: Option<vo_module::ext_manifest::ExtensionManifest>,
+}
+
+impl<R: Resolver, F: FileSystem> PreparedAnalysis<R, F> {
+    pub fn check(self) -> Result<Project, AnalysisError> {
+        crate::project::analyze_project_with_identity_and_extension(
+            self.file_set,
+            &self.resolver,
+            self.identity,
+            self.root_extension,
+        )
+    }
+
+    pub fn editor(self, revision: u64) -> Result<crate::editor::EditorSnapshot, AnalysisError> {
+        crate::editor::analyze(self.file_set, &self.resolver, self.identity, revision)
+    }
+}
+
+/// Prepare an explicit captured project for an executable check or editor snapshot.
+/// Uses the same authority validation as [`analyze_file_set_with_package_identity`].
+pub fn prepare_file_set_with_package_identity<R: Resolver, F: FileSystem>(
+    file_set: FileSet,
+    resolver: R,
+    local_fs: F,
+    local_root: impl Into<PathBuf>,
+    current_module: Option<String>,
+    current_package: Option<PackageIdentity>,
+) -> Result<PreparedAnalysis<R, F>, AnalysisError> {
+    prepare_file_set_analysis(
         file_set,
         resolver,
         local_fs,
@@ -1013,7 +1080,7 @@ impl FileSetAnalysisAuthority {
     }
 }
 
-fn analyze_file_set_with_package_identity_inner<R: Resolver, F: FileSystem>(
+fn prepare_file_set_analysis<R: Resolver, F: FileSystem>(
     file_set: FileSet,
     resolver: R,
     local_fs: F,
@@ -1021,7 +1088,7 @@ fn analyze_file_set_with_package_identity_inner<R: Resolver, F: FileSystem>(
     current_module: Option<String>,
     mut current_package: Option<PackageIdentity>,
     authority: FileSetAnalysisAuthority,
-) -> Result<Project, AnalysisError> {
+) -> Result<PreparedAnalysis<R, F>, AnalysisError> {
     let local_root = normalize_fs_path(&local_root.into());
     let root_metadata = if current_module.is_some() {
         find_module_metadata_in_fs(&local_fs, &local_root, authority.manifest_domain)
@@ -1086,23 +1153,13 @@ fn analyze_file_set_with_package_identity_inner<R: Resolver, F: FileSystem>(
         current_module,
         authority.manifest_domain,
     );
-    match current_package {
-        Some(identity) => crate::project::analyze_project_with_identity_and_extension(
-            file_set,
-            &resolver,
-            identity,
-            root_extension,
-        ),
-        // Absence is deliberate in this explicit API. Do not let archive,
-        // memory, or ad-hoc frontends inherit a host filesystem module merely
-        // because FileSet::root happens to live below one.
-        None => crate::project::analyze_project_with_identity_and_extension(
-            file_set,
-            &resolver,
-            PackageIdentity::ad_hoc(),
-            None,
-        ),
-    }
+    Ok(PreparedAnalysis {
+        file_set,
+        resolver,
+        // Explicit absence deliberately selects the isolated ad-hoc identity.
+        identity: current_package.unwrap_or_else(PackageIdentity::ad_hoc),
+        root_extension,
+    })
 }
 
 #[cfg(test)]

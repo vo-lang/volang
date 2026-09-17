@@ -4,7 +4,6 @@
 extern crate alloc;
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 
 use vo_runtime::bytecode::ModuleRuntimeMetadata;
 use vo_runtime::gc::{Gc, GcRef};
@@ -24,10 +23,19 @@ use crate::vm::helpers::{stack_get, stack_set};
 /// operation while preserving the bytecode aliasing contract.
 #[derive(Debug, Default)]
 pub struct MapScratch {
-    slots: Vec<u64>,
+    slots: crate::fiber_storage::AuxiliaryVec<u64>,
 }
 
 impl MapScratch {
+    pub(crate) fn new(budget: alloc::sync::Arc<crate::fiber::FiberStorageBudget>) -> Self {
+        Self {
+            slots: crate::fiber_storage::AuxiliaryVec::new(budget),
+        }
+    }
+    pub(crate) fn capacity_bytes(&self) -> usize {
+        self.slots.capacity() * 8
+    }
+
     #[inline]
     fn key_value(
         &mut self,
@@ -38,27 +46,21 @@ impl MapScratch {
             InstructionError::Memory(vo_runtime::gc::MemoryError::AllocationSizeOverflow)
         })?;
         if total > self.slots.len() {
-            self.slots
-                .try_reserve_exact(total - self.slots.len())
-                .map_err(|_| {
-                    InstructionError::Memory(vo_runtime::gc::MemoryError::SystemAllocationFailed)
-                })?;
+            self.slots.try_reserve_exact(total - self.slots.len())?;
         }
-        self.slots.resize(total, 0);
-        self.slots[..total].fill(0);
+        self.slots.resize_reserved(total, 0);
+        // MapSet fills both regions; MapGet fills its key and the runtime
+        // writes the complete value or zeros it on a miss. Reused slots need
+        // no preliminary clearing. New slots remain initialized by resize.
         Ok(self.slots[..total].split_at_mut(key_slots))
     }
 
     #[inline]
     fn key(&mut self, key_slots: usize) -> Result<&mut [u64], InstructionError> {
         if key_slots > self.slots.len() {
-            self.slots
-                .try_reserve_exact(key_slots - self.slots.len())
-                .map_err(|_| {
-                    InstructionError::Memory(vo_runtime::gc::MemoryError::SystemAllocationFailed)
-                })?;
+            self.slots.try_reserve_exact(key_slots - self.slots.len())?;
         }
-        self.slots.resize(key_slots, 0);
+        self.slots.resize_reserved(key_slots, 0);
         Ok(&mut self.slots[..key_slots])
     }
 }
@@ -533,6 +535,22 @@ mod tests {
             scratch_ptr,
             "steady-state map reads must retain the scratch allocation"
         );
+
+        // A miss following a hit must discard the old scratch value, including
+        // when the output aliases the new key input.
+        stack[2] = 404;
+        assert!(exec_map_get_with_layout_using_scratch(
+            stack.as_mut_ptr(),
+            0,
+            &inst,
+            &gc,
+            None,
+            (&[SlotType::Value], &[SlotType::Value], false),
+            &mut scratch,
+        )
+        .expect("missing map key"));
+        assert_eq!(stack[2], 0);
+        assert_eq!(scratch.slots.as_ptr(), scratch_ptr);
     }
 
     #[test]
@@ -700,7 +718,9 @@ mod tests {
             _pad: [0; 3],
             init_generation: 0,
             current_index: 0,
-            _reserved: [0; 4],
+            backing_ref: 0,
+            capacity: 0,
+            _reserved: [0; 2],
             map_ref: non_map as u64,
         };
         unsafe {

@@ -1,4 +1,4 @@
-routes = ["/", "/articles/wasm-aot", "/guides/concurrency", "/search", "/subscribe", "/offline"]
+routes = ["/", "/articles/wasm-vm", "/guides/concurrency", "/search", "/subscribe", "/offline"]
 
 [document]
 language = "en"

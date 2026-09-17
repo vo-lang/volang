@@ -1,5 +1,7 @@
 # WebAssembly AOT benchmark report
 
+> 2026-09-16：已决定移除 Core Wasm AOT。本文中的旧 AOT 测量保留为历史记录；当前 Web 执行和后续优化统一使用 Wasm VM，原生 JIT / Native AOT 继续保留。旧后端的源码引用对应删除前版本。
+
 Date: 2026-08-21 (CST)
 Host: macOS 26.5.2 (25F84), arm64
 Run ID: `1787279263-100588000-38624`

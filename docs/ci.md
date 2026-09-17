@@ -37,6 +37,11 @@ Each CI run follows the same chain:
    promotable artifact is hashed recursively and must match the exact bytes
    recorded by its producing job.
 
+Impact explanations use shared or unknown inputs directly when they already
+require all eligible tasks; redundant transitive capability paths are omitted.
+Task selection retains the complete impact graph. Plan generation and loading
+share the same 8 MiB limit, so an oversized plan fails before publication.
+
 Local processes can build plans for inspection. The official workflows record
 receipts only inside GitHub Actions from a clean tracked worktree. Site and
 release promotion accept bundles downloaded from the exact successful main CI
@@ -72,6 +77,13 @@ the typed result and completion digest, write `failure.json`, and cause a
 nonzero exit. Local dirty executions can
 produce diagnostic receipts, but cannot produce certifiable evidence. Bundles
 reject mixed GitHub run attempts and missing command or log records.
+
+Re-running a failed job can help diagnose a platform failure, but cannot combine
+its new attempt with earlier successful jobs into a certificate. For complete
+revalidation, start a new CI workflow run for the candidate ref (the manual
+workflow uses the full merge profile on a branch), or validate the next PR
+commit. Preserve the original failure artifacts; do not replace evidence to
+make a partial rerun certifiable.
 
 Rust test commands require a nonempty successful test set, independently of the
 process exit code. Failure records identify the command, owner through the task
@@ -118,9 +130,112 @@ Both Web profiles execute their ordered commands through `ci run`. The full
 profile retains all 31 semantic probes and tests the final Studio directory
 through the complete journey, startup, canary and offline lifecycle contracts.
 Image and precache budget results bind their measured artifacts, complete asset
-lists and consistent limits. `wasm-web-full` seals `target/ci/artifacts/site` in
-the same execution receipt. Site promotion verifies that producing task's artifact
-digest; no additional task infers success from the presence of a directory.
+lists and consistent limits. These compatibility checks use
+`target/ci/artifacts/legacy-studio`; they no longer produce the default site.
+The separate `ui-web-rewrite` task seals `target/ci/artifacts/site` in its own
+execution receipt. Site promotion verifies that producing task's artifact digest;
+no additional task infers success from the presence of a directory.
+
+The replacement desktop framework has three independent tasks:
+`ui-desktop-rewrite-linux`, `ui-desktop-rewrite-macos`, and
+`ui-desktop-rewrite-windows`. Pull requests select them through desktop source
+impact; merge and main include all three. They build the release compiler,
+execution-only Wasm runtime and optional Studio compiler, then a matching native
+SDK. The first Wasm build may install the exact binding tools selected from
+Cargo.lock; subsequent builds reuse them. SDK builds run offline after an
+explicit locked dependency fetch. Linux installs WebKitGTK 4.1/GTK 3 and executes
+system windows under Xvfb. Windows uses WebView2 and the compiler's MSVC discovery.
+
+Each task drives the public CLI through a relocated toolchain and independently
+relocated VM/JIT/Native AOT applications. The native runtime assertions prove JIT
+and AOT entry, including zero JIT compilation in AOT. The Studio driver separately
+checks all three native backends, offline documents, optional editor, compiler
+workers, cancellation, draft recovery and interactive previews. The aggregate
+rejects missing or duplicated scenarios, mixed platform/profile results and
+changed executable or bundle receipts. The development preview additionally
+checks ordinary and popup HTTP(S) navigation through a recording callback, then
+continues real application interaction; CI never opens an external browser.
+macOS has 52 delivery assertions plus 36 Studio assertions; Linux/Windows have
+49 plus 36, with no macOS plist checks. Six delivery assertions package and run persistent storage across reopening,
+relocation and a second application identity. Four delivery assertions cover building
+that preview and bytecode, then its VM and JIT window contracts.
+These are system WebView DOM assertions; physical input, paint, IME and assistive
+technology acceptance remain separately tracked.
+
+The final result is `target/ci/results/ui-desktop-rewrite.json`. Each task keeps
+its raw reports and SDK under `target/ci/artifacts/ui-desktop-rewrite`; successful
+uploads include both reports and `desktop-sdk.tar.gz`, whose `sdk/` directory
+preserves native executable permissions. Failures retain the process logs and
+partial reports. `VO_UI_DESKTOP_SDK` selects an SDK for checkout-only drivers;
+packaged tools always use their inventoried SDK. CI owns its SDK output directory
+and archives earlier attempts before rebuilding it. These preview tasks retain
+separate identities from the previous native product's compatibility checks.
+
+The experimental Web rewrite runs as `ui-web-rewrite` in the independent
+`ui_web_preview` job. Pull requests select it through source impact; merge and
+main profiles include it. Its declared prerequisites build the JIT-enabled native
+compiler in the release profile, isolated browser compiler, execution-only Wasm VM
+from locked source. The default browser package is built separately for legacy
+compatibility probes. The job installs the locked Playwright versions of Chromium,
+Firefox and WebKit.
+
+`node eng/ui-next/ci.mjs` executes the bounded core gate after those prerequisites
+are available: all top-level Node unit contracts, native VM/JIT contracts, fresh
+application images and three browser matrices, the relocated native CLI's three
+public templates and optional editor, source reload and compile-cache recovery,
+and a fresh Studio distribution with compressed delivery and offline workers.
+The locked VS Code authoring dependencies build a self-contained VSIX in each
+portable toolchain. Its packaging contract checks reproducibility, and the moved
+CLI's LSP session checks completion, UI source definitions, Unicode positions,
+type errors, successful warnings and captured standard-library sources against a
+real generated project. These receipts bind the native compiler digest. Actual
+VS Code host checks run separately with `npm --prefix ui/editors/vscode test`;
+their platform coverage is reported independently from browser coverage.
+The public host contract packs `vo-web` using its normal prepack hook and installs
+the archive offline in an independent consumer. Strict TypeScript resolution,
+browser bundling and 12 browser cases cover both VM distributions,
+SSR/client rendering, simultaneous roots, provider cleanup and remounting.
+Archive contents, fixture images, source inputs and browser versions are bound
+to the receipt; incomplete runtime coverage fails aggregation. Packaging uses
+a fresh staging directory so an earlier local prepack cannot hide missing assets.
+The mount boundary also checks queued SSR actions throughout artifact/runtime
+loading, repeated root ownership, failed startup/retry and native form resets.
+The portable-toolchain regression extracts both complete guide applications from
+the delivered toolkit; migration tests queue input and Save before activation.
+
+It then exports the static Studio, relocates it outside the checkout, and checks
+all three engines and both backends, including direct pages, hydration, browser
+compilation, the optional editor and project recovery. Static evidence is bound
+to the exact native distribution that produced its pages. The upgrade check
+keeps the previous Studio worker and an unsaved tab alive across an atomic local
+deployment. All three engines must preserve project files, drafts and unrelated
+caches/registrations, retire the owned cache, follow old URLs and recover from a
+failed VM startup. Its receipt binds the previous-worker fixture and exported
+site; partial upgrade coverage fails aggregation. The core command uses
+`VO_TEST_PROFILE=release` to select the tested native CLI and packaged executable.
+The broader `node eng/ui-next/cli.mjs check` also runs specialized project and
+server scenarios; those additional drivers are not implied by the core receipt.
+
+The aggregate rejects partial backend coverage and mismatched application,
+Studio or toolchain inventories. The browser compiler/runtime JavaScript and Wasm
+files are bound to the application build, checked before and after each browser
+matrix, and matched to the delivered Studio files. It copies raw reports to
+`target/ci/artifacts/ui-web-rewrite/reports`, records
+`target/ci/results/ui-web-rewrite.json`, and packages the verified tools as
+`target/ci/artifacts/ui-web-rewrite-toolchain.tar.gz`. Tar preserves the native
+compiler's executable mode. The verified static site is archived separately as
+`target/ci/artifacts/ui-web-rewrite-studio-static.tar.gz`; its extracted root is
+ready for an origin-root directory-index host. Per-step logs remain under `target/ui-next/ci` and
+are uploaded on failure. The following site staging command preserves every
+static application byte and its build report, adds domain metadata, and writes
+`target/ci/artifacts/site`. A separate check verifies its complete inventory,
+deployment budgets and served application files before and after the shared
+Gallery/Docs/Playground journey on the Web VM. Its result is
+`target/ci/results/ui-web-site/report.json`; it belongs to the same task receipt.
+
+These artifacts retain experimental status: this gate does not establish a
+formal performance baseline, device/assistive-technology acceptance or product
+certification. Hosted Linux evidence is separate from local macOS execution.
 
 Native UI tasks retain eight real window scenarios on each full platform and
 two Linux smoke scenarios, alongside Rust contracts and VM/JIT differentials.
@@ -166,6 +281,12 @@ The debug profile optimizes the SHA-256 helper with debug assertions and overflo
 checks enabled. Debug executable receipts can cover hundreds of megabytes, so
 verification must remain practical on CPUs without SHA instruction acceleration;
 the compiler, runtime and test runner retain their debug profiles.
+Pull-request and merge Native AOT smoke checks use the same release-profile
+command, matching the nightly AOT lanes. Pull requests retain a separate debug
+VM/JIT/GC/compile smoke command and require both result receipts.
+Large imported packages otherwise spend most of their case deadline
+in unoptimized native code generation; the deadline and VM differential remain
+unchanged. Debug AOT execution remains available through `vo-dev test run`.
 Differential failures retain the logs and executable digest. The case deadline includes
 both build and execution, and process-group cleanup also terminates descendants.
 Successful program output is compared with the matching VM case when present.
@@ -262,14 +383,18 @@ produces the Studio Pages candidate. Superseded pull requests are cancelled;
 immutable branch candidates and Nightly runs retain their execution. Rust compilation uses the GitHub sccache backend; dependency caches
 contain downloads only and never serve as test evidence.
 
-The Studio candidate has independent raw, gzip, Brotli, and total-precache size
-budgets. The raw AOT limit protects browser decode/compile cost; the compressed
-limits protect first-load transfer cost. Browser smoke also enforces startup
-timing, so a size-compliant image cannot silently regress into a slow product.
+The new Studio candidate has independent raw and delivered gzip/Brotli limits
+for the VM application, execution runtime and optional browser
+compiler, plus a complete directory size limit. The policy is owned by
+`eng/ui-next/studio-site-budgets.mjs` and measures the actual gzip-6/Brotli-4
+siblings. Missing representations fail verification. These are size regression
+guards, separate from the unresolved interaction budgets documented in
+[the framework performance report](../ui/next/performance.md). The previous
+Studio's precache and image budgets remain in its compatibility task.
 
 ### Nightly
 
-`.github/workflows/nightly.yml` runs release-mode native and Wasm/Wasm-AOT
+`.github/workflows/nightly.yml` runs release-mode native and Wasm VM
 language matrices, GC/JIT/OSR/scheduler stress selections, macOS and Windows
 workspace tests, bounded protocol fuzzing, and Rust/npm audits. It emits and
 certifies the same task receipts as CI. The macOS task also runs the repository
@@ -286,13 +411,22 @@ checkout.
 
 `.github/workflows/site.yml` starts only after a successful `main` CI run, or
 from an explicitly selected successful main run. It downloads that run's
-certification and Studio candidate, verifies the commit and recursive artifact
-digest, rechecks deployment budgets, and uploads those exact bytes to Pages.
+certification and Studio candidate, verifies the commit and the recursive
+`ui-web-rewrite` artifact digest, rechecks deployment budgets, and uploads those
+exact bytes to Pages, including hidden hosting files.
 It performs no compiler, runtime, or application rebuild.
 
-After deployment, the pinned Playwright canary verifies public asset bytes against
-the certified directory and exercises project creation, editing, execution, saving
-and reopen persistence. The Pages environment remains the deployment authority.
+Before and after deployment, `studio-site-cli.mjs check` uses pinned Chromium
+to exercise Gallery, Docs and Playground with Wasm VM. It compares every
+served application file against the certified directory around the journey.
+CNAME and `.nojekyll` remain bound locally; HTTP availability is not required
+for these hosting metadata files. Cancellation joins requests and closes the
+browser and local server. Reports stay outside the candidate directory.
+
+The Pages environment remains the deployment authority, and superseded main
+candidates cannot deploy. For Actions-based Pages publishing, domain settings
+are owned by the repository's Pages configuration; CNAME alone does not change
+them ([GitHub domain documentation](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site)).
 
 ### Release
 
@@ -304,7 +438,7 @@ main reachability, protected release policy, and the exact successful main CI
 bundle. That bundle must contain full Web, Linux, macOS, and Windows UI
 evidence.
 
-The browser VM/Core Wasm runtime is built once and shared by every target job.
+The browser VM runtime is built once and shared by every target job.
 Target jobs build and smoke-test Linux x64/arm64, macOS x64/arm64, and Windows
 x64 archives. Each archive provenance record binds the product-certified CI
 bundle digest and commit. Inside the protected `release` job, publication
@@ -312,6 +446,34 @@ re-verifies all archives and the bundle, creates GitHub build-provenance
 attestations, and verifies each archive's signed source commit, workflow commit,
 main ref and hosted runner identity before publishing. Signed bundles and
 verification results are retained even when a later publication step fails.
+
+The native archives also carry the complete experimental Web project toolkit at
+`share/volang/ui-next`. Each target packages its own locked Node dependencies and
+matching CLI; the shared build supplies the separate execution-only Wasm runtime.
+Build receipts and archive provenance use schema 8 / `tar+gzip-v5`, recording every
+toolkit file's size, digest and normalized executable mode. The copied toolkit
+compiler must match the top-level CLI byte for byte. Keeping the standalone
+toolkit layout makes relocation and verification use the same implementation;
+it currently includes a second copy of that CLI. The compatibility runtime stays
+in `share/volang/ui-web`, and its existing certification remains separate from
+the experimental replacement's status.
+
+Every target job extracts its actual archive, resolves the project tools through
+the installed `vo`, verifies the inventory, creates a fresh project and runs its
+Chromium VM browser tests. Node.js 24 and the pinned browser dependencies are
+installed explicitly. Archive publication still follows the protected workflow
+above; adding toolkit contents does not confer new platform or product certification.
+
+For a local archive rehearsal after the complete UI gate, build the native static
+runtimes and use the verified `target/ui-next/ci/toolchain`. The explicit ignored
+test `release_archive::installation::local_installation_archive` reads absolute
+`VO_RELEASE_UI_TOOLCHAIN` and a new `VO_RELEASE_INSTALL_PROBE` output directory.
+Run it with `cargo test -p vo-dev --locked` and
+`-- --ignored --exact --nocapture`. It uses the production archive writer and
+verifier, then retains the extracted installation and per-input digests. Exercise
+that installation with `vo ui verify`, `vo ui create`, and `vo ui test --project`
+outside the checkout, with `VO_UI_TOOLCHAIN` unset. This local rehearsal neither
+publishes assets nor substitutes for a clean candidate and hosted platform CI.
 
 Manual dispatch rehearses the same five targets using a successful full CI run
 for the exact selected branch commit. `release candidate metadata|matrix|build|package|verify`
@@ -371,7 +533,7 @@ cargo run -q -p vo-dev --locked -- test run \
 cargo run -q -p vo-dev --locked -- test run \
   --suite lang --targets native,gc,embed,compile --shard 1/2
 cargo run -q -p vo-dev --locked -- test run \
-  --suite lang --targets wasm,wasm-aot --release
+  --suite lang --targets wasm,wasm --release
 ```
 
 Web checks use the locked npm workspace:
@@ -469,4 +631,4 @@ checks that the domain host matches the producing task runner.
 
 Resource groups reserve case groups within each plan without occupying workers
 waiting for busy resources. Native AOT retains its independent two-linker bound;
-Wasm VM and AOT retain bounded worker pools. No automatic test retries are added.
+Wasm VM retains a bounded worker pool. No automatic test retries are added.

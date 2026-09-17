@@ -197,6 +197,14 @@ trait CompileInputCaptureSink {
         path: PathBuf,
         bytes: Vec<u8>,
     ) -> io::Result<CapturedInput<'a>>;
+
+    fn insert_tree_file<'a>(
+        &'a mut self,
+        root: &Path,
+        file: CapturedTreeFile,
+    ) -> io::Result<CapturedInput<'a>> {
+        self.insert_consistent(root.join(file.relative), file.bytes)
+    }
 }
 
 struct CapturedInput<'a> {
@@ -235,6 +243,22 @@ impl CompileInputCaptureSink for CompileInputSnapshot {
     ) -> io::Result<CapturedInput<'a>> {
         self.record_host_parent_directory_identity(&path)?;
         let bytes = CompileInputSnapshot::insert_consistent(self, path, bytes)?;
+        Ok(CapturedInput {
+            digest: Sha256::digest(bytes).into(),
+            bytes: Cow::Borrowed(bytes),
+        })
+    }
+
+    fn insert_tree_file<'a>(
+        &'a mut self,
+        root: &Path,
+        file: CapturedTreeFile,
+    ) -> io::Result<CapturedInput<'a>> {
+        let path = root.join(file.relative);
+        if let Some(parent) = path.parent() {
+            self.record_directory_identity(parent, &file.parent_identity)?;
+        }
+        let bytes = CompileInputSnapshot::insert_consistent(self, path, file.bytes)?;
         Ok(CapturedInput {
             digest: Sha256::digest(bytes).into(),
             bytes: Cow::Borrowed(bytes),
@@ -340,6 +364,11 @@ impl CompileInputCaptureSink for FingerprintCaptureSink {
 
 pub(super) fn compile_cache_slot(root: &Path, single_file: Option<&OsStr>) -> CompileCacheSlot {
     let mut slot_hasher = StableHasher::new(COMPILE_CACHE_SLOT_NAMESPACE);
+    // Several projects can share the repository-local cache directory. Their
+    // generation limits belong to independent source entries, including when
+    // every project is entered as a directory or through a file named main.vo.
+    // The compile context has already resolved the source root's host identity.
+    slot_hasher.update_path("source_root", root);
     if let Some(file_name) = single_file {
         slot_hasher.update_str("entry_kind", "file");
         slot_hasher.update_path("entry_name", Path::new(file_name));
@@ -475,18 +504,22 @@ fn classify_compile_input_error(error: CompileError) -> CompileError {
 fn capture_compile_inputs_once(
     input: CompileInputCapture<'_>,
 ) -> Result<CapturedCompileInputs, CompileError> {
-    let mut snapshot = CompileInputSnapshot::default();
-    let fingerprint = capture_compile_inputs_into(input, &mut snapshot)?;
-    Ok(CapturedCompileInputs {
-        fingerprint,
-        snapshot: Arc::new(snapshot),
+    vo_common::compiler_phase!(InputCapture, {
+        let mut snapshot = CompileInputSnapshot::default();
+        let fingerprint = capture_compile_inputs_into(input, &mut snapshot)?;
+        Ok(CapturedCompileInputs {
+            fingerprint,
+            snapshot: Arc::new(snapshot),
+        })
     })
 }
 
 fn capture_compile_input_fingerprint_once(
     input: CompileInputCapture<'_>,
 ) -> Result<String, CompileError> {
-    capture_compile_inputs_into(input, &mut FingerprintCaptureSink::default())
+    vo_common::compiler_phase!(InputFingerprint, {
+        capture_compile_inputs_into(input, &mut FingerprintCaptureSink::default())
+    })
 }
 
 fn capture_compile_inputs_into<S: CompileInputCaptureSink>(
@@ -855,8 +888,8 @@ fn capture_compile_input_tree_with_exclusions<S: CompileInputCaptureSink>(
             }
             captured_manifests.insert(file.relative.clone(), digest);
         }
-        let bytes = sink.insert_consistent(root.join(&file.relative), file.bytes)?;
         hasher.update_path("file_path", &file.relative);
+        let bytes = sink.insert_tree_file(root, file)?;
         bytes.hash(hasher, "file_digest");
         Ok(())
     };
@@ -923,6 +956,7 @@ fn is_deferred_native_path_entry(
 struct CapturedTreeFile {
     relative: PathBuf,
     bytes: Vec<u8>,
+    parent_identity: HostEntryIdentity,
 }
 
 fn compile_input_capture_limit_error(root: &Path) -> CompileError {
@@ -1238,8 +1272,8 @@ fn capture_locked_module_inputs<S: CompileInputCaptureSink>(
         let remaining_files = sink.remaining_files();
         let remaining_bytes = sink.remaining_bytes();
         let mut capture = |file: CapturedTreeFile| {
-            let bytes = sink.insert_consistent(root.join(&file.relative), file.bytes)?;
             hasher.update_path("locked_file_path", &file.relative);
+            let bytes = sink.insert_tree_file(&root, file)?;
             bytes.hash(hasher, "locked_file_digest");
             Ok(())
         };
@@ -1466,6 +1500,7 @@ where
 {
     let directory = enter_compile_input_directory(walk, dir, depth, "locked module", directory)?;
     let directory_identity = directory.identity.clone();
+    let directory_generation = directory.generation.clone();
     let directory_capability = directory.capability.clone();
     let result = (|| {
         let entries = directory.entries;
@@ -1547,9 +1582,11 @@ where
                 capture(CapturedTreeFile {
                     relative: rel,
                     bytes,
+                    parent_identity: directory_identity.clone(),
                 })?;
             }
         }
+        super::host_input::validate_captured_directory_path(dir, &directory_generation)?;
         Ok(())
     })();
     walk.ancestors.remove(&directory_identity);
@@ -1722,6 +1759,7 @@ where
 {
     let directory = enter_compile_input_directory(walk, dir, depth, "compile input", directory)?;
     let directory_identity = directory.identity.clone();
+    let directory_generation = directory.generation.clone();
     let directory_capability = directory.capability.clone();
     let result = (|| {
         let entries = directory.entries;
@@ -1804,8 +1842,10 @@ where
             capture(CapturedTreeFile {
                 relative: path.strip_prefix(root).unwrap_or(&path).to_path_buf(),
                 bytes,
+                parent_identity: directory_identity.clone(),
             })?;
         }
+        super::host_input::validate_captured_directory_path(dir, &directory_generation)?;
         Ok(())
     })();
     walk.ancestors.remove(&directory_identity);
@@ -2034,23 +2074,25 @@ pub(super) fn try_load_cache_with_options(
     fingerprint: &str,
     _workspace_options: &ProjectContextOptions,
 ) -> Option<CompileOutput> {
-    let entry = compile_cache_entry(slot, fingerprint);
-    if !entry.dir.is_dir() {
-        return None;
-    }
-
-    match load_compile_cache_entry(&entry, source_root, fingerprint) {
-        Ok(output) => Some(output),
-        Err(CacheEntryLoadError::Corrupt) => {
-            // A published entry is immutable. Any malformed payload therefore
-            // represents a crashed/foreign write or disk corruption. Removing
-            // it lets the fallback compile publish one coherent replacement
-            // generation. Native provenance is checked against the frozen
-            // compile closure by the caller before any cached spec is used.
-            let _ = fs::remove_dir_all(&entry.dir);
-            None
+    vo_common::compiler_phase!(CacheLookup, {
+        let entry = compile_cache_entry(slot, fingerprint);
+        if !entry.dir.is_dir() {
+            return None;
         }
-    }
+
+        match load_compile_cache_entry(&entry, source_root, fingerprint) {
+            Ok(output) => Some(output),
+            Err(CacheEntryLoadError::Corrupt) => {
+                // A published entry is immutable. Any malformed payload therefore
+                // represents a crashed/foreign write or disk corruption. Removing
+                // it lets the fallback compile publish one coherent replacement
+                // generation. Native provenance is checked against the frozen
+                // compile closure by the caller before any cached spec is used.
+                let _ = fs::remove_dir_all(&entry.dir);
+                None
+            }
+        }
+    })
 }
 
 pub(super) fn discard_compile_cache_entry(slot: &CompileCacheSlot, fingerprint: &str) {
@@ -2104,10 +2146,14 @@ fn load_compile_cache_entry(
         return Err(CacheEntryLoadError::Corrupt);
     }
 
-    let module = Module::deserialize(&module_bytes).map_err(|_| CacheEntryLoadError::Corrupt)?;
-    let module = vo_common_core::verifier::verify_loaded_module(module)
-        .map(Arc::new)
+    let module = vo_common::compiler_phase!(BytecodeDecode, Module::deserialize(&module_bytes))
         .map_err(|_| CacheEntryLoadError::Corrupt)?;
+    let module = vo_common::compiler_phase!(
+        Verification,
+        vo_common_core::verifier::verify_loaded_module(module)
+    )
+    .map(Arc::new)
+    .map_err(|_| CacheEntryLoadError::Corrupt)?;
     let extensions =
         deserialize_extensions(&extensions_bytes).ok_or(CacheEntryLoadError::Corrupt)?;
     let locked_modules =
@@ -2138,74 +2184,76 @@ pub(super) fn save_compile_cache(
     fingerprint: &str,
     output: &CompileOutput,
 ) {
-    let Ok(module_bytes) = output.module.serialize() else {
-        return;
-    };
-    let Ok(extensions_bytes) = serialize_extensions(&output.extensions) else {
-        return;
-    };
-    let Ok(locked_modules_bytes) = serde_json::to_vec(&output.locked_modules) else {
-        return;
-    };
-    if module_bytes.len() > vo_common_core::serialize::MAX_VOB_BYTES
-        || extensions_bytes.len() > COMPILE_CACHE_EXTENSIONS_MAX_BYTES
-        || locked_modules_bytes.len() > COMPILE_CACHE_LOCKED_MODULES_MAX_BYTES
-    {
-        return;
-    }
-    let manifest = CompileCacheEntryManifest {
-        format_version: COMPILE_CACHE_ENTRY_FORMAT_VERSION,
-        fingerprint: fingerprint.to_string(),
-        module_digest: payload_digest(&module_bytes),
-        extensions_digest: payload_digest(&extensions_bytes),
-        locked_modules_digest: payload_digest(&locked_modules_bytes),
-    };
-    let Ok(manifest_bytes) = serde_json::to_vec(&manifest) else {
-        return;
-    };
-    if manifest_bytes.len() > COMPILE_CACHE_MANIFEST_MAX_BYTES {
-        return;
-    }
-
-    let entry = compile_cache_entry(slot, fingerprint);
-    let Some(entries_root) = entry.dir.parent() else {
-        return;
-    };
-    if fs::create_dir_all(entries_root).is_err() {
-        return;
-    }
-    if entry.dir.is_dir() {
-        maintain_cache_slot(entries_root, &entry.dir);
-        record_test_fingerprint(slot, fingerprint);
-        return;
-    }
-
-    let Ok(pending) = PendingCacheDir::create(entries_root) else {
-        return;
-    };
-    let pending_entry = cache_entry_at(pending.path.clone());
-    let complete = write_synced(&pending_entry.module_file, &module_bytes)
-        .and_then(|()| write_synced(&pending_entry.extensions_file, &extensions_bytes))
-        .and_then(|()| write_synced(&pending_entry.locked_modules_file, &locked_modules_bytes))
-        .and_then(|()| write_synced(&pending_entry.manifest_file, &manifest_bytes))
-        .and_then(|()| sync_directory(&pending_entry.dir));
-    if complete.is_err() {
-        return;
-    }
-
-    let published = match fs::rename(&pending_entry.dir, &entry.dir) {
-        Ok(()) => {
-            let _ = sync_directory(entries_root);
-            true
+    vo_common::compiler_phase!(CachePublish, {
+        let Ok(module_bytes) = output.module.serialize() else {
+            return;
+        };
+        let Ok(extensions_bytes) = serialize_extensions(&output.extensions) else {
+            return;
+        };
+        let Ok(locked_modules_bytes) = serde_json::to_vec(&output.locked_modules) else {
+            return;
+        };
+        if module_bytes.len() > vo_common_core::serialize::MAX_VOB_BYTES
+            || extensions_bytes.len() > COMPILE_CACHE_EXTENSIONS_MAX_BYTES
+            || locked_modules_bytes.len() > COMPILE_CACHE_LOCKED_MODULES_MAX_BYTES
+        {
+            return;
         }
-        // Another compiler may have atomically published this exact content
-        // identity first. Its immutable entry is equally valid.
-        Err(_) => entry.dir.is_dir(),
-    };
-    if published {
-        maintain_cache_slot(entries_root, &entry.dir);
-        record_test_fingerprint(slot, fingerprint);
-    }
+        let manifest = CompileCacheEntryManifest {
+            format_version: COMPILE_CACHE_ENTRY_FORMAT_VERSION,
+            fingerprint: fingerprint.to_string(),
+            module_digest: payload_digest(&module_bytes),
+            extensions_digest: payload_digest(&extensions_bytes),
+            locked_modules_digest: payload_digest(&locked_modules_bytes),
+        };
+        let Ok(manifest_bytes) = serde_json::to_vec(&manifest) else {
+            return;
+        };
+        if manifest_bytes.len() > COMPILE_CACHE_MANIFEST_MAX_BYTES {
+            return;
+        }
+
+        let entry = compile_cache_entry(slot, fingerprint);
+        let Some(entries_root) = entry.dir.parent() else {
+            return;
+        };
+        if fs::create_dir_all(entries_root).is_err() {
+            return;
+        }
+        if entry.dir.is_dir() {
+            maintain_cache_slot(entries_root, &entry.dir);
+            record_test_fingerprint(slot, fingerprint);
+            return;
+        }
+
+        let Ok(pending) = PendingCacheDir::create(entries_root) else {
+            return;
+        };
+        let pending_entry = cache_entry_at(pending.path.clone());
+        let complete = write_synced(&pending_entry.module_file, &module_bytes)
+            .and_then(|()| write_synced(&pending_entry.extensions_file, &extensions_bytes))
+            .and_then(|()| write_synced(&pending_entry.locked_modules_file, &locked_modules_bytes))
+            .and_then(|()| write_synced(&pending_entry.manifest_file, &manifest_bytes))
+            .and_then(|()| sync_directory(&pending_entry.dir));
+        if complete.is_err() {
+            return;
+        }
+
+        let published = match fs::rename(&pending_entry.dir, &entry.dir) {
+            Ok(()) => {
+                let _ = sync_directory(entries_root);
+                true
+            }
+            // Another compiler may have atomically published this exact content
+            // identity first. Its immutable entry is equally valid.
+            Err(_) => entry.dir.is_dir(),
+        };
+        if published {
+            maintain_cache_slot(entries_root, &entry.dir);
+            record_test_fingerprint(slot, fingerprint);
+        }
+    })
 }
 
 fn maintain_cache_slot(entries_root: &Path, current_entry: &Path) {
@@ -3022,6 +3070,35 @@ mod tests {
     }
 
     #[test]
+    fn sibling_projects_keep_independent_cache_generations_in_one_repository() {
+        let fixture = temp_cache_slot("project-retention");
+        fs::create_dir_all(fixture.dir.join("eng")).expect("create repository marker");
+        fs::write(fixture.dir.join("Cargo.toml"), "[workspace]\n")
+            .expect("write repository marker");
+        let mut saved = Vec::new();
+        for index in 0..(COMPILE_CACHE_MAX_ENTRIES_PER_SLOT + 2) {
+            let source_root = fixture.dir.join(format!("project-{index}"));
+            fs::create_dir(&source_root).expect("create project");
+            let output = crate::compile_source_at("package main\nfunc main() {}\n", &source_root)
+                .expect("compile project fixture");
+            for entry in [None, Some(OsStr::new("main.vo"))] {
+                let slot = compile_cache_slot(&source_root, entry);
+                assert!(slot.dir.starts_with(fixture.dir.join(".volang")));
+                let fingerprint = format!("project-{index}");
+                save_compile_cache(&slot, &fingerprint, &output);
+                saved.push((slot, source_root.clone(), fingerprint));
+            }
+        }
+        for (slot, source_root, fingerprint) in saved {
+            assert!(
+                try_load_cache(&slot, &source_root, &fingerprint).is_some(),
+                "compiling sibling projects must preserve {fingerprint}"
+            );
+        }
+        fs::remove_dir_all(&fixture.dir).expect("remove repository fixture");
+    }
+
+    #[test]
     fn stdlib_source_identity_participates_in_compile_cache_fingerprint() {
         let slot = temp_cache_slot("stdlib-fingerprint");
         let project_root = slot.dir.join("project");
@@ -3436,6 +3513,137 @@ mod tests {
         assert_ne!(fingerprint(&source_root), fingerprint(&project_root));
 
         let _ = fs::remove_dir_all(&slot.dir);
+    }
+
+    #[test]
+    fn tree_capture_retains_the_pinned_parent_identity_for_every_file() {
+        use vo_common::vfs::FileSystem;
+        let slot = temp_cache_slot("tree-parent-identity");
+        let root = slot.dir.join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("first.vo"), "package sample\n").unwrap();
+        fs::write(root.join("second.vo"), "package sample\n").unwrap();
+        let directory = super::super::host_input::read_stable_directory(&root, 10).unwrap();
+        let expected = directory.identity.clone();
+        let mut snapshot = CompileInputSnapshot::default();
+        let mut count = 0;
+        let mut capture = |file: CapturedTreeFile| {
+            assert_eq!(file.parent_identity, expected);
+            snapshot.insert_tree_file(&root, file)?;
+            count += 1;
+            Ok(())
+        };
+        collect_compile_input_files_matching(
+            &root,
+            &root,
+            directory,
+            &mut capture,
+            is_module_compile_input_file,
+            10,
+        )
+        .unwrap();
+        assert_eq!(count, 2);
+        let mut encoded = expected.volume.to_le_bytes().to_vec();
+        encoded.extend_from_slice(&expected.file);
+        assert_eq!(
+            snapshot.opaque_directory_identity(&root).unwrap(),
+            Some(encoded)
+        );
+        fs::remove_dir_all(slot.dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_capture_rejects_parent_replacement_during_the_pinned_read() {
+        for locked in [false, true] {
+            let slot = temp_cache_slot(if locked {
+                "locked-tree-move"
+            } else {
+                "tree-move"
+            });
+            let root = slot.dir.join("project");
+            fs::create_dir_all(&root).unwrap();
+            for name in ["first.vo", "second.vo"] {
+                fs::write(root.join(name), "package sample\n").unwrap();
+            }
+            let directory = super::super::host_input::read_stable_directory(&root, 10).unwrap();
+            let mut moved = false;
+            let mut snapshot = CompileInputSnapshot::default();
+            let mut capture = |file: CapturedTreeFile| {
+                snapshot.insert_tree_file(&root, file)?;
+                if !moved {
+                    fs::rename(&root, slot.dir.join("previous")).unwrap();
+                    fs::create_dir(&root).unwrap();
+                    for name in ["first.vo", "second.vo"] {
+                        fs::write(root.join(name), "package sample\n").unwrap();
+                    }
+                    moved = true;
+                }
+                Ok(())
+            };
+            let result = if locked {
+                collect_locked_module_input_files(
+                    &root,
+                    &root,
+                    directory,
+                    &BTreeSet::new(),
+                    &mut capture,
+                    10,
+                    4096,
+                )
+            } else {
+                collect_compile_input_files_matching(
+                    &root,
+                    &root,
+                    directory,
+                    &mut capture,
+                    is_module_compile_input_file,
+                    10,
+                )
+                .map(|_| ())
+            };
+            assert!(moved, "the callback must run inside the pinned walk");
+            assert!(
+                result.is_err(),
+                "replacement with identical bytes must fail"
+            );
+            fs::remove_dir_all(slot.dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn tree_capture_rejects_conflicting_observed_parent_identities() {
+        let slot = temp_cache_slot("tree-parent-conflict");
+        let first = slot.dir.join("first");
+        let second = slot.dir.join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let a = super::super::host_input::read_stable_directory(&first, 10).unwrap();
+        let b = super::super::host_input::read_stable_directory(&second, 10).unwrap();
+        let mut snapshot = CompileInputSnapshot::default();
+        snapshot
+            .insert_tree_file(
+                &first,
+                CapturedTreeFile {
+                    relative: "main.vo".into(),
+                    bytes: b"package main\n".to_vec(),
+                    parent_identity: a.identity,
+                },
+            )
+            .unwrap();
+        let error = snapshot
+            .insert_tree_file(
+                &first,
+                CapturedTreeFile {
+                    relative: "main.vo".into(),
+                    bytes: b"package main\n".to_vec(),
+                    parent_identity: b.identity,
+                },
+            )
+            .err()
+            .expect("identical bytes do not override parent identity");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        fs::remove_dir_all(slot.dir).unwrap();
     }
 
     #[test]

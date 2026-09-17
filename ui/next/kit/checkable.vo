@@ -1,0 +1,96 @@
+package kit
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type CheckboxProps struct {
+	ID string
+	Label string
+	Name string
+	Value string
+	Form string
+	// Nil leaves checkedness with the browser, initialized by DefaultChecked.
+	Checked func() bool
+	// Optional mixed presentation; native checkedness still owns form submission.
+	Indeterminate func() bool
+	DefaultChecked bool
+	Disabled bool
+	Required bool
+	Hint string
+	Error string
+	OnChange func(bool)
+	OnBlur func()
+	Class string
+	InputClass string
+	InputRef *ui.ElementRef
+	LabelContent func() ui.View
+}
+
+type SwitchProps = CheckboxProps
+
+func Checkbox(props CheckboxProps) ui.View {
+	return checkable(props, false, false)
+}
+
+func Switch(props SwitchProps) ui.View {
+	return checkable(props, true, false)
+}
+
+func checkable(props CheckboxProps, switched bool, explicitValue bool) ui.View {
+	if props.ID == "" || props.Label == "" {
+		panic("kit: checkable fields require an ID and label")
+	}
+	if props.Checked != nil && props.DefaultChecked {
+		panic("kit: checked readers and defaults cannot be combined")
+	}
+	if switched && props.Indeterminate != nil {
+		panic("kit: a switch cannot have indeterminate state")
+	}
+	input := ui.Element("input").Attr("type", "checkbox").Attr("id", props.ID).Attr("name", props.Name)
+	input = input.Attr("disabled", fmt.Sprint(props.Disabled)).Attr("required", fmt.Sprint(props.Required)).Ref(props.InputRef)
+	if props.Value != "" || explicitValue {
+		input = input.Attr("value", props.Value)
+	}
+	if props.Form != "" {
+		input = input.Attr("form", props.Form)
+	}
+	if props.Checked == nil {
+		input = input.DefaultChecked(props.DefaultChecked)
+	} else {
+		input = input.Attr("checked", fmt.Sprint(props.Checked()))
+	}
+	if props.Indeterminate != nil {
+		input = input.Indeterminate(props.Indeterminate())
+	}
+	input = describeField(input, props.ID, props.Hint, props.Error).Class("vui-check-input").Class(props.InputClass)
+	if props.OnChange != nil {
+		input = input.On("change", func(event ui.Event) {
+			if !props.Disabled {
+				props.OnChange(event.Checked)
+			}
+		})
+	}
+	if props.OnBlur != nil {
+		input = input.On("blur", func(ui.Event) {
+			props.OnBlur()
+		})
+	}
+	content := ui.Text(props.Label)
+	if props.LabelContent != nil {
+		content = props.LabelContent()
+		input = input.Attr("aria-label", props.Label)
+	}
+	children := []ui.View{input}
+	class := "vui-check"
+	if switched {
+		children[0] = input.Attr("role", "switch")
+		children = append(children, ui.Element("span").Class("vui-switch-track").Attr("aria-hidden", "true"))
+		class = "vui-switch"
+	}
+	children = append(children, ui.Element("span", content))
+	label := ui.Element("label", children...).Attr("for", props.ID).Class(class)
+	parts := append([]ui.View{label}, fieldMessages(props.ID, props.Hint, props.Error)...)
+	return ui.Element("div", parts...).Class("vui-choice-field").Class(props.Class)
+}

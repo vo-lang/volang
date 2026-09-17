@@ -21,6 +21,13 @@ use vo_vm::vm::SchedulingOutcome;
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "compiler")]
+#[wasm_bindgen(module = "/js/host_scheduler.js")]
+extern "C" {
+    #[wasm_bindgen(js_name = yieldHost)]
+    fn yield_host() -> js_sys::Promise;
+}
+
+#[cfg(feature = "compiler")]
 use crate::js_types::make_run_result_obj;
 #[cfg(feature = "compiler")]
 use crate::vm::{decode_bytecode_module, register_wasm_runtime_module_externs};
@@ -31,8 +38,9 @@ use crate::vm::{decode_bytecode_module, register_wasm_runtime_module_externs};
 fn finish_async_outcome(
     vm: &vo_vm::vm::Vm,
     outcome: SchedulingOutcome,
+    output: &vo_runtime::output::CaptureSink,
 ) -> (String, String, String, Option<i32>) {
-    let stdout = vo_runtime::output::take_output();
+    let stdout = output.take();
     match outcome {
         SchedulingOutcome::Completed => ("ok".into(), stdout, String::new(), None),
         SchedulingOutcome::Exited(code) => ("exited".into(), stdout, String::new(), Some(code)),
@@ -165,7 +173,6 @@ async fn wasm_callback_sleep_ms(ms: u32) {
 /// Returns (status, stdout, stderr, exit_code).
 #[cfg(feature = "compiler")]
 async fn run_vm_async(bytecode: &[u8]) -> (String, String, String, Option<i32>) {
-    vo_runtime::output::clear_output();
     let module = match decode_bytecode_module(bytecode) {
         Ok(m) => m,
         Err(e) => return ("error".into(), String::new(), e, None),
@@ -216,7 +223,7 @@ pub(crate) async fn run_vm_async_inner(
     let Some(owner) = vo_web_runtime_wasm::net_http::allocate_http_owner() else {
         return (
             "error".into(),
-            vo_runtime::output::take_output(),
+            String::new(),
             "process-wide HTTP VM owner identity space exhausted".into(),
             None,
         );
@@ -246,11 +253,45 @@ enum DrivenHostEvent {
     Idle,
 }
 
+/// Amortize tiny blocking/fiber turns while retaining both a time window and
+/// a finite work bound. One VM batch retains the existing eight-quantum bound.
+#[cfg(feature = "compiler")]
+fn run_guest_turn(
+    vm: &mut vo_vm::vm::Vm,
+    owner: u64,
+    start: bool,
+) -> Result<SchedulingOutcome, vo_vm::vm::VmError> {
+    const QUANTA_PER_BATCH: usize = 8;
+    const MAX_BATCHES: usize = 128;
+    const HOST_TURN_MS: f64 = 4.0;
+    let deadline = crate::now_ms() + HOST_TURN_MS;
+    vo_web_runtime_wasm::net_http::with_http_owner(owner, || {
+        let mut outcome = if start {
+            vm.run_with_budget(QUANTA_PER_BATCH)?
+        } else {
+            vm.run_scheduled_with_budget(QUANTA_PER_BATCH)?
+        };
+        for _ in 1..MAX_BATCHES {
+            if outcome != SchedulingOutcome::Suspended
+                || !vm.has_runnable_fibers()
+                || crate::now_ms() >= deadline
+            {
+                break;
+            }
+            outcome = vm.run_scheduled_with_budget(QUANTA_PER_BATCH)?;
+        }
+        Ok(outcome)
+    })
+}
+
 #[cfg(feature = "compiler")]
 async fn run_vm_async_owned(
     vm: &mut vo_vm::vm::Vm,
     owner: u64,
 ) -> (String, String, String, Option<i32>) {
+    let output = vo_runtime::output::CaptureSink::new();
+    vm.set_output_sink(output.clone());
+
     type FetchFuture = LocalBoxFuture<'static, FetchCompletion>;
     type TimerFuture = LocalBoxFuture<'static, Option<vo_vm::scheduler::HostWaitKey>>;
 
@@ -259,19 +300,15 @@ async fn run_vm_async_owned(
     let mut timers = FuturesUnordered::<TimerFuture>::new();
     let mut timer_aborts = HashMap::<vo_vm::scheduler::HostWaitKey, AbortHandle>::new();
 
-    let mut outcome = match vo_web_runtime_wasm::net_http::with_http_owner(owner, || vm.run()) {
+    let mut outcome = match run_guest_turn(vm, owner, true) {
         Ok(o) => o,
-        Err(e) => {
-            return (
-                "error".into(),
-                vo_runtime::output::take_output(),
-                format!("{:?}", e),
-                None,
-            )
-        }
+        Err(e) => return ("error".into(), output.take(), format!("{:?}", e), None),
     };
 
-    while outcome == SchedulingOutcome::SuspendedForHostEvents {
+    while matches!(
+        outcome,
+        SchedulingOutcome::Suspended | SchedulingOutcome::SuspendedForHostEvents
+    ) {
         for pending in vo_web_runtime_wasm::net_http::take_pending_fetch_promises() {
             if fetch_tokens.insert(pending.token) {
                 fetches.push(await_fetch(pending).boxed_local());
@@ -321,32 +358,45 @@ async fn run_vm_async_owned(
             );
         }
 
-        if fetches.is_empty() && timers.is_empty() {
+        let runnable = vm.has_runnable_fibers();
+        if !runnable && fetches.is_empty() && timers.is_empty() {
             break;
         }
 
-        let event = match (fetches.is_empty(), timers.is_empty()) {
-            (false, false) => {
-                let next_fetch = fetches.next();
-                let next_timer = timers.next();
-                futures_util::pin_mut!(next_fetch, next_timer);
-                match select(next_fetch, next_timer).await {
-                    Either::Left((Some(fetch), _)) => DrivenHostEvent::Fetch(fetch),
-                    Either::Right((Some(timer), _)) => DrivenHostEvent::Timer(timer),
-                    _ => DrivenHostEvent::Idle,
+        let next_event = async {
+            match (fetches.is_empty(), timers.is_empty()) {
+                (false, false) => {
+                    let next_fetch = fetches.next();
+                    let next_timer = timers.next();
+                    futures_util::pin_mut!(next_fetch, next_timer);
+                    match select(next_fetch, next_timer).await {
+                        Either::Left((Some(fetch), _)) => DrivenHostEvent::Fetch(fetch),
+                        Either::Right((Some(timer), _)) => DrivenHostEvent::Timer(timer),
+                        _ => DrivenHostEvent::Idle,
+                    }
                 }
+                (false, true) => fetches
+                    .next()
+                    .await
+                    .map(DrivenHostEvent::Fetch)
+                    .unwrap_or(DrivenHostEvent::Idle),
+                (true, false) => timers
+                    .next()
+                    .await
+                    .map(DrivenHostEvent::Timer)
+                    .unwrap_or(DrivenHostEvent::Idle),
+                (true, true) => DrivenHostEvent::Idle,
             }
-            (false, true) => fetches
-                .next()
-                .await
-                .map(DrivenHostEvent::Fetch)
-                .unwrap_or(DrivenHostEvent::Idle),
-            (true, false) => timers
-                .next()
-                .await
-                .map(DrivenHostEvent::Timer)
-                .unwrap_or(DrivenHostEvent::Idle),
-            (true, true) => DrivenHostEvent::Idle,
+        };
+        let event = if runnable {
+            // Give JS timers and Fetch a macrotask turn even if guest work is
+            // continuously ready. Start/poll pending futures before yielding;
+            // their state remains owned by the streams across the guest turn.
+            let ready_event = next_event.now_or_never();
+            let _ = wasm_bindgen_futures::JsFuture::from(yield_host()).await;
+            ready_event.unwrap_or(DrivenHostEvent::Idle)
+        } else {
+            next_event.await
         };
 
         let should_run = match event {
@@ -382,24 +432,15 @@ async fn run_vm_async_owned(
             DrivenHostEvent::Timer(None) | DrivenHostEvent::Idle => false,
         };
 
-        if should_run {
-            outcome = match vo_web_runtime_wasm::net_http::with_http_owner(owner, || {
-                vm.run_scheduled()
-            }) {
+        if should_run || runnable {
+            outcome = match run_guest_turn(vm, owner, false) {
                 Ok(o) => o,
-                Err(e) => {
-                    return (
-                        "error".into(),
-                        vo_runtime::output::take_output(),
-                        format!("{:?}", e),
-                        None,
-                    )
-                }
+                Err(e) => return ("error".into(), output.take(), format!("{:?}", e), None),
             };
         }
     }
 
-    finish_async_outcome(vm, outcome)
+    finish_async_outcome(vm, outcome, &output)
 }
 
 // ── WASM exports: compile-and-run ───────────────────────────────────────────
@@ -596,10 +637,18 @@ export function voAsyncRunnerFetchAborted() {
         let mut foreign_run = Box::pin(run_vm_async_owned(&mut foreign_vm, foreign_owner));
         let mut context = Context::from_waker(noop_waker_ref());
 
-        assert!(matches!(
-            foreign_run.as_mut().poll(&mut context),
-            Poll::Pending
-        ));
+        // Bounded execution can yield during initialization before reaching
+        // the fetch. Drive host turns until the request has actually started.
+        for _ in 0..128 {
+            assert!(matches!(
+                foreign_run.as_mut().poll(&mut context),
+                Poll::Pending
+            ));
+            if fetch_started() > 0 {
+                break;
+            }
+            super::wasm_sleep_once_ms(0).await;
+        }
         assert_eq!(fetch_started(), 1);
         assert_eq!(fetch_aborted(), 0);
 

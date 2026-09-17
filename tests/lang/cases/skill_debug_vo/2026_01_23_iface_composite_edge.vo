@@ -93,7 +93,9 @@ func test3() {
 		R io.Reader
 		W io.Writer
 		N string
-	}{R: buf, W: buf, N: "holder"}
+	}{
+		R: buf, W: buf, N: "holder",
+	}
 	data := make([]byte, 32)
 	n, _ := holder.R.Read(data)
 	assert(string(data[:n]) == "anon", "test3: anon struct read")

@@ -1,0 +1,92 @@
+// Package upload sends typed form snapshots with native multipart file bodies.
+package upload
+
+import (
+	"encoding/json"
+	"sort"
+	"strings"
+	"unicode/utf8"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/files"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/web"
+)
+
+type field struct {
+	Name string `json:"name"`
+	Value string `json:"value"`
+	Token string `json:"token"`
+}
+
+type envelope struct {
+	Version int `json:"version"`
+	Request string `json:"request"`
+	Fields []field `json:"fields"`
+}
+
+// Multipart defaults to POST and reuses HTTPOptions for headers/credentials.
+// Body must be empty; omit Content-Type so the browser supplies its boundary.
+// Pass the result to a scoped task or form submission and use web.DecodeHTTP.
+// Text fields are sorted by name, retaining each field's value/file order.
+// Empty file selections are omitted. Files remain owned by their input root.
+func Multipart(url string, data forms.Data, options web.HTTPOptions) ui.Request {
+	if options.Method == "" {
+		options.Method = "POST"
+	}
+	method := strings.ToUpper(options.Method)
+	if method != "POST" && method != "PUT" && method != "PATCH" || options.Body != "" {
+		panic("upload: multipart requires POST, PUT or PATCH and an empty text body")
+	}
+	for name := range options.Headers {
+		if strings.ToLower(name) == "content-type" {
+			panic("upload: let the browser supply the multipart Content-Type boundary")
+		}
+	}
+	request := web.HTTP(url, options)
+	names := []string{}
+	for name := range data.Values {
+		names = append(names, name)
+	}
+	for name := range data.Files {
+		if _, exists := data.Values[name]; exists {
+			panic("upload: a field cannot contain both text and a file selection")
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	fields := []field{}
+	textBytes, fileBytes, count := 0, 0, 0
+	for _, name := range names {
+		if name == "" || len(name) > 1024 || !utf8.ValidString(name) ||
+			strings.ContainsAny(name, "\r\n\x00") {
+			panic("upload: field names must be UTF-8 within 1 KiB without line breaks or NUL")
+		}
+		for _, value := range data.Values[name] {
+			if !utf8.ValidString(value) {
+				panic("upload: text fields must be UTF-8")
+			}
+			textBytes += len(name) + len(value)
+			fields = append(fields, field{Name: name, Value: value})
+		}
+		if selection, exists := data.Files[name]; exists {
+			if selection.Error() != "" {
+				panic("upload: a rejected file selection cannot be submitted")
+			}
+			for _, file := range selection.Files() {
+				count++
+				fileBytes += file.Size
+				textBytes += len(name)
+				fields = append(fields, field{Name: name, Token: file.Token()})
+			}
+		}
+		if len(fields) > 4096 || textBytes > 1024 * 1024 || count > files.MaxFiles ||
+			fileBytes > files.MaxFileBytes {
+			panic("upload: multipart exceeds 4096 fields, 1 MiB text, 32 files or 128 MiB file data")
+		}
+	}
+	encoded, err := json.Marshal(envelope{Version: 1, Request: request.Value, Fields: fields})
+	if err != nil {
+		panic(err)
+	}
+	return ui.Request{Service: "web.multipart", Value: string(encoded)}
+}

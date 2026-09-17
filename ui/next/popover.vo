@@ -1,0 +1,112 @@
+package ui
+
+import (
+	"sort"
+	"strings"
+)
+
+type PopoverOptions struct {
+	Open bool
+	Anchor *ElementRef
+	// Placement uses logical start/end; an empty value defaults to bottom-start.
+	Placement string
+	// Mode defaults to auto. Hint layers coexist with their containing auto
+	// popover and do not request focus when presented by the browser host.
+	Mode string
+}
+
+type popoverBinding struct {
+	node *mounted
+	bound bool
+	open bool
+	anchor int
+	placement string
+}
+
+// Popover controls a native nonmodal layer anchored to another live element.
+// Its content stays mounted while hidden. Native dismissal emits toggle events;
+// native echoes of committed Open requests do not emit additional UI events.
+func (view View) Popover(options PopoverOptions) View {
+	if view.kind == "" || view.kind == "#text" || view.kind == "#fragment" || view.kind == "#component" ||
+		view.kind == "#widget" ||
+		view.kind == "dialog" ||
+		view.hasModal ||
+		options.Anchor == nil {
+		panic("ui: popover requires an HTML element and an anchor ref")
+	}
+	if options.Placement == "" {
+		options.Placement = "bottom-start"
+	}
+	if options.Mode == "" {
+		options.Mode = "auto"
+	}
+	if options.Mode != "auto" && options.Mode != "hint" {
+		panic("ui: unsupported popover mode")
+	}
+	switch options.Placement {
+		case "bottom-start", "bottom-end", "top-start", "top-end", "left", "right":
+		default:
+			panic("ui: unsupported popover placement")
+	}
+	if view.popover != nil {
+		panic("ui: popover presentation is already declared")
+	}
+	for _, attr := range view.attrs {
+		if strings.EqualFold(attr.name, "popover") {
+			panic("ui: Popover owns the native popover attribute")
+		}
+	}
+	view = view.Attr("popover", options.Mode)
+	view.popover = &options
+	return view
+}
+
+func (root *Root) bindPopover(node *mounted) {
+	options := node.view.popover
+	if options == nil {
+		return
+	}
+	ref := options.Anchor
+	if ref.scope == nil || ref.scope.disposed || ref.scope.root != root {
+		panic("ui: popover anchor belongs to a different or disposed root")
+	}
+	if root.popovers == nil {
+		root.popovers = make(map[int]*popoverBinding)
+	}
+	if root.popovers[node.id] == nil {
+		root.popovers[node.id] = &popoverBinding{node: node}
+	}
+}
+
+func (root *Root) preparePopovers() {
+	ids := []int{}
+	for id := range root.popovers {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	for _, id := range ids {
+		binding := root.popovers[id]
+		node := binding.node
+		options := node.view.popover
+		anchor := 0
+		if !options.Anchor.scope.disposed {
+			for _, binding := range options.Anchor.bindings {
+				anchor = binding.id
+			}
+		}
+		open := options.Open && anchor != 0
+		if binding.bound && binding.anchor == anchor && binding.open == open &&
+			binding.placement == options.Placement {
+			continue
+		}
+		binding.bound = true
+		binding.anchor = anchor
+		binding.open = open
+		binding.placement = options.Placement
+		value := "false"
+		if open {
+			value = "true"
+		}
+		root.emit(Mutation{Op: "popover", ID: id, Parent: anchor, Name: options.Placement, Value: value})
+	}
+}

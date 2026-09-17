@@ -112,24 +112,9 @@ jobs:
           ./target/debug/vo-dev ci verify \
             --bundle target/ci/certification-input/certification.json \
             --profile main \
-            --artifact-task wasm-web-full \
+            --artifact-task ui-web-rewrite \
             --artifact target/ci/artifacts/site
-          test -s target/ci/artifacts/site/app.wasm
-          test -s target/ci/artifacts/site/runtime/pkg/vo_web_bg.wasm
           test "$(cat target/ci/artifacts/site/CNAME)" = "volang.dev"
-
-      - name: Recheck deployment budgets
-        run: |
-          node eng/report-ui-web-artifact-size.mjs \
-            --label studio \
-            --artifact target/ci/artifacts/site/app.wasm \
-            --raw-limit 34000000 \
-            --brotli-limit 972800 \
-            --gzip-limit 2500000
-          node eng/report-ui-web-precache-size.mjs \
-            --label studio \
-            --root target/ci/artifacts/site \
-            --gzip-limit 3670016
 
       - name: Setup browser contracts
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -137,6 +122,11 @@ jobs:
           node-version: "24"
           cache: npm
           cache-dependency-path: eng/browser/package-lock.json
+
+      - name: Recheck candidate inventory and deployment budgets
+        run: >-
+          node eng/ui-next/studio-site-cli.mjs verify
+          --directory target/ci/artifacts/site
 
       - name: Install pinned browser
         run: |
@@ -146,13 +136,12 @@ jobs:
 
       - name: Exercise the final certified site before deployment
         run: |
-          node eng/run-browser-smoke.mjs \
-            --static-root target/ci/artifacts/site \
-            --studio-aot-smoke --timeout-ms 120000 \
-            --output target/ci/results/site-predeploy.json
+          node eng/ui-next/studio-site-cli.mjs check \
+            --directory target/ci/artifacts/site \
+            --output target/ci/results/site-predeploy
           ./target/debug/vo-dev ci verify \
             --bundle target/ci/certification-input/certification.json \
-            --profile main --artifact-task wasm-web-full \
+            --profile main --artifact-task ui-web-rewrite \
             --artifact target/ci/artifacts/site
 
       - name: Upload predeployment browser diagnostics
@@ -160,9 +149,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: site-predeploy-${{ steps.candidate.outputs.commit }}
-          path: |
-            target/ci/browser
-            target/ci/results/site-predeploy.json
+          path: target/ci/results/site-predeploy
           if-no-files-found: warn
           retention-days: 14
 
@@ -170,6 +157,7 @@ jobs:
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: target/ci/artifacts/site
+          include-hidden-files: true
           retention-days: 1
 
   deploy:
@@ -249,19 +237,16 @@ jobs:
         env:
           PAGE_URL: ${{ needs.deploy.outputs.page_url }}
         run: |
-          node eng/run-browser-smoke.mjs \
-            --base-url "$PAGE_URL" \
-            --expected-artifact target/ci/artifacts/site \
-            --studio-canary-smoke --timeout-ms 120000 \
-            --output target/ci/results/site-canary.json
+          node eng/ui-next/studio-site-cli.mjs check \
+            --origin "$PAGE_URL" \
+            --directory target/ci/artifacts/site \
+            --output target/ci/results/site-canary
 
       - name: Upload deployed journey diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: site-canary-${{ needs.promote.outputs.commit }}
-          path: |
-            target/ci/browser
-            target/ci/results/site-canary.json
+          path: target/ci/results/site-canary
           if-no-files-found: warn
           retention-days: 14

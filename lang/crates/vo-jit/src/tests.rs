@@ -9,6 +9,15 @@ use vo_runtime::output::{CaptureSink, OutputSink};
 use vo_runtime::{alloc_ic_table, DynCallIC};
 use vo_runtime::{RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
 
+#[path = "tests/continuations.rs"]
+mod continuations;
+
+#[path = "tests/native_arguments.rs"]
+mod native_arguments;
+
+#[path = "tests/sequence_inline.rs"]
+mod sequence_inline;
+
 fn make_func(code: Vec<Instruction>, local_slots: u16) -> FunctionDef {
     crate::test_fixtures::function(code, local_slots)
 }
@@ -150,6 +159,7 @@ impl JitContextParts {
             runtime_trap_arg0: 0,
             runtime_trap_arg1: 0,
             runtime_trap_pc: u32::MAX,
+            runtime_trap_origin: 0,
             current_func_id: u32::MAX,
             infra_error_message: ptr::null_mut(),
             callback_state: ptr::null_mut(),
@@ -169,6 +179,7 @@ impl JitContextParts {
             call_func_id: 0,
             call_arg_start: 0,
             call_resume_pc: 0,
+            call_callee_bp: 0,
             call_ret_slots: 0,
             call_ret_reg: 0,
             call_kind: 0,
@@ -179,6 +190,7 @@ impl JitContextParts {
             stack_limit: 1024,
             call_depth: 0,
             call_depth_limit: 1024,
+            native_stack_floor: 0,
             jit_bp: 0,
             fiber_sp: args.len() as u32,
             push_frame_fn: None,
@@ -208,5 +220,25 @@ impl JitContextParts {
     }
 }
 
+#[path = "tests/compile_contracts.rs"]
 mod compile_contracts;
+#[path = "tests/misc.rs"]
 mod misc;
+
+#[path = "tests/float32.rs"]
+mod float32;
+
+#[path = "tests/dynamic_arguments.rs"]
+mod dynamic_arguments;
+
+#[path = "tests/inline_origin.rs"]
+mod inline_origin;
+
+#[path = "tests/scalar_chains.rs"]
+mod scalar_chains;
+
+#[path = "tests/frame_aliases.rs"]
+mod frame_aliases;
+
+#[path = "tests/feedback_scalar_inline.rs"]
+mod feedback_scalar_inline;

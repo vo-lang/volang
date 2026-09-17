@@ -1,0 +1,80 @@
+package main
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+func focusTarget(batch ui.Batch) int {
+	target := 0
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "focus" {
+			target = mutation.ID
+		}
+	}
+	return target
+}
+
+func elementRefs() {
+	var ref *ui.ElementRef
+	var shown *ui.BoolState
+	var replace *ui.BoolState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		ref = ui.Ref(scope, "input")
+		shown = ui.Bool(scope, "shown", false)
+		replace = ui.Bool(scope, "replace", false)
+		if !shown.Get() {
+			return ui.Text("closed")
+		}
+		if replace.Get() {
+			return ui.Element("textarea").Ref(ref).Attr("data-name", "replacement")
+		}
+		return ui.Element("input").Ref(ref).Attr("data-name", "initial")
+	}))
+	flush(root)
+	shown.Set(true)
+	require(ref.Focus() && root.Pending(), "focus could not be requested before a conditional mount")
+	initial := flush(root)
+	old := target(initial, "initial")
+	require(focusTarget(initial) == old, "focus did not resolve the newly mounted element")
+	replace.Set(true)
+	ref.Focus()
+	replacement := flush(root)
+	current := target(replacement, "replacement")
+	require(current != old && focusTarget(replacement) == current, "ref retained a replaced element")
+	shown.Set(false)
+	ref.Focus()
+	require(focusTarget(flush(root)) == 0, "removal emitted a stale focus command")
+	ref.Focus()
+	require(focusTarget(flush(root)) == 0, "unbound ref emitted a focus command")
+	root.Close()
+	require(!ref.Focus(), "disposed ref accepted focus")
+	var absent *ui.ElementRef
+	require(!absent.Focus() && !(&ui.ElementRef{}).Focus(), "unowned ref accepted focus")
+	root = ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		ref = ui.Ref(scope, "input")
+		ui.Effect(scope, "focus", func() func() {
+			ref.Focus()
+			return nil
+		})
+		return ui.Element("input").Ref(ref)
+	}))
+	first := root.Flush()
+	require(focusTarget(first) == 0, "SSR render ran a focus effect")
+	root.Commit(first.Revision)
+	require(root.Pending() && focusTarget(flush(root)) > 0, "post-commit focus did not schedule a batch")
+	foreign := ui.NewRoot(ui.Element("input").Ref(ref))
+	expectPanic(func() {
+		foreign.Flush()
+	}, "different or disposed root")
+	ref.Focus()
+	require(focusTarget(flush(root)) > 0, "foreign-root rejection detached the original binding")
+	root.Close()
+	root = ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		ref = ui.Ref(scope, "duplicate")
+		return ui.Fragment(ui.Element("input").Ref(ref), ui.Element("input").Ref(ref))
+	}))
+	expectPanic(func() {
+		root.Flush()
+	}, "multiple live bindings")
+	require(!ref.Focus(), "failed root retained live refs")
+}

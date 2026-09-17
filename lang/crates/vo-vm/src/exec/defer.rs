@@ -1,7 +1,9 @@
 //! Defer instructions: DeferPush, ErrDeferPush, Recover
 
+#[cfg(all(test, not(feature = "std")))]
+use alloc::vec::Vec;
 #[cfg(not(feature = "std"))]
-use alloc::{format, string::ToString, vec::Vec};
+use alloc::{format, string::ToString};
 #[cfg(feature = "std")]
 use std::string::ToString;
 
@@ -29,7 +31,7 @@ pub fn exec_defer_push(
     frames: &[CallFrame],
     caller_func: &FunctionDef,
     module: &Module,
-    defer_stack: &mut Vec<DeferEntry>,
+    defer_stack: &mut crate::fiber_storage::AuxiliaryVec<DeferEntry>,
     inst: &Instruction,
     callsite_arg_layout: &[SlotType],
     gc: &mut Gc,
@@ -58,7 +60,7 @@ pub fn exec_err_defer_push(
     frames: &[CallFrame],
     caller_func: &FunctionDef,
     module: &Module,
-    defer_stack: &mut Vec<DeferEntry>,
+    defer_stack: &mut crate::fiber_storage::AuxiliaryVec<DeferEntry>,
     inst: &Instruction,
     callsite_arg_layout: &[SlotType],
     gc: &mut Gc,
@@ -86,7 +88,7 @@ fn push_defer_entry(
     frames: &[CallFrame],
     caller_func: &FunctionDef,
     module: &Module,
-    defer_stack: &mut Vec<DeferEntry>,
+    defer_stack: &mut crate::fiber_storage::AuxiliaryVec<DeferEntry>,
     inst: &Instruction,
     callsite_arg_layout: &[SlotType],
     gc: &mut Gc,
@@ -107,10 +109,12 @@ fn push_defer_entry(
         arg_start,
         arg_slots,
     )?;
-    if arg_layout.slot_types != callsite_arg_layout {
+    let caller_arg_layout = &caller_func.slot_types
+        [usize::from(arg_start)..usize::from(arg_start) + usize::from(arg_slots)];
+    if caller_arg_layout != callsite_arg_layout {
         return Err(format!(
             "DeferPush argument layout {:?} does not match caller storage {:?}",
-            callsite_arg_layout, arg_layout.slot_types
+            callsite_arg_layout, caller_arg_layout
         )
         .into());
     }
@@ -130,9 +134,7 @@ fn push_defer_entry(
         (func_id, core::ptr::null_mut())
     };
 
-    defer_stack
-        .try_reserve(1)
-        .map_err(|_| vo_runtime::gc::MemoryError::SystemAllocationFailed)?;
+    defer_stack.try_reserve(1)?;
 
     let args = if arg_slots > 0 {
         let args_ref = gc.try_alloc(ValueMeta::new(0, ValueKind::Void), arg_slots)?;
@@ -145,7 +147,7 @@ fn push_defer_entry(
         core::ptr::null_mut()
     };
 
-    defer_stack.push(DeferEntry {
+    defer_stack.push_reserved(DeferEntry {
         frame_depth,
         func_id,
         closure,
@@ -240,7 +242,7 @@ mod tests {
         let caller_func = caller_func_with_slot_types(vec![SlotType::GcRef]);
         let module = vo_runtime::bytecode::Module::new("defer-closure-kind".to_string());
         let inst = Instruction::with_flags(Opcode::DeferPush, 1, 0, 0, 0);
-        let mut defer_stack = Vec::new();
+        let mut defer_stack = crate::fiber_storage::AuxiliaryVec::default();
 
         let err = exec_defer_push(
             stack.as_ptr(),
@@ -273,7 +275,7 @@ mod tests {
         let caller_func = caller_func_with_slot_types(vec![SlotType::GcRef]);
         let module = vo_runtime::bytecode::Module::new("defer-nil-closure".to_string());
         let inst = Instruction::with_flags(Opcode::DeferPush, 1, 0, 0, 0);
-        let mut defer_stack = Vec::new();
+        let mut defer_stack = crate::fiber_storage::AuxiliaryVec::default();
 
         exec_defer_push(
             stack.as_ptr(),

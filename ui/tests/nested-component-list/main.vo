@@ -1,5 +1,5 @@
 // Permanent Component Model V2 contract probe. The same source is compiled
-// for headless, browser, desktop, VM, JIT, Native AOT, and Core Wasm AOT gates.
+// for headless, browser, desktop, VM, JIT, Native AOT, and Wasm VM gates.
 package main
 
 import (

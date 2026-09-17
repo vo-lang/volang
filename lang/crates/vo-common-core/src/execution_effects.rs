@@ -8,6 +8,9 @@ use crate::instruction::Opcode;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EffectContract {
+    /// May mutate an existing managed object, including through an alias or
+    /// a guest/runtime call. Initializing a fresh allocation does not count.
+    pub may_write_heap: bool,
     pub may_gc: bool,
     pub may_alloc: bool,
     pub may_panic: bool,
@@ -25,6 +28,7 @@ pub struct EffectContract {
 
 impl EffectContract {
     pub const PURE: Self = Self {
+        may_write_heap: false,
         may_gc: false,
         may_alloc: false,
         may_panic: false,
@@ -42,6 +46,7 @@ impl EffectContract {
 
     pub const fn union(self, other: Self) -> Self {
         Self {
+            may_write_heap: self.may_write_heap || other.may_write_heap,
             may_gc: self.may_gc || other.may_gc,
             may_alloc: self.may_alloc || other.may_alloc,
             may_panic: self.may_panic || other.may_panic,
@@ -92,11 +97,13 @@ const C_SLOT_META_PANIC: EffectContract = EffectContract {
     ..EffectContract::PURE
 };
 const C_PTR_SET: EffectContract = EffectContract {
+    may_write_heap: true,
     may_panic: true,
     needs_write_barrier: true,
     ..EffectContract::PURE
 };
 const C_INDEXED_SET: EffectContract = EffectContract {
+    may_write_heap: true,
     may_panic: true,
     needs_slot_metadata: true,
     needs_write_barrier: true,
@@ -136,6 +143,7 @@ const C_MAP_PANIC: EffectContract = EffectContract {
     ..EffectContract::PURE
 };
 const C_MAP_SET: EffectContract = EffectContract {
+    may_write_heap: true,
     may_gc: true,
     may_alloc: true,
     may_panic: true,
@@ -146,6 +154,7 @@ const C_MAP_SET: EffectContract = EffectContract {
     ..EffectContract::PURE
 };
 const C_QUEUE_FRAME: EffectContract = EffectContract {
+    may_write_heap: true,
     may_gc: true,
     may_panic: true,
     may_schedule: true,
@@ -161,6 +170,7 @@ const C_QUEUE_GET_FRAME: EffectContract = EffectContract {
     ..EffectContract::PURE
 };
 const C_GO_FRAME: EffectContract = EffectContract {
+    may_write_heap: true,
     may_gc: true,
     may_panic: true,
     may_call: true,
@@ -187,6 +197,7 @@ const C_CLOSURE_NEW: EffectContract = EffectContract {
     ..EffectContract::PURE
 };
 const C_CALL: EffectContract = EffectContract {
+    may_write_heap: true,
     may_gc: true,
     may_alloc: true,
     may_panic: true,
@@ -210,6 +221,7 @@ const C_CALL_IFACE: EffectContract = EffectContract {
     ..C_CALL
 };
 const C_DEFER: EffectContract = EffectContract {
+    may_write_heap: true,
     may_gc: true,
     may_alloc: true,
     may_panic: true,
@@ -221,6 +233,7 @@ const C_DEFER: EffectContract = EffectContract {
     ..EffectContract::PURE
 };
 const C_RECOVER: EffectContract = EffectContract {
+    may_write_heap: true,
     may_gc: true,
     may_panic: true,
     may_unwind: true,
@@ -283,10 +296,15 @@ pub const fn opcode_effect_contract(opcode: Opcode) -> EffectContract {
         | Opcode::MulI
         | Opcode::NegI
         | Opcode::AddF
+        | Opcode::AddF32
         | Opcode::SubF
+        | Opcode::SubF32
         | Opcode::MulF
+        | Opcode::MulF32
         | Opcode::DivF
+        | Opcode::DivF32
         | Opcode::NegF
+        | Opcode::NegF32
         | Opcode::EqI
         | Opcode::NeI
         | Opcode::LtI
@@ -298,11 +316,17 @@ pub const fn opcode_effect_contract(opcode: Opcode) -> EffectContract {
         | Opcode::GeI
         | Opcode::GeU
         | Opcode::EqF
+        | Opcode::EqF32
         | Opcode::NeF
+        | Opcode::NeF32
         | Opcode::LtF
+        | Opcode::LtF32
         | Opcode::LeF
+        | Opcode::LeF32
         | Opcode::GtF
+        | Opcode::GtF32
         | Opcode::GeF
+        | Opcode::GeF32
         | Opcode::And
         | Opcode::Or
         | Opcode::Xor
@@ -336,7 +360,6 @@ pub const fn opcode_effect_contract(opcode: Opcode) -> EffectContract {
         | Opcode::DivU
         | Opcode::ModI
         | Opcode::ModU
-        | Opcode::PtrSetN
         | Opcode::Shl
         | Opcode::ShrS
         | Opcode::ShrU
@@ -354,6 +377,10 @@ pub const fn opcode_effect_contract(opcode: Opcode) -> EffectContract {
         | Opcode::SliceGet
         | Opcode::SliceAddr => C_SLOT_META_PANIC,
         Opcode::PtrSet => C_PTR_SET,
+        Opcode::PtrSetN => EffectContract {
+            may_write_heap: true,
+            ..C_PANIC
+        },
         Opcode::ArraySet | Opcode::SliceSet => C_INDEXED_SET,
         Opcode::StrNew | Opcode::StrConcat | Opcode::MapNew => C_ALLOC_TYPED,
         Opcode::StrSlice
@@ -361,9 +388,18 @@ pub const fn opcode_effect_contract(opcode: Opcode) -> EffectContract {
         | Opcode::SliceNew
         | Opcode::SliceSlice
         | Opcode::QueueNew => C_ALLOC_TYPED_PANIC,
-        Opcode::PtrNew | Opcode::SliceAppend => C_ALLOC_TYPED_SLOT,
+        Opcode::PtrNew => C_ALLOC_TYPED_SLOT,
+        Opcode::SliceAppend => EffectContract {
+            may_write_heap: true,
+            needs_write_barrier: true,
+            ..C_ALLOC_TYPED_SLOT
+        },
         Opcode::MapIterInit | Opcode::MapIterNext => C_MAP_HELPER,
-        Opcode::MapGet | Opcode::MapDelete => C_MAP_PANIC,
+        Opcode::MapGet => C_MAP_PANIC,
+        Opcode::MapDelete => EffectContract {
+            may_write_heap: true,
+            ..C_MAP_PANIC
+        },
         Opcode::MapSet => C_MAP_SET,
         Opcode::QueueSend
         | Opcode::QueueRecv
@@ -389,6 +425,25 @@ pub const fn opcode_effect_contract(opcode: Opcode) -> EffectContract {
     }
 }
 
+// Keep the interpreter's per-instruction allocation predicate a single-byte
+// lookup. Derive it from the complete contract so new opcodes cannot acquire
+// an independent or stale allocation classification.
+static ALLOCATION_EFFECTS: [bool; 256] = {
+    let mut effects = [false; 256];
+    let mut raw = 0;
+    while raw < effects.len() {
+        effects[raw] = opcode_effect_contract(Opcode::from_u8(raw as u8)).may_alloc;
+        raw += 1;
+    }
+    effects
+};
+
+/// Allocation effect for hot execution paths that need no other facts.
+#[inline]
+pub fn opcode_may_allocate(opcode: Opcode) -> bool {
+    ALLOCATION_EFFECTS[opcode as u8 as usize]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +455,18 @@ mod tests {
             assert_ne!(opcode, Opcode::Invalid);
             let _ = opcode_effect_contract(opcode);
         }
+    }
+
+    #[test]
+    fn append_writes_existing_backing_while_fresh_allocation_does_not() {
+        assert!(opcode_effect_contract(Opcode::SliceAppend).may_write_heap);
+        assert!(opcode_effect_contract(Opcode::SliceAppend).needs_write_barrier);
+        assert!(!opcode_effect_contract(Opcode::PtrNew).may_write_heap);
+        assert!(
+            opcode_effect_contract(Opcode::Call)
+                .union(EffectContract::PURE)
+                .may_write_heap
+        );
     }
 
     #[test]

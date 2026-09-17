@@ -1,0 +1,272 @@
+package forms
+
+import (
+	"fmt"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// Row identifies an array item independently of its displayed position.
+type Row struct {
+	Key string
+	prefix string
+}
+
+func (row Row) Field(name string) string {
+	if row.prefix == "" || name == "" {
+		panic("forms: a row field requires a row and a relative field name")
+	}
+	return row.prefix + name
+}
+
+func arrayDescendant(name string, field string) bool {
+	return strings.HasPrefix(field, name + "[")
+}
+
+func arrayOwned(arrays []string, name string) bool {
+	for _, root := range arrays {
+		if name == root || arrayDescendant(root, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func selectedField(values Values, name string, fields []string, all bool, arrays []string) bool {
+	if _, exists := values[name]; !exists {
+		return false
+	}
+	if all {
+		return true
+	}
+	for _, field := range fields {
+		if name == field || slices.ContainsString(arrays, field) && arrayDescendant(field, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func rowID(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' ||
+			char == '-' ||
+			char == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// ArrayRows decodes a native form's ordered row IDs and verifies direct child
+// ownership. The returned rows contain no references to the source value lists.
+func ArrayRows(values Values, name string) ([]Row, error) {
+	order, exists := values[name]
+	if !exists || name == "" {
+		return nil, fmt.Errorf("forms: missing array order field: %s", name)
+	}
+	// A leading empty value is a native successful control even for an empty
+	// array. It keeps empty and omitted arrays distinct in ordinary FormData.
+	if len(order) == 0 || order[0] != "" {
+		return nil, fmt.Errorf("forms: array order requires its leading empty control: %s", name)
+	}
+	ids := order[1:]
+	seen := make(map[string]bool)
+	populated := make(map[string]bool)
+	rows := make([]Row, len(ids))
+	for index, id := range ids {
+		if !rowID(id) || seen[id] {
+			return nil, fmt.Errorf("forms: array row IDs must be unique letters, digits, hyphens or underscores")
+		}
+		seen[id] = true
+		rows[index] = Row{Key: id, prefix: name + "[" + id + "]."}
+	}
+	for field := range values {
+		if !arrayDescendant(name, field) {
+			continue
+		}
+		tail := field[len(name) + 1:]
+		end := strings.Index(tail, "]")
+		if end < 1 || !seen[tail[:end]] || len(tail) <= end + 2 || tail[end + 1] != '.' {
+			return nil, fmt.Errorf("forms: orphan or malformed array field: %s", field)
+		}
+		populated[tail[:end]] = true
+	}
+	for _, id := range ids {
+		if !populated[id] {
+			return nil, fmt.Errorf("forms: each array row requires at least one field")
+		}
+	}
+	return rows, nil
+}
+
+// WithArray returns an independent initial-value map with a new array. Nested
+// arrays can be built in a row's relative values before adding the outer array.
+func WithArray(values Values, name string, rows []Values) Values {
+	if name == "" {
+		panic("forms: array names must not be empty")
+	}
+	for field := range values {
+		if field == name || arrayDescendant(name, field) {
+			panic("forms: array initialization would replace existing fields")
+		}
+	}
+	next := cloneValues(values)
+	next[name] = []string{""}
+	for index, fields := range rows {
+		id := "initial-" + strconv.Itoa(index)
+		next[name] = append(next[name], id)
+		prefix := name + "[" + id + "]."
+		for field, value := range fields {
+			if field == "" {
+				panic("forms: row field names must not be empty")
+			}
+			next[prefix + field] = slices.CloneString(value)
+		}
+	}
+	if err := validateArrays(next, []string{name}); err != nil {
+		panic(err.Error())
+	}
+	return next
+}
+
+func validateArrays(values Values, arrays []string) error {
+	for index, name := range arrays {
+		for _, other := range arrays[:index] {
+			if name == other || arrayDescendant(name, other) || arrayDescendant(other, name) {
+				return fmt.Errorf("forms: array declarations must be unique non-overlapping roots")
+			}
+		}
+		if _, err := ArrayRows(values, name); err != nil {
+			return err
+		}
+		checked := map[string]bool{name: true}
+		for field := range values {
+			if !arrayDescendant(name, field) {
+				continue
+			}
+			for offset := len(name); offset < len(field);  {
+				start := strings.Index(field[offset:], "[")
+				if start < 0 {
+					break
+				}
+				start += offset
+				parent := field[:start]
+				if !checked[parent] {
+					if _, err := ArrayRows(values, parent); err != nil {
+						return err
+					}
+					checked[parent] = true
+				}
+				end := strings.Index(field[start:], "]")
+				if end < 0 {
+					return fmt.Errorf("forms: malformed array path")
+				}
+				offset = start + end + 1
+			}
+		}
+	}
+	return nil
+}
+
+// Canonical relative field paths detect changes to source-declared row shape
+// across reloads without retaining a second copy of the initial field values.
+func arraySchema(values Values, name string) string {
+	seen := make(map[string]bool)
+	paths := []string{}
+	for field := range values {
+		if !arrayDescendant(name, field) {
+			continue
+		}
+		path := ""
+		for offset := len(name); offset < len(field);  {
+			if field[offset] != '[' {
+				path += field[offset:offset + 1]
+				offset++
+				continue
+			}
+			end := strings.Index(field[offset:], "]")
+			path += "[]"
+			offset += end + 1 // validateArrays has already checked every bracket.
+		}
+		if !seen[path] {
+			seen[path] = true
+			paths = append(paths, path)
+		}
+	}
+	sort.Strings(paths)
+	identity := "array:"
+	for _, path := range paths {
+		identity += strconv.Itoa(len(path)) + ":" + path
+	}
+	return identity
+}
+
+func arrayNextRow(values Values, arrays []string) int {
+	next := 1
+	for field := range values {
+		if !arrayOwned(arrays, field) {
+			continue
+		}
+		for offset := 0; offset < len(field);  {
+			start := strings.Index(field[offset:], "[row-")
+			if start < 0 {
+				break
+			}
+			start += offset + len("[row-")
+			end := strings.Index(field[start:], "]")
+			if end < 0 {
+				break
+			}
+			id, err := strconv.Atoi(field[start:start + end])
+			if err == nil && id >= next && id < 2147483647 {
+				next = id + 1
+			}
+			offset = start + end + 1
+		}
+	}
+	return next
+}
+
+// fieldNames applies participation to the supplied snapshot, including updates
+// that have not rendered yet. A selected array includes its current descendants.
+func (form *Form) fieldNames(values Values) []string {
+	if len(form.arrays) == 0 {
+		return form.fields
+	}
+	fields := []string{}
+	if form.allFields {
+		for field := range values {
+			fields = append(fields, field)
+		}
+		for _, field := range form.fileFields {
+			fields = append(fields, field)
+		}
+		sort.Strings(fields)
+		return fields
+	}
+	seen := make(map[string]bool)
+	for _, name := range form.fields {
+		if !seen[name] {
+			fields = append(fields, name)
+			seen[name] = true
+		}
+		if slices.ContainsString(form.arrays, name) {
+			descendants := []string{}
+			for field := range values {
+				if arrayDescendant(name, field) && !seen[field] {
+					descendants = append(descendants, field)
+					seen[field] = true
+				}
+			}
+			sort.Strings(descendants)
+			fields = append(fields, descendants...)
+		}
+	}
+	return fields
+}

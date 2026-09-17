@@ -1,0 +1,145 @@
+package ui
+
+type effectKey struct {
+	kind string
+	name string
+}
+
+type effect struct {
+	scope *Scope
+	dependencies []any
+	setup func() func()
+	cleanup func()
+	seen bool
+	queued bool
+	active bool
+}
+
+// Effect runs after the host acknowledges the rendered DOM. Dependencies are
+// immutable, comparable snapshots; nil/empty means once per mounted instance.
+// Cleanup precedes a changed dependency's setup and also runs on removal.
+func Effect(scope *Scope, key string, setup func() func(), dependencies ...any) {
+	declareEffect(scope, effectKey{kind: "user", name: key}, setup, dependencies...)
+}
+
+// OnMount attaches a root-owned service before the first render. Setup runs once
+// after the first successful commit; cleanup follows cancellation on root close.
+// It adds no component, DOM node or reload state. SSR never runs setup.
+func (root *Root) OnMount(setup func() func()) {
+	if root == nil || root.closed || root.node != nil || root.flushing || root.committing ||
+		setup == nil ||
+		len(root.mountSetups) >= 64 {
+		panic("ui: root services require an unmounted root and at most 64 setup functions")
+	}
+	root.mountSetups = append(root.mountSetups, setup)
+}
+
+func declareEffect(scope *Scope, key effectKey, setup func() func(), dependencies ...any) {
+	scope.requireState(key.name)
+	if setup == nil {
+		panic("ui: effect requires a setup function")
+	}
+	dependencies = comparableInputs("effect dependencies", dependencies)
+	current := scope.effects[key]
+	if current == nil {
+		if scope.effects == nil {
+			scope.effects = make(map[effectKey]*effect)
+		}
+		current = &effect{scope: scope, active: true}
+		scope.effects[key] = current
+		scope.effectOrder = append(scope.effectOrder, key)
+	} else if current.seen {
+		panic("ui: duplicate effect key: " + key.name)
+	}
+	changed := current.setup == nil ||
+		!sameInputs("effect dependencies", current.dependencies, dependencies)
+	current.seen = true
+	current.setup = setup
+	current.dependencies = dependencies
+	if changed && !current.queued {
+		current.queued = true
+		scope.root.effects = append(scope.root.effects, current)
+	}
+}
+
+func (root *Root) queueCleanup(current *effect) {
+	if current.cleanup != nil {
+		root.cleanups = append(root.cleanups, current.cleanup)
+		current.cleanup = nil
+	}
+}
+
+func (scope *Scope) releaseEffects() {
+	for _, key := range scope.effectOrder {
+		current := scope.effects[key]
+		current.active = false
+		scope.root.queueCleanup(current)
+		current.setup = nil
+		current.dependencies = nil
+	}
+	scope.effects = nil
+	scope.effectOrder = nil
+}
+
+// Attempt every cleanup, retaining the first failure for the caller.
+func (root *Root) runCleanups() (failure any) {
+	cleanups := root.cleanups
+	root.cleanups = nil
+	for _, cleanup := range cleanups {
+		func() {
+			defer func() {
+				if value := recover(); value != nil && failure == nil {
+					failure = value
+				}
+			}()
+			cleanup()
+		}()
+	}
+	return failure
+}
+
+// Commit acknowledges one exact Flush result. SSR deliberately omits this call.
+// Effect writes are batched into a subsequent Flush, never into the current DOM.
+func (root *Root) Commit(revision int) {
+	if root.closed || root.flushing || root.committing || root.awaiting == 0 ||
+		revision != root.awaiting {
+		panic("ui: invalid commit acknowledgement")
+	}
+	root.awaiting = 0
+	root.committing = true
+	succeeded := false
+	defer func() {
+		root.committing = false
+		if !succeeded {
+			root.abort()
+		}
+	}()
+	pending := root.effects
+	root.effects = nil
+	for _, current := range pending {
+		current.queued = false
+		root.queueCleanup(current)
+	}
+	if failure := root.runCleanups(); failure != nil {
+		panic(failure)
+	}
+	for _, current := range pending {
+		if current.active && !current.scope.disposed {
+			current.cleanup = current.setup()
+		}
+	}
+	setups := root.mountSetups
+	root.mountSetups = nil
+	for _, setup := range setups {
+		if cleanup := setup(); cleanup != nil {
+			root.rootCleanups = append(root.rootCleanups, cleanup)
+		}
+	}
+	succeeded = true
+}
+
+func (root *Root) Pending() bool {
+	return !root.closed &&
+		(root.node == nil || len(root.dirty) > 0 || len(root.commands) > 0 ||
+			len(root.elementRequests) > 0)
+}

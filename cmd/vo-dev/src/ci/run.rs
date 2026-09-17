@@ -605,17 +605,23 @@ fn append_summary(task: &CiTask, receipt: &ExecutionReceipt) -> Result<()> {
 mod tests {
     use super::super::model::{CiCommand, CiManifest, CiProfile};
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     struct Repository(PathBuf);
     impl Repository {
         fn new(report: &str, result: bool, mode: &str) -> Self {
+            static NEXT_REPOSITORY: AtomicU64 = AtomicU64::new(0);
             let nonce = SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let root = std::env::temp_dir()
-                .join(format!("vo-ci-execution-{}-{nonce}", std::process::id()));
-            fs::create_dir_all(root.join("eng")).unwrap();
+            let sequence = NEXT_REPOSITORY.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "vo-ci-execution-{}-{nonce}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).unwrap();
+            fs::create_dir(root.join("eng")).unwrap();
             let root = root.canonicalize().unwrap();
             let manifest = CiManifest {
                 components: Vec::new(),

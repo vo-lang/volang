@@ -1,0 +1,110 @@
+package kit
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type PaginationProps struct {
+	Page func() int
+	PageCount int
+	OnChange func(int)
+	Disabled bool
+	Label string
+	PreviousLabel string
+	NextLabel string
+	PageLabel func(int) string
+	// Neighbors defaults to one page on each side and may be at most five.
+	Neighbors int
+	Class string
+}
+
+// Pagination uses one-based pages and a bounded set of native buttons. Supply
+// PageCount >= 1, including for an empty result, and keep Page within that range.
+// The caller owns page data and may put its page number in the URL.
+func Pagination(props PaginationProps) ui.View {
+	if props.Page == nil || props.OnChange == nil || props.PageCount < 1 {
+		panic("kit: pagination requires a page reader, change handler and positive page count")
+	}
+	page := props.Page()
+	if page < 1 || page > props.PageCount {
+		panic("kit: pagination page is outside its range")
+	}
+	if props.Neighbors == 0 {
+		props.Neighbors = 1
+	}
+	if props.Neighbors < 1 || props.Neighbors > 5 {
+		panic("kit: pagination neighbors must be within 1..5")
+	}
+	label := props.Label
+	if label == "" {
+		label = "Pagination"
+	}
+	previous, next := props.PreviousLabel, props.NextLabel
+	if previous == "" {
+		previous = "Previous"
+	}
+	if next == "" {
+		next = "Next"
+	}
+	change := func(value int) {
+		if !props.Disabled && value >= 1 && value <= props.PageCount && value != props.Page() {
+			props.OnChange(value)
+		}
+	}
+	button := func(key string, text string, unavailable bool, action func()) ui.View {
+		return Button(ButtonProps{
+			Variant: "secondary", Disabled: props.Disabled || unavailable, OnPress: action,
+		}, ui.Text(text)).Key(key)
+	}
+	children := []ui.View{
+		button("previous", previous, page == 1, func() {
+			change(props.Page() - 1)
+		}),
+	}
+	start, end := page - props.Neighbors, props.PageCount
+	if start < 1 {
+		start = 1
+	}
+	if props.PageCount - page > props.Neighbors {
+		end = page + props.Neighbors
+	}
+	pages := []int{}
+	if start > 1 {
+		pages = append(pages, 1)
+	}
+	for value := start; ; value++ {
+		pages = append(pages, value)
+		if value == end {
+			break
+		}
+	}
+	if end < props.PageCount {
+		pages = append(pages, props.PageCount)
+	}
+	last := 0
+	for _, value := range pages {
+		if last != 0 && value > last + 1 {
+			children = append(children, ui.Element("span", ui.Text("…")).Key("gap-" + fmt.Sprint(value)).Attr("aria-hidden", "true").Class("vui-pagination-gap"))
+		}
+		name := "Page " + fmt.Sprint(value)
+		if props.PageLabel != nil {
+			name = props.PageLabel(value)
+		}
+		if name == "" {
+			panic("kit: pagination page labels must not be empty")
+		}
+		entry := button(fmt.Sprint(value), fmt.Sprint(value), false, func() {
+			change(value)
+		}).Attr("aria-label", name)
+		if value == page {
+			entry = entry.Attr("aria-current", "page")
+		}
+		children = append(children, entry)
+		last = value
+	}
+	children = append(children, button("next", next, page == props.PageCount, func() {
+		change(props.Page() + 1)
+	}))
+	return ui.Element("nav", children...).Attr("aria-label", label).Class("vui-pagination").Class(props.Class)
+}

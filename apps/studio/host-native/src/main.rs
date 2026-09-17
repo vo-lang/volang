@@ -37,10 +37,11 @@ fn launch() -> Result<(), String> {
     let output = if repository_owned_application {
         compile_studio_application(&application)?
     } else {
-        vo_engine::compile_path_with_auto_install(&application)
+        vo_ui_integration::engine()
+            .compile_path_with_auto_install(&application)
             .map_err(|error| format!("Studio application compilation failed: {error}"))?
     };
-    let vm = vo_engine::build_native_gui_vm_for_mode(output, RunMode::Jit)?;
+    let vm = vo_ui_integration::build_native_gui_vm_for_mode(output, RunMode::Jit)?;
     let host = NativeStudioHost::open(workspace).map_err(|error| error.to_string())?;
     let mut config = vo_ui_shell_native::NativeDesktopConfig {
         title: "Volang Studio".to_string(),

@@ -1,0 +1,109 @@
+package app
+
+import (
+	"fmt"
+	"unicode/utf8"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type sourcePosition struct {
+	Line int `json:"line"`
+	Character int `json:"character"`
+}
+
+type sourceLocation struct {
+	File string `json:"file"`
+	Start sourcePosition `json:"start"`
+	End sourcePosition `json:"end"`
+	StartByte int `json:"startByte"`
+	EndByte int `json:"endByte"`
+}
+
+type sourceDiagnostic struct {
+	Severity string `json:"severity"`
+	Code int `json:"code"`
+	Message string `json:"message"`
+	Location *sourceLocation `json:"location"`
+}
+
+type sourceDiagnostics struct {
+	Version int `json:"version"`
+	PositionEncoding string `json:"positionEncoding"`
+	Items []sourceDiagnostic `json:"items"`
+}
+
+func (diagnostics sourceDiagnostics) available() bool {
+	return diagnostics.Version == 1 && diagnostics.PositionEncoding == "utf-16" &&
+		len(diagnostics.Items) > 0
+}
+
+func sourceDiagnosticOutput(diagnostics sourceDiagnostics, output ui.View) ui.View {
+	if !diagnostics.available() {
+		return output
+	}
+	for _, diagnostic := range diagnostics.Items {
+		if diagnostic.Severity == "error" {
+			return ui.Element("details", ui.Element("summary", ui.Text("Full compiler message")), output)
+		}
+	}
+	return output
+}
+
+func sourceSelection(source string, location *sourceLocation) (ui.TextSelection, bool) {
+	if location == nil || location.File != "main.vo" || location.StartByte < 0 ||
+		location.EndByte < location.StartByte ||
+		location.EndByte > len(source) {
+		return ui.TextSelection{}, false
+	}
+	before, selected := source[:location.StartByte], source[location.StartByte:location.EndByte]
+	if !utf8.ValidString(before) || !utf8.ValidString(selected) {
+		return ui.TextSelection{}, false
+	}
+	width := func(value string) int {
+		count := 0
+		for _, char := range value {
+			count++
+			if char > 0xffff {
+				count++
+			}
+		}
+		return count
+	}
+	start := width(before)
+	return ui.TextSelection{Start: start, End: start + width(selected)}, true
+}
+
+// Results belong to one submitted source snapshot. Changed drafts expose no
+// active locations; the renderer also verifies the native value at commit time.
+func SourceDiagnostics(draft *editorDraft, source string, diagnostics sourceDiagnostics) ui.View {
+	if !diagnostics.available() {
+		return ui.Fragment()
+	}
+	if source != draft.source.Get() {
+		return ui.Element("p", ui.Text("Code changed. Run again to check your current draft.")).Attr("data-diagnostics-stale", "").Class("studio-editor-hint")
+	}
+	items := make([]ui.View, 0, len(diagnostics.Items))
+	for _, diagnostic := range diagnostics.Items {
+		label := diagnostic.Severity
+		if diagnostic.Code > 0 {
+			label += fmt.Sprintf(" E%d", diagnostic.Code)
+		}
+		if diagnostic.Location != nil {
+			at := diagnostic.Location
+			label += fmt.Sprintf(" · %s:%d:%d", at.File, at.Start.Line + 1, at.Start.Character + 1)
+		}
+		content := ui.Fragment(ui.Element("span", ui.Text(label)).Class("studio-diagnostic-location"), ui.Element("span", ui.Text(diagnostic.Message)))
+		location := diagnostic.Location
+		if location != nil && location.File == "main.vo" && location.StartByte >= 0 &&
+			location.EndByte >= location.StartByte &&
+			location.EndByte <= len(source) {
+			content = ui.Element("button", content).Attr("type", "button").Attr("data-source-diagnostic", "").On("click", func(ui.Event) {
+				if selection, valid := sourceSelection(source, location); valid {
+					draft.input.SelectTextIfUnchanged(source, selection)
+				}
+			})
+		}
+		items = append(items, ui.Element("li", content))
+	}
+	return ui.Element("section", ui.Element("h2", ui.Text("Problems")), ui.Element("p", ui.Text(fmt.Sprintf("%d problem(s). Select a problem to locate it in your code.", len(diagnostics.Items)))).Attr("role", "status"), ui.Element("ul", items...)).Attr("aria-label", "Source diagnostics").Class("studio-diagnostics")
+}

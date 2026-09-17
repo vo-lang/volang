@@ -3,10 +3,11 @@
 //! This binary uses std for file I/O, but depends on vo-vm and vo-runtime
 //! compiled with no_std (default-features = false) to verify no_std compatibility.
 //!
-//! Usage: vo-vm-runner <bytecode_file> [args...]
+//! Usage: vo-embed [--raw-output] <bytecode_file> [args...]
 
 use std::env;
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process;
 
@@ -41,13 +42,15 @@ fn register_embedder_externs(vm: &mut Vm, module: &Module) -> Result<(), String>
 
 fn main() {
     let args: Vec<OsString> = env::args_os().collect();
+    let raw_output = args.get(1).is_some_and(|arg| arg == "--raw-output");
+    let file_index = 1 + usize::from(raw_output);
 
-    if args.len() < 2 {
-        eprintln!("Usage: vo-vm-runner <bytecode_file> [args...]");
+    if args.len() <= file_index {
+        eprintln!("Usage: vo-embed [--raw-output] <bytecode_file> [args...]");
         process::exit(1);
     }
 
-    let bytecode_path = PathBuf::from(&args[1]);
+    let bytecode_path = PathBuf::from(&args[file_index]);
 
     // Read bytecode file
     let bytecode = match vo_common_core::serialize::read_vob_file(&bytecode_path) {
@@ -69,15 +72,19 @@ fn main() {
 
     // Create VM and run
     let mut vm = Vm::new();
+    // The no_std default sink has no native console. Route output through the
+    // public instance-owned sink so the runner exposes exact guest bytes too.
+    let output = vo_runtime::output::CaptureSink::new();
+    vm.set_output_sink(output.clone());
     if let Err(error) = register_embedder_externs(&mut vm, &module) {
         eprintln!("Runtime configuration error: {error}");
         process::exit(1);
     }
 
-    // Pass remaining args as program args
+    // Include the bytecode path as argv[0], followed by guest arguments.
     let program_args = args
         .into_iter()
-        .skip(2)
+        .skip(file_index)
         .map(os_arg_into_bytes)
         .collect::<Result<Vec<_>, _>>()
         .unwrap_or_else(|argument| {
@@ -94,7 +101,12 @@ fn main() {
         process::exit(1);
     }
 
-    match vm.run() {
+    let outcome = vm.run();
+    if let Err(error) = std::io::stdout().lock().write_all(&output.take_bytes()) {
+        eprintln!("Could not write guest output: {error}");
+        process::exit(1);
+    }
+    match outcome {
         Err(e) => {
             eprintln!("Runtime error: {:?}", e);
             process::exit(1);
@@ -107,7 +119,9 @@ fn main() {
         Ok(_) => {}
     }
 
-    println!("[VO:OK]");
+    if !raw_output {
+        println!("[VO:OK]");
+    }
 }
 
 #[cfg(unix)]

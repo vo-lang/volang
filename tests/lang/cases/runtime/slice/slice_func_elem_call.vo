@@ -19,25 +19,31 @@ func (c *Calculator) Exec(idx, a, b int) int {
 
 func main() {
 	// Test 1: Basic slice of functions
-	funcs := []func() int{func() int {
-		return 1
-	}, func() int {
-		return 2
-	}, func() int {
-		return 3
-	}}
+	funcs := []func() int{
+		func() int {
+			return 1
+		},
+		func() int {
+			return 2
+		},
+		func() int {
+			return 3
+		},
+	}
 	assert(funcs[0]() == 1, "funcs[0]() should be 1")
 	assert(funcs[1]() == 2, "funcs[1]() should be 2")
 	assert(funcs[2]() == 3, "funcs[2]() should be 3")
 	// Test 2: Slice of functions with parameters
 	ops := []func(int, int) int{
 		func(a, b int) int {
-	return a + b
-}, func(a, b int) int {
-	return a - b
-}, func(a, b int) int {
-	return a * b
-},
+			return a + b
+		},
+		func(a, b int) int {
+			return a - b
+		},
+		func(a, b int) int {
+			return a * b
+		},
 	}
 	assert(ops[0](10, 5) == 15, "ops[0](10,5) should be 15")
 	assert(ops[1](10, 5) == 5, "ops[1](10,5) should be 5")
@@ -76,15 +82,22 @@ func main() {
 	assert(sum == 15, "sum should be 1+2+3+4+5=15")
 	// Test 7: Nested slice of functions
 	matrix := [][]func() int{
-		[]func() int{func() int {
-	return 1
-}, func() int {
-	return 2
-}}, []func() int{func() int {
-	return 3
-}, func() int {
-	return 4
-}},
+		[]func() int{
+			func() int {
+				return 1
+			},
+			func() int {
+				return 2
+			},
+		},
+		[]func() int{
+			func() int {
+				return 3
+			},
+			func() int {
+				return 4
+			},
+		},
 	}
 	assert(matrix[0][0]() == 1, "matrix[0][0] should be 1")
 	assert(matrix[1][1]() == 4, "matrix[1][1] should be 4")
@@ -97,10 +110,11 @@ func main() {
 func makeOps() []func(int, int) int {
 	return []func(int, int) int{
 		func(a, b int) int {
-	return a + b
-}, func(a, b int) int {
-	return a * b
-},
+			return a + b
+		},
+		func(a, b int) int {
+			return a * b
+		},
 	}
 }
 

@@ -1,0 +1,120 @@
+package inspect
+
+import (
+	"strconv"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type PropValue struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	Value string `json:"value"`
+	Truncated bool `json:"truncated"`
+}
+
+type ComponentProps struct {
+	Component int `json:"component"`
+	Values []PropValue `json:"values"`
+}
+
+// Prop copies a scalar preview during the render attempt. Mutable structures,
+// functions and named application types stay opaque. No application method is
+// called, no reactive computation is evaluated and no supplied object survives
+// this callback. Each attempt replaces its previous declarations.
+func (session *Session) Prop(id int, name string, value any) {
+	if session.closed {
+		return
+	}
+	values, known := session.props[id]
+	if !known && len(session.props) == 512 {
+		session.truncated = true
+		return
+	}
+	preview := PropValue{Name: propText(name), Kind: "opaque", Truncated: len(name) > 256}
+	position := -1
+	for index, previous := range values {
+		if previous.Name == preview.Name {
+			position = index
+			break
+		}
+	}
+	if position < 0 && (len(values) == 64 || session.propCount == 2048) {
+		session.truncated = true
+		return
+	}
+	switch scalar := value.(type) {
+		case nil:
+			preview.Kind, preview.Value = "nil", "nil"
+		case string:
+			preview.Kind, preview.Value = "string", propText(scalar)
+			preview.Truncated = preview.Truncated || len(scalar) > 256
+		case bool:
+			preview.Kind, preview.Value = "bool", strconv.FormatBool(scalar)
+		case int:
+			preview.Kind, preview.Value = "int", strconv.Itoa(scalar)
+		case int8:
+			preview.Kind, preview.Value = "int8", strconv.FormatInt(int64(scalar), 10)
+		case int16:
+			preview.Kind, preview.Value = "int16", strconv.FormatInt(int64(scalar), 10)
+		case int32:
+			preview.Kind, preview.Value = "int32", strconv.FormatInt(int64(scalar), 10)
+		case int64:
+			preview.Kind, preview.Value = "int64", strconv.FormatInt(scalar, 10)
+		case uint:
+			preview.Kind, preview.Value = "uint", strconv.FormatUint(uint64(scalar), 10)
+		case uint8:
+			preview.Kind, preview.Value = "uint8", strconv.FormatUint(uint64(scalar), 10)
+		case uint16:
+			preview.Kind, preview.Value = "uint16", strconv.FormatUint(uint64(scalar), 10)
+		case uint32:
+			preview.Kind, preview.Value = "uint32", strconv.FormatUint(uint64(scalar), 10)
+		case uint64:
+			preview.Kind, preview.Value = "uint64", strconv.FormatUint(scalar, 10)
+		case float32:
+			preview.Kind, preview.Value = "float32", strconv.FormatFloat(float64(scalar), 'g', -1, 32)
+		case float64:
+			preview.Kind, preview.Value = "float64", strconv.FormatFloat(scalar, 'g', -1, 64)
+	}
+	session.truncated = session.truncated || preview.Truncated
+	if position >= 0 {
+		values[position] = preview
+		return
+	}
+	if session.props == nil {
+		session.props = make(map[int][]PropValue)
+	}
+	session.props[id] = append(values, preview)
+	session.propCount++
+}
+
+func propText(value string) string {
+	if len(value) <= 256 {
+		return strings.Clone(value)
+	}
+	end := 0
+	for index := range value {
+		if index > 256 {
+			break
+		}
+		end = index
+	}
+	return strings.Clone(value[:end])
+}
+
+func (session *Session) clearProps(id int) {
+	session.propCount -= len(session.props[id])
+	delete(session.props, id)
+}
+
+func (session *Session) propSnapshots(components []ui.ComponentInspection) []ComponentProps {
+	result := []ComponentProps{}
+	for _, component := range components {
+		if values := session.props[component.ID]; len(values) > 0 {
+			result = append(result, ComponentProps{
+				Component: component.ID, Values: append([]PropValue{}, values...),
+			})
+		}
+	}
+	return result
+}

@@ -1,0 +1,19 @@
+package ui
+
+// StyleScope marks an element as the root of an authored CSS @scope. Use a
+// package-prefixed name shared by every instance of the component. Pair it with
+// @scope ([data-vui-scope="name"]) to ([data-vui-scope]) to exclude nested roots.
+// The marker adds no wrapper and does not change CSS inheritance or ownership.
+func (view View) StyleScope(name string) View {
+	if len(name) == 0 || len(name) > 96 || name[0] < 'a' || name[0] > 'z' {
+		panic("ui: style scope must be 1–96 lowercase ASCII letters, digits or hyphens, starting with a letter")
+	}
+	for index := 1; index < len(name); index++ {
+		character := name[index]
+		if !(character >= 'a' && character <= 'z') && !(character >= '0' && character <= '9') &&
+			character != '-' {
+			panic("ui: style scope must be 1–96 lowercase ASCII letters, digits or hyphens, starting with a letter")
+		}
+	}
+	return view.Attr("data-vui-scope", name)
+}

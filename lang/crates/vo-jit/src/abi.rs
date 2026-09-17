@@ -1,4 +1,6 @@
+#[cfg(feature = "compiler")]
 use cranelift_codegen::ir::{types, AbiParam, Signature};
+#[cfg(feature = "compiler")]
 use cranelift_codegen::isa::CallConv;
 
 use vo_runtime::jit_api::{JitContext, JitResult};
@@ -14,9 +16,12 @@ pub const NATIVE_ARG_LANES: usize = 5;
 
 /// Unified VM/JIT native entry. `frame_bp` identifies the callee's verified
 /// fiber-stack window by stable slot index; generated code reconstructs a raw
-/// pointer only when it actually accesses frame memory. Static calls
-/// additionally pass the leading argument words in lanes so the callee can
-/// enter SSA without reloading them.
+/// pointer only when it actually accesses frame memory. The first
+/// [`NATIVE_ARG_LANES`] parameter words are authoritative in the machine lanes;
+/// their shadow slots may be uninitialized. The callee imports them into SSA
+/// or initializes alias-backed storage before a guest safepoint, and publishes
+/// them before an early entry failure. The caller initializes the wide tail.
+/// Continuation entries have a separate frame-import contract.
 pub type NativeJitFunc = extern "C" fn(
     ctx: *mut JitContext,
     frame_bp: u64,
@@ -30,6 +35,7 @@ pub type NativeJitFunc = extern "C" fn(
 
 pub type JitFunc = NativeJitFunc;
 
+#[cfg(feature = "compiler")]
 pub(crate) fn native_signature(
     call_conv: CallConv,
     pointer_type: cranelift_codegen::ir::Type,
@@ -84,3 +90,6 @@ pub unsafe fn invoke_native_from_frame(
         unsafe { lane(frame_ptr, param_slots, 4) },
     )
 }
+
+/// OSR entry in the shared native execution ABI.
+pub type LoopFunc = extern "C" fn(*mut JitContext, *mut u64) -> JitResult;

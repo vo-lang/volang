@@ -1,0 +1,123 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func portalMutation(batch ui.Batch) ui.Mutation {
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "portal" {
+			return mutation
+		}
+	}
+	panic("missing portal placement")
+}
+
+func portalContracts() {
+	var destination *ui.IntState
+	var visible *ui.BoolState
+	var missing *ui.BoolState
+	var portalTarget *ui.ElementRef
+	created := 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		first, second := ui.Ref(scope, "first"), ui.Ref(scope, "second")
+		portalTarget = first
+		destination = ui.Int(scope, "destination", 1)
+		visible = ui.Bool(scope, "visible", true)
+		missing = ui.Bool(scope, "missing", false)
+		var selected *ui.ElementRef
+		if destination.Get() == 1 {
+			selected = first
+		}
+		if destination.Get() == 2 {
+			selected = second
+		}
+		children := []ui.View{}
+		if visible.Get() {
+			children = append(children, ui.Element("section", ui.Component(counterType, func(scope *ui.Scope) ui.View {
+				ui.State(scope, "identity", func() any {
+					created++
+					return "retained"
+				})
+				return ui.Element("input").Attr("value", "early input").Attr("data-name", "field")
+			})).Attr("data-name", "source").Portal(selected).Key("source"))
+		}
+		if !missing.Get() {
+			children = append(children, ui.Element("aside").Ref(first).Attr("data-name", "first").Key("first"))
+		}
+		children = append(children, ui.Element("aside").Ref(second).Attr("data-name", "second").Key("second"))
+		return ui.Element("main", children...)
+	}))
+	initial := flush(root)
+	placed := portalMutation(initial)
+	require(placed.ID == target(initial, "source") && placed.Parent == target(initial, "first"), "portal did not resolve a later target")
+	beforeHTML := root.HTML()
+	require(strings.Index(beforeHTML, "data-name=\"source\"") <
+		strings.Index(beforeHTML, "data-name=\"field\"") &&
+		strings.Index(beforeHTML, "data-name=\"field\"") <
+			strings.Index(beforeHTML, "data-name=\"first\""), "SSR portal did not keep readable inline content")
+	require(len(flush(root).Mutations) == 0, "unchanged portal emitted placement work")
+	destination.Set(2)
+	changed := portalMutation(flush(root))
+	require(changed.ID == placed.ID && changed.Parent == target(initial, "second") && created == 1, "target change recreated portal state")
+	destination.Set(1)
+	missing.Set(true)
+	require(portalMutation(flush(root)).Parent == 0 && created == 1, "unbound target did not restore inline placement")
+	missing.Set(false)
+	rebound := portalMutation(flush(root))
+	require(rebound.ID == placed.ID && rebound.Parent != placed.Parent && rebound.Parent != 0, "portal did not follow a recreated target")
+	destination.Set(0)
+	require(portalMutation(flush(root)).Parent == 0, "removing portal decoration did not restore its existing node")
+	destination.Set(1)
+	flush(root)
+	visible.Set(false)
+	removed := flush(root)
+	for _, mutation := range removed.Mutations {
+		require(mutation.Op != "portal", "disposed portal emitted a stale placement")
+	}
+	root.Close()
+	expectPanic(func() {
+		ui.Fragment().Portal(nil)
+	}, "HTML element")
+	expectPanic(func() {
+		foreign := ui.NewRoot(ui.Element("section").Portal(portalTarget))
+		flush(foreign)
+	}, "different or disposed root")
+	for _, mode := range []string{
+		"self", "descendant", "cycle", "void", "style", "title", "iframe", "data", "limit", "svg",
+	} {
+		expectPanic(func() {
+			invalid := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+				first, second := ui.Ref(scope, "first"), ui.Ref(scope, "second")
+				if mode == "self" {
+					return ui.Element("div").Ref(first).Portal(first)
+				}
+				if mode == "descendant" {
+					return ui.Element("div", ui.Element("div").Ref(first)).Portal(first)
+				}
+				if mode == "cycle" {
+					return ui.Fragment(ui.Element("div").Ref(first).Portal(second), ui.Element("div").Ref(second).Portal(first))
+				}
+				if mode == "void" {
+					return ui.Fragment(ui.Element("div").Portal(first), ui.Element("input").Ref(first))
+				}
+				if mode == "style" || mode == "title" || mode == "iframe" {
+					return ui.Fragment(ui.Element("div").Portal(first), ui.Element(mode).Ref(first))
+				}
+				if mode == "data" {
+					return ui.Fragment(ui.Element("div").Portal(first), ui.DataBlock("application/json", nil).Ref(first))
+				}
+				if mode == "svg" {
+					return ui.Element("svg", ui.Element("g").Portal(first))
+				}
+				children := []ui.View{ui.Element("div").Ref(first)}
+				for index := 0; index < 65; index++ {
+					children = append(children, ui.Element("div").Portal(first))
+				}
+				return ui.Fragment(children...)
+			}))
+			flush(invalid)
+		}, "")
+	}
+}

@@ -34,8 +34,9 @@ fn set_queue_trap(
     gc: &mut vo_runtime::gc::Gc,
     fiber: &mut crate::fiber::Fiber,
     kind: RuntimeTrapKind,
+    module: &vo_runtime::bytecode::Module,
 ) -> JitResult {
-    set_jit_trap(gc, fiber, kind, helpers::runtime_trap_message(kind))
+    set_jit_trap(gc, fiber, kind, module, helpers::runtime_trap_message(kind))
 }
 
 pub(super) fn commit_queue_action(
@@ -48,7 +49,12 @@ pub(super) fn commit_queue_action(
     match crate::vm::prepare_queue_action(vm.state_mut(), fiber, action) {
         Ok(PreparedQueueAction::Continue) => JitResult::Ok,
         Ok(PreparedQueueAction::Block(_)) => JitResult::WaitQueue,
-        Ok(PreparedQueueAction::Trap(kind)) => set_queue_trap(&mut vm.state_mut().gc, fiber, kind),
+        Ok(PreparedQueueAction::Trap(kind)) => set_queue_trap(
+            &mut vm.state_mut().gc,
+            fiber,
+            kind,
+            unsafe { super::helpers::module_runtime_metadata(ctx) }.module(),
+        ),
         Ok(PreparedQueueAction::Transition {
             mut transition,
             wait,
@@ -295,6 +301,7 @@ pub extern "C" fn jit_queue_send(
             &mut vm.state_mut().gc,
             fiber,
             RuntimeTrapKind::SendOnClosedChannel,
+            module,
             helpers::ERR_SEND_ON_CLOSED,
         );
     }

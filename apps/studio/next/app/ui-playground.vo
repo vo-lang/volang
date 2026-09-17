@@ -1,0 +1,112 @@
+package app
+
+import (
+	"github.com/vo-lang/studio/next/examples"
+	"encoding/json"
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/navigation"
+)
+
+var uiPlaygroundType = ui.Define("studio.UIPlayground")
+
+// Preview handles, status and execution flags retire together on reload.
+type previewExecution struct {
+	active bool
+	busy bool
+	generation int
+	source string
+	status string
+	diagnostics sourceDiagnostics
+}
+
+type previewFeedback struct {
+	State string `json:"state"`
+	Message string `json:"message"`
+	Diagnostics sourceDiagnostics `json:"diagnostics"`
+}
+
+func UIPlayground() ui.View {
+	return ui.Component(uiPlaygroundType, func(scope *ui.Scope) ui.View {
+		draft := useEditorDraft(scope, examples.UI()[0].Source, "studio.ui-draft")
+		execution := ui.State(scope, "execution", func() any {
+			return previewExecution{status: "Your interface will appear here when you run it."}
+		})
+		run := func() {
+			current := execution.Get().(previewExecution)
+			if current.busy {
+				return
+			}
+			current.source = draft.source.Get()
+			current.generation++
+			current.active, current.busy = true, true
+			current.status = "Preparing your interface…"
+			current.diagnostics = sourceDiagnostics{}
+			execution.Update(func(any) any {
+				return current
+			})
+		}
+		stop := func() {
+			execution.Update(func(value any) any {
+				current := value.(previewExecution)
+				current.active, current.busy = false, false
+				current.status = "Stopped. Your draft is ready whenever you are."
+				current.diagnostics = sourceDiagnostics{}
+				return current
+			})
+		}
+		replace := func(source string) {
+			stop()
+			draft.Replace(source)
+		}
+		current := execution.Get().(previewExecution)
+		preview := ui.Element("p", ui.Text("A little space for what comes next.")).Class("studio-preview-empty")
+		if current.active {
+			preview = ui.Widget("studio.preview", current.source, func(result ui.Result) {
+				current := execution.Get().(previewExecution)
+				if !current.active {
+					return
+				}
+				current.busy = false
+				var feedback previewFeedback
+				failure := result.Error
+				if failure == "" {
+					if err := json.Unmarshal([]byte(result.Value), &feedback); err != nil {
+						failure = "The preview returned an unreadable result."
+					}
+				}
+				if failure == "" && feedback.State == "ready" {
+					current.status = "Your preview is ready. Try it below."
+					current.diagnostics = feedback.Diagnostics
+					execution.Update(func(any) any {
+						return current
+					})
+					return
+				}
+				current.active = false
+				message := feedback.Message
+				if failure != "" {
+					message = failure
+				}
+				if message == "" {
+					message = "The preview ended without a result."
+				}
+				current.status = message
+				current.diagnostics = feedback.Diagnostics
+				execution.Update(func(any) any {
+					return current
+				})
+			}).Key(fmt.Sprint(current.generation))
+		}
+		actions := ui.Element("div", kit.Button(kit.ButtonProps{Disabled: current.busy, OnPress: run}, ui.Text("Run preview")).Attr("data-run-preview", ""), kit.Button(kit.ButtonProps{
+			Variant: "secondary", Disabled: !current.active, OnPress: stop,
+		}, ui.Text("Stop preview")).Attr("data-stop-preview", ""), kit.Button(kit.ButtonProps{
+			Variant: "quiet",
+			OnPress: func() {
+				replace(examples.UI()[0].Source)
+			},
+		}, ui.Text("Reset example"))).Class("studio-actions")
+		return ui.Element("section", ui.Element("header", ui.Element("p", ui.Text("FROM A SMALL IDEA TO SOMETHING REAL")).Class("studio-eyebrow"), ui.Element("h1", ui.Text("Make it your own.")), paragraph("Edit a component and give it a try. Your UI draft stays in this browser."), navigation.Link("/studio/playground", ui.Text("Back to console examples →")).Class("studio-text-link")).Class("studio-intro"), ExamplePicker(scope, "ui-example", draft, examples.UI(), replace, stop), SourceEditor("ui-playground-source", draft, actions, run), SourceDiagnostics(draft, current.source, current.diagnostics), ui.Element("section", ui.Element("h2", ui.Text("Your preview")), sourceDiagnosticOutput(current.diagnostics, ui.Element("pre", ui.Text(current.status)).Attr("data-preview-status", "").Attr("role", "status")), preview).Class("studio-output"), ui.Element("p", ui.Text(draft.error.Get())).Attr("role", "alert"))
+	})
+}

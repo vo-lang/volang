@@ -1,0 +1,142 @@
+package app
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/data"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/navigation"
+	"github.com/vo-lang/ui/next/web"
+)
+
+func PreferenceValues(value Preferences) forms.Values {
+	return forms.Values{
+		"name": {value.Name}, "density": {value.Density}, "digest": {fmt.Sprint(value.Digest)},
+		"frequency": {value.Frequency}, "topics": value.Topics,
+	}
+}
+
+func PreferencesFromValues(values forms.Values) Preferences {
+	return Preferences{
+		Name: values.Get("name"), Density: values.Get("density"), Digest: values.Get("digest") == "true",
+		Frequency: values.Get("frequency"), Topics: values["topics"],
+	}
+}
+
+func Settings(scope *ui.Scope, match navigation.Match, content ui.View) ui.View {
+	app := env(scope)
+	request := PreferencesRequest(app.Base)
+	query := data.Use(scope, "preferences", app.Cache, request)
+	if query.Error != "" {
+		return queryProblem("Your preferences could not be loaded.", func() {
+			app.Cache.Invalidate(request)
+		})
+	}
+	if !query.HasValue {
+		return ui.Element("p", ui.Text("Opening your preferences…")).Attr("role", "status")
+	}
+	refs := map[string]*ui.ElementRef{}
+	for _, name := range []string{"name", "density", "frequency", "topics"} {
+		refs[name] = ui.Ref(scope, name)
+	}
+	form := forms.Use(scope, "settings", forms.Options{
+		Initial: PreferenceValues(preferences(query)), Submission: app.Submission,
+		Validate: func(data forms.Data) forms.Errors {
+			values := data.Values
+			return ValidatePreferences(PreferencesFromValues(values))
+		},
+		FocusInvalid: func(name string) {
+			refs[name].Focus()
+		},
+	})
+	name := kit.FormField(kit.FieldProps{
+		ID: "preference-name", Label: "Collection name", Hint: "Make this little corner your own.",
+		Error: form.Error("name"),
+	}, form.Input("name", ui.Element("input").Ref(refs["name"]).Attr("required", "true").Attr("autocomplete", "organization")))
+	density := kit.FormField(kit.FieldProps{
+		ID: "preference-density", Label: "Reading density", Error: form.Error("density"),
+	}, form.Input("density", ui.Element("select", ui.Element("option", ui.Text("Comfortable")).Attr("value", "comfortable"), ui.Element("option", ui.Text("Compact")).Attr("value", "compact")).Ref(refs["density"])))
+	frequency := kit.FormField(kit.FieldProps{
+		ID: "preference-frequency", Label: "Digest frequency", Error: form.Error("frequency"),
+	}, form.Input("frequency", ui.Element("select", ui.Element("option", ui.Text("Every week")).Attr("value", "weekly"), ui.Element("option", ui.Text("Every month")).Attr("value", "monthly")).Ref(refs["frequency"])))
+	options := []kit.ChoiceOption{}
+	for _, topic := range Topics() {
+		options = append(options, kit.ChoiceOption{Value: topic, Label: topic})
+	}
+	choices := kit.CheckboxGroup(kit.CheckboxGroupProps{
+		ID: "preference-topics", Name: "topics", Label: "Topics to include", Options: options,
+		Value: func() []string {
+			return form.All("topics")
+		},
+		OnChange: func(values []string) {
+			form.ChangeAll("topics", values)
+		},
+		OnBlur: func() {
+			form.Blur("topics")
+		},
+		InputRef: refs["topics"], Error: form.Error("topics"),
+	})
+	label := "Save preferences"
+	if form.Pending() {
+		label = "Saving…"
+	}
+	action := app.Base + "preferences"
+	if backend := match.Location.Query.Get("backend"); backend != "" {
+		action += "?backend=" + url.QueryEscape(backend)
+	}
+	view := form.View(func(data forms.Data) ui.Request {
+		values := data.Values
+		encoded, err := json.Marshal(PreferencesFromValues(values))
+		if err != nil {
+			panic(err.Error())
+		}
+		return web.HTTP(app.Base + "api/preferences", web.HTTPOptions{
+			Method: "PATCH", Headers: map[string]string{"Content-Type": "application/json"},
+			Body: string(encoded),
+		}).WithTimeout(5000)
+	}, func(result ui.Result) forms.Outcome {
+		response, err := web.DecodeHTTP(result)
+		if err != nil {
+			return forms.Outcome{Errors: forms.Errors{"": err.Error()}}
+		}
+		var saved SavedPreferences
+		if err := json.Unmarshal([]byte(response.Body), &saved); err != nil {
+			return forms.Outcome{
+				Errors: forms.Errors{"": "The response could not be read. Please try again."},
+			}
+		}
+		if !response.OK() {
+			if len(saved.Errors) > 0 {
+				return forms.Outcome{Errors: saved.Errors}
+			}
+			return forms.Outcome{
+				Errors: forms.Errors{"": "Your preferences could not be saved. Please try again."},
+			}
+		}
+		app.Cache.Invalidate(request)
+		return forms.Outcome{Message: saved.Message}
+	}, ui.Element("section", ui.Element("h2", ui.Text("A space that feels like you.")), name, density).Class("settings-section"), ui.Element("section", ui.Element("h2", ui.Text("A little inspiration, occasionally.")), ui.Element("label", form.Checkbox("digest", ui.Element("input").Attr("id", "preference-digest").Attr("value", "true")), ui.Text("Send me a reading digest")).Class("digest-switch"), frequency, choices).Class("settings-section"), ui.Element("div", ui.Element("button", ui.Text(label)).Attr("type", "submit").Attr("disabled", fmt.Sprint(form.Pending())).Class("vui-button").Attr("data-save-preferences", ""), kit.Button(kit.ButtonProps{
+		Variant: "secondary", Disabled: !form.Pending(),
+		OnPress: func() {
+			form.Cancel()
+		},
+	}, ui.Text("Cancel save")), kit.Button(kit.ButtonProps{
+		Variant: "secondary",
+		OnPress: func() {
+			form.Revert()
+			refs["name"].Focus()
+		},
+	}, ui.Text("Discard changes"))).Class("settings-actions"), ui.Element("p", ui.Text(form.Error(""))).Attr("role", "alert").Attr("data-save-error", "")).Attr("method", "post").Attr("action", action)
+	state := "All changes saved"
+	if form.Dirty() {
+		state = "You have unsaved changes"
+	}
+	message := form.Message()
+	if message == "" && !form.Dirty() && match.Location.Query.Get("saved") == "1" {
+		message = "Your preferences are saved."
+	}
+	return ui.Element("div", ui.Element("p", ui.Text("MAKE YOURSELF AT HOME")).Class("eyebrow"), ui.Element("h1", ui.Text("Your preferences.")), ui.Element("p", ui.Text("Small choices that make this collection yours.")).Class("intro"), view, ui.Element("p", ui.Text(message)).Attr("role", "status").Attr("data-save-message", ""), ui.Element("p", ui.Text(state)).Class("save-state").Attr("data-save-state", "")).Class("settings-page")
+}

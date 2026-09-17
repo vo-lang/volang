@@ -3,7 +3,7 @@
 //! Source analysis and bytecode generation remain target independent. Build
 //! backends consume a [`TargetSpec`] only after common bytecode verification,
 //! which keeps one verified module portable across VM, JIT, Native AOT, and
-//! WebAssembly AOT.
+//! Wasm VM.
 
 use core::fmt;
 use core::str::FromStr;
@@ -17,6 +17,14 @@ pub const WASM32_UNKNOWN_UNKNOWN: &str = "wasm32-unknown-unknown";
 pub enum TargetFamily {
     Native,
     WebAssembly,
+}
+
+/// Observable memory guarantees shared by the supported execution backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum RuntimeMemoryContract {
+    /// Independent Island SpanHeaps, sticky errors and work-bounded collection.
+    IslandSpanHeap = 1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -234,6 +242,10 @@ impl TargetSpec {
     #[inline]
     pub const fn wasm_features(&self) -> WasmFeatureSet {
         self.wasm_features
+    }
+
+    pub const fn runtime_memory_contract(&self) -> RuntimeMemoryContract {
+        RuntimeMemoryContract::IslandSpanHeap
     }
 
     pub const fn supports_artifact(&self, kind: ArtifactKind) -> bool {

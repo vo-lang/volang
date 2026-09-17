@@ -1,5 +1,6 @@
 //! Native ahead-of-time object generation built on the shared JIT lowering.
 
+use crate::NativeAotFunction;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -16,12 +17,10 @@ use crate::analysis::FunctionAnalysis;
 use crate::call_graph::ModuleCallGraph;
 use crate::func_compiler::FunctionCompiler;
 use crate::helpers::{self, HelperRefs};
-use crate::native_stack_map::JitArtifactMetadata;
-use crate::optimizer::{ModuleInlinePlan, ModuleOptimizationPlan, OptimizedFunction};
+use crate::optimizer::{ModuleOptimizationPlan, OptimizedFunction};
 use crate::{
     abi, encode_native_aot_metadata, function_needs_native_root_frame, JitBackendCaps,
-    JitCompileEnv, JitError, JitFrameEntryEligibility, MAX_JIT_ANALYSIS_BYTES,
-    MAX_JIT_COMPILE_WORK_BYTES, MAX_JIT_NATIVE_FRAME_BYTES,
+    JitCompileEnv, JitError, MAX_JIT_ANALYSIS_BYTES,
 };
 
 pub const NATIVE_AOT_MODULE_BYTES_SYMBOL: &str = "vo_aot_module_bytes";
@@ -29,6 +28,7 @@ pub const NATIVE_AOT_MODULE_LEN_SYMBOL: &str = "vo_aot_module_len";
 pub const NATIVE_AOT_METADATA_BYTES_SYMBOL: &str = "vo_aot_metadata_bytes";
 pub const NATIVE_AOT_METADATA_LEN_SYMBOL: &str = "vo_aot_metadata_len";
 pub const NATIVE_AOT_FUNCTION_TABLE_SYMBOL: &str = "vo_aot_function_table";
+pub const NATIVE_AOT_CONTINUATION_TABLE_SYMBOL: &str = "vo_aot_continuation_table";
 pub const NATIVE_AOT_FUNCTION_COUNT_SYMBOL: &str = "vo_aot_function_count";
 pub const NATIVE_AOT_START_SYMBOL: &str = "vo_aot_start";
 pub const NATIVE_AOT_TOOLCHAIN_INIT_SYMBOL: &str = "vo_aot_initialize_toolchain_host_v1";
@@ -50,15 +50,6 @@ impl NativeAotOptions {
             requires_toolchain_host: false,
         }
     }
-}
-
-/// Runtime metadata and stable linker symbol for one compiled Vo function.
-#[derive(Debug, Clone)]
-pub struct NativeAotFunction {
-    pub func_id: u32,
-    pub symbol: String,
-    pub metadata: Arc<JitArtifactMetadata>,
-    pub entry_eligibility: JitFrameEntryEligibility,
 }
 
 /// Relocatable native object plus the exact metadata needed to publish it.
@@ -108,83 +99,6 @@ fn build_isa(target: &str) -> Result<cranelift_codegen::isa::OwnedTargetIsa, Jit
         .map_err(|error| JitError::Internal(format!("invalid AOT ISA for {target}: {error}")))
 }
 
-fn verify_compile_work_budget(module: &LoadedModule) -> Result<(), JitError> {
-    let requested_bytes = module.functions.iter().fold(0usize, |total, function| {
-        total
-            .saturating_add(function.code.len().saturating_mul(512))
-            .saturating_add(function.instruction_metadata.len().saturating_mul(32))
-            .saturating_add(usize::from(function.local_slots).saturating_mul(64))
-    });
-    if requested_bytes > MAX_JIT_COMPILE_WORK_BYTES {
-        return Err(JitError::CompileWorkLimitExceeded {
-            limit_bytes: MAX_JIT_COMPILE_WORK_BYTES,
-            requested_bytes,
-        });
-    }
-    Ok(())
-}
-
-fn verify_native_frame_budget(context: &cranelift_codegen::Context) -> Result<(), JitError> {
-    let requested_bytes = context
-        .func
-        .sized_stack_slots
-        .values()
-        .try_fold(0usize, |total, slot| total.checked_add(slot.size as usize))
-        .unwrap_or(usize::MAX);
-    if requested_bytes > MAX_JIT_NATIVE_FRAME_BYTES {
-        return Err(JitError::NativeFrameLimitExceeded {
-            limit_bytes: MAX_JIT_NATIVE_FRAME_BYTES,
-            requested_bytes,
-        });
-    }
-    Ok(())
-}
-
-fn compiled_metadata(
-    context: &cranelift_codegen::Context,
-    function_name: &str,
-    deopt_states: Vec<crate::DeoptFrameState>,
-) -> Result<JitArtifactMetadata, JitError> {
-    let compiled = context.compiled_code().ok_or_else(|| {
-        JitError::Internal(format!("missing compiled AOT code for {function_name}"))
-    })?;
-    let code_size = compiled.code_info().total_size as usize;
-    let stack_maps = compiled.buffer.user_stack_maps();
-    let source_locs = compiled.buffer.get_srclocs_sorted();
-    let mut source_index = 0usize;
-    let mut native_stack_maps = Vec::with_capacity(stack_maps.len());
-    for (return_address, frame_size, map) in stack_maps {
-        while source_locs
-            .get(source_index)
-            .is_some_and(|source| source.end < *return_address)
-        {
-            source_index += 1;
-        }
-        let source = source_locs
-            .get(source_index)
-            .filter(|source| source.start < *return_address && *return_address <= source.end)
-            .ok_or_else(|| {
-                JitError::Internal(format!(
-                    "native AOT stack map for {function_name} has no safepoint source location"
-                ))
-            })?;
-        let safepoint_id = source.loc.bits().checked_sub(1).ok_or_else(|| {
-            JitError::Internal(format!(
-                "native AOT stack map for {function_name} has an invalid source location"
-            ))
-        })?;
-        native_stack_maps.push((
-            safepoint_id,
-            *return_address,
-            *frame_size,
-            map.entries().collect::<Vec<_>>(),
-        ));
-    }
-
-    JitArtifactMetadata::from_entries(code_size, native_stack_maps, function_name)?
-        .with_deopt_states(deopt_states, function_name)
-}
-
 fn define_exported_bytes(
     module: &mut ObjectModule,
     symbol: &str,
@@ -209,18 +123,14 @@ fn define_exported_u64(
 
 fn define_function_table(
     module: &mut ObjectModule,
-    functions: &[cranelift_module::FuncId],
+    functions: &[Option<cranelift_module::FuncId>],
+    symbol: &str,
 ) -> Result<(), JitError> {
     let byte_len = functions
         .len()
         .checked_mul(8)
         .ok_or_else(|| JitError::Internal("AOT function table size overflow".to_string()))?;
-    let id = module.declare_data(
-        NATIVE_AOT_FUNCTION_TABLE_SYMBOL,
-        Linkage::Export,
-        false,
-        false,
-    )?;
+    let id = module.declare_data(symbol, Linkage::Export, false, false)?;
     let mut description = DataDescription::new();
     // A function-address table carries linker relocations, so it must have
     // file-backed storage. Placing relocations in a zero-fill/BSS section is
@@ -229,6 +139,9 @@ fn define_function_table(
     description.set_align(8);
     description.set_used(true);
     for (index, function) in functions.iter().copied().enumerate() {
+        let Some(function) = function else {
+            continue;
+        };
         let offset =
             u32::try_from(index.checked_mul(8).ok_or_else(|| {
                 JitError::Internal("AOT function table offset overflow".to_string())
@@ -238,11 +151,7 @@ fn define_function_table(
         description.write_function_addr(offset, reference);
     }
     module.define_data(id, &description)?;
-    define_exported_u64(
-        module,
-        NATIVE_AOT_FUNCTION_COUNT_SYMBOL,
-        functions.len() as u64,
-    )
+    Ok(())
 }
 
 fn define_main(module: &mut ObjectModule, requires_toolchain_host: bool) -> Result<(), JitError> {
@@ -306,7 +215,9 @@ pub fn compile_native_object(
     externs: &ResolvedExternTable,
     options: &NativeAotOptions,
 ) -> Result<NativeAotObject, JitError> {
-    verify_compile_work_budget(&loaded)?;
+    for function in &loaded.functions {
+        crate::JitCompiler::verify_compile_work_budget(function)?;
+    }
     let isa = build_isa(&options.target_triple)?;
     let mut object_builder = ObjectBuilder::new(
         isa,
@@ -340,7 +251,6 @@ pub fn compile_native_object(
     )?);
     let module_analysis =
         super::ModuleJitAnalysis::build(loaded.module(), env, graph, MAX_JIT_ANALYSIS_BYTES)?;
-    let inline_plan: &ModuleInlinePlan = &module_analysis.inline_plan;
     let optimization_plan = ModuleOptimizationPlan::build_with_inline_plan(
         loaded.module(),
         Arc::clone(&module_analysis.inline_plan),
@@ -349,6 +259,7 @@ pub fn compile_native_object(
     let mut context = object_module.make_context();
     let mut frontend_context = FunctionBuilderContext::new();
     let mut functions = Vec::with_capacity(loaded.functions.len());
+    let mut continuations = Vec::with_capacity(loaded.functions.len());
 
     for (func_index, ((func_id, symbol), function)) in
         declared.iter().zip(loaded.functions.iter()).enumerate()
@@ -384,11 +295,11 @@ pub fn compile_native_object(
             &module_analysis.entry_eligibility,
             helpers,
             &analysis,
-            JitTier::Optimizing,
-            inline_plan,
-            Some(&optimization_plan),
-            Some(&optimization),
-            Some(self_native_ref),
+            crate::func_compiler::FunctionCompilePlan::Optimizing {
+                module: &optimization_plan,
+                instructions: &optimization,
+                self_entry: self_native_ref,
+            },
         )
         .compile(target_config)
         .map_err(|error| {
@@ -408,7 +319,7 @@ pub fn compile_native_object(
                 JitTier::Optimizing as u32,
             )?;
         }
-        verify_native_frame_budget(&context)?;
+        crate::artifact::verify_lowered_frame(&context)?;
         cranelift_codegen::verifier::verify_function(&context.func, object_module.isa().flags())
             .map_err(|errors| {
                 JitError::Internal(format!(
@@ -421,16 +332,107 @@ pub fn compile_native_object(
         }
 
         object_module.define_function(func_id, &mut context)?;
-        let metadata = Arc::new(compiled_metadata(
-            &context,
-            symbol,
-            analysis.ir().deopt_metadata(0..function.code.len()),
-        )?);
+        let metadata = Arc::new(crate::artifact::compiled_metadata(&context, symbol)?);
+        // A separate body resumes from canonical slots. Every advertised PC
+        // contributes an external edge with independent live-in values, so
+        // optimizations cannot borrow facts from the ordinary function entry.
+        // Nested calls continue to use their ordinary optimizing entries.
+        let pcs = (1..function.code.len())
+            .filter(|&pc| {
+                analysis.ir().frame_state(pc).is_some()
+                    && analysis
+                        .ir()
+                        .instruction(pc)
+                        .is_some_and(|inst| analysis.ir().blocks()[inst.block().index()].reachable)
+            })
+            .map(|pc| pc as u32)
+            .collect::<Vec<_>>();
+        let continuation = if !function.has_defer && !pcs.is_empty() {
+            let symbol = format!("vo_aot_resume_{func_index}");
+            let entry = object_module.declare_function(&symbol, Linkage::Export, &signature)?;
+            object_module.clear_context(&mut context);
+            context.func.signature = signature.clone();
+            context.func.name = UserFuncName::user(JitTier::Baseline as u32, func_id_u32);
+            let resume_analysis = FunctionAnalysis::try_for_continuations(
+                function,
+                loaded.module(),
+                loaded.exact_base_maps().exact_base_returns(),
+                &pcs,
+                MAX_JIT_ANALYSIS_BYTES.saturating_sub(analysis.retained_bytes()),
+            )?;
+            let instructions = match &resume_analysis {
+                Some(analysis) => OptimizedFunction::analyze_continuations(
+                    analysis.ir(),
+                    &module_analysis.inline_plan,
+                    func_id_u32,
+                ),
+                None => OptimizedFunction::baseline_with_module(
+                    analysis.ir(),
+                    &module_analysis.inline_plan,
+                    func_id_u32,
+                ),
+            };
+            let resume_analysis = resume_analysis.as_ref().unwrap_or(&analysis);
+            let helpers = HelperRefs::new(&mut object_module, helper_funcs);
+            FunctionCompiler::new(
+                &mut context.func,
+                &mut frontend_context,
+                func_id_u32,
+                function,
+                loaded.module(),
+                env,
+                &module_analysis.entry_eligibility,
+                helpers,
+                resume_analysis,
+                crate::func_compiler::FunctionCompilePlan::Continuation {
+                    inlines: &module_analysis.inline_plan,
+                    instructions: &instructions,
+                    pcs: &pcs,
+                },
+            )
+            .compile(target_config)?;
+            if function_needs_native_root_frame(function) {
+                crate::native_frame::instrument_function(
+                    &mut context.func,
+                    pointer_type,
+                    func_id_u32,
+                    JitNativeFrame::ARTIFACT_FUNCTION,
+                    u32::MAX,
+                    JitTier::Baseline as u32,
+                )?;
+            }
+            crate::artifact::verify_lowered_frame(&context)?;
+            cranelift_codegen::verifier::verify_function(
+                &context.func,
+                object_module.isa().flags(),
+            )
+            .map_err(|errors| {
+                JitError::Internal(format!(
+                    "Cranelift AOT IR verification failed for {symbol}: {errors}"
+                ))
+            })?;
+            if options.debug_ir {
+                eprintln!("=== AOT IR for {symbol} {} ===", function.name);
+                eprintln!("{}", context.func.display());
+            }
+            object_module.define_function(entry, &mut context)?;
+            let metadata = Arc::new(crate::artifact::compiled_metadata(&context, &symbol)?);
+            continuations.push(Some(entry));
+            Some(crate::NativeAotContinuation {
+                symbol,
+                pcs: pcs.into(),
+                metadata,
+            })
+        } else {
+            continuations.push(None);
+            None
+        };
         functions.push(NativeAotFunction {
             func_id: func_id_u32,
             symbol: symbol.clone(),
             metadata,
             entry_eligibility: module_analysis.entry_eligibility[func_index],
+            continuation,
         });
     }
 
@@ -439,7 +441,7 @@ pub fn compile_native_object(
         .serialize()
         .map_err(|error| JitError::Internal(format!("failed to serialize AOT module: {error}")))?;
     let metadata_bytes = encode_native_aot_metadata(&options.target_triple, &functions)?;
-    let function_ids = declared.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    let function_ids = declared.iter().map(|(id, _)| Some(*id)).collect::<Vec<_>>();
     define_exported_u64(
         &mut object_module,
         NATIVE_AOT_MODULE_LEN_SYMBOL,
@@ -460,7 +462,21 @@ pub fn compile_native_object(
         NATIVE_AOT_METADATA_BYTES_SYMBOL,
         metadata_bytes,
     )?;
-    define_function_table(&mut object_module, &function_ids)?;
+    define_function_table(
+        &mut object_module,
+        &function_ids,
+        NATIVE_AOT_FUNCTION_TABLE_SYMBOL,
+    )?;
+    define_function_table(
+        &mut object_module,
+        &continuations,
+        NATIVE_AOT_CONTINUATION_TABLE_SYMBOL,
+    )?;
+    define_exported_u64(
+        &mut object_module,
+        NATIVE_AOT_FUNCTION_COUNT_SYMBOL,
+        functions.len() as u64,
+    )?;
     define_main(&mut object_module, options.requires_toolchain_host)?;
 
     let bytes = object_module

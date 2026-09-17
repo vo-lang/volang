@@ -99,25 +99,7 @@ impl CallPlan {
         self.eligibility.static_prepared_shadow && self.fits_direct_frame()
     }
 
-    /// Only recursive native edges need a dynamic depth guard once the target
-    /// is frame-elided. The module contract rejects non-recursive descendants
-    /// from such a target, so an acyclic entry contributes one bounded native
-    /// frame and cannot amplify itself. Materializable calls retain the
-    /// conservative guard because their downstream native shape is broader.
-    pub fn requires_depth_guard(self, recursive_edge: bool) -> bool {
-        !self.eligibility.frame_elided || recursive_edge
-    }
-
-    pub fn route_for_full_function(self, current_func_id: u32) -> CallRoute {
-        let _ = current_func_id;
-        self.route_non_recursive()
-    }
-
-    pub fn route_for_loop(self) -> CallRoute {
-        self.route_non_recursive()
-    }
-
-    fn route_non_recursive(self) -> CallRoute {
+    pub fn route(self) -> CallRoute {
         if !self.can_use_direct_jit() {
             return if self.can_use_prepared_jit() {
                 CallRoute::PreparedJitTable

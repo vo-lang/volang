@@ -1,3 +1,5 @@
+# Frozen historical foundation record. Core Wasm AOT was retired on 2026-09-16.
+# Active target support is declared in capabilities.toml and quality-matrix.toml.
 schema_version = 1
 product = "Volang UI"
 scope = "foundation-and-end-to-end-baseline"

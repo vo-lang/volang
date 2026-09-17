@@ -7,8 +7,8 @@
 //! - Container indexing (arr[i], slice[i], map[k])
 //! - Pointer dereference (*p)
 
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 use vo_syntax::ast::{Expr, ExprKind};
 
 use crate::context::CodegenContext;
@@ -179,6 +179,9 @@ struct NestedStackArrayInfo {
 }
 
 fn snapshot_value_slot(src: u16, func: &mut FuncBuilder) -> u16 {
+    if func.is_current_temporary_range(src, 1) {
+        return src;
+    }
     let snapshot = func.alloc_slots(&[SlotType::Value]);
     func.emit_copy(snapshot, src, 1);
     snapshot
@@ -190,15 +193,19 @@ fn snapshot_gc_base_slot(src: u16, func: &mut FuncBuilder) -> u16 {
     snapshot
 }
 
-fn compile_captured_array_ref(expr: &Expr, func: &mut FuncBuilder) -> Option<u16> {
+fn compile_captured_array_ref(
+    expr: &Expr,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Option<u16> {
     match &expr.kind {
         ExprKind::Ident(ident) => {
-            let capture_index = func.lookup_capture(ident.symbol)?.index;
+            let capture_index = func.lookup_capture(info.get_use(ident))?.index;
             let array_ref = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_op(Opcode::ClosureGet, array_ref, capture_index, 0);
             Some(array_ref)
         }
-        ExprKind::Paren(inner) => compile_captured_array_ref(inner, func),
+        ExprKind::Paren(inner) => compile_captured_array_ref(inner, func, info),
         _ => None,
     }
 }
@@ -407,14 +414,26 @@ fn resolve_lvalue_with_mode(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<LValue, CodegenError> {
+    func.with_source_span(expr.span, |func| {
+        resolve_lvalue_with_mode_inner(expr, mode, ctx, func, info)
+    })
+}
+
+fn resolve_lvalue_with_mode_inner(
+    expr: &Expr,
+    mode: ResolveMode,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<LValue, CodegenError> {
     match &expr.kind {
         // === Identifier ===
         ExprKind::Ident(ident) => {
             let obj_key = info.get_use(ident);
             if let Some(spec) = ctx.externalized_local(obj_key).cloned() {
-                let handle = if let Some(local) = func.lookup_local(ident.symbol) {
-                    ExternalizedHandle::Variable(local.storage)
-                } else if let Some(capture) = func.lookup_capture(ident.symbol) {
+                let handle = if let Some(storage) = func.lookup_local_object(obj_key) {
+                    ExternalizedHandle::Variable(storage)
+                } else if let Some(capture) = func.lookup_capture(info.get_use(ident)) {
                     ExternalizedHandle::Capture {
                         capture_index: capture.index,
                     }
@@ -431,8 +450,8 @@ fn resolve_lvalue_with_mode(
                 });
             }
             // Check local variable first - storage is already computed in LocalVar
-            if let Some(local) = func.lookup_local(ident.symbol) {
-                return Ok(LValue::Variable(local.storage));
+            if let Some(storage) = func.lookup_local_object(obj_key) {
+                return Ok(LValue::Variable(storage));
             }
 
             // Check global variable
@@ -444,7 +463,7 @@ fn resolve_lvalue_with_mode(
             }
 
             // Check closure capture
-            if let Some(capture) = func.lookup_capture(ident.symbol) {
+            if let Some(capture) = func.lookup_capture(info.get_use(ident)) {
                 let type_key = info.obj_type(obj_key, "capture must have type");
                 let value_slots = info.type_slot_count(type_key);
                 return Ok(LValue::Capture {
@@ -593,7 +612,7 @@ fn resolve_index_lvalue(
     // Check for nested stack array FIRST (before compiling any index)
     // This handles a[i][j][k]... with arbitrary nesting depth
     // Note: try_resolve_nested_stack_array correctly evaluates in left-to-right order
-    if mode.is_read() && info.is_array(container_type) {
+    if mode.is_read() && info.is_array(container_type) && is_index_expression(&idx.expr) {
         if let Some(nested_info) = try_resolve_nested_stack_array(expr, ctx, func, info)? {
             let elem_type = info.array_elem_type(container_type);
             let inner_elem_slots = info.type_slot_count(elem_type);
@@ -1115,7 +1134,7 @@ fn resolve_array_index_lvalue(
         }
         crate::func::ExprSource::NeedsCompile => {
             // Check if this is a captured array - capture access has no side effects
-            if let Some(gcref_slot) = compile_captured_array_ref(&idx.expr, func) {
+            if let Some(gcref_slot) = compile_captured_array_ref(&idx.expr, func, info) {
                 let index_value = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
                 let index_reg = snapshot_value_slot(index_value, func);
                 if mode.requires_early_check() {
@@ -1353,8 +1372,10 @@ pub fn emit_lvalue_load(
             let argument = externalized_handle_value(handle, func);
             let extern_id = ctx.get_or_register_declared_extern_with_return_shape(
                 read_extern,
-                vo_runtime::bytecode::ReturnShape::try_with_slot_types(value_slot_types.clone())
-                    .map_err(CodegenError::Internal)?,
+                vo_common_core::bytecode::ReturnShape::try_with_slot_types(
+                    value_slot_types.clone(),
+                )
+                .map_err(CodegenError::Internal)?,
                 crate::context::ext_slot_kinds_for_slot_types(&[SlotType::Value]),
             );
             func.emit_call_extern(dst, extern_id, argument, 1, value_slot_types);
@@ -1395,7 +1416,7 @@ pub fn emit_lvalue_store(
     src: u16,
     ctx: &mut crate::context::CodegenContext,
     func: &mut FuncBuilder,
-    slot_types: &[vo_runtime::SlotType],
+    slot_types: &[vo_common_core::SlotType],
 ) -> Result<(), CodegenError> {
     match lv {
         LValue::Variable(storage) => {
@@ -1422,7 +1443,7 @@ pub fn emit_lvalue_store(
             func.emit_copy(arguments + 1, src, value_slot_types.len() as u16);
             let extern_id = ctx.get_or_register_declared_extern_with_return_shape(
                 write_extern,
-                vo_runtime::bytecode::ReturnShape::slots(0),
+                vo_common_core::bytecode::ReturnShape::slots(0),
                 crate::context::ext_slot_kinds_for_slot_types(&arguments_layout),
             );
             func.emit_call_extern(arguments, extern_id, arguments, arguments_layout.len(), &[]);
@@ -1752,7 +1773,7 @@ fn emit_flattened_store(
     flat: &FlattenedBase,
     src: u16,
     slots: u16,
-    slot_types: &[vo_runtime::SlotType],
+    slot_types: &[vo_common_core::SlotType],
     func: &mut FuncBuilder,
 ) {
     match flat {

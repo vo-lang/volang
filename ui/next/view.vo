@@ -1,0 +1,145 @@
+// Package ui is the experimental replacement for the Volang UI framework.
+// It has no dependency on the previous UI runtime or compiler adapters.
+package ui
+
+import (
+	"runtime"
+	"strings"
+)
+
+// Type identifies a component definition. Define it once at package scope.
+// The name is diagnostic metadata; definition identity is the Type itself.
+type Type struct {
+	name string
+	file string
+	line int
+}
+
+func Define(name string) *Type {
+	if name == "" {
+		panic("ui: component name must not be empty")
+	}
+	_, file, line, _ := runtime.Caller(1)
+	return &Type{name: name, file: file, line: line}
+}
+
+type attribute struct {
+	name string
+	value string
+}
+
+type listener struct {
+	kind string
+	options EventOptions
+	handler func(Event)
+}
+
+// View is an immutable description. Builder methods return a new description.
+type View struct {
+	kind string
+	key string
+	text string
+	attrs []attribute
+	events []listener
+	children []View
+	component *Type
+	render func(*Scope) View
+	memo *componentInputs
+	widget *widgetBinding
+	fallback func(*RenderError) View
+	ref *ElementRef
+	hasModal bool
+	modalOpen bool
+	popover *PopoverOptions
+	portal *ElementRef
+	control *nativeControl
+}
+
+func Text(value string) View {
+	return View{kind: "#text", text: value}
+}
+
+func Element(tag string, children ...View) View {
+	if tag == "" || tag[0] == '#' {
+		panic("ui: invalid element name")
+	}
+	return View{kind: tag, children: append([]View{}, children...)}
+}
+
+func Fragment(children ...View) View {
+	return View{kind: "#fragment", children: append([]View{}, children...)}
+}
+
+// Component preserves its Scope while its Type and sibling key are retained.
+// Capturing ordinary typed props in render keeps the application API typed.
+func Component(definition *Type, render func(*Scope) View) View {
+	if definition == nil || render == nil {
+		panic("ui: component requires a definition and render function")
+	}
+	return View{kind: "#component", component: definition, render: render}
+}
+
+func (view View) Key(key string) View {
+	if key == "" {
+		panic("ui: an explicit key must not be empty")
+	}
+	view.key = key
+	return view
+}
+
+func (view View) Attr(name string, value string) View {
+	if name == "" || view.kind == "#text" || view.kind == "#fragment" || view.kind == "#component" {
+		panic("ui: attributes require an element and a name")
+	}
+	if view.hasModal && strings.EqualFold(name, "open") {
+		panic("ui: Modal owns the dialog open state")
+	}
+	if view.popover != nil && strings.EqualFold(name, "popover") {
+		panic("ui: Popover owns the native popover attribute")
+	}
+	if view.control != nil {
+		if view.control.hasSelection &&
+			(strings.EqualFold(name, "value") || strings.EqualFold(name, "multiple") && value == "false") {
+			panic("ui: SelectedValues owns multiple selection and cannot have a value binding")
+		}
+		if view.control.hasValue && strings.EqualFold(name, "value") {
+			panic("ui: value and DefaultValue cannot be combined")
+		}
+		if view.control.hasChecked && strings.EqualFold(name, "checked") {
+			panic("ui: checked and DefaultChecked cannot be combined")
+		}
+	}
+	attrs := append([]attribute{}, view.attrs...)
+	for i := range attrs {
+		if attrs[i].name == name {
+			// Preserve assignment order for aliases whose namespace is resolved
+			// later (for example VALUE and value on HTML controls).
+			copy(attrs[i:], attrs[i + 1:])
+			attrs[len(attrs) - 1] = attribute{name: name, value: value}
+			view.attrs = attrs
+			return view
+		}
+	}
+	view.attrs = append(attrs, attribute{name: name, value: value})
+	return view
+}
+
+// Modal controls a native dialog's modal presentation after DOM commit. Its
+// descendants retain normal component ownership and state while closed.
+func (view View) Modal(open bool) View {
+	if view.kind != "dialog" || view.popover != nil {
+		panic("ui: Modal requires a dialog element")
+	}
+	for _, attr := range view.attrs {
+		if strings.EqualFold(attr.name, "open") {
+			panic("ui: Modal owns the dialog open state")
+		}
+	}
+	view.hasModal = true
+	view.modalOpen = open
+	return view
+}
+
+func (view View) On(kind string, handler func(Event)) View {
+	return view.OnWith(kind, EventOptions{PreventDefault: kind == "submit"}, handler)
+}

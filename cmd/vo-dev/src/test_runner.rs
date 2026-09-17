@@ -579,46 +579,48 @@ fn prepare_native_aot_command(
         return Ok(());
     }
     let features = native_aot_runtime_features(root, plan)?;
-    let mut command = Command::new("cargo");
-    command
-        .current_dir(root)
-        .args([
-            "build",
-            "--locked",
-            "--timings",
-            "--message-format=json",
-            "--no-default-features",
-            "-p",
-            "vo",
-            "-p",
-            "vo-aot-runtime",
-            "-p",
-            "vo-test",
-        ])
-        .stderr(std::process::Stdio::inherit());
-    if release {
-        command.arg("--release");
-    }
-    if !features.is_empty() {
-        command.arg("--features").arg(
-            features
-                .iter()
-                .map(|feature| format!("vo-aot-runtime/{feature}"))
-                .collect::<Vec<_>>()
-                .join(","),
-        );
-    }
-    let output = command
-        .output()
-        .context("could not build shared Native AOT tools")?;
-    if !output.status.success() {
-        bail!("shared Native AOT tools build failed");
+    // Resolve compiler tools separately so their JIT feature cannot pull
+    // Cranelift or executable-memory ownership into the static AOT runtime.
+    let mut artifact_output = Vec::new();
+    for packages in [&["vo", "vo-test"][..], &["vo-aot-runtime"][..]] {
+        let mut command = Command::new("cargo");
+        command
+            .current_dir(root)
+            .args([
+                "build",
+                "--locked",
+                "--timings",
+                "--message-format=json",
+                "--no-default-features",
+            ])
+            .stderr(std::process::Stdio::inherit());
+        for package in packages {
+            command.args(["-p", package]);
+        }
+        if release {
+            command.arg("--release");
+        }
+        if packages == ["vo-aot-runtime"] && !features.is_empty() {
+            command.arg("--features").arg(
+                features
+                    .iter()
+                    .map(|feature| format!("vo-aot-runtime/{feature}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
+        let output = command
+            .output()
+            .context("could not build Native AOT tools")?;
+        if !output.status.success() {
+            bail!("Native AOT build failed for {}", packages.join(", "));
+        }
+        artifact_output.extend(output.stdout);
     }
     let mut compiler = None;
     let mut runtime = None;
     let mut test_runner = None;
-    for line in output
-        .stdout
+    for line in artifact_output
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
     {
@@ -643,9 +645,8 @@ fn prepare_native_aot_command(
             _ => {}
         }
     }
-    // The compiler, runtime and runner share one Cargo feature resolution.
-    // Use the actual artifact instead of a timestamp-based sibling guess or
-    // another cargo run that would re-resolve the engine's JIT features.
+    // Bind execution to the exact artifacts from both feature-isolated builds.
+    // No sibling guessing or later Cargo invocation may replace these artifacts.
     *runner = Command::new(
         test_runner
             .context("Cargo did not report the native test runner")?

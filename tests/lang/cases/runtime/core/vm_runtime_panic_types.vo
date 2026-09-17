@@ -1,0 +1,34 @@
+package main
+
+import (
+	"fmt"
+)
+
+func divide(zero int) int {
+	return 7 / zero
+}
+
+func nilCall() {
+	var f func()
+	f()
+}
+
+func checkTrap(f func(), expected string) {
+	defer func() {
+		value := recover()
+		message, ok := value.(string)
+		assert(ok && message == expected)
+		assert(fmt.Sprint(value) == message)
+		same := any(message)
+		assert(same == value)
+	}()
+	f()
+	panic("missing runtime trap")
+}
+
+func main() {
+	checkTrap(func() {
+		divide(0)
+	}, "runtime error: integer divide by zero")
+	checkTrap(nilCall, "runtime error: call of nil function")
+}

@@ -1,0 +1,32 @@
+package main
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+var nativeType = ui.Define("interaction.NativeElements")
+
+func NativeElements() ui.View {
+	return ui.Component(nativeType, func(scope *ui.Scope) ui.View {
+		notes := ui.String(scope, "notes", "\nA little space for your ideas.\n中文 & <thoughts>")
+		size := ui.Int(scope, "size", 24)
+		submitted := ui.String(scope, "submitted", "")
+		valueAttribute := "VALUE"
+		if size.Get() != 24 {
+			valueAttribute = "value"
+		}
+		textarea := ui.Element("textarea").Attr("id", "notes").Attr("name", "notes").Attr("rows", "4").Attr("DISABLED", "false").Attr(valueAttribute, notes.Get()).On("input", func(event ui.Event) {
+			notes.Set(event.Value)
+		})
+		form := ui.Element("form", ui.Element("label", ui.Text("Your notes")).Attr("for", "notes"), textarea, ui.Element("button", ui.Text("Keep notes")).Attr("type", "submit")).On("submit", func(event ui.Event) {
+			submitted.Set(notes.Get())
+		})
+		gradient := ui.Element("linearGradient", ui.Element("stop").Attr("offset", "0%").Attr("stop-color", "#365b45"), ui.Element("stop").Attr("offset", "100%").Attr("stop-color", "#a0bf75")).Attr("id", "native-gradient")
+		graphic := ui.Element("svg", ui.Element("title", ui.Text("A growing circle")), ui.Element("defs", gradient), ui.Fragment(ui.Element("circle").Attr("cx", "40").Attr("cy", "40").Attr("r", fmt.Sprint(size.Get())).Attr("fill", "url(#native-gradient)").Attr("data-circle", "")), ui.Element("foreignObject", ui.Element("div", ui.Text("Made with native elements")).Attr("data-svg-html", "")).Attr("x", "86").Attr("y", "20").Attr("width", "230").Attr("height", "48")).Attr("viewBox", "0 0 330 80").Attr("role", "img").Attr("aria-label", "A growing circle").Attr("data-native-svg", "")
+		grow := ui.Element("button", ui.Text("Grow circle")).Attr("type", "button").Attr("data-grow", "").On("click", func(event ui.Event) {
+			size.Set(24 + (size.Get() - 20) % 16)
+		})
+		return ui.Element("section", ui.Element("h2", ui.Text("Room to express yourself")), form, ui.Element("output", ui.Text(submitted.Get())).Attr("data-notes-saved", "").Attr("aria-live", "polite"), graphic, grow).Attr("class", "card")
+	})
+}

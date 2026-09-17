@@ -1,0 +1,23 @@
+package ui
+
+// RuntimePropsObserver optionally receives explicitly declared render inputs.
+// Values are borrowed for this callback; observers must not retain them or
+// invoke application methods. Existing RuntimeObserver implementations need
+// not implement this extension.
+type RuntimePropsObserver interface {
+	Prop(int, string, any)
+}
+
+// InspectProp declares a named input for development inspection during render.
+// Pass the same typed value used by the render closure. No formatting or
+// retention occurs without an attached RuntimePropsObserver. This declaration
+// does not read state, add a dependency or change component identity.
+func InspectProp(scope *Scope, name string, value any) {
+	if scope == nil || scope.disposed || scope.root.reading != scope || scope.root.computing != 0 ||
+		name == "" {
+		panic("ui: inspecting a prop requires a name and the current render scope")
+	}
+	if scope.root.propsObserver != nil {
+		scope.root.propsObserver.Prop(scope.node.id, name, value)
+	}
+}

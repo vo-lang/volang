@@ -114,7 +114,7 @@ pub fn dispatch_loop_osr(
     match result {
         JitResult::Ok => {
             // resume_stack should be empty on Ok (no nested non-OK propagation).
-            #[cfg(feature = "jit")]
+            #[cfg(feature = "native")]
             fiber.resume_stack.clear();
             OsrResult::ExitPc(ctx.ctx.loop_exit_pc as usize)
         }
@@ -252,7 +252,9 @@ mod tests {
     use super::*;
     use crate::scheduler::FiberId;
     use crate::vm::JitConfig;
+    #[cfg(feature = "jit")]
     use vo_runtime::bytecode::InstructionMetadata;
+    #[cfg(feature = "jit")]
     use vo_runtime::instruction::{Instruction, Opcode};
     use vo_runtime::jit_api::{JitContext, JitRuntimeTrapKind};
     use vo_runtime::InterfaceSlot;
@@ -299,7 +301,7 @@ mod tests {
     }
 
     fn vm_with_jit_frame() -> (Vm, FiberId) {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-panic-location-test".to_string());
         module.functions.push(function(1));
         vm.load(module).unwrap();
@@ -352,8 +354,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn disabled_loop_short_circuits_cached_lookup_and_recompilation() {
-        let mut vm = Vm::try_with_jit_config(JitConfig {
+        let mut vm = Vm::try_native_for_test(JitConfig {
             loop_threshold: 1,
             ..JitConfig::default()
         })
@@ -380,6 +383,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jit")]
     fn best_effort_osr_compile_failure_is_cached_and_interpreted() {
         let mut func = function(1);
         func.code = vec![

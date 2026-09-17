@@ -5,8 +5,8 @@
 
 use vo_analysis::objects::TypeKey;
 use vo_common_core::bytecode::MAP_ITER_SLOT_TYPES;
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 use vo_syntax::ast::Expr;
 
 use crate::context::CodegenContext;
@@ -226,6 +226,7 @@ pub(crate) fn range_var_info(
                     };
 
                     // For HeapBoxed with deferred alloc, we need a temp slot to receive the value
+                    sc.func.bind_local_object(ident.symbol, Some(obj_key))?;
                     let slot = if deferred_alloc.is_some() {
                         let slot_types = sc.info.type_slot_types(lhs_type);
                         sc.func.alloc_slots(&slot_types)

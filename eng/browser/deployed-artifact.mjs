@@ -29,7 +29,7 @@ export async function deployedAssetRecords(root) {
   }
   await walk(resolve(root));
   records.sort((a, b) => a.path.localeCompare(b.path, 'en'));
-  for (const required of ['index.html', 'app.js', 'app.wasm', 'runtime/pkg/vo_web_bg.wasm', 'service-worker.js']) {
+  for (const required of ['index.html', 'app.js', 'app.vob', 'runtime/pkg/vo_web_bg.wasm', 'service-worker.js']) {
     if (!records.some(record => record.path === required)) throw new Error(`site asset is absent: ${required}`);
   }
   return records;

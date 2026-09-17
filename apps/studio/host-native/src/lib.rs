@@ -649,11 +649,12 @@ impl NativeStudioHost {
                     .map_err(|error| failed(error.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let output = vo_engine::compile_path_with_source_overlays_and_auto_install(
-            &root.join(&request.Entry),
-            overlays,
-        )
-        .map_err(|error| failed(error.to_string()))?;
+        let output = vo_ui_integration::engine()
+            .compile_path_with_source_overlays_and_auto_install(
+                &root.join(&request.Entry),
+                overlays,
+            )
+            .map_err(|error| failed(error.to_string()))?;
         let mut state = self.lock_state();
         let id = format!("native-artifact-{}", state.next_artifact);
         state.next_artifact = state.next_artifact.saturating_add(1);
@@ -747,7 +748,7 @@ impl NativeStudioHost {
             let sink = Arc::new(ChannelSink {
                 sender: sender.clone(),
             });
-            let result = vo_engine::run_with_output_interruptible(
+            let result = vo_ui_integration::engine().run_with_output_interruptible(
                 artifact.output,
                 mode,
                 request.Arguments,
@@ -1433,9 +1434,10 @@ fn studio_automation_values(name: &str) -> Result<Option<Vec<String>>, String> {
 }
 
 pub fn launch_preview_artifact(artifact: PathBuf) -> Result<(), String> {
-    let output = vo_engine::compile_path_with_auto_install(&artifact)
+    let output = vo_ui_integration::engine()
+        .compile_path_with_auto_install(&artifact)
         .map_err(|error| format!("preview artifact loading failed: {error}"))?;
-    let vm = vo_engine::build_native_gui_vm_for_mode(output, RunMode::Vm)?;
+    let vm = vo_ui_integration::build_native_gui_vm_for_mode(output, RunMode::Vm)?;
     let mut config = vo_ui_shell_native::NativeDesktopConfig {
         title: "Volang Studio Preview".to_string(),
         width_points: 960.0,
@@ -1457,7 +1459,8 @@ pub fn compile_studio_application(application: &Path) -> Result<vo_engine::Compi
     let options = vo_module::project::ProjectContextOptions::new(
         vo_module::workspace::WorkspaceDiscovery::Auto,
     );
-    vo_engine::compile_with_auto_install_with_options(application, &options)
+    vo_ui_integration::engine()
+        .compile_with_auto_install_with_options(application, &options)
         .map_err(|error| format!("Studio application compilation failed: {error}"))
 }
 
@@ -3219,7 +3222,7 @@ mod tests {
         fs::write(project.join("main.vo"), "package main\n\nfunc main() {}\n").unwrap();
         let application = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../entry/host");
         let output = compile_studio_application(&application).unwrap();
-        let vm = vo_engine::build_native_gui_vm_for_mode(output, RunMode::Vm).unwrap();
+        let vm = vo_ui_integration::build_native_gui_vm_for_mode(output, RunMode::Vm).unwrap();
         let host = NativeStudioHost::open(&workspace).unwrap();
         let handle = GenerationalHandle {
             index: 1,

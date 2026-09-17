@@ -15,9 +15,9 @@ func testLocalsAndWrapping() {
 	assert(wide == 1.5, "float64 decrement uses arithmetic subtraction")
 	var narrow float32 = 2.25
 	narrow++
-	assert(narrow == float32(3.25), "float32 increment widens and rounds back")
+	assert(narrow == float32(3.25), "float32 increment rounds at the declared width")
 	narrow--
-	assert(narrow == float32(2.25), "float32 decrement widens and rounds back")
+	assert(narrow == float32(2.25), "float32 decrement rounds at the declared width")
 	var byteValue uint8 = 255
 	byteValue++
 	assert(byteValue == 0, "integer increment still wraps at the declared width")
@@ -51,7 +51,7 @@ func testCompoundArithmetic() {
 	narrow *= 3.0
 	narrow /= 2.0
 	narrow -= 1.0
-	assert(narrow == float32(2.0), "float32 compound arithmetic widens and rounds back")
+	assert(narrow == float32(2.0), "float32 compound arithmetic rounds each operation")
 	var quotient uint64 = 1 << 63
 	quotient /= 2
 	assert(quotient == uint64(1 << 62), "uint64 compound division is unsigned")
@@ -63,7 +63,7 @@ func testCompoundArithmetic() {
 func testUnaryFloat32() {
 	var source float32 = 1.25
 	negative := -source
-	assert(negative == float32(-1.25), "non-constant float32 negation widens and rounds back")
+	assert(negative == float32(-1.25), "non-constant float32 negation preserves the declared width")
 	value := sample{narrow: float32(-2.5)}
 	fromField := -value.narrow
 	assert(fromField == float32(2.5), "float32 field negation uses numeric representation")

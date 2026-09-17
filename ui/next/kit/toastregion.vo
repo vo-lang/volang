@@ -1,0 +1,205 @@
+package kit
+
+import (
+	"strconv"
+	"time"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/web"
+)
+
+type ToastRegionProps struct {
+	ID string
+	Queue *ToastQueue
+	Label string
+	DismissLabel string
+	// Visible defaults to 3 and is bounded to 1..5. Remaining items wait without
+	// starting timers or announcements until they become visible.
+	Visible int
+	ReturnFocus *ui.ElementRef
+	Class string
+	// Now supplies elapsed milliseconds for deterministic tests. The default
+	// uses time.Now; backward jumps cannot consume countdown time.
+	Now func() int64
+}
+
+var toastRegionType = ui.Define("kit.ToastRegion")
+
+var toastType = ui.Define("kit.Toast")
+
+type toastCountdown struct {
+	revision int
+	remaining int64
+}
+
+func ToastRegion(props ToastRegionProps) ui.View {
+	if props.ID == "" || props.Queue == nil || props.ReturnFocus == nil {
+		panic("kit: toast region requires an ID, queue and return-focus ref")
+	}
+	if props.Visible == 0 {
+		props.Visible = 3
+	}
+	if props.Visible < 1 || props.Visible > 5 {
+		panic("kit: toast visible limit must be within 1..5")
+	}
+	if props.Label == "" {
+		props.Label = "Notifications"
+	}
+	if props.DismissLabel == "" {
+		props.DismissLabel = "Dismiss notification"
+	}
+	if props.Now == nil {
+		props.Now = func() int64 {
+			return time.Now().UnixNano() / 1000000
+		}
+	}
+	return ui.Component(toastRegionType, func(scope *ui.Scope) ui.View {
+		queue := props.Queue
+		if !queue.scope.Contains(scope) {
+			panic("kit: toast region must belong to its queue's scope")
+		}
+		hovered := ui.Bool(scope, "hovered", false)
+		focused := ui.String(scope, "focused", "")
+		first := ui.Ref(scope, "first")
+		owner := &toastRegionOwner{
+			scope: scope, focused: focused, first: first, returnFocus: props.ReturnFocus,
+		}
+		ui.Effect(scope, "queue-owner", func() func() {
+			if queue.region != nil {
+				panic("kit: a toast queue can have only one region")
+			}
+			queue.region = owner
+			return func() {
+				if queue.region == owner {
+					queue.region = nil
+				}
+			}
+		}, queue, props.ReturnFocus)
+		entries := queue.state.Get().(toastSnapshot).entries
+		if len(entries) > props.Visible {
+			entries = entries[:props.Visible]
+		}
+		active := ""
+		for index, entry := range entries {
+			if index == 0 || entry.message.Key == focused.Get() {
+				active = entry.message.Key
+			}
+		}
+		page := web.PageActivity(scope, "page")
+		paused := func() bool {
+			return hovered.Get() || focused.Get() != "" || !page.Active()
+		}
+		ui.Effect(scope, "repair-focus", func() func() {
+			if focused.Get() != "" && focused.Get() != active {
+				focused.Set(active)
+				if active == "" {
+					props.ReturnFocus.Focus()
+				} else {
+					first.Focus()
+				}
+			}
+			return nil
+		}, active)
+		children := make([]ui.View, 0, len(entries))
+		for _, entry := range entries {
+			ref := (*ui.ElementRef)(nil)
+			if entry.message.Key == active {
+				ref = first
+			}
+			children = append(children, toastView(props, entry, focused, ref, paused).Key(entry.message.Key))
+		}
+		return ui.Element("section", children...).Attr("id", props.ID).Attr("role", "region").Attr("aria-label", props.Label).Class("vui-toasts").Class(props.Class).On("pointerenter", func(ui.Event) {
+			hovered.Set(true)
+		}).On("pointerleave", func(ui.Event) {
+			hovered.Set(false)
+		})
+	})
+}
+
+func toastView(props ToastRegionProps, entry toastEntry, focused *ui.StringState, ref *ui.ElementRef, paused func() bool) ui.View {
+	return ui.Component(toastType, func(scope *ui.Scope) ui.View {
+		message := entry.message
+		countdown := ui.State(scope, "countdown", func() any {
+			return &toastCountdown{}
+		}).Get().(*toastCountdown)
+		isPaused := paused()
+		ui.Effect(scope, "countdown", func() func() {
+			if countdown.revision != entry.revision {
+				countdown.revision = entry.revision
+				countdown.remaining = int64(message.DurationMilliseconds)
+			}
+			if message.DurationMilliseconds == 0 || isPaused {
+				return nil
+			}
+			started := props.Now()
+			task := ui.Start(scope, web.After(int(countdown.remaining), "dismiss"), func(result ui.Result) {
+				latest, exists := props.Queue.find(message.Key)
+				if result.Error == "" && exists && latest.revision == entry.revision && !paused() {
+					props.Queue.Close(message.Key)
+				}
+			})
+			return func() {
+				task.Cancel()
+				elapsed := props.Now() - started
+				if elapsed < 0 {
+					elapsed = 0
+				}
+				if elapsed > countdown.remaining {
+					elapsed = countdown.remaining
+				}
+				countdown.remaining -= elapsed
+			}
+		}, entry.revision, isPaused)
+		announced := ui.Int(scope, "announced", 0)
+		ui.Effect(scope, "announce", func() func() {
+			announced.Set(entry.revision)
+			return nil
+		}, entry.revision)
+		announcement := ""
+		if announced.Get() == entry.revision {
+			announcement = message.Title + ". " + message.Description
+		}
+		role := "status"
+		if message.Urgent {
+			role = "alert"
+		}
+		id := props.ID + "-" + strconv.Itoa(entry.revision)
+		body := []ui.View{ui.Element("strong", ui.Text(message.Title)).Attr("id", id + "-title")}
+		if message.Description != "" {
+			body = append(body, ui.Element("p", ui.Text(message.Description)))
+		}
+		actions := []ui.View{}
+		if message.OnAction != nil {
+			actions = append(actions, Button(ButtonProps{
+				Variant: "secondary",
+				OnPress: func() {
+					latest, exists := props.Queue.find(message.Key)
+					if exists && latest.message.OnAction != nil {
+						props.Queue.Close(message.Key)
+						latest.message.OnAction()
+					}
+				},
+			}, ui.Text(message.ActionLabel)).Attr("tabindex", "0").Class("vui-toast-action"))
+		}
+		dismiss := Button(ButtonProps{
+			Variant: "quiet",
+			OnPress: func() {
+				props.Queue.Close(message.Key)
+			},
+		}, ui.Text("×")).Attr("aria-label", props.DismissLabel).Attr("tabindex", "0").Class("vui-toast-dismiss")
+		if ref != nil {
+			dismiss = dismiss.Ref(ref)
+		}
+		actions = append(actions, dismiss)
+		return ui.Element("div", ui.Element("div", body...).Class("vui-toast-body"), ui.Element("div", actions...).Class("vui-toast-actions"), ui.Element("span", ui.Text(announcement)).Attr("role", role).Attr("aria-atomic", "true").Class("vui-visually-hidden")).Attr("role", "group").Attr("aria-labelledby", id +
+			"-title").Attr("data-toast-key", message.Key).Attr("data-variant", message.Variant).Class("vui-toast").On("focusin", func(ui.Event) {
+			focused.Set(message.Key)
+		}).On("focusout", func(ui.Event) {
+			focused.Set("")
+		}).OnWith("keydown", ui.EventOptions{
+			Keys: []string{"Escape"}, Modifiers: []ui.KeyboardModifiers{{}}, PreventDefault: true,
+			StopPropagation: true,
+		}, func(ui.Event) {
+			props.Queue.Close(message.Key)
+		})
+	})
+}

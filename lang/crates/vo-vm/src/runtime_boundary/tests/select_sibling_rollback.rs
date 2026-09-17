@@ -57,6 +57,7 @@ fn vm_pending_select_sibling_cancel_rollback_061_restores_failed_remote_close() 
         fiber.select_state = Some(SelectState {
             cases: vec![
                 SelectCase {
+                    _storage: None,
                     kind: SelectCaseKind::Recv,
                     result_index: 0,
                     queue_reg: 0,
@@ -66,6 +67,7 @@ fn vm_pending_select_sibling_cancel_rollback_061_restores_failed_remote_close() 
                     has_ok: false,
                 },
                 SelectCase {
+                    _storage: None,
                     kind: SelectCaseKind::Recv,
                     result_index: 0,
                     queue_reg: 2,
@@ -74,7 +76,8 @@ fn vm_pending_select_sibling_cancel_rollback_061_restores_failed_remote_close() 
                     elem_layout: None,
                     has_ok: false,
                 },
-            ],
+            ]
+            .into(),
             expected_cases: 2,
             has_default: false,
             woken_index: None,
@@ -91,7 +94,8 @@ fn vm_pending_select_sibling_cancel_rollback_061_restores_failed_remote_close() 
                     queue: sibling,
                     kind: SelectCaseKind::Recv,
                 },
-            ],
+            ]
+            .into(),
         });
     }
     let selected_waiter = QueueWaiter::try_select(
@@ -205,6 +209,7 @@ fn vm_pending_select_sibling_cancel_rollback_061_restores_callclosure_discard() 
         fiber.select_state = Some(SelectState {
             cases: vec![
                 SelectCase {
+                    _storage: None,
                     kind: SelectCaseKind::Recv,
                     result_index: 0,
                     queue_reg: 0,
@@ -214,6 +219,7 @@ fn vm_pending_select_sibling_cancel_rollback_061_restores_callclosure_discard() 
                     has_ok: false,
                 },
                 SelectCase {
+                    _storage: None,
                     kind: SelectCaseKind::Recv,
                     result_index: 0,
                     queue_reg: 2,
@@ -222,7 +228,8 @@ fn vm_pending_select_sibling_cancel_rollback_061_restores_callclosure_discard() 
                     elem_layout: None,
                     has_ok: false,
                 },
-            ],
+            ]
+            .into(),
             expected_cases: 2,
             has_default: false,
             woken_index: None,
@@ -239,7 +246,8 @@ fn vm_pending_select_sibling_cancel_rollback_061_restores_callclosure_discard() 
                     queue: sibling,
                     kind: SelectCaseKind::Recv,
                 },
-            ],
+            ]
+            .into(),
         });
     }
     let selected_waiter = QueueWaiter::try_select(

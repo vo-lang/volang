@@ -1,0 +1,140 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+func attributeMutation(batch ui.Batch, id int, name string, value string) bool {
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "attr" && mutation.ID == id && mutation.Name == name && mutation.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+func comboboxContracts() {
+	var value *ui.StringState
+	var disabled *ui.BoolState
+	var version *ui.IntState
+	selections := []string{}
+	blurs := 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		value = ui.String(scope, "value", "")
+		disabled = ui.Bool(scope, "disabled", false)
+		version = ui.Int(scope, "version", 0)
+		options := []kit.ComboboxOption{
+			{Key: "a", Label: "Alpha"}, {Key: "b", Label: "Beta", Disabled: true},
+			{Key: "c", Label: "Charlie"}, {Key: "zh", Label: "中文"},
+		}
+		if version.Get() > 0 {
+			options = []kit.ComboboxOption{{Key: fmt.Sprint(version.Get()), Label: "Replacement"}}
+		}
+		return kit.Combobox(kit.ComboboxProps{
+			ID: "choice", Label: "Choice", Name: "choice", Required: true, Disabled: disabled.Get(),
+			Options: options,
+			Value: func() string {
+				return value.Get()
+			},
+			OnChange: func(text string) {
+				value.Set(text)
+			},
+			OnSelect: func(key string) {
+				selections = append(selections, key)
+			},
+			OnBlur: func() {
+				blurs++
+			},
+		})
+	}))
+	initial := flush(root)
+	ids := make(map[string]int)
+	for _, mutation := range initial.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "id" {
+			ids[mutation.Value] = mutation.ID
+		}
+	}
+	input := ids["choice"]
+	popup := ids["choice-listbox"]
+	require(input > 0 && popup > 0 && strings.Contains(root.HTML(), `role="combobox"`), "combobox field or popup missing")
+	sequence := 0
+	sequence = kitModifiedKeys(root, input, "ArrowDown", true, sequence)
+	send := func(event ui.Event) {
+		sequence++
+		event.Sequence = sequence
+		root.Dispatch(event)
+	}
+	press := func(key string) ui.Batch {
+		send(ui.Event{Target: input, Kind: "keydown", Key: key, Capture: true})
+		return flush(root)
+	}
+	batch := press("ArrowDown")
+	require(attributeMutation(batch, input, "aria-activedescendant", "choice-option-0") &&
+		focusTarget(batch) == 0, "suggestion navigation moved DOM focus or missed the first option")
+	send(ui.Event{Target: input, Kind: "keydown", Key: "ArrowDown", Capture: true})
+	send(ui.Event{Target: input, Kind: "keydown", Key: "ArrowDown", Capture: true})
+	require(attributeMutation(flush(root), input, "aria-activedescendant", "choice-option-3"), "burst navigation failed to skip disabled suggestions")
+	press("ArrowDown")
+	press("Enter")
+	require(value.Get() == "中文" && len(selections) == 1 && selections[0] == "zh", "choosing a suggestion did not commit its label and key")
+	press("Enter")
+	require(len(selections) == 1, "closed combobox repeated a selection")
+	send(ui.Event{Target: input, Kind: "input", Value: "a"})
+	send(ui.Event{Target: input, Kind: "input", Value: "ch"})
+	flush(root)
+	require(attributeMutation(press("ArrowDown"), input, "aria-activedescendant", "choice-option-2"), "filtering used a stale query")
+	send(ui.Event{Target: input, Kind: "keydown", Key: "Escape"})
+	flush(root)
+	require(value.Get() == "ch" && len(selections) == 1, "Escape changed the typed text or committed a suggestion")
+	send(ui.Event{Target: input, Kind: "input", Value: "unlisted text"})
+	require(attributeMutation(flush(root), ids["choice-empty"], "hidden", "false"), "empty suggestions did not show feedback")
+	send(ui.Event{Target: popup, Kind: "toggle", Value: "closed"})
+	require(!attributeMutation(flush(root), ids["choice-empty"], "hidden", "true"), "programmatic popup closure hid empty feedback")
+	require(strings.Contains(root.HTML(), "No matching suggestions.") && value.Get() == "unlisted text", "empty results lost free text")
+	send(ui.Event{Target: input, Kind: "input", Value: "中", IsComposing: true})
+	flush(root)
+	require(!strings.Contains(root.HTML(), `aria-expanded="true"`), "composition opened a competing popup")
+	send(ui.Event{Target: input, Kind: "input", Value: "中文"})
+	flush(root)
+	require(attributeMutation(press("ArrowUp"), input, "aria-activedescendant", "choice-option-3"), "committed Unicode query did not match")
+	send(ui.Event{Target: input, Kind: "blur"})
+	flush(root)
+	require(blurs == 1 && value.Get() == "中文", "blur did not preserve free text and notify the form")
+	disabled.Set(true)
+	flush(root)
+	press("ArrowDown")
+	send(ui.Event{Target: input, Kind: "input", Value: "ignored"})
+	flush(root)
+	require(value.Get() == "中文" && !strings.Contains(root.HTML(), `aria-expanded="true"`), "disabled combobox changed")
+	disabled.Set(false)
+	value.Set("")
+	for round := 1; round <= 20; round++ {
+		version.Set(round)
+		flush(root)
+		flush(root)
+		batch := press("ArrowDown")
+		require(attributeMutation(batch, input, "aria-activedescendant", "choice-option-0"), "replaced collection retained a stale active option")
+		scroll := 0
+		for _, mutation := range batch.Mutations {
+			if mutation.Op == "scroll" {
+				scroll = mutation.ID
+			}
+		}
+		require(scroll > 0, "active ref did not follow its replacement option")
+	}
+	root.Close()
+	expectPanic(func() {
+		invalid := ui.NewRoot(kit.Combobox(kit.ComboboxProps{
+			ID: "duplicate", Label: "Duplicate",
+			Options: []kit.ComboboxOption{{Key: "a", Label: "A"}, {Key: "a", Label: "B"}},
+			Value: func() string {
+				return ""
+			},
+			OnChange: func(string) {},
+		}))
+		invalid.Flush()
+	}, "unique keys")
+}

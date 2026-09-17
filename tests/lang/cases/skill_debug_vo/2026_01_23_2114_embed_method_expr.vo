@@ -174,9 +174,12 @@ func testMethodExprDeferred() {
 // Test 8: Method expression in slice
 func testMethodExprSlice() {
 	type Num int
-	funcs := []func(Derived) int{Derived.GetValue, func(d Derived) int {
-		return d.value + 1
-	}}
+	funcs := []func(Derived) int{
+		Derived.GetValue,
+		func(d Derived) int {
+			return d.value + 1
+		},
+	}
 	d := Derived{Base: Base{value: 3}, extra: "y"}
 	assert(funcs[0](d) == 3, "method expr in slice 0")
 	assert(funcs[1](d) == 4, "method expr in slice 1")
@@ -185,9 +188,10 @@ func testMethodExprSlice() {
 // Test 9: Method expression as map value
 func testMethodExprMap() {
 	funcs := map[string]func(Derived) int{
-		"get": Derived.GetValue, "add": func(d Derived) int {
-	return Derived.Add(d, 10)
-},
+		"get": Derived.GetValue,
+		"add": func(d Derived) int {
+			return Derived.Add(d, 10)
+		},
 	}
 	d := Derived{Base: Base{value: 5}, extra: "z"}
 	assert(funcs["get"](d) == 5, "method expr map get")

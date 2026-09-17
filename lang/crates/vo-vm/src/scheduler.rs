@@ -320,8 +320,9 @@ impl Scheduler {
     }
 
     pub(crate) fn with_resource_limits(resource_limits: VmResourceLimits) -> Self {
-        let fiber_storage_budget = Arc::new(FiberStorageBudget::new(
+        let fiber_storage_budget = Arc::new(FiberStorageBudget::with_limits(
             resource_limits.max_total_fiber_storage_bytes,
+            resource_limits.max_total_fiber_auxiliary_bytes,
         ));
         let mut execution_placeholder = Fiber::new_with_resources(
             DETACHED_FIBER_SENTINEL,
@@ -354,6 +355,10 @@ impl Scheduler {
 
     pub(crate) fn fiber_storage_bytes(&self) -> usize {
         self.fiber_storage_budget.used_bytes()
+    }
+
+    pub(crate) fn fiber_auxiliary_storage_bytes(&self) -> usize {
+        self.fiber_storage_budget.auxiliary_used_bytes()
     }
 
     pub(crate) fn goroutine_snapshot(&self) -> GoroutineSnapshot {
@@ -412,15 +417,9 @@ impl Scheduler {
         &mut self,
         additional: usize,
     ) -> Result<(), SchedulerIdentityExhausted> {
-        let reusable_slots = self
-            .free_slots
-            .iter()
-            .filter(|&&slot| {
-                self.fibers
-                    .get(slot as usize)
-                    .is_some_and(|fiber| fiber.generation < u32::MAX)
-            })
-            .count();
+        // Retired generations are excluded when a slot is released. Admission
+        // must stay O(1) even after a large historical concurrency peak.
+        let reusable_slots = self.free_slots.len();
         let needed_new = additional
             .saturating_sub(reusable_slots)
             .saturating_sub(self.reserved_fibers.len());
@@ -563,7 +562,9 @@ impl Scheduler {
         if let Err(error) = spawn.initialize(&mut self.fibers[id.0 as usize]) {
             let fiber = &mut self.fibers[id.0 as usize];
             fiber.state = FiberState::Dead;
-            self.free_slots.push(id.0);
+            if fiber.generation < u32::MAX {
+                self.free_slots.push(id.0);
+            }
             return Err(SchedulerIdentityExhausted::FiberCapacity(error));
         }
         self.ready_queue.push_back(id);
@@ -757,11 +758,15 @@ impl Scheduler {
     }
 
     /// Kill current fiber and return (trap_kind, panic_msg, error_location).
-    /// error_location is (func_id, pc) captured at panic initiation (before frame unwind).
+    /// Diagnostic anchors are captured at panic initiation, before frame unwind.
     /// * -> Dead.
     pub(crate) fn kill_current(
         &mut self,
-    ) -> (Option<RuntimeTrapKind>, Option<String>, Option<(u32, u32)>) {
+    ) -> (
+        Option<RuntimeTrapKind>,
+        Option<String>,
+        Option<vo_common_core::debug_info::DiagnosticSource>,
+    ) {
         if let Some(id) = self.current.take() {
             let fiber = &mut self.fibers[id.0 as usize];
             assert_ne!(
@@ -770,10 +775,12 @@ impl Scheduler {
             );
             let trap_kind = fiber.panic_trap_kind.take();
             let msg = fiber.panic_message();
-            let loc = fiber
-                .panic_source_loc
-                .take()
-                .or_else(|| fiber.current_frame().map(|f| (f.func_id, f.pc as u32)));
+            let loc = fiber.panic_source_loc.take().or_else(|| {
+                fiber.current_frame().and_then(|f| {
+                    vo_common_core::debug_info::DiagnosticSource::new(f.func_id, f.pc as u32)
+                })
+            });
+            fiber.retire_auxiliary_state();
             let oversized = fiber.has_oversized_storage();
             fiber.state = FiberState::Dead;
             if fiber.generation != u32::MAX {
@@ -816,7 +823,7 @@ impl Scheduler {
     /// Whether another runnable fiber is waiting for the current execution
     /// lease. Stale queue entries are ignored so they cannot force a needless
     /// native side exit.
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     pub(crate) fn has_runnable_waiter(&self) -> bool {
         self.ready_queue.iter().any(|id| {
             self.fibers.get(id.0 as usize).is_some_and(|fiber| {
@@ -1108,7 +1115,7 @@ impl Scheduler {
     /// consuming registrations and waking fibers.
     #[cfg(feature = "std")]
     pub(crate) fn poll_io_ready_tokens(&mut self, io: &mut IoRuntime) -> Vec<IoToken> {
-        io.poll()
+        io.poll_bounded(64)
     }
 
     #[cfg(feature = "std")]

@@ -547,6 +547,37 @@ fn test_subdirectory_entry_uses_exact_package_identity_for_internal_visibility()
 }
 
 #[test]
+fn local_module_entries_can_share_their_own_application_package() {
+    let root = temp_dir("vo_compile_local_shared_application");
+    let app = root.join("app");
+    let development = root.join("development");
+    fs::create_dir_all(&app).unwrap();
+    fs::create_dir_all(&development).unwrap();
+    fs::write(
+        root.join("vo.mod"),
+        "format = 1\nmodule = \"local/shared-app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("app.vo"),
+        "package app\ntype Value struct { Count int }\n",
+    )
+    .unwrap();
+    let source = "package main\nimport \"local/shared-app/app\"\nvar current app.Value\nfunc main() { current.Count = 1 }\n";
+    fs::write(root.join("main.vo"), source).unwrap();
+    fs::write(development.join("main.vo"), source).unwrap();
+    for entry in [&root, &development] {
+        let output = compile(entry.to_string_lossy().as_ref()).unwrap();
+        assert!(output
+            .module
+            .named_type_metas
+            .iter()
+            .any(|metadata| { metadata.name == "local/shared-app/app.Value" }));
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn test_compile_locked_graph_can_select_workspace_sources() {
     let root = temp_dir("vo_compile_locked_workspace_sources");
     let app_root = root.join("app");

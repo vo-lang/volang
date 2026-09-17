@@ -1,0 +1,298 @@
+package ui
+
+import (
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// RuntimeObserver is an opt-in diagnostic hook. Callbacks must only read
+// metadata; they must not change state, render, or perform application work.
+// Render's cleanup records the end of an attempt, including failed attempts.
+type RuntimeObserver interface {
+	Render(*Scope) func()
+	Invalidate(*Scope, *Signal)
+	Dispose(*Scope)
+}
+
+// Observe installs one observer between turns. The returned function detaches
+// it. No observer means no diagnostic allocations, clocks or state formatting.
+func (root *Root) Observe(observer RuntimeObserver) func() {
+	if observer == nil || root.closed || root.flushing || root.committing || root.awaiting != 0 ||
+		root.observer != nil {
+		panic("ui: observing requires an idle live root without another observer")
+	}
+	root.observer = observer
+	root.taskObserver, _ = observer.(RuntimeTaskObserver)
+	root.propsObserver, _ = observer.(RuntimePropsObserver)
+	active := true
+	return func() {
+		if active {
+			root.observer = nil
+			root.taskObserver = nil
+			root.propsObserver = nil
+			active = false
+		}
+	}
+}
+
+type StateIdentity struct {
+	Component int `json:"component"`
+	Key string `json:"key"`
+	Truncated bool `json:"truncated"`
+}
+
+type StateInspection struct {
+	Identity StateIdentity `json:"identity"`
+	Kind string `json:"kind"`
+	Value string `json:"value"`
+	Pending bool `json:"pending"`
+	Truncated bool `json:"truncated"`
+	Dependencies []StateIdentity `json:"dependencies"`
+}
+
+type ComponentInspection struct {
+	ID int `json:"id"`
+	Parent int `json:"parent"`
+	Frame ComponentFrame `json:"frame"`
+	Renders int `json:"renders"`
+	Dirty bool `json:"dirty"`
+	Failed bool `json:"failed"`
+	Truncated bool `json:"truncated"`
+	Tasks int `json:"tasks"`
+	Subscriptions int `json:"subscriptions"`
+	Effects int `json:"effects"`
+	States []StateInspection `json:"states"`
+	Dependencies []StateIdentity `json:"dependencies"`
+}
+
+type RootInspection struct {
+	Revision int `json:"revision"`
+	Closed bool `json:"closed"`
+	Truncated bool `json:"truncated"`
+	Components []ComponentInspection `json:"components"`
+}
+
+// InspectMetadata does not read state or add reactive dependencies. It is safe
+// in observer callbacks, before a render or while a failed mount is unwinding.
+func (scope *Scope) InspectMetadata() ComponentInspection {
+	if scope == nil || scope.node == nil || scope.node.view.component == nil {
+		return ComponentInspection{}
+	}
+	view := scope.node.view
+	frame, clipped := inspectionFrame(view)
+	result := ComponentInspection{
+		ID: scope.node.id, Renders: scope.renderVersion, Dirty: scope.dirty, Failed: scope.failure != nil,
+		Frame: frame, Effects: len(scope.effects), Tasks: len(scope.tasks), Truncated: clipped,
+	}
+	if scope.parent != nil {
+		result.Parent = scope.parent.node.id
+	}
+	for _, task := range scope.tasks {
+		if task.stream {
+			result.Subscriptions++
+		}
+	}
+	return result
+}
+
+// Shared identity extraction does not enumerate the component's owned work.
+func inspectionFrame(view View) (ComponentFrame, bool) {
+	definition := view.component
+	return ComponentFrame{
+		Name: inspectionText(definition.name, 256), Key: inspectionText(view.key, 256),
+		File: inspectionText(definition.file, 1024), Line: definition.line,
+	}, len(definition.name) > 256 || len(view.key) > 256 || len(definition.file) > 1024
+}
+
+func inspectionSignal(stored any) *Signal {
+	switch state := stored.(type) {
+		case *IntState:
+			return &state.signal
+		case *StringState:
+			return &state.signal
+		case *BoolState:
+			return &state.signal
+		case *Store:
+			return &state.signal
+		case *DerivedState:
+			return &state.signal
+		case *ResourceState:
+			return &state.signal
+	}
+	return nil
+}
+
+// InspectIdentity resolves a state name only when a diagnostic tool asks for it.
+// State cells do not carry an extra copy of their key on the normal update path.
+func (signal *Signal) InspectIdentity() StateIdentity {
+	if signal == nil || signal.owner.disposed {
+		return StateIdentity{}
+	}
+	for key, stored := range signal.owner.states {
+		if inspectionSignal(stored) == signal {
+			return StateIdentity{
+				Component: signal.owner.node.id, Key: inspectionText(key, 256), Truncated: len(key) > 256,
+			}
+		}
+	}
+	return StateIdentity{}
+}
+
+func inspectionText(value string, limit int) string {
+	if len(value) <= limit {
+		return strings.Clone(value)
+	}
+	end := 0
+	for index := range value {
+		if index > limit {
+			break
+		}
+		end = index
+	}
+	// A short preview must not keep a much larger source string alive.
+	return strings.Clone(value[:end])
+}
+
+type inspectionBudget struct {
+	states int
+	edges int
+	truncated bool
+}
+
+type inspectionEdges []StateIdentity
+
+func (values inspectionEdges) Len() int {
+	return len(values)
+}
+
+func (values inspectionEdges) Swap(i int, j int) {
+	values[i], values[j] = values[j], values[i]
+}
+
+func (values inspectionEdges) Less(i int, j int) bool {
+	return values[i].Component < values[j].Component ||
+		(values[i].Component == values[j].Component && values[i].Key < values[j].Key)
+}
+
+type inspectionStates []StateInspection
+
+func (values inspectionStates) Len() int {
+	return len(values)
+}
+
+func (values inspectionStates) Swap(i int, j int) {
+	values[i], values[j] = values[j], values[i]
+}
+
+func (values inspectionStates) Less(i int, j int) bool {
+	return values[i].Identity.Key < values[j].Identity.Key
+}
+
+func (budget *inspectionBudget) dependencies(reader *observation) []StateIdentity {
+	result := []StateIdentity{}
+	for signal := range reader.dependencies {
+		if budget.edges == 0 {
+			budget.truncated = true
+			break
+		}
+		budget.edges--
+		identity := signal.InspectIdentity()
+		budget.truncated = budget.truncated || identity.Truncated
+		result = append(result, identity)
+	}
+	sort.Sort(inspectionEdges(result))
+	return result
+}
+
+func (budget *inspectionBudget) state(component int, key string, stored any) StateInspection {
+	result := StateInspection{
+		Identity: StateIdentity{
+			Component: component, Key: inspectionText(key, 256), Truncated: len(key) > 256,
+		},
+	}
+	budget.truncated = budget.truncated || result.Identity.Truncated
+	switch state := stored.(type) {
+		case *IntState:
+			result.Kind, result.Value = "int", strconv.Itoa(state.value)
+		case *StringState:
+			result.Kind, result.Value = "string", inspectionText(state.value, 256)
+			result.Truncated = len(result.Value) < len(state.value)
+		case *BoolState:
+			result.Kind, result.Value = "bool", strconv.FormatBool(state.value)
+		case *Store:
+			result.Kind = "store"
+		case *DerivedState:
+			result.Kind, result.Pending = "derived", state.dirty
+			result.Dependencies = budget.dependencies(state.reader)
+		case *ResourceState:
+			result.Kind = "resource"
+			result.Pending = state.result.Pending || state.wanted != state.started ||
+				state.version != state.startedVersion
+		case *watchState:
+			result.Kind = "watch"
+		default:
+			result.Kind = "internal"
+	}
+	// Arbitrary stores and derived results stay opaque: inspection never calls
+	// application String methods, walks mutable objects or runs computations.
+	return result
+}
+
+// Inspect returns an independent snapshot between committed turns. It visits
+// at most 20,000 nodes and includes at most 512 components, 2,048 states and
+// 4,096 dependency edges. Truncated marks a partial snapshot explicitly.
+func (root *Root) Inspect() RootInspection {
+	if root.flushing || root.committing || root.awaiting != 0 {
+		panic("ui: inspection requires a committed turn")
+	}
+	result := RootInspection{Revision: root.revision, Closed: root.closed}
+	if root.node == nil {
+		return result
+	}
+	budget := inspectionBudget{states: 2048, edges: 4096}
+	// A frame keeps only the current branch, rather than copying a wide list.
+	type cursor struct {
+		node *mounted
+		next int
+	}
+	stack := []cursor{{node: root.node, next: -1}}
+	visited := 0
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		current := stack[last].node
+		if stack[last].next == -1 {
+			if visited == 20000 || len(result.Components) == 512 {
+				budget.truncated = true
+				break
+			}
+			visited++
+			stack[last].next = 0
+			if current.scope != nil {
+				scope := current.scope
+				component := scope.InspectMetadata()
+				budget.truncated = budget.truncated || component.Truncated
+				component.Dependencies = budget.dependencies(scope.reader)
+				for key, stored := range scope.states {
+					if budget.states == 0 {
+						budget.truncated = true
+						break
+					}
+					budget.states--
+					component.States = append(component.States, budget.state(component.ID, key, stored))
+				}
+				sort.Sort(inspectionStates(component.States))
+				result.Components = append(result.Components, component)
+			}
+		}
+		if stack[last].next < len(current.children) {
+			child := current.children[stack[last].next]
+			stack[last].next++
+			stack = append(stack, cursor{node: child, next: -1})
+		} else {
+			stack = stack[:last]
+		}
+	}
+	result.Truncated = budget.truncated
+	return result
+}

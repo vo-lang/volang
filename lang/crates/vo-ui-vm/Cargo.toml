@@ -12,6 +12,7 @@ publish = false
 [dependencies]
 vo-common-core.workspace = true
 vo-runtime.workspace = true
+vo-ui-bridge.workspace = true
 vo-ui-artifact.workspace = true
 vo-ui-core.workspace = true
 vo-ui-headless.workspace = true

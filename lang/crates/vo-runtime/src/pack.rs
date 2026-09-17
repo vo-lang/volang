@@ -23,6 +23,9 @@ use vo_common_core::bytecode::{
 use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
 use vo_common_core::RuntimeType;
 
+mod encoder;
+pub(crate) use encoder::PacketEncoder;
+
 /// Packed representation of a sendable value.
 /// Contains serialized bytes that can be transferred across islands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -915,6 +918,18 @@ struct RuntimeLayoutCache {
 }
 
 impl RuntimeLayoutCache {
+    // A packet can contain many unrelated shapes. Retained memoization is a
+    // soft-bounded optimization; a full cache still resolves valid layouts.
+    const MAX_ENTRIES: usize = 4096;
+
+    /// Caching is optional. All derived widths use the same fallible gate;
+    /// allocation failure must not turn a successful layout query into an abort.
+    fn remember_slot_count(&mut self, rttid: ValueRttid, slots: Option<usize>) {
+        if self.slot_counts.len() < Self::MAX_ENTRIES && self.slot_counts.try_reserve(1).is_ok() {
+            self.slot_counts.insert(rttid, slots);
+        }
+    }
+
     fn slot_count(
         &mut self,
         value_rttid: ValueRttid,
@@ -928,9 +943,7 @@ impl RuntimeLayoutCache {
             self.slot_count_resolutions += 1;
         }
         let resolved = context.resolver().slot_count_for_value_rttid(value_rttid);
-        if self.slot_counts.try_reserve(1).is_ok() {
-            self.slot_counts.insert(value_rttid, resolved);
-        }
+        self.remember_slot_count(value_rttid, resolved);
         resolved
     }
 
@@ -948,7 +961,8 @@ impl RuntimeLayoutCache {
             self.array_layout_resolutions += 1;
         }
         let resolved = self.compute_array_value_layout(value_meta, context);
-        if self.array_layouts.try_reserve(1).is_ok() {
+        if self.array_layouts.len() < Self::MAX_ENTRIES && self.array_layouts.try_reserve(1).is_ok()
+        {
             self.array_layouts.insert(cache_key, resolved);
         }
         resolved
@@ -998,11 +1012,11 @@ impl RuntimeLayoutCache {
             Some(None) => return None,
             Some(Some(_)) => {}
             None => {
-                self.slot_counts.insert(array_rttid, Some(total_slots));
+                self.remember_slot_count(array_rttid, Some(total_slots));
             }
         }
         if len != 0 && !self.slot_counts.contains_key(elem_rttid) {
-            self.slot_counts.insert(*elem_rttid, Some(elem_slots));
+            self.remember_slot_count(*elem_rttid, Some(elem_slots));
         }
         let elem_meta = resolver.canonical_value_meta_for_value_rttid(*elem_rttid)?;
         Some(ArrayValueLayout {
@@ -1143,6 +1157,12 @@ fn try_zeroed_pack_slots(packed: &mut PackedValue, len: usize) -> Option<Box<[u6
     Some(slots.into_boxed_slice())
 }
 
+#[derive(Default)]
+struct PackWorkspace {
+    layouts: RuntimeLayoutCache,
+    tasks: Vec<PackTask>,
+}
+
 unsafe fn pack_value(
     packed: &mut PackedValue,
     gc: &Gc,
@@ -1151,11 +1171,36 @@ unsafe fn pack_value(
     context: PackTypeContext<'_>,
     object_graph: &mut PackObjectGraph,
 ) {
-    let mut layout_cache = RuntimeLayoutCache::default();
-    let mut tasks = Vec::new();
+    let mut workspace = PackWorkspace::default();
+    pack_value_with_workspace(
+        packed,
+        gc,
+        src,
+        value_meta,
+        context,
+        object_graph,
+        &mut workspace,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn pack_value_with_workspace(
+    packed: &mut PackedValue,
+    gc: &Gc,
+    src: &[u64],
+    value_meta: ValueMeta,
+    context: PackTypeContext<'_>,
+    object_graph: &mut PackObjectGraph,
+    workspace: &mut PackWorkspace,
+) {
+    let PackWorkspace {
+        layouts: layout_cache,
+        tasks,
+    } = workspace;
+    debug_assert!(tasks.is_empty());
     push_pack_task(
         packed,
-        &mut tasks,
+        tasks,
         PackTask::Value {
             src: PackSlots::from_slice(src),
             value_meta,
@@ -1174,8 +1219,8 @@ unsafe fn pack_value(
                     value_meta,
                     context,
                     object_graph,
-                    &mut tasks,
-                    &mut layout_cache,
+                    tasks,
+                    layout_cache,
                 );
             }
             PackTask::SequenceElements {
@@ -1191,8 +1236,7 @@ unsafe fn pack_value(
                 if index >= length {
                     continue;
                 }
-                let elem_slots =
-                    sequence_elem_slots(elem_meta, elem_bytes, context, &mut layout_cache);
+                let elem_slots = sequence_elem_slots(elem_meta, elem_bytes, context, layout_cache);
                 let elem_src = if flat_storage {
                     assert_eq!(
                         storage_stride,
@@ -1210,7 +1254,7 @@ unsafe fn pack_value(
                 };
                 push_pack_task(
                     packed,
-                    &mut tasks,
+                    tasks,
                     PackTask::SequenceElements {
                         data_ptr,
                         length,
@@ -1224,7 +1268,7 @@ unsafe fn pack_value(
                 );
                 push_pack_task(
                     packed,
-                    &mut tasks,
+                    tasks,
                     PackTask::Value {
                         src: elem_src,
                         value_meta: elem_meta,
@@ -1242,7 +1286,7 @@ unsafe fn pack_value(
                 };
                 push_pack_task(
                     packed,
-                    &mut tasks,
+                    tasks,
                     PackTask::InlineArrayElements {
                         src,
                         layout,
@@ -1251,7 +1295,7 @@ unsafe fn pack_value(
                 );
                 push_pack_task(
                     packed,
-                    &mut tasks,
+                    tasks,
                     PackTask::Value {
                         src: elem_src,
                         value_meta: layout.elem_meta,
@@ -1285,7 +1329,7 @@ unsafe fn pack_value(
                 };
                 push_pack_task(
                     packed,
-                    &mut tasks,
+                    tasks,
                     PackTask::StructFields {
                         src,
                         meta_id,
@@ -1294,7 +1338,7 @@ unsafe fn pack_value(
                 );
                 push_pack_task(
                     packed,
-                    &mut tasks,
+                    tasks,
                     PackTask::Value {
                         src: field_src,
                         value_meta: field_meta,
@@ -1311,7 +1355,7 @@ unsafe fn pack_value(
                 }) {
                     push_pack_task(
                         packed,
-                        &mut tasks,
+                        tasks,
                         PackTask::MapValue {
                             iter,
                             val,
@@ -1321,7 +1365,7 @@ unsafe fn pack_value(
                     );
                     push_pack_task(
                         packed,
-                        &mut tasks,
+                        tasks,
                         PackTask::Value {
                             src: key,
                             value_meta: key_meta,
@@ -1337,7 +1381,7 @@ unsafe fn pack_value(
             } => {
                 push_pack_task(
                     packed,
-                    &mut tasks,
+                    tasks,
                     PackTask::MapEntries {
                         iter,
                         key_meta,
@@ -1346,7 +1390,7 @@ unsafe fn pack_value(
                 );
                 push_pack_task(
                     packed,
-                    &mut tasks,
+                    tasks,
                     PackTask::Value {
                         src: val,
                         value_meta: val_meta,
@@ -1355,6 +1399,9 @@ unsafe fn pack_value(
             }
         }
     }
+    // Failed output can leave tasks borrowing the current source. Drop every
+    // pending task before returning, retaining only the workspace capacity.
+    tasks.clear();
 }
 
 #[inline]

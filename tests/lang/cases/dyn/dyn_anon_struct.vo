@@ -13,7 +13,9 @@ func main() {
 		X int
 		Y string
 		Z bool
-	}{X: 10, Y: "hello", Z: true}
+	}{
+		X: 10, Y: "hello", Z: true,
+	}
 	var a any = &anon
 	x, err := a~>X
 	assert(err == nil, "X access error")
@@ -34,9 +36,13 @@ func main() {
 		Inner struct {
 			Value int
 		}
-	}{Inner: struct {
-		Value int
-	}{Value: 42}}
+	}{
+		Inner: struct {
+			Value int
+		}{
+			Value: 42,
+		},
+	}
 	var b any = &nested
 	inner, err := b~>Inner
 	assert(err == nil, "Inner access error")
@@ -48,7 +54,9 @@ func main() {
 	items := []struct {
 		ID int
 		Name string
-	}{{ID: 1, Name: "first"}, {ID: 2, Name: "second"}}
+	}{
+		{ID: 1, Name: "first"}, {ID: 2, Name: "second"},
+	}
 	var c any = items
 	elem, err := c~>[0]
 	assert(err == nil, "index 0 error")
@@ -61,7 +69,9 @@ func main() {
 	// Test 5: Map with anonymous struct value
 	m := map[string]struct {
 		Count int
-	}{"a": {Count: 100}, "b": {Count: 200}}
+	}{
+		"a": {Count: 100}, "b": {Count: 200},
+	}
 	var d any = m
 	aVal, err := d~>["a"]
 	assert(err == nil, "map a error")

@@ -150,18 +150,12 @@ mod tests {
         );
 
         let direct = CallPlan::new(8, 2, &func(8, false));
-        assert_eq!(
-            direct.route_for_full_function(7),
-            CallRoute::DynamicJitTable
-        );
-        assert_eq!(direct.route_for_loop(), CallRoute::DynamicJitTable);
+        assert_eq!(direct.route(), CallRoute::DynamicJitTable);
+        assert_eq!(direct.route(), CallRoute::DynamicJitTable);
 
         let large = CallPlan::new(8, 2, &func((MAX_DIRECT_JIT_FRAME_SLOTS + 1) as u16, false));
-        assert_eq!(
-            large.route_for_full_function(7),
-            CallRoute::VmCallMaterialization
-        );
-        assert_eq!(large.route_for_loop(), CallRoute::VmCallMaterialization);
+        assert_eq!(large.route(), CallRoute::VmCallMaterialization);
+        assert_eq!(large.route(), CallRoute::VmCallMaterialization);
     }
 
     #[test]

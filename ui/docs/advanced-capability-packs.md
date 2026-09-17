@@ -99,7 +99,7 @@ control and document work while keeping renderer state deterministic.
 ## Permanent evidence
 
 - `ui/tests/advanced-packs` runs document, language, graphics, assets, chart,
-  animation, media and workspace behavior through VM, JIT, Core Wasm AOT and
+  animation, media and workspace behavior through VM, JIT, Wasm VM and
   Native AOT.
 - `ui/tests/multi-window-editor` shares a document across independent editor
   and desktop window scopes and verifies close isolation.

@@ -5,6 +5,7 @@ use vo_common_core::bytecode::{FieldMeta, MethodInfo, NamedTypeMeta, StructMeta}
 use vo_common_core::{ChanDir, RuntimeType, StructField};
 use vo_runtime::island::{EndpointRequestKind, IslandCommand};
 use vo_runtime::objects::queue_state::QueueKind;
+use vo_runtime::objects::string;
 use vo_runtime::{SlotType, ValueKind, ValueMeta, ValueRttid};
 
 fn runtime_struct_field(name: &str, typ: ValueRttid) -> StructField {
@@ -52,6 +53,35 @@ fn make_unaligned_port_slice(state: &mut crate::vm::VmState, port: GcRef) -> GcR
     unsafe { slice::SliceData::as_mut(slice_ref) }.data_ptr =
         vo_runtime::slot::ptr_to_slot(unaligned);
     slice_ref
+}
+
+#[test]
+fn compact_string_transfer_checks_owner_and_complete_view_geometry() {
+    let mut gc = Gc::new();
+    let source = string::try_create(&mut gc, b"abcdef").unwrap();
+    let view = unsafe { string::try_slice_of(&mut gc, source, 1, 5) }
+        .unwrap()
+        .unwrap();
+    validate_string_transfer_layout(&gc, view, "compact view").unwrap();
+    let owner = unsafe { string::owner_ref(view) };
+    let data = unsafe { string::data_ptr(view) };
+
+    // Each corruption stays within the descriptor's actual allocation. The
+    // validator must reject before any packet or endpoint is published.
+    unsafe { string::StringData::as_mut(view) }.len = u64::MAX;
+    assert!(validate_string_transfer_layout(&gc, view, "long view").is_err());
+    unsafe { string::StringData::as_mut(view) }.len = 4;
+    unsafe { string::StringData::as_mut(view) }.data_ptr = u64::MAX;
+    assert!(validate_string_transfer_layout(&gc, view, "overflow view").is_err());
+    unsafe { string::StringData::as_mut(view) }.data_ptr = unsafe { data.add(2) } as u64;
+    assert!(validate_string_transfer_layout(&gc, view, "outside view").is_err());
+    unsafe { string::StringData::as_mut(view) }.data_ptr = data as u64;
+    unsafe { string::StringData::as_mut(view) }.owner = 0;
+    assert!(validate_string_transfer_layout(&gc, view, "missing owner").is_err());
+    unsafe { string::StringData::as_mut(view) }.owner = unsafe { owner.add(1) } as u64;
+    assert!(validate_string_transfer_layout(&gc, view, "interior owner").is_err());
+    unsafe { string::StringData::as_mut(view) }.owner = owner as u64;
+    validate_string_transfer_layout(&gc, view, "restored view").unwrap();
 }
 
 fn direct_method_function(slot_types: Vec<SlotType>) -> FunctionDef {
@@ -754,7 +784,7 @@ fn vm_goisland_transfer_txn_006_rejects_malformed_later_string_before_endpoint_p
     );
     let bad_string = state
         .gc
-        .alloc(ValueMeta::new(0, ValueKind::String), slice::DATA_SLOTS);
+        .alloc(ValueMeta::new(0, ValueKind::String), string::DATA_SLOTS);
     let struct_metas = vec![StructMeta {
         slot_types: vec![SlotType::GcRef, SlotType::GcRef],
         fields: vec![

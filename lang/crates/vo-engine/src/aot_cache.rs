@@ -21,7 +21,6 @@ static CACHE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[repr(u8)]
 pub enum AotCacheArtifactKind {
     NativeObject = 1,
-    CoreWasm = 2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +31,16 @@ pub struct AotCacheKey {
 
 impl AotCacheKey {
     pub fn new(
+        module_bytes: &[u8],
+        target: &TargetSpec,
+        kind: AotCacheArtifactKind,
+        debug_ir: bool,
+    ) -> Self {
+        crate::Engine::default().aot_cache_key(module_bytes, target, kind, debug_ir)
+    }
+
+    pub(crate) fn for_engine(
+        engine: &crate::Engine,
         module_bytes: &[u8],
         target: &TargetSpec,
         kind: AotCacheArtifactKind,
@@ -59,13 +68,14 @@ impl AotCacheKey {
         hash_field(&mut hasher, b"debug-ir", &[u8::from(debug_ir)]);
         hash_field(
             &mut hasher,
-            b"native-aot-abi",
-            &vo_jit::NATIVE_AOT_ABI_VERSION.to_le_bytes(),
+            b"engine-extension",
+            engine.cache_identity().as_bytes(),
         );
+        #[cfg(feature = "aot-native")]
         hash_field(
             &mut hasher,
-            b"wasm-aot-abi",
-            &vo_wasm_aot::WASM_AOT_ABI_VERSION.to_le_bytes(),
+            b"native-aot-abi",
+            &vo_jit::NATIVE_AOT_ABI_VERSION.to_le_bytes(),
         );
         hash_field(
             &mut hasher,
@@ -323,7 +333,6 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use vo_target::WASM32_UNKNOWN_UNKNOWN;
 
     fn temp_cache(label: &str) -> (PathBuf, AotArtifactCache) {
         let unique = SystemTime::now()
@@ -337,23 +346,33 @@ mod tests {
 
     #[test]
     fn key_covers_target_kind_options_and_module() {
-        let target = TargetSpec::parse(WASM32_UNKNOWN_UNKNOWN).unwrap();
-        let base = AotCacheKey::new(b"module", &target, AotCacheArtifactKind::CoreWasm, false);
-        assert_ne!(
-            base,
-            AotCacheKey::new(b"other", &target, AotCacheArtifactKind::CoreWasm, false)
+        let target = TargetSpec::host().unwrap();
+        let base = AotCacheKey::new(
+            b"module",
+            &target,
+            AotCacheArtifactKind::NativeObject,
+            false,
         );
         assert_ne!(
             base,
-            AotCacheKey::new(b"module", &target, AotCacheArtifactKind::CoreWasm, true)
+            AotCacheKey::new(b"other", &target, AotCacheArtifactKind::NativeObject, false)
+        );
+        assert_ne!(
+            base,
+            AotCacheKey::new(b"module", &target, AotCacheArtifactKind::NativeObject, true)
         );
     }
 
     #[test]
     fn round_trip_and_corruption_is_a_miss() {
         let (root, cache) = temp_cache("round-trip");
-        let target = TargetSpec::parse(WASM32_UNKNOWN_UNKNOWN).unwrap();
-        let key = AotCacheKey::new(b"module", &target, AotCacheArtifactKind::CoreWasm, false);
+        let target = TargetSpec::host().unwrap();
+        let key = AotCacheKey::new(
+            b"module",
+            &target,
+            AotCacheArtifactKind::NativeObject,
+            false,
+        );
         assert_eq!(cache.load(&key).unwrap(), None);
         cache.store(&key, b"artifact").unwrap();
         assert_eq!(cache.load(&key).unwrap(), Some(b"artifact".to_vec()));
@@ -373,8 +392,13 @@ mod tests {
         {
             use std::os::unix::fs::symlink;
             let (root, cache) = temp_cache("symlink");
-            let target = TargetSpec::parse(WASM32_UNKNOWN_UNKNOWN).unwrap();
-            let key = AotCacheKey::new(b"module", &target, AotCacheArtifactKind::CoreWasm, false);
+            let target = TargetSpec::host().unwrap();
+            let key = AotCacheKey::new(
+                b"module",
+                &target,
+                AotCacheArtifactKind::NativeObject,
+                false,
+            );
             let path = cache.entry_path(&key);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             let target_file = root.join("target");

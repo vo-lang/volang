@@ -1,0 +1,228 @@
+package ui
+
+import (
+	"sort"
+)
+
+type Request struct {
+	Service string
+	Value string
+	TimeoutMilliseconds int
+}
+
+// WithTimeout bounds a host request from its committed start. Zero disables it.
+// Timeout is delivered as a normal Result.Error and aborts the host operation.
+func (request Request) WithTimeout(milliseconds int) Request {
+	request.TimeoutMilliseconds = milliseconds
+	request.validate()
+	return request
+}
+
+func (request Request) validate() {
+	if request.Service == "" || request.TimeoutMilliseconds < 0 ||
+		request.TimeoutMilliseconds > 2147483647 {
+		panic("ui: request requires a service and a timeout between 0 and 2147483647 ms")
+	}
+}
+
+type Result struct {
+	Value string
+	Error string
+}
+
+type Task struct {
+	root *Root
+	scope *Scope
+	id int
+	active bool
+	stream bool
+	receive func(Result)
+}
+
+// Start belongs to the declaring Scope and returns through Root.Dispatch.
+// A host service performs I/O; only the UI writer invokes receive and changes state.
+func Start(scope *Scope, request Request, receive func(Result)) *Task {
+	return startTask(scope, request, receive, false)
+}
+
+// Subscribe receives successive host values until cancellation or a terminal
+// error. Like Start, it belongs to the scope and runs only after commit.
+func Subscribe(scope *Scope, request Request, receive func(Result)) *Task {
+	return startTask(scope, request, receive, true)
+}
+
+func startTask(scope *Scope, request Request, receive func(Result), stream bool) *Task {
+	if scope == nil || scope.disposed {
+		panic("ui: tasks must start in a live handler or post-commit effect")
+	}
+	return scope.root.startTask(scope, request, receive, stream)
+}
+
+// Start and Subscribe attach services directly to a committed root. They share
+// the component task transport and cancellation rules without adding UI state.
+func (root *Root) Start(request Request, receive func(Result)) *Task {
+	return root.startTask(nil, request, receive, false)
+}
+
+func (root *Root) Subscribe(request Request, receive func(Result)) *Task {
+	return root.startTask(nil, request, receive, true)
+}
+
+func (root *Root) startTask(scope *Scope, request Request, receive func(Result), stream bool) *Task {
+	request.validate()
+	if root == nil || root.closed || root.node == nil || root.revision == 0 || root.reading != nil ||
+		root.computing != 0 ||
+		root.awaiting != 0 ||
+		receive == nil {
+		panic("ui: tasks must start in a live handler or post-commit effect")
+	}
+	root.nextTask++
+	task := &Task{
+		root: root, scope: scope, id: root.nextTask, active: true, stream: stream, receive: receive,
+	}
+	root.tasks[task.id] = task
+	if scope != nil {
+		if scope.tasks == nil {
+			scope.tasks = make(map[int]*Task)
+		}
+		scope.tasks[task.id] = task
+	}
+	op := "start"
+	if stream {
+		op = "watch"
+	}
+	root.commands = append(root.commands, Command{
+		Op: op, ID: task.id, Name: request.Service, Value: request.Value,
+		TimeoutMilliseconds: request.TimeoutMilliseconds,
+	})
+	task.notifyActivity("requested", request.Service, request.TimeoutMilliseconds, "")
+	return task
+}
+
+func (task *Task) retire() {
+	task.active = false
+	task.receive = nil
+	delete(task.root.tasks, task.id)
+	if task.scope != nil {
+		delete(task.scope.tasks, task.id)
+	}
+}
+
+func (task *Task) Cancel() {
+	if task == nil || !task.active {
+		return
+	}
+	task.retire()
+	task.notifyActivity("cancelled", "", 0, "")
+	if !task.root.closed {
+		task.root.commands = append(task.root.commands, Command{Op: "cancel", ID: task.id})
+	}
+}
+
+func (scope *Scope) cancelTasks() {
+	ids := []int{}
+	for id := range scope.tasks {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	for _, id := range ids {
+		scope.tasks[id].Cancel()
+	}
+}
+
+func (root *Root) cancelTasks() {
+	ids := []int{}
+	for id := range root.tasks {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	for _, id := range ids {
+		root.tasks[id].Cancel()
+	}
+}
+
+func (root *Root) completeTask(event Event) bool {
+	task := root.tasks[event.Target]
+	if task == nil || !task.active || task.scope != nil && task.scope.disposed {
+		return false
+	}
+	receive := task.receive
+	if !task.stream || event.Error != "" {
+		task.retire()
+	}
+	kind := "value"
+	if event.Error != "" {
+		kind = "failed"
+	} else if !task.stream {
+		kind = "completed"
+	}
+	task.notifyActivity(kind, "", 0, event.Error)
+	receive(Result{Value: event.Value, Error: event.Error})
+	return true
+}
+
+type LoadResult struct {
+	Pending bool
+	Value string
+	Error string
+}
+
+type ResourceState struct {
+	signal Signal
+	wanted Request
+	started Request
+	result LoadResult
+	version int
+	startedVersion int
+}
+
+// Resource declares a latest-request-wins load. Changed inputs cancel old work
+// after commit; stale responses are rejected before invoking application code.
+func Resource(scope *Scope, key string, request Request) *ResourceState {
+	request.validate()
+	scope.requireState(key)
+	var state *ResourceState
+	if stored, exists := scope.states[key]; exists {
+		var valid bool
+		state, valid = stored.(*ResourceState)
+		if !valid {
+			panic("ui: state key changed type: " + key)
+		}
+	} else {
+		state = &ResourceState{signal: newSignal(scope), result: LoadResult{Pending: true}}
+		scope.storeState(key, state)
+	}
+	state.wanted = request
+	identity := effectKey{kind: "resource", name: key}
+	if scope.effects[identity] == nil {
+		state.started = Request{}
+	}
+	version := state.version
+	declareEffect(scope, identity, func() func() {
+		state.started = request
+		state.startedVersion = version
+		state.result = LoadResult{Pending: true}
+		task := Start(scope, request, func(result Result) {
+			state.result = LoadResult{Value: result.Value, Error: result.Error}
+			state.signal.changed()
+		})
+		return func() {
+			task.Cancel()
+		}
+	}, request.Service, request.Value, request.TimeoutMilliseconds, version)
+	return state
+}
+
+func (state *ResourceState) Get() LoadResult {
+	state.signal.read()
+	if state.wanted != state.started || state.version != state.startedVersion {
+		return LoadResult{Pending: true}
+	}
+	return state.result
+}
+
+func (state *ResourceState) Reload() {
+	state.signal.write()
+	state.version++
+	state.signal.changed()
+}

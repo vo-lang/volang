@@ -1,0 +1,39 @@
+package main
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+func textSelectionContracts() {
+	var ref *ui.ElementRef
+	var visible *ui.BoolState
+	root := ui.NewRoot(ui.Component(ui.Define("selection.Text"), func(scope *ui.Scope) ui.View {
+		ref = ui.Ref(scope, "source")
+		visible = ui.Bool(scope, "visible", true)
+		if visible.Get() {
+			return ui.Element("textarea").Ref(ref)
+		}
+		return ui.Text("")
+	}))
+	defer root.Close()
+	flush(root)
+	const source = "中文🙂\nmissing()"
+	require(ref.SelectTextIfUnchanged(source, ui.TextSelection{Start: 5, End: 12}), "selection was not queued")
+	batch := flush(root)
+	require(len(batch.Mutations) == 1 && batch.Mutations[0].Op == "textSelection", "selection operation lost")
+	for _, selected := range []ui.TextSelection{
+		{Start: -1}, {Start: 2, End: 1}, {End: 30}, {End: 15}, {Start: 3, End: 4},
+		{End: 1, Direction: "invalid"},
+	} {
+		expectPanic(func() {
+			ref.SelectTextIfUnchanged(source, selected)
+		}, "text selection")
+	}
+	visible.Set(false)
+	ref.SelectTextIfUnchanged(source, ui.TextSelection{Start: 0, End: 2})
+	for _, mutation := range flush(root).Mutations {
+		require(mutation.Op != "textSelection", "removed selection binding survived")
+	}
+	root.Close()
+	require(!ref.SelectTextIfUnchanged(source, ui.TextSelection{}), "disposed ref accepted selection")
+}

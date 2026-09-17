@@ -99,7 +99,7 @@ fn handle_special_call_kind(
     }
 }
 
-#[cfg(all(test, feature = "jit"))]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::super::super::context::build_jit_context;
     use super::super::super::frame::jit_push_frame;
@@ -128,7 +128,7 @@ mod tests {
     }
 
     fn assert_nested_special_call_materializes(call_kind: u8) {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-special-call-materialize-test".to_string());
         module.functions.push(function(2));
         module.functions.push(returning_function(3, 1));
@@ -194,7 +194,7 @@ mod tests {
     }
 
     fn assert_top_level_special_call_materializes(call_kind: u8) {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-special-call-top-level-materialize-test".to_string());
         module.functions.push(function(5));
         finish_jit_test_load(&mut vm, module.clone());
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn vm_jit_special_call_materialize_failure_does_not_record_side_exit_058() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-special-call-side-exit-txn-test".to_string());
         module.functions.push(function(1));
         finish_jit_test_load(&mut vm, module.clone());
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn vm_jit_regular_call_defers_compilation_to_materialized_frame_entry_058() {
-        let mut vm = Vm::try_with_jit_config(JitConfig {
+        let mut vm = Vm::try_native_for_test(JitConfig {
             call_threshold: 1,
             ..JitConfig::default()
         })
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn vm_jit_regular_cold_call_materialize_failure_does_not_record_side_exit_058() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-regular-cold-call-side-exit-txn-test".to_string());
         module.functions.push(function(0));
         module.functions.push(function(1));
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn vm_jit_prepared_call_defers_compilation_to_materialized_frame_entry_058() {
-        let mut vm = Vm::try_with_jit_config(JitConfig {
+        let mut vm = Vm::try_native_for_test(JitConfig {
             call_threshold: 1,
             ..JitConfig::default()
         })
@@ -440,7 +440,8 @@ mod tests {
         ctx.ctx.jit_bp = caller_bp as u32;
         ctx.ctx.fiber_sp = before_sp as u32;
         ctx.ctx.call_func_id = 1;
-        ctx.ctx.call_arg_start = callee_bp;
+        ctx.ctx.call_arg_start = 0;
+        ctx.ctx.call_callee_bp = callee_bp;
         ctx.ctx.call_resume_pc = callee_bp;
         ctx.ctx.call_ret_reg = 0;
         ctx.ctx.call_kind = JitContext::CALL_KIND_PREPARED;
@@ -471,7 +472,7 @@ mod tests {
 
     #[test]
     fn vm_jit_prepared_cold_call_materialize_failure_does_not_record_side_exit_058() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-prepared-cold-call-side-exit-txn-test".to_string());
         module.functions.push(function(0));
         module.functions.push(function(1));
@@ -540,8 +541,8 @@ fn handle_prepared_call(
     target: CallTarget,
 ) -> JitBridgeTransition {
     let interpreter_reason = callee_interpreter_reason(vm, &target);
-    let callee_bp = ctx.call_resume_pc() as usize;
-    let caller_resume_pc = ctx.call_arg_start();
+    let callee_bp = ctx.ctx.call_callee_bp as usize;
+    let caller_resume_pc = ctx.call_resume_pc();
     match setup_prepared_call(
         fiber,
         module,

@@ -1,0 +1,31 @@
+package app
+
+import (
+	"github.com/vo-lang/studio/next/documentation"
+)
+
+type LegacyRedirect struct {
+	From string
+	To string
+}
+
+// Saved language links retain their chapter. Removed workspace features lead
+// to the explicit project-export page; the UI guide points to the new model.
+func LegacyRedirects() []LegacyRedirect {
+	redirects := []LegacyRedirect{
+		{From: "/", To: "/studio/gallery"}, {From: "/workspace", To: "/studio/recover"},
+		{From: "/search", To: "/studio/recover"}, {From: "/source-control", To: "/studio/recover"},
+		{From: "/runner", To: "/studio/playground"}, {From: "/offline", To: "/studio/gallery"},
+		{From: "/docs", To: "/studio/docs"},
+	}
+	for _, chapter := range documentation.Pages() {
+		redirects = append(redirects, LegacyRedirect{From: "/docs/" + chapter.ID, To: chapterURL(chapter)})
+	}
+	for _, chapter := range []string{
+		"ui-getting-started", "ui-authoring", "ui-testing", "ui-platforms", "ui-accessibility",
+		"ui-security",
+	} {
+		redirects = append(redirects, LegacyRedirect{From: "/docs/" + chapter, To: "/studio/docs"})
+	}
+	return append(redirects, LegacyRedirect{From: "/docs/ui-component-model", To: "/studio/docs/state"})
+}

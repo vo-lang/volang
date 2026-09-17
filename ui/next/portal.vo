@@ -1,0 +1,110 @@
+package ui
+
+import (
+	"sort"
+	"strings"
+	"github.com/vo-lang/ui/next/wire"
+)
+
+type portalBinding struct {
+	node *mounted
+	target int
+}
+
+// Portal places an HTML element inside another element in this root. Component
+// state and context keep their source ownership; native events, forms and CSS
+// follow the destination DOM. Nil or an unbound ref restores inline placement.
+// Server HTML stays inline until activation, preserving early native input.
+func (view View) Portal(target *ElementRef) View {
+	if view.kind == "" || strings.HasPrefix(view.kind, "#") {
+		panic("ui: Portal requires an HTML element")
+	}
+	view.portal = target
+	return view
+}
+
+func (root *Root) bindPortal(node *mounted) {
+	ref := node.view.portal
+	if ref == nil {
+		return
+	}
+	if node.svg {
+		panic("ui: Portal requires an HTML element")
+	}
+	if ref.scope == nil || ref.scope.disposed || ref.scope.root != root {
+		panic("ui: portal target belongs to a different or disposed root")
+	}
+	if root.portals == nil {
+		root.portals = make(map[int]*portalBinding)
+	}
+	if root.portals[node.id] == nil {
+		root.portals[node.id] = &portalBinding{node: node}
+	}
+}
+
+func (root *Root) preparePortals() {
+	if len(root.portals) == 0 {
+		return
+	}
+	ids := []int{}
+	targets := make(map[int]int)
+	declared := 0
+	for id, binding := range root.portals {
+		ids = append(ids, id)
+		ref := binding.node.view.portal
+		if ref == nil {
+			continue
+		}
+		declared++
+		if declared > wire.MaxPortals {
+			panic("ui: at most 64 portals may be declared in one root")
+		}
+		if ref.scope.disposed {
+			continue
+		}
+		for target, node := range ref.bindings {
+			if node.svg || strings.HasPrefix(node.view.kind, "#") || voidElement(node.view.kind) ||
+				node.view.kind == "textarea" ||
+				node.view.kind == "iframe" ||
+				textElement(node.view.kind) {
+				panic("ui: portal target must be an HTML child container")
+			}
+			for ancestor := target; ancestor != 0; ancestor = root.nodes[ancestor].parent {
+				if ancestor == id {
+					panic("ui: portal target cannot belong to its own content")
+				}
+			}
+			targets[id] = target
+		}
+	}
+	// Validate the resulting physical parent graph before emitting any placement.
+	// Ordinary parent-local reconciliation keeps mounted.parent stable.
+	for id := range targets {
+		ancestor := id
+		for depth := 0; ancestor != 0; depth++ {
+			if depth >= 512 {
+				panic("ui: cyclic or excessively deep portal placement")
+			}
+			if target := targets[ancestor]; target != 0 {
+				ancestor = target
+			} else {
+				ancestor = root.nodes[ancestor].parent
+			}
+			if ancestor == id {
+				panic("ui: cyclic portal placement")
+			}
+		}
+	}
+	sort.Ints(ids)
+	for _, id := range ids {
+		binding := root.portals[id]
+		target := targets[id]
+		if binding.target != target {
+			root.emit(Mutation{Op: "portal", ID: id, Parent: target})
+			binding.target = target
+		}
+		if binding.node.view.portal == nil {
+			delete(root.portals, id)
+		}
+	}
+}

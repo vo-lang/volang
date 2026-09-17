@@ -676,11 +676,34 @@ pub struct TypeSwitchStmt {
 #[derive(Debug, Clone)]
 pub struct TypeCaseClause {
     /// The types (empty for default, may contain nil).
-    pub types: Vec<Option<TypeExpr>>,
+    pub types: Vec<TypeCase>,
     /// The statements in this case.
     pub body: Vec<Stmt>,
     /// The span of the case clause.
     pub span: Span,
+}
+
+/// One type-switch alternative, including the source location of `nil`.
+#[derive(Debug, Clone)]
+pub enum TypeCase {
+    Type(TypeExpr),
+    Nil(Span),
+}
+
+impl TypeCase {
+    pub fn type_expr(&self) -> Option<&TypeExpr> {
+        match self {
+            Self::Type(ty) => Some(ty),
+            Self::Nil(_) => None,
+        }
+    }
+
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Type(ty) => ty.span,
+            Self::Nil(span) => *span,
+        }
+    }
 }
 
 /// A select statement.
@@ -1017,20 +1040,11 @@ pub struct CompositeLit {
 #[derive(Debug, Clone)]
 pub struct CompositeLitElem {
     /// The key, if any (field name or index).
-    pub key: Option<CompositeLitKey>,
+    pub key: Option<Expr>,
     /// The value.
     pub value: Expr,
     /// The span of this element.
     pub span: Span,
-}
-
-/// A key in a composite literal element.
-#[derive(Debug, Clone)]
-pub enum CompositeLitKey {
-    /// A field name.
-    Ident(Ident),
-    /// An index expression.
-    Expr(Expr),
 }
 
 /// A function literal.
@@ -1091,6 +1105,22 @@ pub trait Visitor: Sized {
         walk_decl(self, decl);
     }
 
+    fn visit_var_decl(&mut self, decl: &VarDecl) {
+        walk_var_decl(self, decl);
+    }
+    fn visit_const_decl(&mut self, decl: &ConstDecl) {
+        walk_const_decl(self, decl);
+    }
+    fn visit_type_decl(&mut self, decl: &TypeDecl) {
+        walk_type_decl(self, decl);
+    }
+    fn visit_func_sig(&mut self, sig: &FuncSig) {
+        walk_func_sig(self, sig);
+    }
+    fn visit_param(&mut self, param: &Param) {
+        walk_param(self, param);
+    }
+
     fn visit_stmt(&mut self, stmt: &Stmt) {
         walk_stmt(self, stmt);
     }
@@ -1111,6 +1141,11 @@ pub fn walk_file<V: Visitor>(visitor: &mut V, file: &File) {
     if let Some(pkg) = &file.package {
         visitor.visit_ident(pkg);
     }
+    for import in &file.imports {
+        if let Some(alias) = &import.alias {
+            visitor.visit_ident(alias);
+        }
+    }
     for decl in &file.decls {
         visitor.visit_decl(decl);
     }
@@ -1119,44 +1154,76 @@ pub fn walk_file<V: Visitor>(visitor: &mut V, file: &File) {
 /// Walk a declaration.
 pub fn walk_decl<V: Visitor>(visitor: &mut V, decl: &Decl) {
     match decl {
-        Decl::Var(d) => {
-            for spec in &d.specs {
-                for name in &spec.names {
-                    visitor.visit_ident(name);
-                }
-                if let Some(ty) = &spec.ty {
-                    visitor.visit_type_expr(ty);
-                }
-                for value in &spec.values {
-                    visitor.visit_expr(value);
-                }
-            }
-        }
-        Decl::Const(d) => {
-            for spec in &d.specs {
-                for name in &spec.names {
-                    visitor.visit_ident(name);
-                }
-                if let Some(ty) = &spec.ty {
-                    visitor.visit_type_expr(ty);
-                }
-                for value in &spec.values {
-                    visitor.visit_expr(value);
-                }
-            }
-        }
-        Decl::Type(d) => {
-            visitor.visit_ident(&d.name);
-            visitor.visit_type_expr(&d.ty);
-        }
+        Decl::Var(d) => visitor.visit_var_decl(d),
+        Decl::Const(d) => visitor.visit_const_decl(d),
+        Decl::Type(d) => visitor.visit_type_decl(d),
         Decl::Func(d) => {
             visitor.visit_ident(&d.name);
+            if let Some(receiver) = &d.receiver {
+                if let Some(name) = &receiver.name {
+                    visitor.visit_ident(name);
+                }
+                visitor.visit_ident(&receiver.ty);
+            }
+            visitor.visit_func_sig(&d.sig);
             if let Some(body) = &d.body {
                 for stmt in &body.stmts {
                     visitor.visit_stmt(stmt);
                 }
             }
         }
+    }
+}
+
+pub fn walk_var_decl<V: Visitor>(visitor: &mut V, d: &VarDecl) {
+    for spec in &d.specs {
+        for name in &spec.names {
+            visitor.visit_ident(name);
+        }
+        if let Some(ty) = &spec.ty {
+            visitor.visit_type_expr(ty);
+        }
+        for value in &spec.values {
+            visitor.visit_expr(value);
+        }
+    }
+}
+
+pub fn walk_const_decl<V: Visitor>(visitor: &mut V, d: &ConstDecl) {
+    for spec in &d.specs {
+        for name in &spec.names {
+            visitor.visit_ident(name);
+        }
+        if let Some(ty) = &spec.ty {
+            visitor.visit_type_expr(ty);
+        }
+        for value in &spec.values {
+            visitor.visit_expr(value);
+        }
+    }
+}
+
+pub fn walk_type_decl<V: Visitor>(visitor: &mut V, d: &TypeDecl) {
+    visitor.visit_ident(&d.name);
+    visitor.visit_type_expr(&d.ty);
+}
+
+pub fn walk_param<V: Visitor>(visitor: &mut V, param: &Param) {
+    for name in &param.names {
+        visitor.visit_ident(name);
+    }
+    visitor.visit_type_expr(&param.ty);
+}
+
+pub fn walk_func_sig<V: Visitor>(visitor: &mut V, sig: &FuncSig) {
+    for param in &sig.params {
+        visitor.visit_param(param);
+    }
+    for result in &sig.results {
+        if let Some(name) = &result.name {
+            visitor.visit_ident(name);
+        }
+        visitor.visit_type_expr(&result.ty);
     }
 }
 
@@ -1169,9 +1236,9 @@ pub fn walk_stmt<V: Visitor>(visitor: &mut V, stmt: &Stmt) {
                 visitor.visit_stmt(s);
             }
         }
-        StmtKind::Var(d) => visitor.visit_decl(&Decl::Var(d.clone())),
-        StmtKind::Const(d) => visitor.visit_decl(&Decl::Const(d.clone())),
-        StmtKind::Type(d) => visitor.visit_decl(&Decl::Type(d.clone())),
+        StmtKind::Var(d) => visitor.visit_var_decl(d),
+        StmtKind::Const(d) => visitor.visit_const_decl(d),
+        StmtKind::Type(d) => visitor.visit_type_decl(d),
         StmtKind::ShortVar(d) => {
             for name in &d.names {
                 visitor.visit_ident(name);
@@ -1258,9 +1325,12 @@ pub fn walk_stmt<V: Visitor>(visitor: &mut V, stmt: &Stmt) {
             if let Some(init) = &s.init {
                 visitor.visit_stmt(init);
             }
+            if let Some(binding) = &s.assign {
+                visitor.visit_ident(binding);
+            }
             visitor.visit_expr(&s.expr);
             for case in &s.cases {
-                for ty in case.types.iter().flatten() {
+                for ty in case.types.iter().filter_map(TypeCase::type_expr) {
                     visitor.visit_type_expr(ty);
                 }
                 for s in &case.body {
@@ -1302,7 +1372,18 @@ pub fn walk_stmt<V: Visitor>(visitor: &mut V, stmt: &Stmt) {
             visitor.visit_expr(&s.chan);
             visitor.visit_expr(&s.value);
         }
-        StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Goto(_) | StmtKind::Fallthrough => {}
+        StmtKind::Break(stmt) => {
+            if let Some(label) = &stmt.label {
+                visitor.visit_ident(label);
+            }
+        }
+        StmtKind::Continue(stmt) => {
+            if let Some(label) = &stmt.label {
+                visitor.visit_ident(label);
+            }
+        }
+        StmtKind::Goto(stmt) => visitor.visit_ident(&stmt.label),
+        StmtKind::Fallthrough => {}
         StmtKind::Labeled(l) => {
             visitor.visit_ident(&l.label);
             visitor.visit_stmt(&l.stmt);
@@ -1361,15 +1442,13 @@ pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &Expr) {
             }
             for elem in &c.elems {
                 if let Some(key) = &elem.key {
-                    match key {
-                        CompositeLitKey::Ident(ident) => visitor.visit_ident(ident),
-                        CompositeLitKey::Expr(expr) => visitor.visit_expr(expr),
-                    }
+                    visitor.visit_expr(key);
                 }
                 visitor.visit_expr(&elem.value);
             }
         }
         ExprKind::FuncLit(f) => {
+            visitor.visit_func_sig(&f.sig);
             for stmt in &f.body.stmts {
                 visitor.visit_stmt(stmt);
             }
@@ -1426,14 +1505,17 @@ pub fn walk_type_expr<V: Visitor>(visitor: &mut V, ty: &TypeExpr) {
         TypeExprKind::Island => {}
         TypeExprKind::Func(f) => {
             for p in &f.params {
-                visitor.visit_type_expr(&p.ty);
+                visitor.visit_param(p);
             }
             for r in &f.results {
-                visitor.visit_type_expr(&r.ty);
+                visitor.visit_param(r);
             }
         }
         TypeExprKind::Struct(s) => {
             for field in &s.fields {
+                for name in &field.names {
+                    visitor.visit_ident(name);
+                }
                 visitor.visit_type_expr(&field.ty);
             }
         }
@@ -1445,6 +1527,7 @@ pub fn walk_type_expr<V: Visitor>(visitor: &mut V, ty: &TypeExpr) {
                 match elem {
                     InterfaceElem::Method(m) => {
                         visitor.visit_ident(&m.name);
+                        visitor.visit_func_sig(&m.sig);
                     }
                     InterfaceElem::Embedded(e) => {
                         visitor.visit_ident(e);
@@ -1456,5 +1539,80 @@ pub fn walk_type_expr<V: Visitor>(visitor: &mut V, ty: &TypeExpr) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod visitor_tests {
+    use super::*;
+
+    #[test]
+    fn visitor_covers_signatures_and_borrows_local_declarations() {
+        let source = r#"package main
+            type S struct { field [1]int }
+            type F func(named [2]int) (result [3]int)
+            type I interface { Method(param [4]int) (value [5]int); }
+            func (receiver S) method(arg [6]int) (out [7]int) {
+                type Local [8]int
+                var local [9]int
+                const constant = 10
+                _ = func(lit [11]int) (ret [12]int) { return }
+                return
+            }
+        "#;
+        let (file, diagnostics, interner) = crate::parser::parse(source, 0);
+        assert!(!diagnostics.has_errors(), "{diagnostics:?}");
+        #[derive(Default)]
+        struct Coverage {
+            ints: Vec<vo_common::symbol::Symbol>,
+            names: Vec<vo_common::symbol::Symbol>,
+            local_types: Vec<*const TypeDecl>,
+            visited_types: Vec<*const TypeDecl>,
+        }
+        impl Visitor for Coverage {
+            fn visit_ident(&mut self, ident: &Ident) {
+                self.names.push(ident.symbol);
+            }
+            fn visit_expr(&mut self, expr: &Expr) {
+                if let ExprKind::IntLit(value) = &expr.kind {
+                    self.ints.push(value.raw);
+                }
+                walk_expr(self, expr);
+            }
+            fn visit_stmt(&mut self, stmt: &Stmt) {
+                if let StmtKind::Type(decl) = &stmt.kind {
+                    self.local_types.push(decl as *const _);
+                }
+                walk_stmt(self, stmt);
+            }
+            fn visit_type_decl(&mut self, decl: &TypeDecl) {
+                self.visited_types.push(decl as *const _);
+                walk_type_decl(self, decl);
+            }
+        }
+        let mut coverage = Coverage::default();
+        coverage.visit_file(&file);
+        let mut ints: Vec<u32> = coverage
+            .ints
+            .iter()
+            .map(|&raw| interner.resolve(raw).unwrap().parse().unwrap())
+            .collect();
+        ints.sort();
+        assert_eq!(ints, (1..=12).collect::<Vec<_>>());
+        let names: Vec<_> = coverage
+            .names
+            .iter()
+            .map(|&symbol| interner.resolve(symbol).unwrap())
+            .collect();
+        for name in [
+            "field", "named", "result", "param", "value", "receiver", "arg", "out", "lit", "ret",
+        ] {
+            assert!(names.contains(&name), "missing identifier {name}");
+        }
+        assert_eq!(coverage.local_types.len(), 1);
+        assert!(
+            coverage.visited_types.contains(&coverage.local_types[0]),
+            "local declarations must be borrowed directly"
+        );
     }
 }

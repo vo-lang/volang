@@ -17,6 +17,20 @@ use vo_common_core::types::INVALID_META_ID;
 
 pub const SLOT_COUNT: usize = 2;
 
+/// Box a runtime diagnostic using the owning module's canonical string type.
+/// Loaded modules always admit this intrinsic, even for programs without string literals.
+pub fn diagnostic_string(
+    gc: &mut crate::gc::Gc,
+    module: &crate::bytecode::Module,
+    message: String,
+) -> InterfaceSlot {
+    let rttid = module
+        .basic_type_rttid(ValueKind::String)
+        .expect("runtime diagnostics require the module string intrinsic");
+    let value = string::new_from_string(gc, message);
+    InterfaceSlot::new(pack_slot0(0, rttid, ValueKind::String), value as u64)
+}
+
 // =============================================================================
 // InterfaceSlot - Core interface value type
 // =============================================================================

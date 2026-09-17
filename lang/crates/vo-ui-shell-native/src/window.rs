@@ -13,7 +13,7 @@ use vo_app_runtime::{
     NativeCompositionFrame, NativeCompositionOutcome, NativeCompositorConfig,
     NativeCompositorError, NativeCompositorOwner, SurfaceInputPolicy,
 };
-use vo_engine::PreparedNativeUiReload;
+use vo_ui_integration::PreparedNativeUiReload;
 use vo_ui_layout::{LayoutLimits, Size};
 use vo_ui_paint::PaintLimits;
 use vo_ui_present_wgpu::{WgpuScenePresenter, WgpuScenePresenterConfig, WgpuScenePresenterError};

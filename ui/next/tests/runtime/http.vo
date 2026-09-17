@@ -1,0 +1,55 @@
+package main
+
+import (
+	"encoding/json"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/server"
+	"github.com/vo-lang/ui/next/web"
+)
+
+func httpContracts() {
+	headers := map[string]string{"X-Second": " b ", "Accept": "application/json"}
+	first := web.HTTP("/data", web.HTTPOptions{Headers: headers})
+	headers["Accept"] = "text/plain"
+	second := web.HTTP("/data", web.HTTPOptions{
+		Method: "get", Credentials: "same-origin",
+		Headers: map[string]string{"accept": "application/json", "x-second": "b"},
+	})
+	require(first.Service == "web.http" && first.Value == second.Value, "HTTP identity depends on map order, casing or caller mutation")
+	for _, method := range []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} {
+		request := web.HTTP("/data", web.HTTPOptions{Method: method}).WithTimeout(500)
+		require(request.TimeoutMilliseconds == 500 && request.Service == "web.http", "HTTP lost task policy")
+	}
+	encoded := `{"version":1,"status":422,"url":"https://example.test/data","redirected":false,"headers":{"content-type":"application/json"},"body":"{\"name\":\"名字已使用\"}"}`
+	response, err := web.DecodeHTTP(ui.Result{Value: encoded})
+	require(err == nil && response.Status == 422 && !response.OK(), "HTTP status became a transport error")
+	var fields struct {
+		Name string `json:"name"`
+	}
+	err = json.Unmarshal([]byte(response.Body), &fields)
+	require(err == nil && fields.Name == "名字已使用", "HTTP body cannot decode into application data")
+	_, err = web.DecodeHTTP(ui.Result{Error: "Request timed out"})
+	require(err != nil && err.Error() == "Request timed out", "HTTP transport failure lost")
+	for _, value := range []string{
+		"null", "{}", "[]", strings.Replace(encoded, `"version":1`, `"version":2`, 1),
+		strings.Replace(encoded, `"status":422`, `"status":0`, 1),
+	} {
+		_, err = web.DecodeHTTP(ui.Result{Value: value})
+		require(err != nil, "invalid HTTP result accepted")
+	}
+	_, err = server.JSON(422, map[string]string{"name": "名字已使用"})
+	require(err == nil, "native JSON response rejected typed data")
+	_, err = server.JSON(200, strings.Repeat("x", 2 * 1024 * 1024))
+	require(err != nil, "native JSON response exceeded its body budget")
+	for _, options := range []web.HTTPOptions{
+		{Method: "TRACE"}, {Credentials: "invalid"}, {Body: "GET body"},
+		{Headers: map[string]string{"X": "one", "x": "two"}},
+		{Headers: map[string]string{"x": "bad\r\nline"}},
+		{Method: "POST", Body: strings.Repeat("界", 350000)},
+	} {
+		expectPanic(func() {
+			web.HTTP("/data", options)
+		}, "web:")
+	}
+}

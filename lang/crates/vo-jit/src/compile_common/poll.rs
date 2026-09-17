@@ -15,7 +15,8 @@ pub(crate) struct ExecutionBudgetPollBlocks {
 /// Terminate the current block with a scheduler-turn budget check.
 ///
 /// The budget lives in `JitContext`, making it visible to nested native calls
-/// and to every VM/JIT bridge in the same scheduler turn.
+/// and to every VM/JIT bridge in the same scheduler turn. The final forwarding
+/// pass can reuse reads while preserving all writes and call invalidations.
 pub(crate) fn branch_on_execution_budget(
     builder: &mut FunctionBuilder<'_>,
     ctx: Value,

@@ -2228,6 +2228,8 @@ export interface UiVmHostEvent {
 
 export interface UiVmDomSessionOptions {
   readonly onError?: (error: Error) => void;
+  /** Called after each successfully applied guest mutation frame. */
+  readonly onCommit?: () => void;
   readonly onPendingHostEvents?: (events: readonly UiVmHostEvent[]) => void;
   readonly systemHost?: UiSystemHost;
   /** Enables an isolated in-memory history for iframe and embedded hosts. */
@@ -2319,6 +2321,7 @@ export class UiVmDomSession {
     this.adapter = replacement;
     this.throwOnTerminalFailure(outcome);
     this.reconcileHostEvents();
+    this.options.onCommit?.();
     return outcome;
   }
 
@@ -2531,6 +2534,7 @@ export class UiVmDomSession {
       const frame = this.island.takeHostOutput();
       if (frame === undefined) return;
       this.adapter.applyMutationFrame(frame);
+      this.options.onCommit?.();
     }
   }
 
@@ -2567,13 +2571,13 @@ export function connectUiVmToDom(
   options: Omit<UiDomAdapterOptions, 'onEvent'> & UiVmDomSessionOptions = {},
 ): UiVmDomSession {
   let session: UiVmDomSession | undefined;
-  const { onError, onPendingHostEvents, systemHost, initialLocation, ...adapterOptions } = options;
+  const { onError, onCommit, onPendingHostEvents, systemHost, initialLocation, ...adapterOptions } = options;
   const adapter = new UiDomAdapter(root, {
     ...adapterOptions,
     onEvent: () => session?.deliverEvents(),
   });
   session = new UiVmDomSession(island, adapter, {
-    onError, onPendingHostEvents, systemHost, initialLocation,
+    onError, onCommit, onPendingHostEvents, systemHost, initialLocation,
   });
   return session;
 }

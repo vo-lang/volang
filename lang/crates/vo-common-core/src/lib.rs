@@ -9,7 +9,10 @@
 //! - `instruction` - Bytecode instruction format and opcodes
 //! - `bytecode` - Module and function definitions
 
-#![cfg_attr(not(feature = "std"), no_std)]
+// Host unit tests use the standard test harness while feature-gated library
+// paths still follow `std`. Separate no-default-features library/target checks
+// verify that production code imports everything required by `no_std`.
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
@@ -20,11 +23,13 @@ pub mod dynamic_layout;
 pub mod exact_bases;
 pub mod execution_effects;
 pub mod execution_layouts;
+pub mod extern_contracts;
 pub mod extern_key;
 pub mod frame_roots;
 pub mod identifier;
 pub mod instruction;
 pub mod instruction_effects;
+pub mod instruction_registers;
 pub mod log_record;
 pub mod runtime_type;
 pub mod serialize;
@@ -47,8 +52,8 @@ pub use dynamic_layout::{
 };
 pub use exact_bases::{ExactBaseMaps, FunctionExactBaseMap, WriteBarrierBaseProvenance};
 pub use execution_layouts::{
-    ElementLayoutMaps, FunctionElementLayouts, FunctionPointerLayouts, PointerExecutionLayout,
-    PointerLayoutMaps,
+    ElementLayoutMaps, ExecutionLayoutMaps, FunctionElementLayouts, FunctionExecutionLayouts,
+    FunctionPointerLayouts, PointerExecutionLayout, PointerLayoutMaps,
 };
 pub use extern_key::{
     classify_extern_name, decode_extern_name, is_portable_package_component,
@@ -77,5 +82,5 @@ pub use struct_tag::lookup_struct_tag_value;
 pub use symbol::Symbol;
 #[cfg(feature = "std")]
 pub use symbol::SymbolInterner;
-pub use types::{MetaId, SlotType, ValueKind, ValueMeta};
+pub use types::{MetaId, SlotType, ValueKind, ValueMeta, ValueRttid, INVALID_META_ID};
 pub use verifier::{ModuleVerificationError, ModuleVerifier, VerifiedModule};

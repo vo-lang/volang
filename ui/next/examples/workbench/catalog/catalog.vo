@@ -1,0 +1,77 @@
+// Package catalog is a reusable cross-package list with caller-owned row content.
+package catalog
+
+import (
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type Item struct {
+	ID string
+	Name string
+	Score int
+}
+
+type Props struct {
+	ID string
+	Title string
+	Items []Item
+	Content func(Item) ui.View
+}
+
+var listType = ui.Define("workbench.catalog.List")
+
+var rowType = ui.Define("workbench.catalog.Row")
+
+func Row(id string, item Item, content func(Item) ui.View) ui.View {
+	return ui.Component(rowType, func(scope *ui.Scope) ui.View {
+		note := ui.String(scope, "note", "")
+		fieldID := id + "-" + item.ID
+		body := ui.Element("strong", ui.Text(item.Name))
+		if content != nil {
+			body = content(item)
+		}
+		input := ui.Element("input").Attr("id", fieldID).Attr("aria-label", "Note for " + item.Name).Attr("placeholder", "Add a note").Attr("value", note.Get()).On("input", func(event ui.Event) {
+			note.Set(event.Value)
+		})
+		return ui.Element("li", body, input).Attr("data-row", item.ID)
+	}).Key(item.ID)
+}
+
+func List(props Props) ui.View {
+	return ui.Component(listType, func(scope *ui.Scope) ui.View {
+		query := ui.String(scope, "query", "")
+		reverse := ui.Bool(scope, "reverse", false)
+		visible := ui.Derived(scope, "filtered", func() any {
+			items := []Item{}
+			for _, item := range props.Items {
+				if strings.Contains(strings.ToLower(item.Name), strings.ToLower(query.Get())) {
+					items = append(items, item)
+				}
+			}
+			return items
+		})
+		items := visible.Get().([]Item)
+		countLabel := fmt.Sprint(len(items)) + " people"
+		if len(items) == 1 {
+			countLabel = "1 person"
+		}
+		rows := []ui.View{}
+		for i := 0; i < len(items); i++ {
+			index := i
+			if reverse.Get() {
+				index = len(items) - i - 1
+			}
+			rows = append(rows, Row(props.ID, items[index], props.Content))
+		}
+		search := ui.Element("input").Attr("type", "search").Attr("id", props.ID + "-filter").Attr("placeholder", "Filter people").Attr("value", query.Get()).On("input", func(event ui.Event) {
+			query.Set(event.Value)
+		})
+		reorder := ui.Element("button", ui.Text("Reverse order")).Attr("type", "button").Attr("data-reorder", props.ID).On("click", func(event ui.Event) {
+			reverse.Set(!reverse.Get())
+		})
+		label := ui.Element("label", ui.Text("Search " + props.Title)).Attr("for", props.ID + "-filter")
+		return ui.Element("section", ui.Element("h2", ui.Text(props.Title)), label, search, reorder, ui.Element("p", ui.Text(countLabel)).Attr("data-count", ""), ui.Element("ul", rows...)).Attr("class", "card").Attr("data-catalog", props.ID)
+	}).Key(props.ID)
+}

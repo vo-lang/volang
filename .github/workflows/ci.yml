@@ -39,6 +39,7 @@ jobs:
       rust_quality: ${{ steps.plan.outputs.rust_quality }}
       language_matrix: ${{ steps.plan.outputs.language_matrix }}
       wasm_task: ${{ steps.plan.outputs.wasm_task }}
+      ui_web_preview: ${{ steps.plan.outputs.ui_web_preview }}
       ui_matrix: ${{ steps.plan.outputs.ui_matrix }}
       site_candidate: ${{ steps.plan.outputs.site_candidate }}
     steps:
@@ -136,8 +137,9 @@ jobs:
             echo "language_matrix=$language_matrix"
             echo "ui_matrix=$ui_matrix"
             echo "wasm_task=$wasm_task"
+            if has_task ui-web-rewrite; then echo "ui_web_preview=true"; else echo "ui_web_preview=false"; fi
             if has_task rust-quality; then echo "rust_quality=true"; else echo "rust_quality=false"; fi
-            if has_task wasm-web-full; then echo "site_candidate=true"; else echo "site_candidate=false"; fi
+            if [ "$profile" = main ] && has_task ui-web-rewrite; then echo "site_candidate=true"; else echo "site_candidate=false"; fi
           } >> "$GITHUB_OUTPUT"
 
       - name: Upload immutable CI plan
@@ -416,6 +418,144 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+
+  ui_web_preview:
+    name: ui-web-preview
+    needs: plan
+    if: needs.plan.outputs.ui_web_preview == 'true'
+    runs-on: ubuntu-24.04
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Setup engineering toolchain
+        uses: ./.github/actions/setup-volang
+        with:
+          compiler-cache: ${{ github.event_name != 'workflow_dispatch' || !inputs.cold_cache }}
+          wasm: "true"
+
+      - name: Download immutable CI plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ci-plan-${{ github.sha }}
+          path: target/ci/plan-input
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            lang/crates/vo-web/package-lock.json
+            eng/browser/package-lock.json
+            eng/ui-next/package-lock.json
+            ui/editors/vscode/package-lock.json
+
+      - name: Setup browser contracts
+        uses: ./.github/actions/setup-browser
+
+      - name: Install matching Firefox and WebKit builds
+        working-directory: eng/browser
+        run: npx --no-install playwright install --with-deps firefox webkit
+
+      - name: Cache wasm-pack
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-0.14.0
+
+      - name: Install wasm-pack
+        run: |
+          if [ "$(wasm-pack --version 2>/dev/null || true)" != "wasm-pack 0.14.0" ]; then
+            cargo install wasm-pack --locked --version 0.14.0 --force
+          fi
+
+      - name: Build repository tooling
+        run: cargo build -p vo-dev --locked
+
+      - name: Execute rewritten Web UI contracts
+        run: >-
+          ./target/debug/vo-dev ci run
+          --plan target/ci/plan-input/plan.json
+          --task ui-web-rewrite
+
+      - name: Upload compact task summaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-summary-ui-web-preview-${{ github.sha }}
+          path: target/ci/summaries
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-evidence-ui-web-preview-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-diagnostics-ui-web-preview-${{ github.sha }}
+          path: |
+            target/ci/executions
+            target/ci/results
+            target/cargo-timings
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload rewritten UI reports and logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ui-web-preview-reports-${{ github.sha }}
+          path: |
+            target/ui-next/ci/*.log
+            target/ui-next/ci/commands.json
+            target/ci/artifacts/ui-web-rewrite/reports
+            target/ui-next/build-report.json
+            target/ui-next/browser-report.json
+            target/ui-next/firefox/browser-report.json
+            target/ui-next/webkit/browser-report.json
+            target/ui-next/desktop/browser-report.json
+            target/ui-next/asset-delivery-report.json
+            target/ui-next/toolchain-project/report.json
+            target/ui-next/studio-static-check
+            target/ui-next/studio-upgrade-check
+            target/ui-next/*.png
+            target/ui-next/firefox/*.png
+            target/ui-next/webkit/*.png
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload verified preview toolchain
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ui-web-preview-toolchain-${{ github.sha }}
+          path: target/ci/artifacts/ui-web-rewrite-toolchain.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload verified static Studio
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ui-web-preview-studio-${{ github.sha }}
+          path: target/ci/artifacts/ui-web-rewrite-studio-static.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
       - name: Upload promotable Studio site
         if: needs.plan.outputs.site_candidate == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -429,11 +569,11 @@ jobs:
 
   ui_platform:
     if: needs.plan.outputs.ui_matrix != '[]'
-    name: ui-platform (${{ matrix.os }})
+    name: ui-platform (${{ matrix.task }})
     needs: plan
     runs-on: ${{ matrix.os }}
     # Allow provisioning and diagnostic uploads outside the declared task deadline.
-    timeout-minutes: 75
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -449,6 +589,7 @@ jobs:
         uses: ./.github/actions/setup-volang
         with:
           compiler-cache: ${{ github.event_name != 'workflow_dispatch' || !inputs.cold_cache }}
+          wasm: ${{ startsWith(matrix.task, 'ui-desktop-rewrite-') }}
 
       - name: Download immutable CI plan
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -464,6 +605,37 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes libxkbcommon-x11-0 mesa-vulkan-drivers xvfb
+
+      - name: Setup desktop project tooling
+        if: startsWith(matrix.task, 'ui-desktop-rewrite-')
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            eng/browser/package-lock.json
+            eng/ui-next/package-lock.json
+            ui/editors/vscode/package-lock.json
+
+      - name: Install Linux system WebView development libraries
+        if: runner.os == 'Linux' && startsWith(matrix.task, 'ui-desktop-rewrite-')
+        run: sudo apt-get install --yes libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev pkg-config
+
+      - name: Cache desktop wasm-pack
+        if: startsWith(matrix.task, 'ui-desktop-rewrite-')
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/wasm-pack
+            ~/.cargo/bin/wasm-pack.exe
+          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-0.14.0
+
+      - name: Install desktop wasm-pack
+        if: startsWith(matrix.task, 'ui-desktop-rewrite-')
+        run: |
+          if [ "$(wasm-pack --version 2>/dev/null || true)" != "wasm-pack 0.14.0" ]; then
+            cargo install wasm-pack --locked --version 0.14.0 --force
+          fi
 
       - name: Execute declared native UI task
         env:
@@ -500,8 +672,27 @@ jobs:
             target/ci/executions
             target/ci/results
             target/cargo-timings
+            target/ui-next/desktop-delivery/report.json
+            target/ui-next/desktop-delivery/*/*.log
+            target/ui-next/studio-desktop/report.json
+            target/ui-next/studio-desktop/*-window.log
+            target/ci/artifacts/ui-desktop-rewrite/sdk/*.json
+            target/ci/artifacts/ui-desktop-rewrite/sdk/*.jsonl
+            target/ci/artifacts/ui-desktop-rewrite/sdk/*.log
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Upload replacement desktop SDK and acceptance reports
+        if: success() && startsWith(matrix.task, 'ui-desktop-rewrite-')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ui-desktop-rewrite-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            target/ci/artifacts/ui-desktop-rewrite/*.json
+            target/ci/artifacts/ui-desktop-rewrite/*.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
   required:
     name: required
@@ -512,6 +703,7 @@ jobs:
       - language_native
       - ui_platform
       - wasm_web
+      - ui_web_preview
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -557,8 +749,9 @@ jobs:
           LANGUAGE_NATIVE: ${{ needs.language_native.result }}
           UI_PLATFORM: ${{ needs.ui_platform.result }}
           WASM_WEB: ${{ needs.wasm_web.result }}
+          UI_WEB_PREVIEW: ${{ needs.ui_web_preview.result }}
         run: |
-          for result in "$PLAN" "$QUALITY_RUST" "$LANGUAGE_NATIVE" "$UI_PLATFORM" "$WASM_WEB"; do
+          for result in "$PLAN" "$QUALITY_RUST" "$LANGUAGE_NATIVE" "$UI_PLATFORM" "$WASM_WEB" "$UI_WEB_PREVIEW"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "CI job ended with: $result"
               exit 1

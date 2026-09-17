@@ -65,6 +65,10 @@ impl Instruction {
 
 ## 3. Opcode Definitions
 
+The groups below describe instruction families. Exact numeric discriminants
+come from `vo-common-core/src/instruction.rs`; the binary32 instructions are
+appended after `ForLoop` and preserve every earlier opcode number.
+
 ```rust
 #[repr(u8)]
 pub enum Opcode {
@@ -216,6 +220,10 @@ pub enum Opcode {
 
     // === DEBUG: Debug operations ===
     IndexCheck,   // panic if a >= b (unsigned comparison)
+
+    // === BINARY32: Direct float32 operations (VOB 22) ===
+    AddF32, SubF32, MulF32, DivF32, NegF32,
+    EqF32, NeF32, LtF32, LeF32, GtF32, GeF32,
 }
 ```
 
@@ -321,6 +329,27 @@ from the target `FunctionDef`. Dynamic calls use the metadata above. Retired
 shape operands and flags must be zero. `IfaceAssert.flags` retains only the
 comma-ok semantic bit; assertion kind, target identity, and result layout come
 exclusively from `IfaceAssertLayout`.
+
+### 3.6 Direct Binary32 Operations
+
+`AddF32`, `SubF32`, `MulF32`, and `DivF32` read operands from the low 32 bits of
+slots `b` and `c`, perform one IEEE-754 binary32 operation with round-to-nearest,
+ties-to-even, and write the result bits to slot `a` with its high 32 bits zero.
+`NegF32` reads slot `b` and negates the binary32 value. Arithmetic operations
+retain their individual rounding boundaries; combining operations into FMA or
+reassociating expressions requires separate language permission.
+
+`EqF32`, `NeF32`, `LtF32`, `LeF32`, `GtF32`, and `GeF32` compare the binary32
+operands and write a canonical boolean to slot `a`. NaN compares unequal to
+every value, including itself; the ordered comparisons return false for NaN.
+Positive and negative zero compare equal. Arithmetic NaN payloads are not a
+portable cross-backend bit-pattern guarantee.
+
+These instructions require zero flags. Arithmetic input and output slots may
+use scalar `Value` or `Float` layouts, and comparison destinations must use
+`Value`. The opcode selects the arithmetic width; the slot layout does not
+convert a binary32 bit pattern into binary64. Explicit conversions continue to
+use `ConvF32F64` and `ConvF64F32`.
 
 ---
 
@@ -510,7 +539,7 @@ impl Module {
 **File format**:
 ```
 Magic: "VOB" (3 bytes)
-Version: u32 (currently 21)
+Version: u32 (currently 24)
 struct_metas: [StructMeta]
 interface_metas: [InterfaceMeta]
 named_type_metas: [NamedTypeMeta]
@@ -530,7 +559,40 @@ debug_info: DebugInfo
 Version 21 adds bounded, namespaced, versioned module artifacts. Their payloads
 remain opaque to the bytecode layer and are validated by their owning compiler
 subsystem. Artifact names are unique and strictly sorted for deterministic
-cache and AOT inputs. Only the current VOB version is accepted.
+cache and AOT inputs. Version 22 appends the direct binary32 arithmetic and
+comparison instructions. Version 23 adds immutable logical inline-source
+metadata to `DebugInfo`. Version 24 encodes the five u32 coordinates of each
+physical `DebugLoc` (PC, file ID, line, column, length) as canonical unsigned
+LEB128 integers. Each word occupies one to five bytes; the full u32 domain is
+preserved. Overlong encodings, overflow and truncation are rejected. Vector
+counts and inline DAG records retain their previous encoding and allocation
+limits. Only the current VOB version is accepted; inputs
+produced by earlier compilers must be rebuilt.
+
+Inline sources use a module-owned parent-before-child DAG and a sparse table
+of exact final instruction PCs for each affected function. Each node names a
+module function and optionally retains file/line/column/span coordinates copied
+before its original function was transformed. These coordinates are independent
+of executable `InstructionSource` identities and recovery PCs. Deleting an
+instruction removes its inline attachment; its successor does not inherit that
+attachment. Source chains are read from the leaf toward the physical caller.
+
+The compiler records lexical source runs for pure instructions as well as
+observable operations, so an arithmetic leaf can retain its coordinates after
+composition. Adjacent instructions sharing a span reuse one source run; calls
+and frame observations retain exact PC anchors for `runtime.Caller`.
+
+The shared limit is 32 frames per chain, 131,072 frame records, and 131,072 total
+instruction attachments. A chain's outermost function must own its final PC.
+Parents precede children, function tables and attachment PCs are strictly ordered,
+and present spans have valid file IDs and positive line, column and length.
+Decoders bound vector counts before allocation; the common verifier checks the
+graph and instruction ownership. Inline admission stops when source metadata
+cannot fit its budget. Ordinary functions need no per-function inline table.
+
+This metadata describes source provenance. It does not create runtime activations,
+GC roots, a suspension state, or permission to remove observable calls. Current
+inlining guards continue to preserve `runtime.Caller`, panic/defer and host effects.
 
 Note: iface_dispatch removed, itab built lazily at runtime.
 

@@ -1,0 +1,27 @@
+package server
+
+import (
+	"strings"
+)
+
+	// Keep the portable image namespace aligned with project-entries.mjs. The
+	// deployment manifest performs membership checks after this syntax validation.
+func validEntry(value string) bool {
+	if len(value) == 0 || len(value) > 64 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, char := range value {
+		if !(char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '-') {
+			return false
+		}
+	}
+	if value == "con" || value == "prn" || value == "aux" || value == "nul" {
+		return false
+	}
+	if len(value) == 4 && (strings.HasPrefix(value, "com") || strings.HasPrefix(value, "lpt")) &&
+		value[3] >= '1' &&
+		value[3] <= '9' {
+		return false
+	}
+	return true
+}

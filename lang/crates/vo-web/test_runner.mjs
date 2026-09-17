@@ -190,7 +190,7 @@ async function runPlanJob(job, format) {
       );
     }
 
-    if (result.status === "ok") {
+    if (result.status === "ok" || (result.status === "exited" && result.exitCode === 0)) {
       if (emitText) {
         console.log(`  ${GREEN}✓${NC} ${relPath} [wasm]`);
       }
@@ -203,7 +203,8 @@ async function runPlanJob(job, format) {
         "",
       );
     }
-    const error = result.stderr ?? "";
+    const error = result.stderr || (result.status === "exited"
+      ? `guest exited with status ${result.exitCode}` : `guest execution ended with status ${result.status}`);
     if (emitText) {
       console.log(`  ${RED}✗${NC} ${relPath} [wasm] ${error.slice(0, 80)}`);
     }

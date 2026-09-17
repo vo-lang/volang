@@ -954,14 +954,13 @@ fn validate_slice_transfer_layout(
     context: &str,
 ) -> Result<SliceTransferLayout, String> {
     let expected_meta = vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Slice);
-    let slice_ref = validate_fixed_transfer_object_layout(
-        gc,
-        slice_ref,
-        expected_meta,
-        vo_runtime::objects::slice::DATA_SLOTS as usize,
-        context,
-    )?;
-    // Safety: fixed-layout validation established a live slice object.
+    let (slice_ref, _) = validate_transfer_object_layout(gc, slice_ref, expected_meta, context)?;
+    if !vo_runtime::objects::slice::has_valid_descriptor_shape(gc, slice_ref) {
+        return Err(format!(
+            "{context} Slice layout has invalid descriptor shape"
+        ));
+    }
+    // Shape validation establishes the prefix, tail and any derived Array header.
     let owner = unsafe { vo_runtime::objects::slice::owner_ref(slice_ref) };
     let len = unsafe { vo_runtime::objects::slice::len(slice_ref) };
     let cap = unsafe { vo_runtime::objects::slice::cap(slice_ref) };
@@ -1066,11 +1065,11 @@ fn validate_string_transfer_layout(
         gc,
         str_ref,
         expected_meta,
-        vo_runtime::objects::slice::DATA_SLOTS as usize,
+        vo_runtime::objects::string::DATA_SLOTS as usize,
         context,
     )?;
     // Safety: fixed-layout validation established a live string object.
-    let arr_ref = unsafe { vo_runtime::objects::slice::owner_ref(str_ref) };
+    let arr_ref = unsafe { vo_runtime::objects::string::owner_ref(str_ref) };
     if arr_ref.is_null() {
         return Err(format!(
             "{context} String layout is missing underlying Array"
@@ -1079,27 +1078,20 @@ fn validate_string_transfer_layout(
     let array_layout =
         validate_heap_array_transfer_layout(gc, arr_ref, "queue transfer String underlying Array")?;
     let byte_meta = vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Uint8);
-    let descriptor_meta = unsafe { vo_runtime::objects::slice::elem_meta(str_ref) };
-    let descriptor_bytes = unsafe { vo_runtime::objects::slice::elem_bytes(str_ref) };
-    if array_layout.elem_meta != byte_meta
-        || array_layout.elem_bytes != 1
-        || descriptor_meta != byte_meta
-        || descriptor_bytes != 1
-    {
+    if array_layout.elem_meta != byte_meta || array_layout.elem_bytes != 1 {
         return Err(format!(
             "{context} String layout expects Uint8 backing, got {:?} width {}",
             array_layout.elem_meta, array_layout.elem_bytes
         ));
     }
-    let len = unsafe { vo_runtime::objects::slice::len(str_ref) };
-    let cap = unsafe { vo_runtime::objects::slice::cap(str_ref) };
-    if len > cap || cap > array_layout.len {
+    let len = unsafe { vo_runtime::objects::string::len(str_ref) };
+    if len > array_layout.len {
         return Err(format!(
-            "{context} String layout len/cap mismatch: len {len}, cap {cap}, array len {}",
+            "{context} String layout length {len} exceeds array len {}",
             array_layout.len
         ));
     }
-    let data_ptr = unsafe { vo_runtime::objects::slice::data_ptr(str_ref) };
+    let data_ptr = unsafe { vo_runtime::objects::string::data_ptr(str_ref) };
     if len != 0 && data_ptr.is_null() {
         return Err(format!("{context} String layout has null data pointer"));
     }

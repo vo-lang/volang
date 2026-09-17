@@ -20,20 +20,7 @@ pub const RUNTIME_MEM_GC_STEP_EXTERN_NAME: &str = crate::vo_extern_name!("runtim
 pub const RUNTIME_MEM_GC_COLLECT_EXTERN_NAME: &str =
     crate::vo_extern_name!("runtime/mem", "GCCollect");
 
-const VM_MATERIALIZED_EXTERN_NAMES: &[&str] = &[
-    RUNTIME_CALLER_EXTERN_NAME,
-    RUNTIME_MEM_READ_STATS_EXTERN_NAME,
-    RUNTIME_MEM_GC_STEP_EXTERN_NAME,
-    RUNTIME_MEM_GC_COLLECT_EXTERN_NAME,
-];
-
-pub fn known_extern_allowed_effects(name: &str) -> Option<crate::bytecode::ExternEffects> {
-    if VM_MATERIALIZED_EXTERN_NAMES.contains(&name) {
-        return Some(crate::bytecode::ExternEffects::NONE);
-    }
-    builtin::known_extern_allowed_effects(name)
-        .or_else(|| dynamic::known_extern_allowed_effects(name))
-}
+pub use vo_common_core::extern_contracts::known_runtime_extern_allowed_effects as known_extern_allowed_effects;
 
 #[cfg(test)]
 mod tests {

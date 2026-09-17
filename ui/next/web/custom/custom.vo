@@ -1,0 +1,83 @@
+// Package custom wraps managed Custom Element adapters in the normal Widget
+// lifetime. An integration package supplies a typed wrapper and its host factory.
+package custom
+
+import (
+	"encoding/json"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type Event struct {
+	Type string `json:"type"`
+	// Detail is JSON, independent of the element's native object identity.
+	Detail string `json:"detail"`
+	Error string `json:"error"`
+}
+
+type Props struct {
+	Attributes map[string]string
+	// Properties must encode as a JSON object whose keys the adapter declares.
+	// Use a typed struct with explicit JSON tags in a component package wrapper.
+	Properties any
+	OnEvent func(Event)
+	OnError func(string)
+}
+
+type payload struct {
+	Version int `json:"version"`
+	Attributes map[string]string `json:"attributes"`
+	Properties any `json:"properties"`
+}
+
+// Element selects a registered Widget provider, whose factory fixes the native
+// tag, property names and event names. Changing provider replaces the widget.
+func Element(provider string, props Props) ui.View {
+	if provider == "" || len(provider) > 128 || len(props.Attributes) > 64 {
+		panic("custom: require a provider name and at most 64 attributes")
+	}
+	attributes := props.Attributes
+	if attributes == nil {
+		attributes = make(map[string]string)
+	}
+	bytes, err := json.Marshal(payload{
+		Version: 1, Attributes: attributes, Properties: props.Properties,
+	})
+	if err != nil {
+		panic(err)
+	}
+	if len(bytes) > 65536 {
+		panic("custom: element input exceeds 64 KiB")
+	}
+	report := func(message string) {
+		if props.OnError != nil {
+			props.OnError(message)
+		} else {
+			panic(message)
+		}
+	}
+	return ui.Widget(provider, string(bytes), func(result ui.Result) {
+		if result.Error != "" {
+			report(result.Error)
+			return
+		}
+		var event Event
+		if len(result.Value) > 131072 || json.Unmarshal([]byte(result.Value), &event) != nil ||
+			event.Type == "" ||
+			len(event.Type) > 128 ||
+			len(event.Detail) > 16384 {
+			report("custom: invalid element event")
+			return
+		}
+		if event.Error != "" {
+			report(event.Error)
+			return
+		}
+		if !json.Valid([]byte(event.Detail)) {
+			report("custom: invalid event detail")
+			return
+		}
+		if props.OnEvent != nil {
+			props.OnEvent(event)
+		}
+	})
+}

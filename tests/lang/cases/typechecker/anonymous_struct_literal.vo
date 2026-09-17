@@ -10,14 +10,18 @@ func main() {
 	p := struct {
 		x int
 		y int
-	}{1, 2}
+	}{
+		1, 2,
+	}
 	assert(p.x == 1, "p.x should be 1, got ", p.x)
 	assert(p.y == 2, "p.y should be 2, got ", p.y)
 	// Anonymous struct with named initialization
 	q := struct {
 		name string
 		age int
-	}{name: "Alice", age: 30}
+	}{
+		name: "Alice", age: 30,
+	}
 	assert(q.name == "Alice", "q.name should be Alice")
 	assert(q.age == 30, "q.age should be 30")
 	// Nested anonymous struct
@@ -29,9 +33,12 @@ func main() {
 		label string
 	}{
 		point: struct {
-	x int
-	y int
-}{10, 20}, label: "origin",
+			x int
+			y int
+		}{
+			10, 20,
+		},
+		label: "origin",
 	}
 	assert(r.point.x == 10, "r.point.x should be 10")
 	assert(r.point.y == 20, "r.point.y should be 20")
@@ -40,7 +47,9 @@ func main() {
 	points := []struct {
 		x int
 		y int
-	}{{1, 2}, {3, 4}, {5, 6}}
+	}{
+		{1, 2}, {3, 4}, {5, 6},
+	}
 	assert(len(points) == 3, "len(points) should be 3")
 	assert(points[0].x == 1, "points[0].x should be 1")
 	assert(points[2].y == 6, "points[2].y should be 6")
@@ -48,7 +57,9 @@ func main() {
 	m := map[string]struct {
 		value int
 		ok bool
-	}{"a": {1, true}, "b": {2, false}}
+	}{
+		"a": {1, true}, "b": {2, false},
+	}
 	assert(m["a"].value == 1, "m[a].value should be 1")
 	assert(m["a"].ok == true, "m[a].ok should be true")
 	assert(m["b"].ok == false, "m[b].ok should be false")
@@ -62,13 +73,19 @@ func main() {
 	// Anonymous struct comparison
 	s1 := struct {
 		x int
-	}{1}
+	}{
+		1,
+	}
 	s2 := struct {
 		x int
-	}{1}
+	}{
+		1,
+	}
 	s3 := struct {
 		x int
-	}{2}
+	}{
+		2,
+	}
 	assert(s1 == s2, "s1 should equal s2")
 	assert(s1 != s3, "s1 should not equal s3")
 	fmt.Println("anonymous_struct_literal: PASSED")

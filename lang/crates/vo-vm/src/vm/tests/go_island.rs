@@ -440,3 +440,61 @@ fn vm_goisland_remote_shape_002_rejects_arg_slot_metadata_drift_before_island_ef
     #[cfg(feature = "jit")]
     assert!(vm.pending_runtime_transitions.is_empty());
 }
+
+fn nil_goroutine_entry_is_owned_by_child(mut vm: Vm) {
+    let mut module = malformed_single_instruction_module(
+        "nil-go-owner",
+        vec![
+            Instruction::with_flags(Opcode::GoStart, 1, 0, 0, 0),
+            Instruction::new(Opcode::Return, 0, 0, 0),
+        ],
+        Vec::new(),
+    );
+    let func = &mut module.functions[0];
+    func.slot_types[0] = SlotType::GcBase;
+    func.instruction_metadata[0] = InstructionMetadata::CallLayout {
+        arg_layout: Vec::new(),
+        ret_layout: Vec::new(),
+    };
+    refresh_vm_test_function_metadata(func);
+    vm.load(module).unwrap();
+    vm.spawn_call(0, &[]).unwrap();
+    let launcher = vm.scheduler.ready_queue[0];
+    assert!(matches!(
+        vm.run_scheduled_with_budget(1).unwrap(),
+        SchedulingOutcome::Suspended
+    ));
+    assert!(vm.scheduler.get_fiber(launcher).panic_state.is_none());
+    assert_eq!(vm.scheduler.get_fiber(launcher).frames[0].pc, 1);
+    let child = vm
+        .scheduler
+        .fibers
+        .iter()
+        .find(|fiber| fiber.id != launcher.to_raw())
+        .unwrap();
+    assert_eq!(child.entry_trap, Some(RuntimeTrapKind::NilFuncCall));
+    assert!(child.frames.is_empty());
+    assert!(matches!(
+        vm.run_scheduled(),
+        Err(VmError::RuntimeTrap {
+            kind: RuntimeTrapKind::NilFuncCall,
+            ..
+        })
+    ));
+    assert!(vm.scheduler.get_fiber(launcher).panic_state.is_none());
+}
+
+#[test]
+fn nil_goroutine_traps_in_child_after_interpreter_launch() {
+    nil_goroutine_entry_is_owned_by_child(Vm::new());
+}
+
+#[cfg(feature = "jit")]
+#[test]
+fn nil_goroutine_traps_in_child_after_compiled_launch() {
+    let config = crate::vm::jit_mgr::JitConfig {
+        call_threshold: 1,
+        ..Default::default()
+    };
+    nil_goroutine_entry_is_owned_by_child(Vm::try_with_jit_config(config).unwrap());
+}

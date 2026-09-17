@@ -11,7 +11,8 @@ use vo_vm::vm::SchedulingOutcome;
 #[cfg(all(not(test), feature = "toolchain-host"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn vo_aot_initialize_toolchain_host_v1() -> i32 {
-    match std::panic::catch_unwind(vo_engine::ensure_toolchain_host_installed) {
+    match std::panic::catch_unwind(|| vo_ui_integration::engine().ensure_toolchain_host_installed())
+    {
         Ok(()) => 0,
         Err(_) => 101,
     }
@@ -21,9 +22,19 @@ pub extern "C" fn vo_aot_initialize_toolchain_host_v1() -> i32 {
 unsafe fn run_embedded(argc: i32, argv: *const *const c_char) -> Result<i32, String> {
     let mut vm =
         unsafe { vo_aot_runtime_core::load_embedded_vm(argc, argv, |_vm, _module| Ok(())) }?;
-    let outcome = vm
-        .run()
-        .map_err(|error| format!("AOT execution failed: {error:?}"))?;
+    let outcome = vm.run().map_err(|error| {
+        use std::fmt::Write;
+        let mut message = format!("AOT execution failed: {error:?}");
+        if let (Some(location), Some(module)) = (error.source_location(), vm.module()) {
+            for (index, frame) in location.logical_frames(&module.debug_info).enumerate() {
+                let frame = module.debug_info.resolve_frame(frame, &module.functions);
+                let relation = if index == 0 { "at" } else { "inlined in" };
+                // Writing to a String cannot return a formatting error.
+                let _ = write!(message, "\n  {relation} {frame}");
+            }
+        }
+        message
+    })?;
     if std::env::var_os("VO_AOT_STATS").is_some() {
         eprintln!("Vo AOT execution stats: {:?}", vm.jit_execution_stats());
     }

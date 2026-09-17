@@ -36,7 +36,8 @@
 package dyn
 
 import (
-	"errors"
+	// Native sentinel construction needs the errors.Error runtime metadata.
+	_ "errors"
 )
 
 // =============================================================================

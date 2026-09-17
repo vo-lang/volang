@@ -1,16 +1,17 @@
 //! Function builder - manages function-level codegen state.
 
 use std::collections::HashMap;
+use vo_analysis::objects::ObjKey;
 use vo_common::span::Span;
 use vo_common::symbol::Symbol;
+use vo_common_core::bytecode::{FunctionDef, MAX_CLOSURE_CAPTURE_SLOTS};
 use vo_common_core::instruction::{
     pack_u8_slot_count, HINT_LOOP, IFACE_ASSERT_HAS_OK_FLAG, QUEUE_KIND_PORT_FLAG,
     QUEUE_RECV_HAS_OK_FLAG,
 };
+use vo_common_core::instruction::{Instruction, Opcode};
+use vo_common_core::SlotType;
 use vo_common_core::{InstructionMetadata, SelectCaseLayout, TransferType};
-use vo_runtime::bytecode::{FunctionDef, MAX_CLOSURE_CAPTURE_SLOTS};
-use vo_runtime::instruction::{Instruction, Opcode};
-use vo_runtime::SlotType;
 
 use crate::error::CodegenError;
 
@@ -45,7 +46,8 @@ pub enum StorageKind {
     /// Semantics: register-like, JIT maps to SSA variables
     StackValue { slot: u16, slots: u16 },
 
-    /// Stack-allocated array (N slots, indirect access via SlotGet/SlotSet)
+    /// Stack-allocated array (N slots, indexed access via SlotGet/SlotSet and
+    /// whole-value copies via Copy/CopyN).
     /// Used for: non-escaping arrays
     /// Semantics: memory-like, JIT accesses via locals_slot memory
     StackArray {
@@ -161,13 +163,13 @@ pub enum ExprSource {
 #[derive(Debug, Clone)]
 pub struct LocalVar {
     pub symbol: Symbol,
+    object: Option<ObjKey>,
     pub storage: StorageKind,
 }
 
 /// Capture info for closure.
 #[derive(Debug, Clone)]
 pub struct CaptureVar {
-    pub symbol: Symbol,
     pub index: u16, // capture index in closure
     pub slots: u16, // always 1 (GcRef to escaped var)
 }
@@ -199,14 +201,15 @@ pub struct FuncBuilder {
     recv_slots: u16,
     next_slot: u16,
     locals: HashMap<Symbol, LocalVar>,
-    captures: HashMap<Symbol, CaptureVar>, // closure captures
+    local_objects: HashMap<ObjKey, StorageKind>,
+    captures: HashMap<ObjKey, CaptureVar>, // closure captures
     named_return_slots: Vec<(u16, u16, bool)>, // (slot, slots, escaped) for named return variables
     slot_types: Vec<SlotType>,
     stack_array_elem_layouts: HashMap<u16, Vec<SlotType>>,
     code: Vec<Instruction>,
     instruction_metadata: Vec<InstructionMetadata>,
-    active_call_span: Option<Span>,
-    call_debug_locs: Vec<(u32, Span)>,
+    active_source_span: Option<Span>,
+    source_debug_locs: Vec<(u32, Span)>,
     loop_stack: Vec<LoopContext>,
     return_types: Vec<vo_analysis::objects::TypeKey>,
     // Label support for goto
@@ -215,7 +218,7 @@ pub struct FuncBuilder {
     // Scope stack for variable shadowing: each entry is a list of (symbol, previous_local)
     // When a variable is defined that shadows an existing one, we save the old LocalVar here.
     // On exit_scope, we restore the saved values.
-    scope_stack: Vec<Vec<(Symbol, Option<LocalVar>)>>,
+    scope_stack: Vec<LocalScope>,
     // True if this is a closure (anonymous function) that expects closure ref in slot 0
     is_closure: bool,
     // Slot offset of error return value within return slots, or -1 if function doesn't return error.
@@ -233,6 +236,11 @@ pub struct FuncBuilder {
     layout_error: Option<String>,
 }
 
+struct LocalScope {
+    checkpoint: u16,
+    bindings: Vec<(Symbol, Option<LocalVar>)>,
+}
+
 impl FuncBuilder {
     pub fn new(name: &str) -> Self {
         Self {
@@ -244,14 +252,15 @@ impl FuncBuilder {
             recv_slots: 0,
             next_slot: 0,
             locals: HashMap::new(),
+            local_objects: HashMap::new(),
             captures: HashMap::new(),
             named_return_slots: Vec::new(),
             slot_types: Vec::new(),
             stack_array_elem_layouts: HashMap::new(),
             code: Vec::new(),
             instruction_metadata: Vec::new(),
-            active_call_span: None,
-            call_debug_locs: Vec::new(),
+            active_source_span: None,
+            source_debug_locs: Vec::new(),
             loop_stack: Vec::new(),
             return_types: Vec::new(),
             labels: HashMap::new(),
@@ -309,11 +318,11 @@ impl FuncBuilder {
     // 3. Calls end_temp_region() at end, restoring next_slot
     //
     // Variable definitions (Var, ShortVar) don't call begin/end_temp_region,
-    // so their slots are permanent.
+    // so their slots persist until the owning lexical scope ends.
     //
     // slot_types is kept at high-water mark (never shrinks) because:
     // - JIT needs type info for all slots that may be used
-    // - Same slot may have different types in different statements
+    // - A physical slot keeps the same type in every statement
     // =========================================================================
 
     /// Begin a temporary slot region. Call at statement/expression start.
@@ -349,7 +358,8 @@ impl FuncBuilder {
     ///
     /// Static type principle: slot types are immutable after allocation.
     /// When reusing slots (after end_temp_region), types must match exactly.
-    /// If types don't match, fresh slots are allocated at the end.
+    /// Skip incompatible dead slots before extending the frame. The live prefix
+    /// ends at next_slot; no returned allocation overlaps that prefix.
     pub fn alloc_slots(&mut self, types: &[SlotType]) -> u16 {
         if types.is_empty() {
             return 0;
@@ -383,6 +393,14 @@ impl FuncBuilder {
                 self.next_slot = end_slot as u16;
                 return slot as u16;
             }
+            if let Some(offset) = self.slot_types[slot + 1..]
+                .windows(len)
+                .position(|candidate| candidate == types)
+            {
+                let reused = slot + 1 + offset;
+                self.next_slot = (reused + len) as u16;
+                return reused as u16;
+            }
             return alloc_fresh(self);
         }
 
@@ -404,11 +422,10 @@ impl FuncBuilder {
     }
 
     /// Define a capture variable (for closure)
-    pub fn define_capture(&mut self, sym: Symbol, index: u16) {
+    pub fn define_capture(&mut self, object: ObjKey, index: u16) {
         self.captures.insert(
-            sym,
+            object,
             CaptureVar {
-                symbol: sym,
                 index,
                 slots: 1, // captures are always GcRef
             },
@@ -416,8 +433,8 @@ impl FuncBuilder {
     }
 
     /// Look up a capture variable
-    pub fn lookup_capture(&self, sym: Symbol) -> Option<&CaptureVar> {
-        self.captures.get(&sym)
+    pub fn lookup_capture(&self, object: ObjKey) -> Option<&CaptureVar> {
+        self.captures.get(&object)
     }
 
     // === Parameter definition ===
@@ -460,6 +477,7 @@ impl FuncBuilder {
                 s,
                 LocalVar {
                     symbol: s,
+                    object: None,
                     storage: StorageKind::StackValue { slot, slots },
                 },
             );
@@ -505,19 +523,16 @@ impl FuncBuilder {
         };
 
         let gcref_slot = self.alloc_slots(&[SlotType::GcBase]);
-        self.locals.insert(
+        self.replace_local_storage(
             sym,
-            LocalVar {
-                symbol: sym,
-                storage: StorageKind::HeapBoxed {
-                    gcref_slot,
-                    value_slots,
-                    stores_pointer,
-                },
+            StorageKind::HeapBoxed {
+                gcref_slot,
+                value_slots,
+                stores_pointer,
             },
         );
         // Emit PtrNew + PtrSet
-        use vo_runtime::instruction::Opcode;
+        use vo_common_core::instruction::Opcode;
         let meta_reg = self.alloc_slots(&[SlotType::Value]);
         self.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         assert_eq!(value_slots as usize, slot_types.len());
@@ -535,6 +550,7 @@ impl FuncBuilder {
             sym,
             LocalVar {
                 symbol: sym,
+                object: None,
                 storage,
             },
         );
@@ -555,6 +571,31 @@ impl FuncBuilder {
             .get_mut(&sym)
             .expect("replacing storage requires an existing local binding");
         local.storage = storage;
+        if let Some(object) = local.object {
+            self.local_objects.insert(object, storage);
+        }
+    }
+
+    /// Attach the checked declaration identity once its local storage is bound.
+    /// Names remain useful for lexical construction, but captures resolve only
+    /// through object identity, including when an outer name is shadowed.
+    pub fn bind_local_object(
+        &mut self,
+        sym: Symbol,
+        object: Option<ObjKey>,
+    ) -> Result<(), CodegenError> {
+        if let Some(object) = object {
+            let local = self.locals.get_mut(&sym).ok_or_else(|| {
+                CodegenError::Internal(format!("declaration {object:?} has no local storage"))
+            })?;
+            local.object = Some(object);
+            self.local_objects.insert(object, local.storage);
+        }
+        Ok(())
+    }
+
+    pub fn lookup_local_object(&self, object: ObjKey) -> Option<StorageKind> {
+        self.local_objects.get(&object).copied()
     }
 
     /// Stack allocation (non-escaping) for values (struct/primitive).
@@ -766,14 +807,27 @@ impl FuncBuilder {
     /// Enter a new scope. Variables defined in this scope that shadow outer
     /// variables will have the outer variable saved for restoration on exit.
     pub fn enter_scope(&mut self) {
-        self.scope_stack.push(Vec::new());
+        self.scope_stack.push(LocalScope {
+            checkpoint: self.next_slot,
+            bindings: Vec::new(),
+        });
     }
 
     /// Exit the current scope, restoring any shadowed variables.
     pub fn exit_scope(&mut self) {
-        if let Some(saved) = self.scope_stack.pop() {
-            for (sym, old_local) in saved {
+        if let Some(scope) = self.scope_stack.pop() {
+            // All surviving addresses belong to escaped heap storage. Lexical
+            // locals and statement temporaries in this suffix are dead here;
+            // parameters, named returns, and enclosing scopes stay protected.
+            self.next_slot = scope.checkpoint;
+            for (sym, old_local) in scope.bindings.into_iter().rev() {
+                if let Some(object) = self.locals.get(&sym).and_then(|local| local.object) {
+                    self.local_objects.remove(&object);
+                }
                 if let Some(local) = old_local {
+                    if let Some(object) = local.object {
+                        self.local_objects.insert(object, local.storage);
+                    }
                     self.locals.insert(sym, local);
                 } else {
                     self.locals.remove(&sym);
@@ -787,7 +841,7 @@ impl FuncBuilder {
     fn save_shadowed(&mut self, sym: Symbol) {
         if let Some(scope) = self.scope_stack.last_mut() {
             let old = self.locals.get(&sym).cloned();
-            scope.push((sym, old));
+            scope.bindings.push((sym, old));
         }
     }
 
@@ -985,10 +1039,14 @@ impl FuncBuilder {
 
     // === Instruction emission ===
 
-    /// Replace the source span assigned to subsequently emitted call
-    /// instructions, returning the previous span for lexical restoration.
-    pub fn replace_active_call_span(&mut self, span: Option<Span>) -> Option<Span> {
-        core::mem::replace(&mut self.active_call_span, span)
+    /// Associate emitted instructions with their lexical source. Nested
+    /// expressions restore the enclosing span even when compilation returns
+    /// an error; closures use a separate builder and retain their own spans.
+    pub fn with_source_span<T>(&mut self, span: Span, compile: impl FnOnce(&mut Self) -> T) -> T {
+        let previous = self.active_source_span.replace(span);
+        let result = compile(self);
+        self.active_source_span = previous;
+        result
     }
 
     pub fn emit(&mut self, inst: Instruction) {
@@ -1324,13 +1382,17 @@ impl FuncBuilder {
     }
 
     fn emit_with_metadata(&mut self, inst: Instruction, metadata: InstructionMetadata) {
-        if matches!(
-            inst.opcode(),
-            Opcode::Call | Opcode::CallExtern | Opcode::CallClosure | Opcode::CallIface
-        ) {
-            if let Some(span) = self.active_call_span {
+        // Preserve lexical source runs for pure instructions too: a scalar leaf
+        // may later be copied into another function and have no trapping anchor.
+        // Caller still requires every call/frame observation to have an exact PC.
+        if let Some(span) = self.active_source_span {
+            let effects = vo_common_core::execution_effects::opcode_effect_contract(inst.opcode());
+            if effects.may_call
+                || effects.may_observe_frame
+                || self.source_debug_locs.last().map(|(_, previous)| *previous) != Some(span)
+            {
                 match u32::try_from(self.code.len()) {
-                    Ok(pc) => self.call_debug_locs.push((pc, span)),
+                    Ok(pc) => self.source_debug_locs.push((pc, span)),
                     Err(_) if self.layout_error.is_none() => {
                         self.layout_error =
                             Some("function bytecode length exceeds the u32 debug-PC domain".into());
@@ -1444,6 +1506,18 @@ impl FuncBuilder {
         );
     }
 
+    /// Emit the exact integer bit pattern, using the immediate domain whenever
+    /// possible. Callers validate language/layout ranges before reaching here.
+    pub fn emit_int(&mut self, dst: u16, value: i64, ctx: &mut crate::context::CodegenContext) {
+        if let Ok(immediate) = i32::try_from(value) {
+            let (b, c) = crate::type_info::encode_i32(immediate);
+            self.emit_op(Opcode::LoadInt, dst, b, c);
+        } else {
+            let constant = ctx.const_int(value);
+            self.emit_op(Opcode::LoadConst, dst, constant, 0);
+        }
+    }
+
     // === Copy helpers ===
 
     /// Emit Copy or CopyN based on slot count
@@ -1525,7 +1599,7 @@ impl FuncBuilder {
         ptr: u16,
         offset: u16,
         src: u16,
-        slot_types: &[vo_runtime::SlotType],
+        slot_types: &[vo_common_core::SlotType],
     ) {
         let slots = self.checked_u16_count_or_record(slot_types.len(), "PtrSet value layout");
 
@@ -1579,41 +1653,16 @@ impl FuncBuilder {
                 elem_slots,
                 len,
             } => {
-                // Copy element by element using SlotGet
-                let elem_slot_types = self.stack_array_elem_slot_types(base_slot, elem_slots);
-                // A zero-slot element has no physical value to copy. Its logical
-                // array length may exceed the bytecode's u16 register width.
-                if elem_slots == 0 {
+                // Both operands use the same flat frame layout. This copies
+                // the complete value without synthetic index computations.
+                let Some(slots) = len
+                    .checked_mul(u64::from(elem_slots))
+                    .and_then(|slots| u16::try_from(slots).ok())
+                else {
+                    self.record_layout_error("stack array copy exceeds the frame slot domain");
                     return;
-                }
-                let len = u16::try_from(len).unwrap_or_else(|_| {
-                    if self.layout_error.is_none() {
-                        self.layout_error = Some(format!(
-                            "stack array with non-zero-size elements exceeds u16 length: {len}"
-                        ));
-                    }
-                    0
-                });
-                // These are compiler-generated, in-range indices. Reuse one
-                // index/bound register pair for the entire copy so array
-                // length does not inflate the function's local-slot domain.
-                let index_and_len = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
-                let idx_reg = index_and_len;
-                let len_reg = index_and_len + 1;
-                for i in 0..len {
-                    self.emit_op(Opcode::LoadInt, idx_reg, i, 0);
-                    // Collection access invalidates the verifier's register
-                    // facts, so recreate the constant bound for every access.
-                    self.emit_op(Opcode::LoadInt, len_reg, len, 0);
-                    self.emit_op(Opcode::IndexCheck, idx_reg, len_reg, 0);
-                    self.emit_slot_get_with_slot_types(
-                        dst + i * elem_slots,
-                        base_slot,
-                        idx_reg,
-                        u64::from(len),
-                        &elem_slot_types,
-                    );
-                }
+                };
+                self.emit_copy(dst, base_slot, slots);
             }
             StorageKind::HeapBoxed {
                 gcref_slot,
@@ -1645,7 +1694,7 @@ impl FuncBuilder {
         &mut self,
         storage: StorageKind,
         src: u16,
-        slot_types: &[vo_runtime::SlotType],
+        slot_types: &[vo_common_core::SlotType],
     ) {
         match storage {
             StorageKind::StackValue { slot, slots } => {
@@ -1656,34 +1705,16 @@ impl FuncBuilder {
                 elem_slots,
                 len,
             } => {
-                // Copy element by element using SlotSet
-                let elem_slot_types = self.stack_array_elem_slot_types(base_slot, elem_slots);
-                if elem_slots == 0 {
+                // Both operands use the same flat frame layout. This copies
+                // the complete value without synthetic index computations.
+                let Some(slots) = len
+                    .checked_mul(u64::from(elem_slots))
+                    .and_then(|slots| u16::try_from(slots).ok())
+                else {
+                    self.record_layout_error("stack array copy exceeds the frame slot domain");
                     return;
-                }
-                let len = u16::try_from(len).unwrap_or_else(|_| {
-                    if self.layout_error.is_none() {
-                        self.layout_error = Some(format!(
-                            "stack array with non-zero-size elements exceeds u16 length: {len}"
-                        ));
-                    }
-                    0
-                });
-                let index_and_len = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
-                let idx_reg = index_and_len;
-                let len_reg = index_and_len + 1;
-                for i in 0..len {
-                    self.emit_op(Opcode::LoadInt, idx_reg, i, 0);
-                    self.emit_op(Opcode::LoadInt, len_reg, len, 0);
-                    self.emit_op(Opcode::IndexCheck, idx_reg, len_reg, 0);
-                    self.emit_slot_set_with_slot_types(
-                        base_slot,
-                        idx_reg,
-                        src + i * elem_slots,
-                        u64::from(len),
-                        &elem_slot_types,
-                    );
-                }
+                };
+                self.emit_copy(base_slot, src, slots);
             }
             StorageKind::HeapBoxed { gcref_slot, .. } => {
                 self.emit_ptr_set_with_slot_types(gcref_slot, 0, src, slot_types);
@@ -1726,13 +1757,7 @@ impl FuncBuilder {
                 "stack array length {len} cannot be represented by the language int type"
             ))
         })?;
-        if let Ok(len32) = i32::try_from(len) {
-            let (b, c) = crate::type_info::encode_i32(len32);
-            self.emit_op(Opcode::LoadInt, len_reg, b, c);
-        } else {
-            let constant = ctx.const_int(len);
-            self.emit_op(Opcode::LoadConst, len_reg, constant, 0);
-        }
+        self.emit_int(len_reg, len, ctx);
         self.emit_op(Opcode::IndexCheck, index, len_reg, 0);
         Ok(())
     }
@@ -2361,7 +2386,7 @@ impl FuncBuilder {
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&self.code);
         assert_eq!(self.code.len(), self.instruction_metadata.len());
 
-        let call_debug_locs = core::mem::take(&mut self.call_debug_locs);
+        let source_debug_locs = core::mem::take(&mut self.source_debug_locs);
         let function = FunctionDef {
             name: self.name,
             param_count: self.param_count,
@@ -2385,7 +2410,7 @@ impl FuncBuilder {
             capture_slot_types: self.capture_slot_types,
             param_types: self.param_types,
         };
-        (function, call_debug_locs)
+        (function, source_debug_locs)
     }
 
     /// Add a capture type for cross-island serialization.
@@ -2431,7 +2456,10 @@ impl FuncBuilder {
         self.add_param_type(meta_raw, rttid_raw, slots);
     }
 
-    pub fn add_param_transfer_types(&mut self, param_types: &[vo_runtime::bytecode::TransferType]) {
+    pub fn add_param_transfer_types(
+        &mut self,
+        param_types: &[vo_common_core::bytecode::TransferType],
+    ) {
         for transfer_type in param_types {
             self.add_param_type(
                 transfer_type.meta_raw,
@@ -2451,6 +2479,131 @@ impl FuncBuilder {
 mod tests {
     use super::*;
     use vo_common_core::ValueKind;
+
+    #[test]
+    fn source_spans_restore_across_nested_calls_and_failed_expression_lowering() {
+        let mut func = FuncBuilder::new("source_scopes");
+        let outer = Span::from_u32(10, 80);
+        let call = Span::from_u32(20, 60);
+        let operand = Span::from_u32(30, 40);
+        func.with_source_span(outer, |func| {
+            func.emit_op(Opcode::PtrGet, 0, 1, 0);
+            func.with_source_span(call, |func| {
+                let result: Result<(), ()> = func.with_source_span(operand, |func| {
+                    func.emit_op(Opcode::IndexCheck, 0, 1, 0);
+                    Err(())
+                });
+                assert!(result.is_err());
+                func.emit_op(Opcode::Call, 0, 0, 0);
+            });
+            func.emit_op(Opcode::DivI, 0, 1, 2);
+        });
+        // Synthetic instructions outside a source scope inherit no stale span.
+        func.emit_op(Opcode::PtrGet, 0, 1, 0);
+        assert_eq!(
+            func.source_debug_locs,
+            [(0, outer), (1, operand), (2, call), (3, outer)]
+        );
+        assert!(func.active_source_span.is_none());
+    }
+
+    #[test]
+    fn pure_instructions_preserve_lexical_runs_and_exact_call_anchors() {
+        let mut func = FuncBuilder::new("pure_sources");
+        let expression = Span::from_u32(20, 40);
+        let literal = Span::from_u32(35, 36);
+        func.with_source_span(expression, |func| {
+            func.with_source_span(literal, |func| func.emit_op(Opcode::LoadInt, 1, 3, 0));
+            for _ in 0..128 {
+                func.emit_op(Opcode::MulI, 2, 0, 1);
+            }
+            func.emit_op(Opcode::Call, 0, 0, 0);
+            func.emit_op(Opcode::Return, 2, 1, 0);
+        });
+        assert_eq!(
+            func.source_debug_locs,
+            [(0, literal), (1, expression), (129, expression)]
+        );
+    }
+
+    #[test]
+    fn repeated_trapping_instructions_share_one_source_run() {
+        let mut func = FuncBuilder::new("source_runs");
+        let outer = Span::from_u32(10, 40);
+        let operand = Span::from_u32(20, 30);
+        func.with_source_span(outer, |func| {
+            for _ in 0..256 {
+                func.emit_op(Opcode::PtrGet, 0, 1, 0);
+            }
+            func.with_source_span(operand, |func| func.emit_op(Opcode::DivI, 0, 1, 2));
+            func.emit_op(Opcode::PtrGet, 0, 1, 0);
+        });
+        assert_eq!(
+            func.source_debug_locs,
+            [(0, outer), (256, operand), (257, outer)]
+        );
+        for pc in 0..func.code.len() {
+            let actual = func
+                .source_debug_locs
+                .iter()
+                .rfind(|(start, _)| *start as usize <= pc)
+                .unwrap()
+                .1;
+            assert_eq!(actual, if pc == 256 { operand } else { outer });
+        }
+    }
+
+    #[test]
+    fn source_runs_keep_exact_call_and_frame_observation_anchors() {
+        let mut func = FuncBuilder::new("source_call_anchors");
+        let source = Span::from_u32(10, 40);
+        func.with_source_span(source, |func| {
+            // Variadic lowering can allocate argument storage before the call
+            // while retaining the call expression's lexical source span.
+            func.emit_op(Opcode::SliceNew, 0, 1, 2);
+            for opcode in [
+                Opcode::Call,
+                Opcode::CallClosure,
+                Opcode::CallIface,
+                Opcode::CallExtern,
+                Opcode::DeferPush,
+                Opcode::Recover,
+            ] {
+                func.emit_op(opcode, 0, 0, 0);
+            }
+            func.emit_op(Opcode::PtrGet, 0, 1, 0);
+            func.emit_op(Opcode::PtrGet, 0, 1, 0);
+        });
+        assert_eq!(
+            func.source_debug_locs,
+            (0..7).map(|pc| (pc, source)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn typed_regions_reuse_mixed_layouts_without_overlapping_live_slots() {
+        let mut func = FuncBuilder::new("typed_regions");
+        let permanent = func.alloc_slots(&[SlotType::GcBase]);
+        assert_eq!(permanent, 0);
+        for _ in 0..128 {
+            for layout in [
+                vec![SlotType::Value],
+                vec![SlotType::GcBase],
+                vec![SlotType::Interface0, SlotType::Interface1],
+            ] {
+                func.begin_temp_region();
+                let start = func.alloc_slots(&layout);
+                assert!(start > permanent);
+                func.begin_temp_region();
+                let nested = func.alloc_slots(&layout);
+                assert!(nested >= start + layout.len() as u16);
+                func.end_temp_region();
+                assert_eq!(func.alloc_slots(&layout), nested);
+                func.end_temp_region();
+            }
+        }
+        assert_eq!(func.slot_types.len(), 9);
+    }
 
     #[test]
     fn copy_emission_elides_empty_and_identity_moves() {

@@ -1,0 +1,132 @@
+package app
+
+import (
+	"strings"
+	"unicode/utf8"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/web"
+)
+
+var formPreviewType = ui.Define("studio.FormPreview")
+
+func FormPreview() ui.View {
+	return ui.Component(formPreviewType, func(scope *ui.Scope) ui.View {
+		withNote := ui.Bool(scope, "with-note", false)
+		titleRef := ui.Ref(scope, "title-input")
+		errorRef := ui.Ref(scope, "form-error")
+		interestsRef := ui.Ref(scope, "first-interest")
+		fields := []string{"title", "interests"}
+		if withNote.Get() {
+			fields = append(fields, "note")
+		}
+		form := forms.Use(scope, "idea", forms.Options{
+			Initial: forms.Values{
+				"title": []string{""}, "note": []string{""}, "interests": []string{"paper"},
+			},
+			Fields: fields,
+			Validate: func(data forms.Data) forms.Errors {
+				values := data.Values
+				if utf8.RuneCountInString(strings.TrimSpace(values.Get("title"))) < 3 {
+					return forms.Errors{"title": "Give your idea a name with at least three characters."}
+				}
+				if len(values["interests"]) == 0 {
+					return forms.Errors{"interests": "Choose something that inspires you."}
+				}
+				return nil
+			},
+			ValidateAsync: func(data forms.Data) ui.Request {
+				values := data.Values
+				message := ""
+				if strings.EqualFold(strings.TrimSpace(values.Get("title")), "hello") {
+					message = "Try a more descriptive name than “hello”."
+				}
+				return web.After(300, message)
+			},
+			DecodeValidation: func(result ui.Result) forms.Errors {
+				return forms.Errors{"title": result.Value}
+			},
+			FocusInvalid: func(name string) {
+				if name == "title" {
+					titleRef.Focus()
+				} else if name == "interests" {
+					interestsRef.Focus()
+				} else {
+					errorRef.Focus()
+				}
+			},
+		})
+		controls := []ui.View{
+			form.Field("title", func(form *forms.Form) ui.View {
+				return kit.FormField(kit.FieldProps{
+					ID: "idea-title", Label: "Give your idea a name",
+					Hint: "Try “hello” to see a validation response.", Error: form.Error("title"),
+				}, form.Input("title", ui.Element("input").Ref(titleRef).Attr("placeholder", "Something worth making")))
+			}),
+			form.Field("interests", func(form *forms.Form) ui.View {
+				return kit.CheckboxGroup(kit.CheckboxGroupProps{
+					ID: "idea-interests", Label: "A little inspiration", Name: "interests",
+					Options: []kit.ChoiceOption{
+						{Value: "paper", Label: "Pen and paper"}, {Value: "music", Label: "A good song"},
+						{Value: "outside", Label: "Time outside"},
+					},
+					Value: func() []string {
+						return form.All("interests")
+					},
+					OnChange: func(values []string) {
+						form.ChangeAll("interests", values)
+					},
+					OnBlur: func() {
+						form.Blur("interests")
+					},
+					Hint: "Pick the things that help an idea grow.", Error: form.Error("interests"),
+					InputRef: interestsRef,
+				})
+			}),
+			kit.Switch(kit.SwitchProps{
+				ID: "idea-with-note", Label: "Add a little context",
+				Checked: func() bool {
+					return withNote.Get()
+				},
+				OnChange: func(value bool) {
+					withNote.Set(value)
+				},
+			}),
+		}
+		if withNote.Get() {
+			controls = append(controls, form.Field("note", func(form *forms.Form) ui.View {
+				return kit.FormField(kit.FieldProps{
+					ID: "idea-note", Label: "Your note", Hint: "Your note stays here if you hide this field.",
+				}, form.Input("note", ui.Element("textarea").Attr("rows", "2")))
+			}))
+		}
+		message := "A small form, ready for your next idea."
+		if form.Dirty() {
+			message = "You have unsaved changes."
+		}
+		if form.Message() != "" {
+			message = form.Message()
+		}
+		if form.Validating() {
+			message = "Checking your idea…"
+		}
+		if form.Submitting() {
+			message = "Saving your idea…"
+		}
+		controls = append(controls, ui.Element("div", kit.Button(kit.ButtonProps{
+			Disabled: form.Submitting(),
+		}, ui.Text("Save idea")).Attr("type", "submit").Attr("data-save-idea", ""), kit.Button(kit.ButtonProps{
+			Variant: "secondary", Disabled: !form.Pending(),
+			OnPress: func() {
+				form.Cancel()
+			},
+		}, ui.Text("Cancel")).Attr("data-cancel-idea", ""), kit.Button(kit.ButtonProps{Variant: "quiet"}, ui.Text("Reset")).Attr("type", "reset").Attr("data-reset-idea", "")).Attr("class", "studio-actions"), ui.Element("output", ui.Text(message)).Attr("aria-live", "polite").Attr("data-idea-status", ""), ui.Element("p", ui.Text(form.Error(""))).Ref(errorRef).Attr("tabindex", "-1").Attr("role", "alert"))
+		return form.View(func(data forms.Data) ui.Request {
+			values := data.Values
+			return web.After(550, "Saved “" + values.Get("title") + "”.")
+		}, func(result ui.Result) forms.Outcome {
+			return forms.Outcome{Message: result.Value}
+		}, controls...).Attr("class", "studio-field-demo")
+	}).Memo()
+}

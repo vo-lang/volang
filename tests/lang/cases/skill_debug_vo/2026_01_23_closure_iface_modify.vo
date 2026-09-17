@@ -44,13 +44,17 @@ func test1() {
 func test2() {
 	fmt.Println("Test 2: multiple closures capturing same interface")
 	var c Counter = &SimpleCounter{val: 10}
-	closures := []func(){func() {
-		c.Inc()
-	}, func() {
-		c.Inc()
-	}, func() {
-		c.Inc()
-	}}
+	closures := []func(){
+		func() {
+			c.Inc()
+		},
+		func() {
+			c.Inc()
+		},
+		func() {
+			c.Inc()
+		},
+	}
 	for _, f := range closures {
 		f()
 	}

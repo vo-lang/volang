@@ -131,7 +131,7 @@ class MemoryOPFSDirectory {
 }
 
 async function withMockOPFS(run, { page = true } = {}) {
-  const controller = { failNextWrite: false, getDirectoryCalls: 0 };
+  const controller = { failNextWrite: false, getDirectoryCalls: 0, listeners: 0 };
   const root = new MemoryOPFSDirectory(controller);
   const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -149,7 +149,7 @@ async function withMockOPFS(run, { page = true } = {}) {
   if (page) {
     Object.defineProperty(globalThis, 'window', {
       configurable: true,
-      value: { addEventListener() {} },
+      value: { addEventListener() {controller.listeners++;} },
     });
   } else {
     delete globalThis.window;
@@ -413,4 +413,18 @@ test('Worker VFS stays memory-only when OPFS exists on the worker navigator', as
     await workerFs.forceFlush();
     assert.equal(root.children.has('vo-web-vfs-v1'), false);
   }, { page: false });
+});
+
+test('explicit memory filesystems stay isolated on a browser page', async () => {
+  await withMockOPFS(async ({ controller, root }) => {
+    const first = new VirtualFS({persistence:'memory'}), second = new VirtualFS({persistence:'memory'});
+    await Promise.all([first.init(), second.init()]);
+    assert.equal(controller.getDirectoryCalls, 0);
+    assert.equal(first.writeFile('/tmp/owned', encode('local'), 0o600), null);
+    assert.notEqual(second.readFile('/tmp/owned')[1], null);
+    await Promise.all([first.forceFlush(), second.forceFlush()]);
+    assert.equal(root.children.size, 0);
+    assert.equal(controller.listeners, 0);
+    assert.throws(() => new VirtualFS({persistence:'invalid'}), /persistence/);
+  });
 });

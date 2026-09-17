@@ -1,0 +1,24 @@
+package web
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+type PageState struct {
+	active *ui.BoolState
+}
+
+func (state *PageState) Active() bool {
+	return state.active.Get()
+}
+
+// PageActivity observes whether this root's document is visible and focused.
+// False before the first host value also keeps SSR deterministic. The listener
+// belongs to this declaration and is released on replacement or removal.
+func PageActivity(scope *ui.Scope, key string) *PageState {
+	active := ui.Bool(scope, key + "/active", false)
+	ui.Watch(scope, key + "/watch", ui.Request{Service: "web.page-active"}, func(result ui.Result) {
+		active.Set(result.Error == "" && result.Value == "true")
+	})
+	return &PageState{active: active}
+}

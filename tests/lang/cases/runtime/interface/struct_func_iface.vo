@@ -27,9 +27,10 @@ func main() {
 	assert(msg == "no_logic", "msg no_logic")
 	// Test with logic
 	h2 := &SimpleHandler{
-		name: "test2", priority: 2, logic: func(args map[string]interface{}) interface{} {
-	return 42
-},
+		name: "test2", priority: 2,
+		logic: func(args map[string]interface{}) interface{} {
+			return 42
+		},
 	}
 	result2, ok2, msg2 := h2.Handle(nil)
 	assert(result2.(int) == 42, "result 42")

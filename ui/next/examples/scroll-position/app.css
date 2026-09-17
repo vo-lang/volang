@@ -1,0 +1,12 @@
+* { box-sizing: border-box; }
+body { margin: 0; background: #f6f5ef; color: #253d32; font-family: ui-sans-serif, system-ui, sans-serif; }
+.starter { max-width: 720px; margin: 7vh auto; padding: 24px; }
+h1 { font-size: clamp(36px, 7vw, 54px); letter-spacing: -.045em; font-weight: 550; margin: 20px 0; }
+p { color: #647368; line-height: 1.7; }
+#scroll-area { border-radius: 14px; margin: 28px 0 16px; }
+#scroll-area > div { padding: 24px; }
+output { display: block; margin-bottom: 24px; font-size: 13px; font-variant-numeric: tabular-nums; color: #647368; }
+button { margin: 0 8px 12px 0; }
+#status { max-width: 720px; margin: 24px auto; padding: 0 24px; }
+#status:empty { display: none; }
+@media (max-width: 480px) { .starter { margin-top: 2vh; } }

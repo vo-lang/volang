@@ -451,6 +451,7 @@ fn wake_queue_waiter_rejects_stale_select_identity() {
         let fiber = scheduler.current_fiber_mut().unwrap();
         fiber.select_state = Some(SelectState {
             cases: vec![SelectCase {
+                _storage: None,
                 kind: SelectCaseKind::Recv,
                 result_index: 0,
                 queue_reg: 0,
@@ -458,7 +459,8 @@ fn wake_queue_waiter_rejects_stale_select_identity() {
                 elem_slots: 1,
                 elem_layout: None,
                 has_ok: false,
-            }],
+            }]
+            .into(),
             expected_cases: 1,
             has_default: false,
             woken_index: None,
@@ -468,7 +470,8 @@ fn wake_queue_waiter_rejects_stale_select_identity() {
                 case_index: 0,
                 queue: 0x1000 as vo_runtime::gc::GcRef,
                 kind: SelectCaseKind::Recv,
-            }],
+            }]
+            .into(),
         });
     }
     scheduler.block_for_queue();
@@ -510,6 +513,7 @@ fn vm_wake_registration_002_select_wake_rejects_queue_or_kind_identity_mismatch(
         let fiber = scheduler.current_fiber_mut().unwrap();
         fiber.select_state = Some(SelectState {
             cases: vec![SelectCase {
+                _storage: None,
                 kind: SelectCaseKind::Recv,
                 result_index: 0,
                 queue_reg: 0,
@@ -517,7 +521,8 @@ fn vm_wake_registration_002_select_wake_rejects_queue_or_kind_identity_mismatch(
                 elem_slots: 1,
                 elem_layout: None,
                 has_ok: false,
-            }],
+            }]
+            .into(),
             expected_cases: 1,
             has_default: false,
             woken_index: None,
@@ -527,7 +532,8 @@ fn vm_wake_registration_002_select_wake_rejects_queue_or_kind_identity_mismatch(
                 case_index: 0,
                 queue: 0x1000 as vo_runtime::gc::GcRef,
                 kind: SelectCaseKind::Recv,
-            }],
+            }]
+            .into(),
         });
     }
     scheduler.block_for_queue();

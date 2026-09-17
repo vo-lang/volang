@@ -1,0 +1,101 @@
+package kit
+
+import (
+	"fmt"
+	"math"
+	"strconv"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type SliderProps struct {
+	ID string
+	Label string
+	Name string
+	Form string
+	// A zero Min/Max pair uses 0..100. Step defaults to 1.
+	Min float64
+	Max float64
+	Step float64
+	Value func() float64
+	// Nil lets the browser choose its native midpoint/reset default.
+	DefaultValue func() float64
+	ValueText string
+	Disabled bool
+	Hint string
+	Error string
+	OnChange func(float64)
+	OnCommit func(float64)
+	OnBlur func()
+	Class string
+	InputClass string
+	InputRef *ui.ElementRef
+}
+
+func finiteNumber(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func Slider(props SliderProps) ui.View {
+	if props.ID == "" || props.Label == "" {
+		panic("kit: sliders require an ID and label")
+	}
+	if props.Min == 0 && props.Max == 0 {
+		props.Max = 100
+	}
+	if props.Step == 0 {
+		props.Step = 1
+	}
+	if !finiteNumber(props.Min) || !finiteNumber(props.Max) || !finiteNumber(props.Step) ||
+		props.Min >= props.Max ||
+		props.Step <= 0 {
+		panic("kit: sliders require finite increasing bounds and a positive step")
+	}
+	if props.Value != nil && props.DefaultValue != nil {
+		panic("kit: value readers and defaults cannot be combined")
+	}
+	input := ui.Element("input").Attr("type", "range").Attr("min", fmt.Sprint(props.Min)).Attr("max", fmt.Sprint(props.Max)).Attr("step", fmt.Sprint(props.Step))
+	input = input.Attr("name", props.Name).Attr("disabled", fmt.Sprint(props.Disabled)).Ref(props.InputRef).Class("vui-slider-input").Class(props.InputClass)
+	if props.Form != "" {
+		input = input.Attr("form", props.Form)
+	}
+	if props.Value != nil || props.DefaultValue != nil {
+		value := 0.0
+		if props.Value != nil {
+			value = props.Value()
+		} else {
+			value = props.DefaultValue()
+		}
+		if !finiteNumber(value) || value < props.Min || value > props.Max {
+			panic("kit: slider value must be finite and within its bounds")
+		}
+		if props.Value != nil {
+			input = input.Attr("value", fmt.Sprint(value))
+		} else {
+			input = input.DefaultValue(fmt.Sprint(value))
+		}
+	}
+	if props.ValueText != "" {
+		input = input.Attr("aria-valuetext", props.ValueText)
+	}
+	handler := func(callback func(float64)) func(ui.Event) {
+		return func(event ui.Event) {
+			value, err := strconv.ParseFloat(event.Value, 64)
+			if !props.Disabled && err == nil && finiteNumber(value) && value >= props.Min &&
+				value <= props.Max {
+				callback(value)
+			}
+		}
+	}
+	if props.OnChange != nil {
+		input = input.On("input", handler(props.OnChange))
+	}
+	if props.OnCommit != nil {
+		input = input.On("change", handler(props.OnCommit))
+	}
+	if props.OnBlur != nil {
+		input = input.On("blur", func(ui.Event) {
+			props.OnBlur()
+		})
+	}
+	return FormField(FieldProps{ID: props.ID, Label: props.Label, Hint: props.Hint, Error: props.Error}, input).Class("vui-slider").Class(props.Class)
+}

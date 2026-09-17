@@ -6,12 +6,14 @@ use vo_runtime::jit_api::JitRuntimeTrapKind;
 use crate::translate::{emit_jit_error_if_zero, emit_runtime_trap_if};
 use crate::translator::{emit_runtime_helper_call, CollectionEmitter, HelperKind};
 
-use super::{emit_nil_guarded_load, SLICE_FIELD_LEN};
+use super::emit_nil_guarded_load;
+
+const STRING_FIELD_LEN: i32 =
+    (vo_runtime::objects::string::FIELD_LEN * vo_runtime::slot::SLOT_BYTES) as i32;
 
 pub(in crate::translate) fn str_len<'a>(e: &mut impl CollectionEmitter<'a>, inst: &Instruction) {
-    // String uses SliceData layout: len is at the same offset as slice len.
     let s = e.read_var(inst.b);
-    let result = emit_nil_guarded_load(e, s, SLICE_FIELD_LEN);
+    let result = emit_nil_guarded_load(e, s, STRING_FIELD_LEN);
     e.write_var(inst.a, result);
 }
 
@@ -20,7 +22,7 @@ pub(in crate::translate) fn str_index<'a>(e: &mut impl CollectionEmitter<'a>, in
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
     if !e.current_bounds_check_elided() {
-        let len = emit_nil_guarded_load(e, s, SLICE_FIELD_LEN);
+        let len = emit_nil_guarded_load(e, s, STRING_FIELD_LEN);
         let out_of_bounds = e
             .builder()
             .ins()
@@ -45,8 +47,8 @@ pub(in crate::translate) fn str_concat<'a>(e: &mut impl CollectionEmitter<'a>, i
     let b = e.read_var(inst.c);
     let call = emit_runtime_helper_call(e, func, &[gc_ptr, a, b]);
     let result = e.builder().inst_results(call)[0];
-    let a_len = emit_nil_guarded_load(e, a, SLICE_FIELD_LEN);
-    let b_len = emit_nil_guarded_load(e, b, SLICE_FIELD_LEN);
+    let a_len = emit_nil_guarded_load(e, a, STRING_FIELD_LEN);
+    let b_len = emit_nil_guarded_load(e, b, STRING_FIELD_LEN);
     let total_len = e.builder().ins().iadd(a_len, b_len);
     let zero = e.builder().ins().iconst(types::I64, 0);
     let result_is_zero = e.builder().ins().icmp(IntCC::Equal, result, zero);

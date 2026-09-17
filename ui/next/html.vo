@@ -1,0 +1,219 @@
+package ui
+
+import (
+	"strconv"
+	"strings"
+)
+
+func htmlEscape(value string) string {
+	value = strings.ReplaceAll(value, "&", "&amp;")
+	value = strings.ReplaceAll(value, "<", "&lt;")
+	value = strings.ReplaceAll(value, ">", "&gt;")
+	value = strings.ReplaceAll(value, "\"", "&quot;")
+	value = strings.ReplaceAll(value, "\r", "&#13;")
+	return value
+}
+
+func voidElement(tag string) bool {
+	switch tag {
+		case "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr":
+			return true
+	}
+	return false
+}
+
+func booleanAttribute(name string) bool {
+	switch name {
+		case "allowfullscreen", "async", "autofocus", "autoplay", "checked", "controls", "default", "defer", "disabled", "formnovalidate", "hidden", "inert", "ismap", "itemscope", "loop", "multiple", "muted", "nomodule", "novalidate", "open", "playsinline", "readonly", "required", "reversed", "selected":
+			return true
+	}
+	return false
+}
+
+func validHtmlName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == ':' {
+			continue
+		}
+		if i > 0 && ((c >= '0' && c <= '9') || c == '-' || c == '.') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// HTML serializes the last flushed tree with deterministic hydration markers.
+// Use a fresh Root for each server request. No renderer or browser is required.
+func (root *Root) HTML() string {
+	if root.closed || root.flushing || root.node == nil || len(root.dirty) != 0 {
+		panic("ui: HTML requires a live, flushed root")
+	}
+	var output strings.Builder
+	appendHTML(&output, root.node, false, nil)
+	return output.String()
+}
+
+func appendHTML(output *strings.Builder, node *mounted, svg bool, selection *htmlSelection) {
+	id := strconv.Itoa(node.id)
+	view := node.view
+	if view.kind == "#text" {
+		output.WriteString("<!--vo:t:" + id + "-->" + htmlEscape(view.text) + "<!--vo:/t:" + id + "-->")
+		return
+	}
+	if view.kind == "#component" || view.kind == "#fragment" {
+		output.WriteString("<!--vo:r:" + id + "-->")
+		for _, child := range node.children {
+			appendHTML(output, child, svg, selection)
+		}
+		output.WriteString("<!--vo:/r:" + id + "-->")
+		return
+	}
+	tag := view.kind
+	if tag == "svg" {
+		svg = true
+	}
+	if view.kind == "#widget" {
+		if svg {
+			panic("ui: DOM widgets require HTML context")
+		}
+		tag = "div"
+	}
+	if !validHtmlName(tag) {
+		panic("ui: invalid HTML element")
+	}
+	if !svg && tag == "select" {
+		selection = nil
+		if value, exists := attributeValue(view, "value"); exists {
+			selection = &htmlSelection{value: value}
+		}
+		if view.control != nil && view.control.hasSelection {
+			selection = &htmlSelection{multiple: make(map[string]bool)}
+			for _, value := range view.control.selected {
+				selection.multiple[value] = true
+			}
+		}
+	}
+	if !svg && tag == "input" {
+		kind, _ := attributeValue(view, "type")
+		value, _ := attributeValue(view, "value")
+		if strings.ToLower(kind) == "file" && value != "" {
+			panic("ui: file inputs cannot have a nonempty controlled value")
+		}
+	}
+	selectedOption := !svg && tag == "option" && selection != nil
+	if selectedOption &&
+		(selection.multiple != nil && selection.multiple[optionValue(node)] ||
+			selection.multiple == nil && !selection.selected && optionValue(node) == selection.value) {
+		selection.selected = true
+		output.WriteString("<" + tag + " data-vo-id=\"" + id + "\" selected=\"\"")
+	} else {
+		output.WriteString("<" + tag + " data-vo-id=\"" + id + "\"")
+	}
+	if view.kind == "#widget" {
+		output.WriteString(" data-vo-widget=\"\"")
+	}
+	if !svg && textElement(tag) && len(node.children) == 1 {
+		output.WriteString(" data-vo-text=\"" + strconv.Itoa(node.children[0].id) + "\"")
+	}
+	textareaValue := ""
+	if view.control != nil {
+		if svg {
+			panic("ui: native control properties require HTML controls")
+		}
+		if view.control.hasValue {
+			output.WriteString(" data-vo-default-value=\"\"")
+			if tag == "textarea" {
+				textareaValue = view.control.value
+			} else {
+				output.WriteString(" value=\"" + htmlEscape(view.control.value) + "\"")
+			}
+		}
+		if view.control.hasChecked && view.control.checked {
+			output.WriteString(" checked=\"\"")
+		}
+		if view.control.hasSelection {
+			output.WriteString(" data-vo-selected=\"" + htmlEscape(view.control.selection) + "\"")
+		}
+		if view.control.hasIndeterminate {
+			value := "false"
+			if view.control.indeterminate {
+				value = "true"
+			}
+			output.WriteString(" data-vo-indeterminate=\"" + value + "\"")
+		}
+	}
+	for _, attr := range view.attrs {
+		if !validHtmlName(attr.name) || strings.HasPrefix(strings.ToLower(attr.name), "on") ||
+			strings.HasPrefix(attr.name, "data-vo-") {
+			panic("ui: invalid or reserved HTML attribute")
+		}
+		if selectedOption && attr.name == "selected" {
+			continue
+		}
+		if !svg && tag == "input" && attr.name == "checked" {
+			output.WriteString(" data-vo-checked=\"\"")
+		}
+		if !svg && booleanAttribute(attr.name) && attr.value == "false" {
+			continue
+		}
+		if !svg && tag == "textarea" && attr.name == "value" {
+			textareaValue = attr.value
+			output.WriteString(" data-vo-controlled=\"\"")
+			continue
+		}
+		output.WriteString(" " + attr.name + "=\"" + htmlEscape(attr.value) + "\"")
+	}
+	if len(view.events) > 0 {
+		output.WriteString(" data-vo-events=\"")
+		for i, event := range view.events {
+			if !validHtmlName(event.kind) {
+				panic("ui: invalid HTML event name")
+			}
+			if i > 0 {
+				output.WriteString(" ")
+			}
+			output.WriteString(event.name() + "=" + htmlEscape(event.binding()))
+		}
+		output.WriteString("\"")
+	}
+	output.WriteString(">")
+	if !svg && textElement(tag) {
+		if len(node.children) == 1 {
+			value := node.children[0].view.text
+			if tag == "title" {
+				value = htmlEscape(value)
+			}
+			output.WriteString(value)
+		}
+		output.WriteString("</" + tag + ">")
+		return
+	}
+	if !svg && tag == "textarea" {
+		if len(node.children) != 0 {
+			panic("ui: textarea uses its value binding and cannot have children")
+		}
+		// HTML parsing strips a leading newline from textarea content.
+		if strings.HasPrefix(textareaValue, "\n") {
+			output.WriteString("\n")
+		}
+		output.WriteString(htmlEscape(textareaValue))
+		output.WriteString("</textarea>")
+		return
+	}
+	if !svg && voidElement(view.kind) {
+		if len(node.children) > 0 {
+			panic("ui: void HTML elements cannot have children")
+		}
+		return
+	}
+	childSVG := svg && tag != "foreignObject" && tag != "desc" && tag != "title"
+	for _, child := range node.children {
+		appendHTML(output, child, childSVG, selection)
+	}
+	output.WriteString("</" + tag + ">")
+}

@@ -1,0 +1,23 @@
+package main
+
+type Cell struct {
+	x int
+}
+
+var keep *Cell
+
+func scalarLifetime(n int) int {
+	p := &Cell{x: n}
+	v := p.x
+	for i := 0; i < 1000; i++ {
+		keep = &Cell{x: i}
+	}
+	println(v)
+	return keep.x
+}
+
+func main() {
+	for i := 0; i < 5; i++ {
+		assert(scalarLifetime(777) == 999, "dead scalar object must never overwrite a recycled GC cell")
+	}
+}

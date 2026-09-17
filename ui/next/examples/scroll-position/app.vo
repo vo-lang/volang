@@ -1,0 +1,77 @@
+package app
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var appType = ui.Define("scroll.App")
+
+func App(scope *ui.Scope, initial string) ui.View {
+	visible := ui.Bool(scope, "visible", true)
+	rtl := ui.Bool(scope, "rtl", false)
+	height := ui.Int(scope, "height", 1000)
+	position := ui.String(scope, "position", "Waiting for the viewport")
+	ref := ui.Ref(scope, "viewport")
+	observed := ui.State(scope, "observed", func() any {
+		return ui.ScrollPosition{}
+	})
+	saved := ui.State(scope, "saved", func() any {
+		return ui.ScrollPosition{}
+	})
+	direction := "ltr"
+	if rtl.Get() {
+		direction = "rtl"
+	}
+	box := ui.Element("p", ui.Text("The scroll area is hidden."))
+	if visible.Get() {
+		box = ui.Element("div", ui.Element("div", ui.Text("A little room to explore.")).Attr("style", fmt.Sprint("width:800px;height:", height.Get(), "px;background:linear-gradient(#d9e8da,#90b7c8)"))).Ref(ref).Attr("id", "scroll-area").Attr("tabindex", "0").Attr("role", "region").Attr("aria-label", "Scrollable landscape").Attr("dir", direction).Attr("style", "width:100%;height:180px;overflow:auto;overflow-anchor:none;scroll-behavior:smooth").OnViewport(func(viewport ui.Viewport) {
+			position.Set(fmt.Sprint(int(viewport.Left), ",", int(viewport.Top)))
+			observed.Update(func(any) any {
+				return ui.ScrollPosition{Left: viewport.Left, Top: viewport.Top}
+			})
+		})
+	}
+	return ui.Element("main", ui.Element("h1", ui.Text("Find your place.")), ui.Element("p", ui.Text("Scroll a little, or jump to a new position.")), box, ui.Element("output", ui.Text(position.Get())).Attr("data-position", ""), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			saved.Update(func(any) any {
+				return observed.Get()
+			})
+		},
+	}, ui.Text("Remember place")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			ref.ScrollToIfUnchanged(saved.Get().(ui.ScrollPosition), ui.ScrollPosition{Top: 320})
+		},
+	}, ui.Text("Correct saved place")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			ref.ScrollTo(40, 480)
+		},
+	}, ui.Text("Jump")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			height.Set(3000)
+			ref.ScrollTo(0, 2500)
+		},
+	}, ui.Text("Extend and jump")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			visible.Set(false)
+			ref.ScrollTo(0, 200)
+		},
+	}, ui.Text("Hide")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			visible.Set(true)
+			ref.ScrollTo(0, 100)
+		},
+	}, ui.Text("Restore")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			rtl.Set(true)
+			ref.ScrollTo(-100, 100)
+		},
+	}, ui.Text("Right to left"))).Class("vui", "starter")
+}
+
+func View(initial string) ui.View {
+	return ui.Component(appType, func(scope *ui.Scope) ui.View {
+		return App(scope, initial)
+	})
+}

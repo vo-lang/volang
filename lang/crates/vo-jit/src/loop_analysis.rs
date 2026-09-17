@@ -7,7 +7,7 @@ use vo_common_core::instruction::HINT_LOOP;
 use vo_runtime::bytecode::{FunctionDef, InstructionMetadata};
 use vo_runtime::instruction::{Instruction, Opcode};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "compiler"))]
 use crate::effects;
 
 /// Information about a detected loop (from Hint instructions).
@@ -185,30 +185,30 @@ fn jump_target(pc: usize, offset: i32) -> Option<usize> {
 }
 
 /// Get registers read by an instruction.
-#[cfg(test)]
+#[cfg(all(test, feature = "compiler"))]
 fn get_read_regs(inst: &Instruction) -> Vec<u16> {
     effects::try_read_regs(inst).unwrap()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "compiler"))]
 fn get_read_regs_with_metadata(inst: &Instruction, metadata: &InstructionMetadata) -> Vec<u16> {
     effects::try_read_regs_with_facts(inst, effects::EffectFacts::from_instruction(Some(metadata)))
         .unwrap()
 }
 
 /// Get the register written by an instruction (single destination).
-#[cfg(test)]
+#[cfg(all(test, feature = "compiler"))]
 fn get_write_reg(inst: &Instruction) -> Option<u16> {
     effects::single_write_reg(inst)
 }
 
 /// Get registers written by multi-slot instructions (e.g., Call return values).
-#[cfg(test)]
+#[cfg(all(test, feature = "compiler"))]
 fn get_write_regs_multi(inst: &Instruction) -> Vec<u16> {
     effects::try_multi_write_regs(inst).unwrap()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "compiler"))]
 fn get_write_regs_multi_with_metadata(
     inst: &Instruction,
     metadata: &InstructionMetadata,
@@ -221,5 +221,5 @@ fn get_write_regs_multi_with_metadata(
     .unwrap()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "compiler"))]
 mod tests;

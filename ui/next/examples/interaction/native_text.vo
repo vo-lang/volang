@@ -1,0 +1,22 @@
+package main
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+var nativeTextType = ui.Define("interaction.NativeText")
+
+func NativeTextExample() ui.View {
+	return ui.Component(nativeTextType, func(scope *ui.Scope) ui.View {
+		alternate := ui.Bool(scope, "alternate", false)
+		color := "rgb(37, 83, 65)"
+		if alternate.Get() {
+			color = "rgb(91, 52, 122)"
+		}
+		return ui.Element("section", ui.Element("h2", ui.Text("Native style text")), ui.Element("style", ui.Text("#native-text-preview {color: " +
+			color +
+			"; font-weight: 600;}")).Attr("data-native-style", ""), ui.Element("p", ui.Text("A small change, in the same element.")).Attr("id", "native-text-preview"), ui.Element("button", ui.Text("Change preview color")).Attr("type", "button").Attr("data-native-style-toggle", "").On("click", func(ui.Event) {
+			alternate.Set(!alternate.Get())
+		})).Class("card")
+	})
+}

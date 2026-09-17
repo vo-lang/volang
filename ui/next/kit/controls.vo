@@ -1,0 +1,75 @@
+// Package kit supplies small, composable native controls and scoped recipes.
+package kit
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type ButtonProps struct {
+	Variant string
+	Disabled bool
+	OnPress func()
+}
+
+func Button(props ButtonProps, content ...ui.View) ui.View {
+	variant := props.Variant
+	if variant == "" {
+		variant = "primary"
+	}
+	view := ui.Element("button", content...).Attr("type", "button").Attr("class", "vui-button").Attr("data-variant", variant).Attr("disabled", fmt.Sprint(props.Disabled))
+	if props.OnPress != nil {
+		view = view.On("click", func(event ui.Event) {
+			props.OnPress()
+		})
+	}
+	return view
+}
+
+func Field(id string, label string, hint string, control ui.View) ui.View {
+	return FormField(FieldProps{ID: id, Label: label, Hint: hint}, control)
+}
+
+type FieldProps struct {
+	ID string
+	Label string
+	Hint string
+	Error string
+}
+
+func FormField(props FieldProps, control ui.View) ui.View {
+	id, label, hint := props.ID, props.Label, props.Hint
+	if id == "" || label == "" {
+		panic("kit: field requires an ID and label")
+	}
+	control = control.Attr("id", id).Class("vui-input")
+	control = describeField(control, id, hint, props.Error)
+	children := []ui.View{ui.Element("label", ui.Text(label)).Attr("for", id), control}
+	children = append(children, fieldMessages(id, hint, props.Error)...)
+	return ui.Element("div", children...).Attr("class", "vui-field")
+}
+
+func describeField(control ui.View, id string, hint string, error string) ui.View {
+	if error != "" {
+		control = control.Attr("aria-invalid", "true").DescribedBy(id + "-error")
+	}
+	if hint != "" {
+		control = control.DescribedBy(id + "-hint")
+	}
+	return control
+}
+
+func fieldMessages(id string, hint string, error string) []ui.View {
+	children := []ui.View{}
+	if hint != "" {
+		children = append(children, ui.Element("p", ui.Text(hint)).Key("hint").Attr("id", id + "-hint").Class("vui-hint"))
+	}
+	if error != "" {
+		children = append(children, ui.Element("p", ui.Text(error)).Key("error").Attr("id", id + "-error").Class("vui-hint").Attr("role", "alert"))
+	}
+	return children
+}
+
+func Badge(label string) ui.View {
+	return ui.Element("span", ui.Text(label)).Attr("class", "vui-badge")
+}

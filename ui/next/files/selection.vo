@@ -1,0 +1,204 @@
+// Package files describes native file selections and scoped file requests.
+package files
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"unicode/utf8"
+	ui "github.com/vo-lang/ui/next"
+)
+
+const MaxFiles = 32
+
+const MaxFileBytes = 128 * 1024 * 1024
+
+const MaxReadBytes = 256 * 1024
+
+const MaxTextBytes = 1024 * 1024
+
+// File is metadata plus an opaque reference to a file in this UI root. Copies
+// retain that reference; they do not copy bytes or acquire a filesystem path.
+type File struct {
+	token string
+	Name string
+	Size int
+	MediaType string
+	LastModified int64
+}
+
+// Token is for a root-scoped platform adapter. It is not a persistent file ID.
+func (file File) Token() string {
+	return file.token
+}
+
+type record struct {
+	Token string `json:"token"`
+	Name string `json:"name"`
+	Size int `json:"size"`
+	MediaType string `json:"mediaType"`
+	LastModified int64 `json:"lastModified"`
+}
+
+type envelope struct {
+	Version int `json:"version"`
+	Owner string `json:"owner"`
+	Revision int `json:"revision"`
+	Files []record `json:"files"`
+	Error string `json:"error"`
+}
+
+// Selection is an immutable native-input snapshot. Its zero value is empty.
+// Store it in component/form state; opaque references never cross reload roots.
+type Selection struct {
+	owner string
+	revision int
+	files []File
+	error string
+}
+
+func (selection Selection) Files() []File {
+	result := make([]File, len(selection.files))
+	copy(result, selection.files)
+	return result
+}
+
+func (selection Selection) Error() string {
+	return selection.error
+}
+
+func (selection Selection) Len() int {
+	return len(selection.files)
+}
+
+// Clear retains the native revision, so a later user selection wins over an
+// earlier clear when both reach the UI writer before the next DOM commit.
+func (selection Selection) Clear() Selection {
+	return Selection{owner: selection.owner, revision: selection.revision}
+}
+
+func (selection Selection) SameFiles(other Selection) bool {
+	if len(selection.files) != len(other.files) {
+		return false
+	}
+	for index, file := range selection.files {
+		if file.token != other.files[index].token {
+			return false
+		}
+	}
+	return true
+}
+
+// Same includes the native acknowledgement revision and complete metadata.
+// Rendering subscriptions must retain updates even when file tokens are equal.
+func (selection Selection) Same(other Selection) bool {
+	if selection.owner != other.owner || selection.revision != other.revision ||
+		selection.error != other.error ||
+		len(selection.files) != len(other.files) {
+		return false
+	}
+	for index, file := range selection.files {
+		if file != other.files[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func validToken(value string) bool {
+	return len(value) >= 1 && len(value) <= 128 && !strings.ContainsAny(value, " \t\r\n\x00") &&
+		utf8.ValidString(value)
+}
+
+func decode(value string) (Selection, error) {
+	var payload envelope
+	if len(value) > 128 * 1024 || !utf8.ValidString(value) {
+		return Selection{}, fmt.Errorf("files: invalid selection payload")
+	}
+	if err := json.Unmarshal([]byte(value), &payload); err != nil {
+		return Selection{}, err
+	}
+	if payload.Version != 1 || !validToken(payload.Owner) || payload.Revision <= 0 ||
+		payload.Revision > 2147483647 ||
+		len(payload.Files) > MaxFiles ||
+		len(payload.Error) > 4096 ||
+		!utf8.ValidString(payload.Error) {
+		return Selection{}, fmt.Errorf("files: invalid selection identity or limits")
+	}
+	selection := Selection{owner: payload.Owner, revision: payload.Revision, error: payload.Error}
+	seen := make(map[string]bool)
+	for _, file := range payload.Files {
+		if !validToken(file.Token) || seen[file.Token] || len(file.Name) > 4096 ||
+			len(file.MediaType) > 1024 ||
+			!utf8.ValidString(file.Name) ||
+			!utf8.ValidString(file.MediaType) ||
+			file.Size < 0 ||
+			file.Size > MaxFileBytes ||
+			file.LastModified < -9007199254740991 ||
+			file.LastModified > 9007199254740991 {
+			return Selection{}, fmt.Errorf("files: invalid file metadata")
+		}
+		seen[file.Token] = true
+		selection.files = append(selection.files, File{
+			token: file.Token, Name: file.Name, Size: file.Size, MediaType: file.MediaType,
+			LastModified: file.LastModified,
+		})
+	}
+	if selection.error != "" && len(selection.files) != 0 {
+		return Selection{}, fmt.Errorf("files: a rejected selection cannot contain accepted files")
+	}
+	return selection, nil
+}
+
+type readRequest struct {
+	Version int `json:"version"`
+	Token string `json:"token"`
+	Offset int `json:"offset"`
+	Length int `json:"length"`
+}
+
+func read(file File, service string, offset int, length int) ui.Request {
+	if !validToken(file.token) || offset < 0 || length < 0 {
+		panic("files: a read requires a live file reference and nonnegative byte range")
+	}
+	encoded, err := json.Marshal(readRequest{
+		Version: 1, Token: file.token, Offset: offset, Length: length,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return ui.Request{Service: service, Value: string(encoded)}
+}
+
+// ReadText reads a whole UTF-8 file within 1 MiB. Invalid UTF-8 is an error.
+// The host checks the actual file size independently of this copied metadata.
+func ReadText(file File) ui.Request {
+	return read(file, "ui.files.text", 0, 0)
+}
+
+// ReadBytes reads at most 256 KiB starting at offset; EOF yields fewer bytes.
+// DecodeBytes converts the bounded base64 task result back to bytes.
+func ReadBytes(file File, offset int, length int) ui.Request {
+	if length > MaxReadBytes {
+		panic("files: a byte read is limited to 256 KiB")
+	}
+	return read(file, "ui.files.bytes", offset, length)
+}
+
+func DecodeBytes(result ui.Result) ([]byte, error) {
+	if result.Error != "" {
+		return nil, fmt.Errorf("%s", result.Error)
+	}
+	if len(result.Value) > (MaxReadBytes + 2) / 3 * 4 {
+		return nil, fmt.Errorf("files: byte result exceeds 256 KiB")
+	}
+	bytes, err := base64.StdEncoding.DecodeString(result.Value)
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes) > MaxReadBytes {
+		return nil, fmt.Errorf("files: byte result exceeds 256 KiB")
+	}
+	return bytes, nil
+}

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UI comparison — 1,000 rows</title>
+<style>
+  * { box-sizing: border-box } body { margin: 0; font: 16px/1.5 system-ui; color: #23382e; background: #f5f6f1 }
+  main { max-width: 760px; margin: 24px auto; padding: 16px } main>div { display: flex; gap: 12px; align-items: center; flex-wrap: wrap }
+  ul { padding: 0; list-style: none } li { display: flex; justify-content: space-between; height: 40px; padding: 4px 12px; border-bottom: 1px solid #ccd6c8 }
+  button, input { font: inherit } button { cursor: pointer; min-width: 44px }
+</style></head><body><div id="root"></div>
+<script>
+  window.__benchmark = { error: null, close: null, metrics: { exchanges: 0, batches: 0, mutations: 0, guestBytes: 0, inputBytes: 0, hostMs: 0 } };
+  const observer = new MutationObserver(() => {
+    if (document.querySelectorAll('[data-row]').length === 1000) {
+      document.querySelector('main').getBoundingClientRect();
+      window.__benchmark.loadedAt = performance.now();
+      observer.disconnect();
+    }
+  });
+  observer.observe(document.getElementById('root'), { subtree: true, childList: true });
+</script><script type="module" src="./app.js"></script></body></html>

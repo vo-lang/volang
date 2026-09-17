@@ -1,0 +1,21 @@
+package main
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+	// These recipes own plain navigation keys. Browser shortcuts and modified text
+	// editing must keep their default action and must not change selection/focus.
+func kitModifiedKeys(root *ui.Root, target int, key string, capture bool, sequence int) int {
+	before := root.HTML()
+	for mask := 1; mask < 16; mask++ {
+		sequence++
+		root.Dispatch(ui.Event{
+			Target: target, Kind: "keydown", Key: key, Capture: capture, Sequence: sequence,
+			AltKey: mask & 1 != 0, CtrlKey: mask & 2 != 0, MetaKey: mask & 4 != 0, ShiftKey: mask & 8 != 0,
+		})
+		batch := flush(root)
+		require(root.HTML() == before && focusTarget(batch) == 0, "kit consumed a modified native key")
+	}
+	return sequence
+}

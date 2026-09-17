@@ -1997,9 +1997,9 @@ mod tests {
 
         let resolved = HashSet::from(["wasm"]);
         let target = TestTarget {
-            name: "wasm-aot".to_string(),
+            name: "wasm-derived".to_string(),
             kind: "wasm".to_string(),
-            backend: "wasm-aot".to_string(),
+            backend: "wasm-derived".to_string(),
             native_aot_runtime_features: Vec::new(),
             compatible_with: Some("wasm".to_string()),
             inherit_compatible_skips: false,
@@ -2013,7 +2013,9 @@ mod tests {
         };
 
         assert!(target_applies_to_resolved_case(
-            "wasm-aot", &target, &resolved
+            "wasm-derived",
+            &target,
+            &resolved
         ));
         let mut unrelated = target.clone();
         unrelated.name = "unrelated".to_string();

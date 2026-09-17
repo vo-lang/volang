@@ -22,6 +22,10 @@ const NONE_ID: u32 = u32::MAX;
 pub(crate) struct BlockId(u32);
 
 impl BlockId {
+    pub(crate) fn from_index(index: usize) -> Self {
+        Self(index as u32)
+    }
+
     #[inline]
     pub(crate) fn index(self) -> usize {
         self.0 as usize
@@ -107,6 +111,9 @@ impl ValueType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValueOrigin {
     EntrySlot,
+    /// A read of an addressable frame cell. Its value belongs to this access;
+    /// indexed stores do not produce ordinary SSA register definitions.
+    MemoryRead,
     BlockParameter,
     Alias(ValueId),
     Instruction,
@@ -209,6 +216,7 @@ impl EffectSet {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TypedInstruction {
     source: Instruction,
+    pc: u32,
     block: BlockId,
     values: Span,
     input_count: u16,
@@ -218,6 +226,10 @@ pub(crate) struct TypedInstruction {
 }
 
 impl TypedInstruction {
+    pub(crate) fn pc(self) -> usize {
+        self.pc as usize
+    }
+
     #[inline]
     pub(crate) fn source(self) -> Instruction {
         self.source
@@ -236,6 +248,21 @@ impl TypedInstruction {
     #[inline]
     pub(crate) fn memory_sync(self) -> MemorySyncEffect {
         self.memory_sync
+    }
+
+    /// Whether this instruction can overwrite a canonical frame cell through
+    /// an indexed address, without producing an SSA register definition.
+    pub(crate) fn frame_write_range(self) -> Option<std::ops::Range<usize>> {
+        if !matches!(self.source.opcode(), Opcode::SlotSet | Opcode::SlotSetN) {
+            return None;
+        }
+        match self.memory_sync {
+            MemorySyncEffect::AliasedRange { start, count } => {
+                let start = usize::from(start);
+                Some(start..start + usize::from(count))
+            }
+            MemorySyncEffect::None => None,
+        }
     }
 
     #[inline]
@@ -264,14 +291,6 @@ pub(crate) struct FrameState {
     values: Span,
     direct_roots: Span,
     conditional_roots: Span,
-    /// Inlined frame states form a parent chain through this field.
-    parent: u32,
-}
-
-impl FrameState {
-    pub(crate) fn parent(self) -> Option<FrameStateId> {
-        (self.parent != NONE_ID).then_some(FrameStateId(self.parent))
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -289,6 +308,8 @@ pub(crate) struct BasicBlock {
     predecessors: Span,
     successors: Span,
     pub reachable: bool,
+    /// An artifact may enter here with values supplied by the canonical frame.
+    pub external_entry: bool,
 }
 
 #[derive(Debug)]
@@ -373,6 +394,7 @@ struct BlockFacts {
     live_in: BTreeSet<u16>,
     live_out: BTreeSet<u16>,
     reachable: bool,
+    external_entry: bool,
 }
 
 impl FunctionIr {
@@ -381,20 +403,35 @@ impl FunctionIr {
         Self::build_with_limit(func, module, crate::MAX_JIT_ANALYSIS_BYTES)
     }
 
+    #[cfg(test)]
     pub(crate) fn build_with_limit(
         func: &FunctionDef,
         module: &Module,
         retained_limit_bytes: usize,
     ) -> Result<Self, JitError> {
-        Self::build_with_limit_and_return_summaries(func, module, &[], retained_limit_bytes)
+        Self::build_with_entry_points(func, module, &[], &[], retained_limit_bytes)
     }
 
-    pub(crate) fn build_with_limit_and_return_summaries(
+    /// Additional entries split the CFG and introduce independent, unknown
+    /// canonical-frame values. Facts established before an entry cannot flow
+    /// through its external edge, even when ordinary execution reaches it too.
+    pub(crate) fn build_with_entry_points(
         func: &FunctionDef,
         module: &Module,
         exact_base_returns: &[Box<[bool]>],
+        entry_pcs: &[u32],
         retained_limit_bytes: usize,
     ) -> Result<Self, JitError> {
+        if entry_pcs.windows(2).any(|pcs| pcs[0] >= pcs[1])
+            || entry_pcs
+                .iter()
+                .any(|&pc| pc == 0 || pc as usize >= func.code.len())
+        {
+            return Err(JitError::Internal(format!(
+                "invalid external entry points for {}",
+                func.name
+            )));
+        }
         if func.code.is_empty() {
             return Ok(Self::empty());
         }
@@ -402,7 +439,7 @@ impl FunctionIr {
         let mut raw = Vec::with_capacity(func.code.len());
         for (pc, source) in func.code.iter().copied().enumerate() {
             let facts = EffectFacts::from_instruction(func.instruction_metadata.get(pc));
-            let instruction_effects = effects::try_instruction_effects_with_module_context(
+            let mut instruction_effects = effects::try_instruction_effects_with_module_context(
                 &source,
                 facts,
                 &module.externs,
@@ -414,6 +451,7 @@ impl FunctionIr {
                     func.name
                 ))
             })?;
+            instruction_effects.reads.extend(func.unwind_root_slots());
             validate_slots(func, pc, &instruction_effects.reads, "read")?;
             validate_slots(func, pc, &instruction_effects.writes, "write")?;
             raw.push(RawInstruction {
@@ -457,7 +495,7 @@ impl FunctionIr {
             }
         }
 
-        let (mut blocks, pc_to_block) = build_cfg(&raw)?;
+        let (mut blocks, pc_to_block) = build_cfg(&raw, entry_pcs)?;
         compute_block_liveness(&mut blocks, &raw)?;
         let (liveness_at_frame_state, live_slots, root_slots) =
             compute_sparse_frame_liveness(&blocks, &raw, &func.slot_types, retained_limit_bytes)?;
@@ -470,12 +508,12 @@ impl FunctionIr {
             let block_id = BlockId(block_index as u32);
             let mut parameters = BTreeMap::new();
             for &slot in &block.live_in {
-                let provenance = if block_index == 0 {
+                let provenance = if block.external_entry {
                     RootProvenance::Unknown
                 } else {
                     RootProvenance::Unreachable
                 };
-                let origin = if block_index == 0 {
+                let origin = if block.external_entry {
                     ValueOrigin::EntrySlot
                 } else {
                     ValueOrigin::BlockParameter
@@ -509,12 +547,23 @@ impl FunctionIr {
                 let instruction = &raw[pc];
                 let value_start = instruction_values.len();
                 for &slot in &instruction.reads {
-                    let value = current.get(&slot).copied().ok_or_else(|| {
-                        JitError::Internal(format!(
-                            "SSA value for {} slot {slot} is absent at pc {pc}",
-                            func.name
-                        ))
-                    })?;
+                    let value = if aliased_cells[usize::from(slot)] {
+                        push_value(
+                            &mut values,
+                            &mut value_origins,
+                            func,
+                            slot,
+                            RootProvenance::Unknown,
+                            ValueOrigin::MemoryRead,
+                        )?
+                    } else {
+                        current.get(&slot).copied().ok_or_else(|| {
+                            JitError::Internal(format!(
+                                "SSA value for {} slot {slot} is absent at pc {pc}",
+                                func.name
+                            ))
+                        })?
+                    };
                     instruction_values.push(value);
                 }
                 let input_count = (instruction_values.len() - value_start) as u16;
@@ -535,7 +584,6 @@ impl FunctionIr {
                         values,
                         direct_roots: liveness.direct_roots,
                         conditional_roots: liveness.conditional_roots,
-                        parent: NONE_ID,
                     });
                     id
                 } else {
@@ -575,6 +623,7 @@ impl FunctionIr {
                 };
                 typed.push(TypedInstruction {
                     source: instruction.source,
+                    pc: pc as u32,
                     block: block_id,
                     values: instruction_value_span,
                     input_count,
@@ -655,6 +704,7 @@ impl FunctionIr {
                     len: successor_count,
                 },
                 reachable: block.reachable,
+                external_entry: block.external_entry,
             });
             parameter_cursor += parameter_count;
             edge_cursor += successor_count;
@@ -737,6 +787,13 @@ impl FunctionIr {
         &self.blocks
     }
 
+    pub(crate) fn is_external_entry(&self, pc: usize) -> bool {
+        self.instruction(pc).is_some_and(|instruction| {
+            let block = &self.blocks[instruction.block().index()];
+            block.external_entry && block.start_pc as usize == pc
+        })
+    }
+
     pub(crate) fn block_parameters(&self, block: BlockId) -> &[ValueUse] {
         self.blocks[block.index()]
             .parameters
@@ -754,6 +811,25 @@ impl FunctionIr {
         let instruction = self.instruction(pc)?;
         let block = &self.blocks[instruction.block().index()];
         (block.start_pc as usize == pc).then(|| self.block_parameters(block.id))
+    }
+
+    /// Canonical cells needed when entering this artifact from frame memory.
+    /// Root-only cells include aliased storage and both words of an interface.
+    pub(crate) fn resume_slots(&self, pc: usize) -> Option<Vec<u16>> {
+        let mut slots = self
+            .resume_values(pc)?
+            .iter()
+            .map(|value| value.slot)
+            .collect::<Vec<_>>();
+        if let Some(state) = self.frame_state(pc).copied() {
+            slots.extend_from_slice(self.direct_roots(state));
+            for &header in self.conditional_roots(state) {
+                slots.extend([header, header + 1]);
+            }
+        }
+        slots.sort_unstable();
+        slots.dedup();
+        Some(slots)
     }
 
     pub(crate) fn predecessors(&self, block: BlockId) -> &[BlockId] {
@@ -871,7 +947,9 @@ impl FunctionIr {
 
     pub(crate) fn frame_state(&self, pc: usize) -> Option<&FrameState> {
         let id = self.instruction(pc)?.frame_state_id()?;
-        self.frame_states.get(id.index())
+        let state = self.frame_states.get(id.index())?;
+        debug_assert_eq!(state.resume_pc as usize, pc);
+        Some(state)
     }
 
     pub(crate) fn frame_values(&self, state: FrameState) -> &[FrameValue] {
@@ -884,67 +962,6 @@ impl FunctionIr {
 
     pub(crate) fn conditional_roots(&self, state: FrameState) -> &[u16] {
         state.conditional_roots.slice(&self.root_slots)
-    }
-
-    pub(crate) fn deopt_metadata(
-        &self,
-        pc_range: std::ops::Range<usize>,
-    ) -> Vec<crate::native_stack_map::DeoptFrameState> {
-        self.frame_states
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(_, state)| pc_range.contains(&(state.resume_pc as usize)))
-            .map(
-                |(state_id, state)| crate::native_stack_map::DeoptFrameState {
-                    state_id: state_id as u32,
-                    resume_pc: state.resume_pc,
-                    parent_state_id: state
-                        .parent()
-                        .map_or(crate::native_stack_map::DeoptFrameState::NO_PARENT, |id| {
-                            id.0
-                        }),
-                    values: self
-                        .frame_values(state)
-                        .iter()
-                        .map(|value| {
-                            let ssa = self.value(value.value);
-                            crate::native_stack_map::DeoptValue {
-                                slot: value.slot,
-                                kind: match ssa.ty {
-                                    ValueType::Word => {
-                                        crate::native_stack_map::DeoptValueKind::Word
-                                    }
-                                    ValueType::Float64 => {
-                                        crate::native_stack_map::DeoptValueKind::Float64
-                                    }
-                                    ValueType::GcRef(_) => {
-                                        crate::native_stack_map::DeoptValueKind::GcRef
-                                    }
-                                    ValueType::InterfaceHeader => {
-                                        crate::native_stack_map::DeoptValueKind::InterfaceHeader
-                                    }
-                                    ValueType::InterfaceData => {
-                                        crate::native_stack_map::DeoptValueKind::InterfaceData
-                                    }
-                                },
-                                location: self.constant(value.value).map_or(
-                                    crate::native_stack_map::DeoptValueLocation::FiberSlot(
-                                        value.slot,
-                                    ),
-                                    |constant| {
-                                        crate::native_stack_map::DeoptValueLocation::Constant(
-                                            constant as u64,
-                                        )
-                                    },
-                                ),
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                },
-            )
-            .collect()
     }
 
     #[inline]
@@ -1021,7 +1038,7 @@ impl FunctionIr {
             let parameters = block.parameters.slice(&self.block_parameters);
             let predecessors = block.predecessors.slice(&self.predecessors);
             let successors = block.successors.slice(&self.edges);
-            if block.reachable && index != 0 && predecessors.is_empty() {
+            if block.reachable && !block.external_entry && predecessors.is_empty() {
                 return Err(JitError::Internal(format!(
                     "SSA reachable block has no predecessor for {} at block {index}",
                     func.name
@@ -1096,8 +1113,12 @@ pub(crate) fn instruction_successors(
     })
 }
 
-fn build_cfg(raw: &[RawInstruction]) -> Result<(Vec<BlockFacts>, Vec<BlockId>), JitError> {
+fn build_cfg(
+    raw: &[RawInstruction],
+    entry_pcs: &[u32],
+) -> Result<(Vec<BlockFacts>, Vec<BlockId>), JitError> {
     let mut leaders = BTreeSet::from([0_usize]);
+    leaders.extend(entry_pcs.iter().map(|&pc| pc as usize));
     for (pc, instruction) in raw.iter().enumerate() {
         match instruction.source.opcode() {
             Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot | Opcode::ForLoop => {
@@ -1128,6 +1149,7 @@ fn build_cfg(raw: &[RawInstruction]) -> Result<(Vec<BlockFacts>, Vec<BlockId>), 
         blocks.push(BlockFacts {
             start,
             end,
+            external_entry: start == 0 || entry_pcs.binary_search(&(start as u32)).is_ok(),
             ..BlockFacts::default()
         });
     }
@@ -1150,8 +1172,13 @@ fn build_cfg(raw: &[RawInstruction]) -> Result<(Vec<BlockFacts>, Vec<BlockId>), 
         }
     }
 
-    let mut pending = VecDeque::from([BlockId(0)]);
-    blocks[0].reachable = true;
+    let mut pending = VecDeque::new();
+    for (index, block) in blocks.iter_mut().enumerate() {
+        if block.external_entry {
+            block.reachable = true;
+            pending.push_back(BlockId::from_index(index));
+        }
+    }
     while let Some(block) = pending.pop_front() {
         let successors = blocks[block.index()].successors.clone();
         for successor in successors {
@@ -1631,17 +1658,17 @@ fn propagate_constants(
     let mut constants = origins
         .iter()
         .map(|origin| match origin {
-            ValueOrigin::EntrySlot => ConstantLattice::Overdefined,
+            ValueOrigin::EntrySlot | ValueOrigin::MemoryRead => ConstantLattice::Overdefined,
             ValueOrigin::BlockParameter | ValueOrigin::Alias(_) | ValueOrigin::Instruction => {
                 ConstantLattice::Unknown
             }
         })
         .collect::<Vec<_>>();
-    let mut executable_blocks = vec![false; blocks.len()];
+    let mut executable_blocks = blocks
+        .iter()
+        .map(|block| block.external_entry)
+        .collect::<Vec<_>>();
     let mut executable_edges = vec![false; edges.len()];
-    if !blocks.is_empty() {
-        executable_blocks[0] = true;
-    }
 
     // Every value rises at most twice and every block/edge becomes executable
     // once. This bound closes conservatively if a future IR extension violates
@@ -1674,7 +1701,9 @@ fn propagate_constants(
                             &constants,
                             module_constants,
                         ),
-                        ValueOrigin::EntrySlot | ValueOrigin::BlockParameter => continue,
+                        ValueOrigin::EntrySlot
+                        | ValueOrigin::MemoryRead
+                        | ValueOrigin::BlockParameter => continue,
                     };
                     let current = constants[output.index()];
                     let merged = current.join(desired);
@@ -1909,6 +1938,75 @@ mod tests {
     }
 
     #[test]
+    fn external_entries_forget_preceding_constants_and_pointer_provenance() {
+        let module = module_with(
+            vec![
+                Instruction::new(Opcode::LoadInt, 0, 7, 0),
+                Instruction::new(Opcode::Copy, 1, 0, 0),
+                Instruction::new(Opcode::PtrNew, 2, 2, 1),
+                Instruction::new(Opcode::Copy, 3, 2, 0),
+                Instruction::new(Opcode::Return, 0, 4, 0),
+            ],
+            vec![
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::GcRef,
+                SlotType::GcRef,
+            ],
+        );
+        let ordinary = FunctionIr::build(&module.functions[0], &module).unwrap();
+        assert_eq!(ordinary.input_constant(1, 0), Some(7));
+        assert_eq!(
+            ordinary.value(ordinary.input_value(3, 2).unwrap()).ty,
+            ValueType::GcRef(RootProvenance::ExactBase),
+        );
+        let resumed = FunctionIr::build_with_entry_points(
+            &module.functions[0],
+            &module,
+            &[],
+            &[1, 3],
+            crate::MAX_JIT_ANALYSIS_BYTES,
+        )
+        .unwrap();
+        assert_eq!(resumed.input_constant(1, 0), None);
+        assert_eq!(
+            resumed.value(resumed.input_value(3, 2).unwrap()).ty,
+            ValueType::GcRef(RootProvenance::Unknown),
+        );
+        assert!(resumed.is_external_entry(1) && resumed.is_external_entry(3));
+        assert!(!resumed.is_external_entry(2));
+    }
+
+    #[test]
+    fn external_entries_make_disconnected_regions_reachable_and_validate_pcs() {
+        let module = module_with(
+            vec![
+                Instruction::new(Opcode::Return, 0, 0, 0),
+                Instruction::new(Opcode::LoadInt, 0, 9, 0),
+                Instruction::new(Opcode::Return, 0, 1, 0),
+            ],
+            vec![SlotType::Value],
+        );
+        let build = |entries: &[u32]| {
+            FunctionIr::build_with_entry_points(
+                &module.functions[0],
+                &module,
+                &[],
+                entries,
+                crate::MAX_JIT_ANALYSIS_BYTES,
+            )
+        };
+        let ordinary = build(&[]).unwrap();
+        assert!(!ordinary.is_executable_block(ordinary.instruction(1).unwrap().block()));
+        let resumed = build(&[1]).unwrap();
+        assert!(resumed.is_executable_block(resumed.instruction(1).unwrap().block()));
+        assert_eq!(resumed.input_constant(2, 0), Some(9));
+        for entries in [&[0][..], &[3], &[1, 1], &[2, 1], &[u32::MAX]] {
+            assert!(build(entries).is_err(), "entries={entries:?}");
+        }
+    }
+
+    #[test]
     fn diamond_merge_uses_a_typed_block_parameter() {
         let code = vec![
             branch(Opcode::JumpIf, 0, 3),
@@ -2004,6 +2102,23 @@ mod tests {
     }
 
     #[test]
+    fn named_return_cells_remain_roots_at_native_safepoints() {
+        let mut module = module_with(
+            vec![Instruction::new(Opcode::Panic, 0, 0, 0)],
+            vec![SlotType::Interface0, SlotType::Interface1, SlotType::GcBase],
+        );
+        module.functions[0].has_defer = true;
+        module.functions[0].heap_ret_gcref_start = 2;
+        module.functions[0].heap_ret_gcref_count = 1;
+        module.functions[0].heap_ret_slots = vec![1];
+        let ir = FunctionIr::build(&module.functions[0], &module).unwrap();
+        let state = *ir.frame_state(0).expect("panic unwind state");
+        assert_eq!(ir.direct_roots(state), &[2]);
+        assert_eq!(ir.conditional_roots(state), &[0]);
+        assert_eq!(ir.resume_slots(0).unwrap(), vec![0, 1, 2]);
+    }
+
+    #[test]
     fn return_owns_the_sparse_state_needed_by_an_osr_exit() {
         let code = vec![
             Instruction::new(Opcode::LoadInt, 0, 42, 0),
@@ -2050,6 +2165,7 @@ mod tests {
         assert_eq!(ir.conditional_roots(state), &[0, 2, 4]);
         assert!(!ir.conditional_roots(state).contains(&8));
         assert!(!ir.conditional_roots(state).contains(&12));
+        assert_eq!(ir.resume_slots(1).unwrap(), vec![0, 1, 2, 3, 4, 5, 6]);
     }
 
     #[test]

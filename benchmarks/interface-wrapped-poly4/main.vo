@@ -1,0 +1,44 @@
+package main
+
+func mix(x int) int {
+	return (x * 33) ^ 17
+}
+
+type Adder interface {
+	Add(int) int
+}
+
+type Shape0 struct{}
+
+func (s *Shape0) Add(x int) int {
+	return mix(x) + 1
+}
+
+type Shape1 struct{}
+
+func (s *Shape1) Add(x int) int {
+	return mix(x) + 2
+}
+
+type Shape2 struct{}
+
+func (s *Shape2) Add(x int) int {
+	return mix(x) + 3
+}
+
+type Shape3 struct{}
+
+func (s *Shape3) Add(x int) int {
+	return mix(x) + 4
+}
+
+func main() {
+	table := []Adder{&Shape0{}, &Shape1{}, &Shape2{}, &Shape3{}}
+	total := 0
+	for i := 0; i < 200000; i++ {
+		index := i & 3
+		total += table[index].Add(i & 1023)
+	}
+	assert(total == 3372682880, "dynamic target/value mismatch")
+	println(total)
+}

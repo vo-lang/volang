@@ -337,7 +337,7 @@ pub fn resolve_method_call(
 // =============================================================================
 
 use crate::func::FuncBuilder;
-use vo_runtime::SlotType;
+use vo_common_core::SlotType;
 
 /// Initial state for embed path traversal.
 #[derive(Debug, Clone, Copy)]
@@ -506,7 +506,7 @@ fn emit_final_receiver(
                 // Need to compute ptr + offset to get pointer to embedded field
                 let offset_reg = builder.alloc_slots(&[SlotType::Value]);
                 builder.emit_op(
-                    vo_runtime::instruction::Opcode::LoadInt,
+                    vo_common_core::instruction::Opcode::LoadInt,
                     offset_reg,
                     offset,
                     0,
@@ -702,7 +702,7 @@ pub fn extract_receiver(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vo_runtime::instruction::Opcode;
+    use vo_common_core::instruction::Opcode;
 
     #[test]
     fn pointer_boundaries_keep_large_embed_offsets_in_separate_segments() {

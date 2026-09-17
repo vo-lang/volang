@@ -1,0 +1,48 @@
+package main
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+var measurementType = ui.Define("interaction.Measurement")
+
+func MeasurementExample() ui.View {
+	return ui.Component(measurementType, func(scope *ui.Scope) ui.View {
+		ref := ui.Ref(scope, "box")
+		shown := ui.Bool(scope, "shown", false)
+		wide := ui.Bool(scope, "wide", false)
+		status := ui.String(scope, "status", "Show the space to measure it.")
+		measure := func() {
+			ref.Measure(func(result ui.Measurement) {
+				if result.Error != "" {
+					status.Set(result.Error)
+				} else if !result.Found {
+					status.Set("No space is shown.")
+				} else {
+					status.Set(fmt.Sprintf("%.2f × %.2f", result.Width, result.Height))
+				}
+			})
+		}
+		box := ui.Fragment()
+		if shown.Get() {
+			width := "160.5px"
+			if wide.Get() {
+				width = "240.75px"
+			}
+			box = ui.Element("div", ui.Text("A little room")).Ref(ref).Attr("data-measured-box", "").Attr("style", "box-sizing:border-box;width:" +
+				width +
+				";height:80.25px;background:#edf1e9;border:1px solid #b7c9ae;padding:12px;transform:translateX(3.5px)")
+		}
+		return ui.Element("section", ui.Element("h2", ui.Text("A sense of space")), ui.Element("p", ui.Text("Show, resize, or hide a space. Its size follows the updated layout.")), ui.Element("div", ui.Element("button", ui.Text("Show and measure")).Attr("data-measure-show", "").On("click", func(ui.Event) {
+			shown.Set(true)
+			measure()
+		}), ui.Element("button", ui.Text("Resize and measure")).Attr("data-measure-resize", "").On("click", func(ui.Event) {
+			wide.Set(!wide.Get())
+			measure()
+		}), ui.Element("button", ui.Text("Hide and measure")).Attr("data-measure-hide", "").On("click", func(ui.Event) {
+			shown.Set(false)
+			measure()
+		})).Class("actions"), box, ui.Element("output", ui.Text(status.Get())).Attr("data-measurement", "").Attr("aria-live", "polite")).Class("card")
+	})
+}

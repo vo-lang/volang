@@ -1,0 +1,97 @@
+package ui
+
+var boundaryType = Define("ui.ErrorBoundary")
+
+// RenderError belongs to one failure of one mounted boundary. Retry schedules
+// a fresh content subtree; retained callbacks from an earlier failure are inert.
+type RenderError struct {
+	Value any
+	scope *Scope
+	diagnostic *RenderFailure
+}
+
+func (failure *RenderError) Components() []ComponentFrame {
+	if failure == nil {
+		return nil
+	}
+	return failure.diagnostic.Components()
+}
+
+func (failure *RenderError) Retry() bool {
+	if failure == nil || failure.scope == nil || failure.scope.disposed ||
+		failure.scope.failure != failure {
+		return false
+	}
+	scope := failure.scope
+	if scope.root.closed || scope.root.flushing || scope.root.committing || scope.root.awaiting != 0 {
+		return false
+	}
+	scope.failure = nil
+	scope.root.invalidate(scope)
+	return true
+}
+
+// ErrorBoundary replaces failed content with a fallback in the same commit.
+// Content state resets after failure; ancestors and siblings retain identity.
+// It catches render/reconciliation panics. Fallback failures reach the next
+// outer boundary. Handler, effect, cleanup and host failures are separate paths.
+func ErrorBoundary(content func() View, fallback func(*RenderError) View) View {
+	if content == nil || fallback == nil {
+		panic("ui: error boundary requires content and fallback functions")
+	}
+	view := Component(boundaryType, func(scope *Scope) View {
+		return content()
+	})
+	view.fallback = fallback
+	return view
+}
+
+// Only boundary child IDs and the mutation cursor need a checkpoint. On error
+// dispose the attempted subtree, discard its unpublished DOM delta, remove the
+// pre-attempt child ranges, and mount the fallback. External cleanup still runs
+// after commit; cancellation commands and consumed IDs are deliberately kept.
+func (root *Root) protect(scope *Scope, action func()) {
+	cursor := root.mutations.length
+	children := make([]int, len(scope.node.children))
+	for i, child := range scope.node.children {
+		children[i] = child.id
+	}
+	defer func() {
+		if value := recover(); value != nil {
+			diagnostic := captureRenderFailure(value, scope)
+			root.mutations.truncate(cursor)
+			for _, child := range scope.node.children {
+				root.dispose(child)
+			}
+			scope.node.children = nil
+			for _, id := range children {
+				root.emit(Mutation{Op: "remove", ID: id})
+			}
+			scope.failure = &RenderError{Value: diagnostic.Value, scope: scope, diagnostic: diagnostic}
+			root.renderComponent(scope)
+		}
+	}()
+	action()
+}
+
+// Dirty descendants render independently of their ancestors. Reestablish the
+// boundary nesting so fallback failures follow the same route as initial mount.
+func (root *Root) renderPending(scope *Scope) {
+	boundaries := []*Scope{}
+	for parent := scope.parent; parent != nil; parent = parent.parent {
+		if parent.node.view.fallback != nil && parent.failure == nil {
+			boundaries = append(boundaries, parent)
+		}
+	}
+	root.renderWithin(scope, boundaries, len(boundaries) - 1)
+}
+
+func (root *Root) renderWithin(scope *Scope, boundaries []*Scope, index int) {
+	if index < 0 {
+		root.render(scope)
+		return
+	}
+	root.protect(boundaries[index], func() {
+		root.renderWithin(scope, boundaries, index - 1)
+	})
+}

@@ -1,0 +1,170 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/navigation"
+)
+
+func routeLocation(value string) navigation.Location {
+	location, err := navigation.Parse(value)
+	if err != nil {
+		panic(err)
+	}
+	return location
+}
+
+func routeContracts() {
+	leaf := func(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {
+		return ui.Text(match.ID)
+	}
+	definitions := []navigation.Route{
+		{
+			ID: "workspace", Path: "space",
+			Children: []navigation.Route{
+				{ID: "rest", Path: "*rest", Render: leaf}, {ID: "person", Path: ":person", Render: leaf},
+				{ID: "new", Path: "new", Render: leaf}, {ID: "home", Render: leaf},
+			},
+		},
+	}
+	routes := navigation.NewRoutes(definitions)
+	definitions[0].Children[1].Path = "changed"
+	for _, example := range []struct {
+		URL string
+		ID string
+		Param string
+		Value string
+	}{
+		{URL: "/space/new", ID: "new"}, {URL: "/space", ID: "home"}, {URL: "/space/", ID: "home"},
+		{URL: "/space/ada?tag=one&tag=two#note", ID: "person", Param: "person", Value: "ada"},
+		{URL: "/space/%E4%B8%AD%E6%96%87", ID: "person", Param: "person", Value: "中文"},
+		{URL: "/space/a%2Fb", ID: "person", Param: "person", Value: "a/b"},
+		{URL: "/space/a%252Fb", ID: "person", Param: "person", Value: "a%2Fb"},
+		{URL: "/space/a+b", ID: "person", Param: "person", Value: "a+b"},
+		{URL: "/space/a/b", ID: "rest", Param: "rest", Value: "a/b"},
+	} {
+		match, ok := routes.Match(routeLocation(example.URL))
+		require(ok && match.ID == example.ID && match.Param(example.Param) == example.Value, "route precedence or decoded parameter failed: " +
+			example.URL)
+	}
+	for _, path := range []string{"/elsewhere", "/space//ada", "/space//", "space/ada"} {
+		_, ok := routes.Match(routeLocation(path))
+		require(!ok, "invalid or missing route unexpectedly matched: " + path)
+	}
+	_, err := navigation.Parse("/space/%ZZ")
+	require(err != nil, "malformed path escaping was silently accepted")
+	location := routeLocation("/space/ada?tag=one&tag=two#note")
+	match, _ := routes.Match(location)
+	location.Query["tag"][0] = "mutated"
+	require(match.Location.Query.Get("tag") == "one" && len(match.Location.Query["tag"]) == 2 &&
+		match.Location.Fragment == "note", "route location did not preserve an independent query snapshot")
+	for _, invalid := range [][]navigation.Route{
+		{{ID: "one", Path: ":id", Render: leaf}, {ID: "two", Path: ":other", Render: leaf}},
+		{{ID: "one", Path: "a/:id/:id", Render: leaf}}, {{ID: "one", Path: "a/*rest/b", Render: leaf}},
+		{{ID: "one", Path: "/absolute", Render: leaf}},
+		{{ID: "one", Render: leaf}, {ID: "one", Path: "b", Render: leaf}}, {{ID: "one"}},
+	} {
+		expectPanic(func() {
+			navigation.NewRoutes(invalid)
+		}, "navigation:")
+	}
+	routeLifetimes()
+	routeCommitOrdering()
+}
+
+func routeCommitOrdering() {
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		router := navigation.Use(scope, "router", "/a")
+		navigation.Restore(scope, "viewport", router, "main")
+		return ui.Element("main", ui.Text(router.Current().Path)).Attr("id", "main")
+	}))
+	commands := settleQueries(root)
+	location, metadata := 0, 0
+	for _, command := range commands {
+		if command.Name == "web.location" {
+			location = command.ID
+		}
+		if command.Name == "web.navigation" {
+			metadata = command.ID
+		}
+	}
+	require(location > 0 && metadata > 0, "restoration subscriptions were not declared")
+	root.Dispatch(ui.Event{
+		Kind: "@task", Target: metadata, Sequence: 1, Value: `{"observer":"one","revision":2,"url":"/b"}`,
+	})
+	require(len(settleQueries(root)) == 0, "restoration acknowledged a URL its view had not rendered")
+	root.Dispatch(ui.Event{Kind: "@task", Target: location, Sequence: 2, Value: "/b"})
+	batch := root.Flush()
+	require(len(batch.Commands) == 0 && strings.Contains(root.HTML(), "/b"), "restoration ran before the new view committed")
+	root.Commit(batch.Revision)
+	commands = settleQueries(root)
+	one := onlyStart(commands)
+	require(len(commands) == 1 && commands[0].Name == "web.navigation-commit", "committed navigation did not acknowledge its viewport")
+	root.Close()
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: one, Sequence: 3}), "closed restoration accepted a result")
+}
+
+func routeLifetimes() {
+	var layoutNote, leafNote *ui.StringState
+	var path *ui.StringState
+	cleanups := 0
+	routes := navigation.NewRoutes([]navigation.Route{
+		{
+			ID: "layout", Path: "space",
+			Render: func(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {
+				layoutNote = ui.String(scope, "note", "layout")
+				// A layout receives its own mutable query copy. Its child is isolated.
+				match.Location.Query.Set("source", "layout mutation")
+				return ui.Element("section", ui.Text(layoutNote.Get()), outlet)
+			},
+			Children: []navigation.Route{
+				{
+					ID: "person", Path: ":person",
+					Render: func(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {
+						leafNote = ui.String(scope, "note", "leaf")
+						ui.Effect(scope, "cleanup", func() func() {
+							return func() {
+								cleanups++
+							}
+						})
+						return ui.Element("p", ui.Text(match.Param("person") + ":" + leafNote.Get() + ":" +
+							match.Location.Query.Get("source")))
+					},
+				},
+				{
+					ID: "new", Path: "new",
+					Render: func(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {
+						return ui.Text("new person")
+					},
+				},
+			},
+		},
+	})
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		path = ui.String(scope, "url", "/space/ada?source=original")
+		return routes.View(routeLocation(path.Get()), ui.Text("missing"))
+	}))
+	flush(root)
+	require(strings.Contains(root.HTML(), "ada:leaf:original"), "layout mutation leaked into its outlet props")
+	initialLayout, initialLeaf := layoutNote, leafNote
+	layoutNote.Set("keep layout")
+	leafNote.Set("keep leaf")
+	flush(root)
+	path.Set("/space/grace?source=updated")
+	batch := flush(root)
+	for _, mutation := range batch.Mutations {
+		require(mutation.Op != "create", "parameter change remounted a route")
+	}
+	require(layoutNote == initialLayout && leafNote == initialLeaf && cleanups == 0 &&
+		strings.Contains(root.HTML(), "grace:keep leaf:updated"), "parameter update lost route state or props")
+	path.Set("/space/new")
+	flush(root)
+	require(layoutNote == initialLayout && layoutNote.Get() == "keep layout" && cleanups == 1, "sibling route replaced its layout or retained old leaf effects")
+	path.Set("/space/ada")
+	flush(root)
+	require(leafNote != initialLeaf && leafNote.Get() == "leaf", "returning route retained a disposed leaf")
+	path.Set("/missing")
+	flush(root)
+	require(strings.Contains(root.HTML(), "missing") && cleanups == 2, "404 retained the old route tree")
+	root.Close()
+}

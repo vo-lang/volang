@@ -115,17 +115,17 @@ Use `--kind=object` for a relocatable object or `--target=TRIPLE` for a
 supported cross target. A custom runtime archive may be supplied with
 `--runtime=PATH`.
 
-## Build Core Wasm AOT
+## Build Web bytecode
 
-Create an interpreter-free Core Wasm deployment image with:
+Create a verified bytecode module for the Wasm VM with:
 
 ```sh
-vo build . --kind=wasm -o hello-app.wasm
+vo build . --kind=bytecode --target=wasm32-unknown-unknown -o hello-app.vob
 ```
 
-The Wasm image targets the versioned Volang AOT host ABI. A host such as
-`vo-web` provides output, memory, scheduling, and declared platform imports.
-For browser applications, `vo ui build` assembles the image, host adapter,
+The `vo-web` Wasm VM loads the verified bytecode and provides output, memory,
+scheduling, and supported platform services.
+For browser applications, `vo ui build` assembles the bytecode, runtime, host adapter,
 assets, manifest, and deployment policy into one directory.
 
 ## Continue

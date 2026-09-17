@@ -1,0 +1,80 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+func popoverMutation(batch ui.Batch) ui.Mutation {
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "popover" {
+			return mutation
+		}
+	}
+	panic("missing popover presentation")
+}
+
+func popoverContracts() {
+	var open *ui.BoolState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		open = ui.Bool(scope, "open", false)
+		return kit.Popover(kit.PopoverProps{
+			ID: "settings", Label: "Settings", Motion: true,
+			Open: func() bool {
+				return open.Get()
+			},
+			OnOpenChange: func(value bool) {
+				open.Set(value)
+			},
+		}, ui.Text("retained content"))
+	}))
+	initial := popoverMutation(flush(root))
+	require(initial.Parent > 0 && initial.Value == "false" && initial.Name == "bottom-start", "popover lost its anchor or default placement")
+	require(strings.Contains(root.HTML(), "vui-popover-motion") &&
+		strings.Contains(root.HTML(), `inert`) &&
+		strings.Contains(root.HTML(), `aria-hidden="true"`), "closed animated popover retained interactive content")
+	sequence := 0
+	click := func() {
+		sequence++
+		require(root.Dispatch(ui.Event{Target: initial.Parent, Kind: "click", Sequence: sequence}), "popover trigger did not receive activation")
+	}
+	click()
+	click()
+	require(!open.Get(), "batched trigger activation read stale open props")
+	flush(root)
+	click()
+	presentation := popoverMutation(flush(root))
+	require(open.Get() && presentation.ID == initial.ID && presentation.Parent == initial.Parent &&
+		presentation.Value == "true", "popover activation replaced its identities")
+	require(strings.Contains(root.HTML(), `popover="auto"`) &&
+		strings.Contains(root.HTML(), "retained content"), "popover SSR omitted hidden content")
+	require(!strings.Contains(root.HTML(), ` inert`) &&
+		strings.Contains(root.HTML(), `aria-hidden="false"`), "open popover remained inactive")
+	sequence++
+	root.Dispatch(ui.Event{Target: initial.ID, Kind: "toggle", Value: "closed", Sequence: sequence})
+	require(!open.Get() && popoverMutation(flush(root)).Value == "false", "native dismissal did not synchronize controlled state")
+	require(strings.Contains(root.HTML(), ` inert`) &&
+		strings.Contains(root.HTML(), `aria-hidden="true"`), "native dismissal did not deactivate popover content")
+	root.Close()
+	var replaced *ui.BoolState
+	anchorRoot := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		anchor := ui.Ref(scope, "anchor")
+		replaced = ui.Bool(scope, "replaced", false)
+		key := "first"
+		if replaced.Get() {
+			key = "second"
+		}
+		return ui.Fragment(ui.Element("button", ui.Text("Anchor")).Ref(anchor).Key(key), ui.Element("div", ui.Text("Popup")).Popover(ui.PopoverOptions{
+			Open: true, Anchor: anchor,
+		}))
+	}))
+	before := popoverMutation(flush(anchorRoot))
+	replaced.Set(true)
+	after := popoverMutation(flush(anchorRoot))
+	require(before.ID == after.ID && before.Parent != after.Parent && after.Value == "true", "retained popup did not follow a replaced anchor binding")
+	anchorRoot.Close()
+	expectPanic(func() {
+		ui.Element("div").Popover(ui.PopoverOptions{})
+	}, "anchor ref")
+}

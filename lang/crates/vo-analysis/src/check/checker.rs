@@ -104,8 +104,7 @@ impl ObjContext {
     }
 }
 
-/// Delayed action to be executed later during type checking.
-pub type DelayedAction = Box<dyn FnOnce(&mut Checker)>;
+use super::deferred::DelayedAction;
 
 // =============================================================================
 // Checker - the main type checker
@@ -160,7 +159,7 @@ pub struct Checker {
     /// Map of expressions without final type.
     pub(crate) untyped: HashMap<ExprId, ExprInfo>,
     /// Stack of delayed actions.
-    pub delayed: Vec<DelayedAction>,
+    delayed: Vec<DelayedAction>,
     /// Path of object dependencies during type inference (for cycle reporting).
     pub obj_path: Vec<ObjKey>,
     /// Aggregate payload processed by constant folding in this package.
@@ -169,17 +168,20 @@ pub struct Checker {
 
 impl Checker {
     /// Creates a new type checker for the given package.
-    pub(crate) fn new(pkg: PackageKey, interner: SymbolInterner) -> Checker {
-        Self::new_with_trace(pkg, interner, false)
-    }
-
-    /// Creates a new type checker with trace option.
     pub fn new_with_trace(
         pkg: PackageKey,
         interner: SymbolInterner,
         trace_enabled: bool,
     ) -> Checker {
-        let tc_objs = TCObjects::new();
+        Self::with_objects(pkg, interner, trace_enabled, TCObjects::new())
+    }
+
+    pub(crate) fn with_objects(
+        pkg: PackageKey,
+        interner: SymbolInterner,
+        trace_enabled: bool,
+        tc_objs: TCObjects,
+    ) -> Checker {
         Checker {
             tc_objs,
             interner,
@@ -246,6 +248,23 @@ impl Checker {
     /// Resolves an identifier to its string.
     pub(crate) fn resolve_ident(&self, ident: &vo_syntax::ast::Ident) -> &str {
         self.resolve_symbol(ident.symbol)
+    }
+
+    /// Record a resolved package qualifier in both semantic metadata and lint state.
+    pub(crate) fn use_package_name(
+        &mut self,
+        ident: vo_syntax::ast::Ident,
+        object: ObjKey,
+    ) -> Option<PackageKey> {
+        let crate::obj::EntityType::PkgName { imported, used } =
+            self.lobj_mut(object).entity_type_mut()
+        else {
+            return None;
+        };
+        *used = true;
+        let imported = *imported;
+        self.result.record_use(ident, object);
+        Some(imported)
     }
 
     /// Returns the universe.
@@ -392,8 +411,21 @@ impl Checker {
         self.untyped.insert(expr_id, info);
     }
 
+    /// Run a semantic subtask in its own context, restoring the caller's state
+    /// even when the subtask returns early after a diagnostic.
+    pub(crate) fn with_context<R>(
+        &mut self,
+        context: ObjContext,
+        run: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous = std::mem::replace(&mut self.octx, context);
+        let result = run(self);
+        self.octx = previous;
+        result
+    }
+
     /// Push a delayed action onto the stack.
-    pub(crate) fn later(&mut self, action: DelayedAction) {
+    pub(super) fn later(&mut self, action: DelayedAction) {
         self.delayed.push(action);
     }
 
@@ -404,9 +436,11 @@ impl Checker {
 
     /// Process delayed actions starting from index `top`.
     pub(crate) fn process_delayed(&mut self, top: usize) {
-        let actions: Vec<DelayedAction> = self.delayed.drain(top..).collect();
-        for action in actions {
-            action(self);
+        while self.delayed.len() > top {
+            let actions: Vec<DelayedAction> = self.delayed.drain(top..).collect();
+            for action in actions {
+                action.run(self);
+            }
         }
     }
 
@@ -441,33 +475,7 @@ impl Checker {
 
     /// Main entry point for type checking a set of files.
     pub(crate) fn check(&mut self, files: &[File]) -> Result<PackageKey, ()> {
-        self.constant_fold_work_bytes = 0;
-        self.check_files_pkg_name(files)?;
-        self.collect_objects(files, None);
-        self.package_objects();
-        self.process_delayed(0);
-        self.init_order();
-        self.unused_imports();
-        self.record_untyped();
-
-        // Escape analysis pass
-        let escape_result = super::escape::analyze(files, &self.result, &self.tc_objs);
-        self.result.escaped_vars = escape_result.escaped;
-        self.result.closure_captures = escape_result.closure_captures;
-        self.result.loop_defined_vars = escape_result.loop_defined_vars;
-
-        // go @(island) sendability post-pass (needs closure_captures from escape analysis)
-        let go_island_diags =
-            super::go_island::check_go_island_sendability(files, &self.result, &self.tc_objs);
-        for diag in go_island_diags {
-            self.error_code_msg(diag.code, diag.span, diag.message);
-        }
-
-        if self.has_errors() {
-            Err(())
-        } else {
-            Ok(self.pkg)
-        }
+        self.check_package(files, None)
     }
 
     /// Type check files with an importer for handling imports.
@@ -477,24 +485,40 @@ impl Checker {
         files: &[File],
         importer: &mut dyn Importer,
     ) -> Result<PackageKey, ()> {
-        self.constant_fold_work_bytes = 0;
-        self.check_files_pkg_name(files)?;
-        self.collect_objects(files, Some(importer));
-        self.package_objects();
-        self.process_delayed(0);
-        self.init_order();
-        self.unused_imports();
-        self.record_untyped();
+        self.check_package(files, Some(importer))
+    }
 
-        // Escape analysis pass
-        let escape_result = super::escape::analyze(files, &self.result, &self.tc_objs);
+    fn check_package(
+        &mut self,
+        files: &[File],
+        importer: Option<&mut dyn Importer>,
+    ) -> Result<PackageKey, ()> {
+        vo_common::compiler_phase!(TypeCheck, {
+            self.constant_fold_work_bytes = 0;
+            self.check_files_pkg_name(files)?;
+            self.collect_objects(files, importer);
+            self.package_objects();
+            self.process_delayed(0);
+            self.init_order();
+            self.unused_imports();
+            self.record_untyped();
+            Ok::<(), ()>(())
+        })?;
+
+        // Escape and capture share one traversal.
+        let escape_result = vo_common::compiler_phase!(
+            EscapeCapture,
+            super::escape::analyze(files, &self.result, &self.tc_objs)
+        );
         self.result.escaped_vars = escape_result.escaped;
         self.result.closure_captures = escape_result.closure_captures;
         self.result.loop_defined_vars = escape_result.loop_defined_vars;
 
         // go @(island) sendability post-pass (needs closure_captures from escape analysis)
-        let go_island_diags =
-            super::go_island::check_go_island_sendability(files, &self.result, &self.tc_objs);
+        let go_island_diags = vo_common::compiler_phase!(
+            Sendability,
+            super::go_island::check_go_island_sendability(files, &self.result, &self.tc_objs)
+        );
         for diag in go_island_diags {
             self.error_code_msg(diag.code, diag.span, diag.message);
         }

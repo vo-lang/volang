@@ -605,30 +605,36 @@ impl<'src> Lexer<'src> {
     }
 
     fn scan_number_inner(&mut self) -> TokenKind {
+        let start = self.local_pos;
         let first = self.advance().unwrap();
-
         if first == '0' {
             match self.peek() {
                 Some('x') | Some('X') => return self.scan_hex_number(),
                 Some('o') | Some('O') => return self.scan_octal_number(),
                 Some('b') | Some('B') => return self.scan_binary_number(),
-                Some('.') => {
-                    self.advance();
-                    return self.scan_float_after_dot();
-                }
-                Some('e') | Some('E') => {
-                    return self.scan_float_exponent();
-                }
-                Some(c) if c.is_ascii_digit() => {
-                    // Go-style octal: 0644
-                    return self.scan_go_style_octal_number();
-                }
-                Some('_') => return self.scan_go_style_octal_number(),
-                _ => return TokenKind::IntLit,
+                _ => {}
             }
         }
 
-        self.scan_decimal_number()
+        // A leading zero determines the radix only after the complete token
+        // has been classified: 08.0 and 08e1 are decimal floats, 08 is invalid.
+        let kind = self.scan_decimal_number();
+        if first == '0' && kind == TokenKind::IntLit {
+            for (offset, digit) in self.source[start as usize..self.local_pos as usize]
+                .bytes()
+                .enumerate()
+            {
+                if matches!(digit, b'8' | b'9') {
+                    let pos = self.base + start + offset as u32;
+                    self.diagnostics
+                        .emit(SyntaxError::OctalInvalidDigit.at_with_message(
+                            pos..pos + 1,
+                            format!("invalid digit '{}' in octal literal", digit as char),
+                        ));
+                }
+            }
+        }
+        kind
     }
 
     /// Scans a decimal number (integer or float).
@@ -707,12 +713,6 @@ impl<'src> Lexer<'src> {
             return TokenKind::Invalid;
         }
 
-        self.scan_octal_digits();
-        TokenKind::IntLit
-    }
-
-    /// Scans a Go-style octal number (0644 style, Go compatible).
-    fn scan_go_style_octal_number(&mut self) -> TokenKind {
         self.scan_octal_digits();
         TokenKind::IntLit
     }

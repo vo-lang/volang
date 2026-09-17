@@ -20,7 +20,7 @@ file = "lang/docs/guides/installation.md"
 [[section.page]]
 id = "hello-world"
 title = "Hello world"
-summary = "Run a script, create a module, test it, and build native or Wasm AOT output."
+summary = "Run a script, create a module, test it, and build native output or Web bytecode."
 file = "lang/docs/guides/hello-world.md"
 
 [[section.page]]
@@ -82,7 +82,7 @@ file = "lang/docs/guides/cli.md"
 [[section.page]]
 id = "execution-backends"
 title = "Execution backends"
-summary = "Choose VM or JIT for development and Native AOT or Core Wasm AOT for release."
+summary = "Choose VM or JIT for development and Native AOT or Wasm VM for release."
 file = "lang/docs/guides/execution-backends.md"
 
 [[section.page]]
@@ -133,7 +133,7 @@ file = "lang/docs/spec/runtime-memory.md"
 
 [[section]]
 id = "ui"
-title = "Official UI"
+title = "Legacy UI compatibility"
 
 [[section.page]]
 id = "ui-getting-started"
@@ -162,7 +162,7 @@ file = "ui/docs/testing-troubleshooting.md"
 [[section.page]]
 id = "ui-platforms"
 title = "Web and desktop products"
-summary = "Design one application for Core Wasm AOT Web and Native AOT desktop hosts."
+summary = "Design one application for Wasm VM Web and Native AOT desktop hosts."
 file = "ui/docs/web-desktop-products.md"
 
 [[section.page]]
@@ -176,3 +176,32 @@ id = "ui-security"
 title = "UI security"
 summary = "Apply capability, authority, isolation, payload, navigation, and release boundaries."
 file = "ui/docs/security.md"
+
+
+[[section]]
+id = "web-ui"
+title = "Web UI framework"
+
+[[section.page]]
+id = "first-steps"
+title = "First steps"
+summary = "Create, inspect, test and build your first Web UI application."
+file = "ui/next/guides/first-steps.md"
+
+[[section.page]]
+id = "state"
+title = "State & identity"
+summary = "Keep typed inputs, local state and shared values tied to the right component."
+file = "ui/next/guides/state.md"
+
+[[section.page]]
+id = "lifecycle"
+title = "Lifecycle & requests"
+summary = "Own effects, requests, subscriptions and cancellation through the component lifetime."
+file = "ui/next/guides/lifecycle.md"
+
+[[section.page]]
+id = "migration"
+title = "Migrate a Web screen"
+summary = "Move existing state and controls into an owned component and test startup interactions."
+file = "ui/next/guides/migration.md"

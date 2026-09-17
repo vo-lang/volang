@@ -25,7 +25,7 @@ wgpu = { version = "=24.0.5", optional = true, default-features = false, feature
 vo-app-host-native.workspace = true
 vo-app-protocol.workspace = true
 vo-app-runtime = { workspace = true, features = ["std"] }
-vo-engine.workspace = true
+vo-ui-integration = { workspace = true }
 vo-ui-accesskit.workspace = true
 vo-ui-core.workspace = true
 vo-ui-host-native.workspace = true

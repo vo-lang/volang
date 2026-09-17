@@ -23,11 +23,10 @@ mod vm_materialization;
 
 pub use callback_abi::{
     emit_checked_jit_result_indirect_callback_call, emit_raw_jit_context_callback_call,
-    emit_returning_jit_result_indirect_callback_call, CALL_DEPTH_OVERFLOW_CALLSITE,
-    LINK_FUNCTION_CALLSITE, NON_OK_SLOW_PATH_PUSH_FRAME_CALLSITE,
-    NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE, PREPARED_CALL_POP_FRAME_CALLSITE,
-    PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE, PREPARE_CLOSURE_CALLSITE, PREPARE_IFACE_CALLSITE,
-    STACK_LIMIT_OVERFLOW_CALLSITE,
+    emit_returning_jit_result_indirect_callback_call, LINK_FUNCTION_CALLSITE,
+    NON_OK_SLOW_PATH_PUSH_FRAME_CALLSITE, NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE,
+    PREPARED_CALL_POP_FRAME_CALLSITE, PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
+    PREPARE_CLOSURE_CALLSITE, PREPARE_IFACE_CALLSITE, STACK_LIMIT_OVERFLOW_CALLSITE,
 };
 pub use dynamic::{emit_call_closure, emit_call_iface};
 pub use externs::{emit_call_extern, CallExternConfig};
@@ -37,7 +36,6 @@ pub use result_flow::{
     check_call_result, emit_checked_jit_result_helper_call, emit_non_ok_slow_path,
     NonOkSlowPathParams, JIT_RESULT_CALL, JIT_RESULT_OK, JIT_RESULT_REPLAY,
 };
-pub(crate) use vm_materialization::emit_jit_call_with_explicit_arguments;
 pub use vm_materialization::{emit_call_via_vm, emit_jit_call_with_vm_materialization};
 
 /// Maximum callee local-slot width for direct static JIT calls.
@@ -165,41 +163,74 @@ pub fn emit_stack_capacity_check<'a, E: IrEmitter<'a>>(
     Ok((checked_materialize_block, ok_block))
 }
 
-pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-    ctx: Value,
-) -> Result<Value, crate::JitError> {
+/// The generated frame is already allocated when its prologue runs. Reserve
+/// enough remaining headroom for the largest admitted callee, and bound the
+/// rest of a chain by actual SP movement rather than frame count alone.
+const NATIVE_CHAIN_BYTES: usize = 512 * 1024;
+
+pub(crate) fn initialize_native_stack_budget<'a>(emitter: &mut impl IrEmitter<'a>) {
+    let depth = emitter.load_context_field(types::I32, JitContextField::CallDepth);
+    let outermost = emitter.builder().ins().icmp_imm_u(IntCC::Equal, depth, 0);
+    let initialize = emitter.builder().create_block();
+    let ready = emitter.builder().create_block();
+    emitter
+        .builder()
+        .ins()
+        .brif(outermost, initialize, &[], ready, &[]);
+    emitter.builder().switch_to_block(initialize);
+    emitter.builder().seal_block(initialize);
+    let sp = emitter.builder().ins().get_stack_pointer(types::I64);
+    let headroom = NATIVE_CHAIN_BYTES - crate::MAX_JIT_NATIVE_FRAME_BYTES;
+    let floor = emitter.builder().ins().iadd_imm_s(sp, -(headroom as i64));
+    emitter.store_context_field(floor, JitContextField::NativeStackFloor);
+    emitter.builder().ins().jump(ready, &[]);
+    emitter.builder().switch_to_block(ready);
+    emitter.builder().seal_block(ready);
+}
+
+fn emit_native_chain_guard<'a, E: IrEmitter<'a>>(emitter: &mut E, trampoline: Block) -> Value {
     let depth = emitter.load_context_field(types::I32, JitContextField::CallDepth);
     let limit = emitter.load_context_field(types::I32, JitContextField::CallDepthLimit);
-    let overflow = emitter
+    let too_deep = emitter
         .builder()
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, depth, limit);
+    let check_stack = emitter.builder().create_block();
+    emitter
+        .builder()
+        .ins()
+        .brif(too_deep, trampoline, &[], check_stack, &[]);
+    emitter.builder().switch_to_block(check_stack);
+    emitter.builder().seal_block(check_stack);
 
-    let overflow_block = crate::compile_common::cold_block(emitter.builder());
+    // Keep both failures on cold edges. Combining these comparisons into an
+    // integer boolean adds flag-to-register dependencies to every native call.
+    let floor = emitter.load_context_field(types::I64, JitContextField::NativeStackFloor);
+    let sp = emitter.builder().ins().get_stack_pointer(types::I64);
+    let too_large = emitter
+        .builder()
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, sp, floor);
     let ok_block = emitter.builder().create_block();
     emitter
         .builder()
         .ins()
-        .brif(overflow, overflow_block, &[], ok_block, &[]);
-
-    emitter.builder().switch_to_block(overflow_block);
-    emitter.builder().seal_block(overflow_block);
-    mark_stack_overflow_pc(emitter);
-    let stack_overflow_fn_ptr =
-        emitter.load_context_field(types::I64, JitContextField::StackOverflowFn);
-    emit_returning_jit_result_indirect_callback_call(
-        emitter,
-        CALL_DEPTH_OVERFLOW_CALLSITE,
-        stack_overflow_fn_ptr,
-        &[ctx],
-    )?;
-
+        .brif(too_large, trampoline, &[], ok_block, &[]);
     emitter.builder().switch_to_block(ok_block);
     emitter.builder().seal_block(ok_block);
+    depth
+}
+
+pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(emitter: &mut E, trampoline: Block) -> Value {
+    let depth = emit_native_chain_guard(emitter, trampoline);
+    emit_call_depth_increment(emitter, depth)
+}
+
+/// Increment a depth already checked against the trampoline boundary.
+fn emit_call_depth_increment<'a, E: IrEmitter<'a>>(emitter: &mut E, depth: Value) -> Value {
     let next_depth = emitter.builder().ins().iadd_imm_s(depth, 1);
     emitter.store_context_field(next_depth, JitContextField::CallDepth);
-    Ok(depth)
+    depth
 }
 
 pub fn emit_call_depth_leave<'a, E: IrEmitter<'a>>(emitter: &mut E, old_depth: Value) {
@@ -340,31 +371,9 @@ pub(super) fn emit_effect_aware_direct_jit_call<'a, E: IrEmitter<'a>>(
     }
 }
 
-/// Load raw argument words from a validated frame window. Callers guarantee
-/// that `available_slots` words are addressable; unused lanes are zero-filled.
+/// Load raw argument words from a verified frame window. Each load is guarded
+/// by its target width; unused lanes are zero and cannot read beyond the frame.
 pub(super) fn load_native_arg_lanes<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-    frame_ptr: Value,
-    available_slots: usize,
-) -> [Value; crate::NATIVE_ARG_LANES] {
-    std::array::from_fn(|lane| {
-        if lane < available_slots {
-            emitter.builder().ins().load(
-                types::I64,
-                cranelift_codegen::ir::MemFlagsData::trusted(),
-                frame_ptr,
-                (lane * 8) as i32,
-            )
-        } else {
-            emitter.builder().ins().iconst(types::I64, 0)
-        }
-    })
-}
-
-/// Dynamic counterpart used by prepared calls. Each load is control-dependent
-/// on the verified target frame width, so a narrow frame never incurs a
-/// speculative out-of-bounds read.
-pub(super) fn load_native_arg_lanes_dynamic<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     frame_ptr: Value,
     available_slots: Value,
@@ -445,32 +454,19 @@ mod tests {
     fn gc_materialize_call_plan_routes_full_function_call_shapes() {
         let self_plan = CallPlan::new(7, 2, &func(8, false));
         assert_eq!(
-            self_plan.route_for_full_function(7),
+            self_plan.route(),
             CallRoute::DynamicJitTable,
             "self recursion uses the guarded JIT table path once its entry is published"
         );
-        assert!(self_plan.requires_depth_guard(true));
-        assert!(!self_plan.requires_depth_guard(false));
 
         let defer_self = CallPlan::new(7, 2, &func(8, true));
-        assert_eq!(
-            defer_self.route_for_full_function(7),
-            CallRoute::VmCallMaterialization
-        );
+        assert_eq!(defer_self.route(), CallRoute::VmCallMaterialization);
 
         let large = CallPlan::new(7, 2, &func((MAX_DIRECT_JIT_FRAME_SLOTS + 1) as u16, false));
-        assert_eq!(
-            large.route_for_full_function(7),
-            CallRoute::VmCallMaterialization
-        );
-        assert_eq!(large.route_for_loop(), CallRoute::VmCallMaterialization);
+        assert_eq!(large.route(), CallRoute::VmCallMaterialization);
 
         let dynamic = CallPlan::new(8, 2, &func(8, false));
-        assert_eq!(
-            dynamic.route_for_full_function(7),
-            CallRoute::DynamicJitTable
-        );
-        assert_eq!(dynamic.route_for_loop(), CallRoute::DynamicJitTable);
+        assert_eq!(dynamic.route(), CallRoute::DynamicJitTable);
 
         let mut allocating = func(8, false);
         allocating.code = vec![Instruction::new(
@@ -481,7 +477,7 @@ mod tests {
         )];
         let allocating_plan = CallPlan::new(8, 2, &allocating);
         assert_eq!(
-            allocating_plan.route_for_full_function(7),
+            allocating_plan.route(),
             CallRoute::DynamicJitTable,
             "allocation-only callees use the guarded JIT table; their allocation helpers own the GC safepoint"
         );
@@ -495,11 +491,10 @@ mod tests {
         )];
         let trapping_plan = CallPlan::new(8, 2, &trapping);
         assert_eq!(
-            trapping_plan.route_for_full_function(7),
+            trapping_plan.route(),
             CallRoute::PreparedJitTable,
             "runtime traps use the prepared shadow route"
         );
-        assert!(trapping_plan.requires_depth_guard(false));
     }
 
     #[test]
@@ -525,7 +520,7 @@ mod tests {
             },
         );
 
-        assert_eq!(plan.route_for_full_function(1), CallRoute::DynamicJitTable);
+        assert_eq!(plan.route(), CallRoute::DynamicJitTable);
     }
 
     #[test]

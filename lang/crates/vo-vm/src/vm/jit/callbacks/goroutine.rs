@@ -265,8 +265,11 @@ pub extern "C" fn jit_go_start(
                 Err(result) => return result,
             };
         if closure_ref == 0 {
-            record_runtime_trap(ctx, JitRuntimeTrapKind::NilFuncCall, ctx.runtime_trap_pc);
-            return JitResult::Panic;
+            return commit_go_spawn(
+                ctx,
+                &mut vm,
+                crate::fiber::PendingSpawn::trapped(crate::vm::RuntimeTrapKind::NilFuncCall),
+            );
         }
         let gc = &vm.state().gc;
         let closure_target = match validate_closure_target(gc, module, closure_ref, "jit_go_start")
@@ -333,6 +336,7 @@ pub extern "C" fn jit_go_start(
                     &mut vm.state_mut().gc,
                     current,
                     crate::vm::RuntimeTrapKind::StackOverflow,
+                    module,
                     &err.message(),
                 );
             }

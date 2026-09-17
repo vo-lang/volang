@@ -1,27 +1,21 @@
 //! Type info wrapper - provides slot layout calculation and type queries.
 //!
 //! This module provides a convenient wrapper around Project for codegen queries.
-//! Core type layout functions are in vo_analysis::check::type_info.
+//! Core type layout functions are in vo_analysis::layout.
 
 use std::rc::Rc;
-use vo_analysis::check::type_info as type_layout;
+use vo_analysis::layout as type_layout;
 use vo_analysis::objects::PackageKey;
 use vo_analysis::objects::{ObjKey, TCObjects, TypeKey};
 use vo_analysis::typ::{self, Type};
 use vo_analysis::Project;
-use vo_runtime::SlotType;
+use vo_common_core::SlotType;
 use vo_syntax::ast::ExprId;
 use vo_syntax::ast::Ident;
 
-/// Describes how call arguments should be compiled.
-/// If `tuple_expand` is Some, the single argument is a tuple that needs expansion.
-pub struct CallArgInfo {
-    /// Expanded argument types (after tuple expansion if applicable)
-    pub arg_types: Vec<TypeKey>,
-    /// If Some, the single AST argument is a tuple and should be expanded.
-    /// The value is the tuple type to expand.
-    pub tuple_expand: Option<TypeKey>,
-}
+mod layouts;
+use layouts::CodegenLayouts;
+pub(crate) use layouts::SlotLayout;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum QueueFlavor {
@@ -38,7 +32,7 @@ pub struct TypeInfoWrapper<'a> {
     /// The type_info for the package being compiled.
     pkg: PackageKey,
     type_info: &'a vo_analysis::check::TypeInfo,
-    layout_facts: Rc<type_layout::TypeLayoutFacts>,
+    layout_facts: Rc<CodegenLayouts>,
 }
 
 impl<'a> TypeInfoWrapper<'a> {
@@ -49,9 +43,9 @@ impl<'a> TypeInfoWrapper<'a> {
     ) -> Self {
         Self {
             project,
-            pkg: project.main_package,
-            type_info: &project.type_info,
-            layout_facts: Rc::new(layout_facts),
+            pkg: project.main().key,
+            type_info: &project.main().type_info,
+            layout_facts: Rc::new(CodegenLayouts::new(layout_facts)),
         }
     }
 
@@ -60,7 +54,7 @@ impl<'a> TypeInfoWrapper<'a> {
         project: &'a Project,
         pkg: PackageKey,
         type_info: &'a vo_analysis::check::TypeInfo,
-        layout_facts: Rc<type_layout::TypeLayoutFacts>,
+        layout_facts: Rc<CodegenLayouts>,
     ) -> Self {
         Self {
             project,
@@ -70,7 +64,7 @@ impl<'a> TypeInfoWrapper<'a> {
         }
     }
 
-    pub(crate) fn shared_layout_facts(&self) -> Rc<type_layout::TypeLayoutFacts> {
+    pub(crate) fn shared_layout_facts(&self) -> Rc<CodegenLayouts> {
         Rc::clone(&self.layout_facts)
     }
 
@@ -84,6 +78,13 @@ impl<'a> TypeInfoWrapper<'a> {
 
     fn type_info(&self) -> &vo_analysis::check::TypeInfo {
         self.type_info
+    }
+
+    pub fn call_info(
+        &self,
+        expr: &vo_syntax::ast::Expr,
+    ) -> Option<&vo_analysis::check::type_info::CallInfo> {
+        self.type_info.call(expr)
     }
 
     // === Expression type queries ===
@@ -273,8 +274,8 @@ impl<'a> TypeInfoWrapper<'a> {
         &self,
         type_key: TypeKey,
         ctx: &mut crate::context::CodegenContext,
-    ) -> vo_runtime::RuntimeType {
-        use vo_runtime::{RuntimeType, ValueKind};
+    ) -> vo_common_core::RuntimeType {
+        use vo_common_core::{RuntimeType, ValueKind};
 
         // Check if it's a Named type - use ObjKey (the true identity) for lookup
         let tc_objs = self.tc_objs();
@@ -363,8 +364,8 @@ impl<'a> TypeInfoWrapper<'a> {
         &self,
         type_key: TypeKey,
         ctx: &mut crate::context::CodegenContext,
-    ) -> vo_runtime::ValueRttid {
-        vo_runtime::ValueRttid::new(
+    ) -> vo_common_core::ValueRttid {
+        vo_common_core::ValueRttid::new(
             ctx.intern_type_key(type_key, self),
             self.type_value_kind(type_key),
         )
@@ -375,8 +376,8 @@ impl<'a> TypeInfoWrapper<'a> {
         &self,
         tuple_key: TypeKey,
         ctx: &mut crate::context::CodegenContext,
-    ) -> Vec<vo_runtime::ValueRttid> {
-        use vo_runtime::ValueRttid;
+    ) -> Vec<vo_common_core::ValueRttid> {
+        use vo_common_core::ValueRttid;
         let tc_objs = self.tc_objs();
         let Type::Tuple(tuple) = &tc_objs.types[tuple_key] else {
             panic!("function signature metadata must reference tuple type metadata");
@@ -687,13 +688,24 @@ impl<'a> TypeInfoWrapper<'a> {
     }
 
     pub fn try_type_slot_types(&self, type_key: TypeKey) -> Result<Vec<SlotType>, String> {
-        type_layout::try_type_slot_types_with_facts(type_key, self.tc_objs(), &self.layout_facts)
-            .map_err(|error| error.to_string())
+        self.try_slot_layout(type_key).map(|layout| match layout {
+            SlotLayout::Owned(types) => types,
+            _ => layout.to_vec(),
+        })
+    }
+
+    pub(crate) fn slot_layout(&self, type_key: TypeKey) -> SlotLayout {
+        self.try_slot_layout(type_key)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub(crate) fn try_slot_layout(&self, type_key: TypeKey) -> Result<SlotLayout, String> {
+        self.layout_facts.slots(type_key, self.tc_objs())
     }
 
     /// Get ValueKind for each slot in a composite type (struct/array).
     /// Used for comparison to preserve the leaf type's equality semantics.
-    pub fn type_slot_value_kinds(&self, type_key: TypeKey) -> Vec<vo_runtime::ValueKind> {
+    pub fn type_slot_value_kinds(&self, type_key: TypeKey) -> Vec<vo_common_core::ValueKind> {
         self.try_type_slot_value_kinds(type_key)
             .unwrap_or_else(|error| panic!("{error}"))
     }
@@ -701,7 +713,7 @@ impl<'a> TypeInfoWrapper<'a> {
     pub fn try_type_slot_value_kinds(
         &self,
         type_key: TypeKey,
-    ) -> Result<Vec<vo_runtime::ValueKind>, String> {
+    ) -> Result<Vec<vo_common_core::ValueKind>, String> {
         type_layout::try_type_slot_value_kinds_with_facts(
             type_key,
             self.tc_objs(),
@@ -856,7 +868,7 @@ impl<'a> TypeInfoWrapper<'a> {
     /// They only need boxing when captured by closure (to share storage location).
     /// Other escape reasons (e.g. assigned to interface) don't require boxing.
     pub fn is_reference_type(&self, type_key: TypeKey) -> bool {
-        use vo_runtime::ValueKind;
+        use vo_common_core::ValueKind;
         let vk = self.type_value_kind(type_key);
         vk.is_queue()
             || matches!(
@@ -884,35 +896,38 @@ impl<'a> TypeInfoWrapper<'a> {
     }
 
     /// Get map key slot types
-    pub fn map_key_slot_types(&self, type_key: TypeKey) -> Vec<vo_runtime::SlotType> {
+    pub fn map_key_slot_types(&self, type_key: TypeKey) -> Vec<vo_common_core::SlotType> {
         let (key_type, _) = self.get_map_types(type_key);
         self.type_slot_types(key_type)
     }
 
     /// Get map value slot types
-    pub fn map_val_slot_types(&self, type_key: TypeKey) -> Vec<vo_runtime::SlotType> {
+    pub fn map_val_slot_types(&self, type_key: TypeKey) -> Vec<vo_common_core::SlotType> {
         let (_, val_type) = self.get_map_types(type_key);
         self.type_slot_types(val_type)
     }
 
     /// Get map key ValueKind
-    pub fn map_key_value_kind(&self, type_key: TypeKey) -> vo_runtime::ValueKind {
+    pub fn map_key_value_kind(&self, type_key: TypeKey) -> vo_common_core::ValueKind {
         let (key_type, _) = self.get_map_types(type_key);
         self.type_value_kind(key_type)
     }
 
     /// Get map value ValueKind
-    pub fn map_val_value_kind(&self, type_key: TypeKey) -> vo_runtime::ValueKind {
+    pub fn map_val_value_kind(&self, type_key: TypeKey) -> vo_common_core::ValueKind {
         let (_, val_type) = self.get_map_types(type_key);
         self.type_value_kind(val_type)
     }
 
     /// Get ValueKind for a type
-    pub fn type_value_kind(&self, type_key: TypeKey) -> vo_runtime::ValueKind {
+    pub fn type_value_kind(&self, type_key: TypeKey) -> vo_common_core::ValueKind {
         type_layout::type_value_kind(type_key, self.tc_objs())
     }
 
-    pub fn try_type_value_kind(&self, type_key: TypeKey) -> Result<vo_runtime::ValueKind, String> {
+    pub fn try_type_value_kind(
+        &self,
+        type_key: TypeKey,
+    ) -> Result<vo_common_core::ValueKind, String> {
         type_layout::try_type_value_kind(type_key, self.tc_objs())
             .map_err(|error| error.to_string())
     }
@@ -988,7 +1003,7 @@ impl<'a> TypeInfoWrapper<'a> {
     }
 
     /// Get array element slot types
-    pub fn array_elem_slot_types(&self, type_key: TypeKey) -> Vec<vo_runtime::SlotType> {
+    pub fn array_elem_slot_types(&self, type_key: TypeKey) -> Vec<vo_common_core::SlotType> {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         if let Type::Array(a) = &self.tc_objs().types[underlying] {
             self.type_slot_types(a.elem())
@@ -1008,7 +1023,7 @@ impl<'a> TypeInfoWrapper<'a> {
     }
 
     /// Get slice element slot types
-    pub fn slice_elem_slot_types(&self, type_key: TypeKey) -> Vec<vo_runtime::SlotType> {
+    pub fn slice_elem_slot_types(&self, type_key: TypeKey) -> Vec<vo_common_core::SlotType> {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         if let Type::Slice(s) = &self.tc_objs().types[underlying] {
             self.type_slot_types(s.elem())
@@ -1045,7 +1060,7 @@ impl<'a> TypeInfoWrapper<'a> {
 
     pub fn try_array_elem_bytes(&self, type_key: TypeKey) -> Result<usize, String> {
         let elem_type = self.array_elem_type(type_key);
-        vo_analysis::check::type_info::try_elem_bytes_for_heap_with_facts(
+        vo_analysis::layout::try_elem_bytes_for_heap_with_facts(
             elem_type,
             self.tc_objs(),
             &self.layout_facts,
@@ -1056,7 +1071,7 @@ impl<'a> TypeInfoWrapper<'a> {
     /// Get slice element heap bytes (for packed array storage)
     pub fn slice_elem_bytes(&self, type_key: TypeKey) -> usize {
         let elem_type = self.slice_elem_type(type_key);
-        vo_analysis::check::type_info::try_elem_bytes_for_heap_with_facts(
+        vo_analysis::layout::try_elem_bytes_for_heap_with_facts(
             elem_type,
             self.tc_objs(),
             &self.layout_facts,
@@ -1084,13 +1099,13 @@ impl<'a> TypeInfoWrapper<'a> {
     }
 
     /// Get channel direction
-    pub fn chan_dir(&self, type_key: TypeKey) -> vo_runtime::ChanDir {
+    pub fn chan_dir(&self, type_key: TypeKey) -> vo_common_core::ChanDir {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         if let Type::Chan(c) = &self.tc_objs().types[underlying] {
             match c.dir() {
-                vo_analysis::typ::ChanDir::SendRecv => vo_runtime::ChanDir::Both,
-                vo_analysis::typ::ChanDir::SendOnly => vo_runtime::ChanDir::Send,
-                vo_analysis::typ::ChanDir::RecvOnly => vo_runtime::ChanDir::Recv,
+                vo_analysis::typ::ChanDir::SendRecv => vo_common_core::ChanDir::Both,
+                vo_analysis::typ::ChanDir::SendOnly => vo_common_core::ChanDir::Send,
+                vo_analysis::typ::ChanDir::RecvOnly => vo_common_core::ChanDir::Recv,
             }
         } else {
             panic!("chan_dir: not a channel type")
@@ -1108,8 +1123,8 @@ impl<'a> TypeInfoWrapper<'a> {
 
     fn queue_flavor(&self, type_key: TypeKey) -> QueueFlavor {
         match self.type_value_kind(type_key) {
-            vo_runtime::ValueKind::Channel => QueueFlavor::Chan,
-            vo_runtime::ValueKind::Port => QueueFlavor::Port,
+            vo_common_core::ValueKind::Channel => QueueFlavor::Chan,
+            vo_common_core::ValueKind::Port => QueueFlavor::Port,
             _ => panic!("queue_flavor: not a queue type"),
         }
     }
@@ -1121,20 +1136,20 @@ impl<'a> TypeInfoWrapper<'a> {
         }
     }
 
-    pub fn queue_dir(&self, type_key: TypeKey) -> vo_runtime::ChanDir {
+    pub fn queue_dir(&self, type_key: TypeKey) -> vo_common_core::ChanDir {
         match self.queue_flavor(type_key) {
             QueueFlavor::Chan => self.chan_dir(type_key),
             QueueFlavor::Port => self.port_dir(type_key),
         }
     }
 
-    pub fn port_dir(&self, type_key: TypeKey) -> vo_runtime::ChanDir {
+    pub fn port_dir(&self, type_key: TypeKey) -> vo_common_core::ChanDir {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         if let Type::Port(p) = &self.tc_objs().types[underlying] {
             match p.dir() {
-                vo_analysis::typ::ChanDir::SendRecv => vo_runtime::ChanDir::Both,
-                vo_analysis::typ::ChanDir::SendOnly => vo_runtime::ChanDir::Send,
-                vo_analysis::typ::ChanDir::RecvOnly => vo_runtime::ChanDir::Recv,
+                vo_analysis::typ::ChanDir::SendRecv => vo_common_core::ChanDir::Both,
+                vo_analysis::typ::ChanDir::SendOnly => vo_common_core::ChanDir::Send,
+                vo_analysis::typ::ChanDir::RecvOnly => vo_common_core::ChanDir::Recv,
             }
         } else {
             panic!("port_dir: not a port type")
@@ -1375,29 +1390,11 @@ impl<'a> TypeInfoWrapper<'a> {
     }
 
     /// Get call argument info for a function call.
-    /// Handles the `f(g())` pattern where g() returns multiple values.
-    pub fn get_call_arg_info(
+    pub fn call_expr_info(
         &self,
-        args: &[vo_syntax::ast::Expr],
-        param_types: &[TypeKey],
-    ) -> CallArgInfo {
-        // Check for multi-value expansion: single arg that is a tuple matching multiple params
-        if args.len() == 1 && param_types.len() > 1 {
-            let arg_type = self.expr_type(args[0].id);
-            if self.is_tuple(arg_type) && self.tuple_len(arg_type) == param_types.len() {
-                return CallArgInfo {
-                    arg_types: (0..param_types.len())
-                        .map(|i| self.tuple_elem_type(arg_type, i))
-                        .collect(),
-                    tuple_expand: Some(arg_type),
-                };
-            }
-        }
-        // Normal case: arg types from expressions
-        CallArgInfo {
-            arg_types: args.iter().map(|a| self.expr_type(a.id)).collect(),
-            tuple_expand: None,
-        }
+        call: &vo_syntax::ast::CallExpr,
+    ) -> Option<&vo_analysis::check::type_info::CallInfo> {
+        self.type_info.call_expr(call)
     }
 
     /// Get parameter types for a function signature

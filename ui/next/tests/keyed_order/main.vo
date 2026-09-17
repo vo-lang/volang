@@ -1,0 +1,66 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/host"
+)
+
+var rowType = ui.Define("order.Row")
+
+var appType = ui.Define("order.App")
+
+func row(key string, rotate func()) ui.View {
+	return ui.Component(rowType, func(scope *ui.Scope) ui.View {
+		text := ui.String(scope, "text", "")
+		count := ui.Int(scope, "count", 0)
+		return ui.Fragment(ui.Element("input").Attr("data-row", key).Attr("aria-label", "Item " + key).Attr("value", text.Get()).On("input", func(event ui.Event) {
+			text.Set(event.Value)
+		}).OnWith("keydown", ui.EventOptions{Keys: []string{"F8"}, PreventDefault: true}, func(ui.Event) {
+			rotate()
+		}), ui.Element("button", ui.Text(key + ": " + fmt.Sprint(count.Get()))).Attr("data-count", key).On("click", func(ui.Event) {
+			count.Set(count.Get() + 1)
+		}), ui.Element("output", ui.Text(text.Get())).Attr("data-value", key))
+	}).Key(key)
+}
+
+func app(scope *ui.Scope) ui.View {
+	mode := ui.String(scope, "mode", "reset")
+	keys := []string{"a", "b", "c", "d", "e"}
+	switch mode.Get() {
+		case "rotate":
+			keys = []string{"b", "c", "d", "e", "a"}
+		case "reverse":
+			keys = []string{"e", "d", "c", "b", "a"}
+		case "mixed":
+			keys = []string{"e", "f", "b", "d"}
+		case "empty":
+			keys = nil
+	}
+	rows := []ui.View{}
+	for _, key := range keys {
+		rows = append(rows, row(key, func() {
+			mode.Set("rotate")
+		}))
+	}
+	actions := []ui.View{}
+	for _, key := range []string{"reset", "rotate", "reverse", "mixed", "empty"} {
+		selected := key
+		actions = append(actions, ui.Element("button", ui.Text(selected)).Attr("data-action", selected).On("click", func(ui.Event) {
+			mode.Set(selected)
+		}))
+	}
+	return ui.Element("main", ui.Element("h1", ui.Text("Retained rows")), ui.Element("nav", actions...), ui.Element("div", rows...).Attr("data-list", ""), ui.Element("output", ui.Text(mode.Get())).Attr("data-mode", ""))
+}
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--ssr" {
+		root := ui.NewRoot(ui.Component(appType, app))
+		root.Flush()
+		fmt.Print(root.HTML())
+		root.Close()
+		return
+	}
+	host.Run(ui.Component(appType, app))
+}

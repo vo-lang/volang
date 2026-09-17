@@ -4,6 +4,7 @@ pub mod binary;
 pub mod builtin;
 pub mod call;
 pub mod comparison;
+pub(crate) mod condition;
 pub mod conversion;
 pub mod dyn_access;
 pub mod indexing;
@@ -12,8 +13,8 @@ pub mod method_value;
 pub mod pointer;
 pub mod selector;
 
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 use vo_syntax::ast::{BinaryOp, Expr, ExprKind, UnaryOp};
 
 use crate::context::CodegenContext;
@@ -132,8 +133,8 @@ pub fn get_expr_source(
             if ctx.externalized_local(object).is_some() {
                 return ExprSource::NeedsCompile;
             }
-            if let Some(local) = func.lookup_local(ident.symbol) {
-                return ExprSource::Location(local.storage);
+            if let Some(storage) = func.lookup_local_object(object) {
+                return ExprSource::Location(storage);
             }
             let obj_key = object;
             if let Some(global_idx) = ctx.get_global_index(obj_key) {
@@ -199,16 +200,16 @@ pub(super) fn expr_runtime_slot_types(
     ctx: &CodegenContext,
     func: &FuncBuilder,
     info: &TypeInfoWrapper,
-) -> Result<Vec<SlotType>, CodegenError> {
+) -> Result<crate::type_info::SlotLayout, CodegenError> {
     if matches!(
         get_expr_source(expr, ctx, func, info),
         ExprSource::Location(StorageKind::HeapArray { .. })
     ) || is_global_array_expr(expr, ctx, func, info)
         || is_captured_array_expr(expr, func, info)
     {
-        Ok(vec![SlotType::GcBase])
+        Ok(crate::type_info::SlotLayout::single(SlotType::GcBase))
     } else {
-        info.try_type_slot_types(info.expr_type(expr.id))
+        info.try_slot_layout(info.expr_type(expr.id))
             .map_err(CodegenError::Internal)
     }
 }
@@ -216,7 +217,8 @@ pub(super) fn expr_runtime_slot_types(
 fn is_captured_array_expr(expr: &Expr, func: &FuncBuilder, info: &TypeInfoWrapper) -> bool {
     match &expr.kind {
         ExprKind::Ident(ident) => {
-            func.lookup_capture(ident.symbol).is_some() && info.is_array(info.expr_type(expr.id))
+            func.lookup_capture(info.get_use(ident)).is_some()
+                && info.is_array(info.expr_type(expr.id))
         }
         ExprKind::Paren(inner) => is_captured_array_expr(inner, func, info),
         _ => false,
@@ -231,7 +233,7 @@ fn is_global_array_expr(
 ) -> bool {
     match &expr.kind {
         ExprKind::Ident(ident) => {
-            if func.lookup_local(ident.symbol).is_some() {
+            if func.lookup_local_object(info.get_use(ident)).is_some() {
                 return false;
             }
             let obj_key = info.get_use(ident);
@@ -345,6 +347,15 @@ pub fn compile_expr(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
+    func.with_source_span(expr.span, |func| compile_expr_inner(expr, ctx, func, info))
+}
+
+fn compile_expr_inner(
+    expr: &Expr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
     if let ExprSource::Location(storage) = get_expr_source(expr, ctx, func, info) {
         match storage {
             StorageKind::StackValue { slot, slots: 1 } => return Ok(slot),
@@ -427,6 +438,18 @@ pub fn compile_expr_to(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
+    func.with_source_span(expr.span, |func| {
+        compile_expr_to_inner(expr, dst, ctx, func, info)
+    })
+}
+
+fn compile_expr_to_inner(
+    expr: &Expr,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
     match &expr.kind {
         // === Literals ===
         ExprKind::IntLit(_)
@@ -463,7 +486,7 @@ pub fn compile_expr_to(
                 ExprSource::NeedsCompile => {
                     let obj_key = object;
                     // Closure capture: ClosureGet returns GcRef to the captured storage
-                    if let Some(capture) = func.lookup_capture(ident.symbol) {
+                    if let Some(capture) = func.lookup_capture(info.get_use(ident)) {
                         let capture_index = capture.index;
                         // Arrays: capture stores GcRef to [ArrayHeader][elems], use directly
                         // Others: capture stores GcRef to box [value], need PtrGet to read value
@@ -539,10 +562,7 @@ pub fn compile_expr_to(
                     let operand = compile_expr(&unary.operand, ctx, func, info)?;
                     let type_key = info.expr_type(expr.id);
                     if info.is_float32(type_key) {
-                        let wide = func.alloc_slots(&[SlotType::Float]);
-                        func.emit_op(Opcode::ConvF32F64, wide, operand, 0);
-                        func.emit_op(Opcode::NegF, wide, wide, 0);
-                        func.emit_op(Opcode::ConvF64F32, dst, wide, 0);
+                        func.emit_op(Opcode::NegF32, dst, operand, 0);
                     } else {
                         let opcode = if info.is_float(type_key) {
                             Opcode::NegF
@@ -757,7 +777,7 @@ pub fn emit_int_trunc(
     if !info.is_int(type_key) {
         return;
     }
-    use vo_runtime::ValueKind;
+    use vo_common_core::ValueKind;
     let vk = info.type_value_kind(type_key);
     // flags: high bit (0x80) = signed, low bits = byte width
     match vk {

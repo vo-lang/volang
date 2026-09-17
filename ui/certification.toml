@@ -32,14 +32,14 @@ evidence = ["ui/testdata/goldens/uikit.accessibility.txt", "ui/testdata/goldens/
 
 [[gate]]
 id = "vm-jit-aot-differential"
-summary = "Official UI behavior and lowering agree across VM, JIT, Native AOT, and Core Wasm AOT."
-commands = ["cargo test --locked -p vo-engine official_ui_", "cargo test --locked -p vo-engine component_bundle_", "cargo test --locked -p vo-ui-vm"]
-evidence = ["lang/crates/vo-engine/src/run.rs", "ui/tests/nested-component-list/main.vo", ".github/workflows/ci.yml#language_native", ".github/workflows/ci.yml#wasm_web", ".github/workflows/ci.yml#ui_platform"]
+summary = "Official UI behavior and lowering agree across VM, JIT, Native AOT, and Wasm VM."
+commands = ["cargo test --locked -p vo-ui-integration official_ui_", "cargo test --locked -p vo-ui-integration component_bundle_", "cargo test --locked -p vo-ui-vm"]
+evidence = ["lang/crates/vo-ui-integration/src/tests.rs", "ui/tests/nested-component-list/main.vo", ".github/workflows/ci.yml#language_native", ".github/workflows/ci.yml#wasm_web", ".github/workflows/ci.yml#ui_platform"]
 
 [[gate]]
 id = "web-browser-suite"
-summary = "Real browser VM and Wasm AOT flows cover DOM, input, IME, accessibility, navigation, resources, modal focus, and rollback."
-commands = ["npm --prefix lang/crates/vo-web run test:ui", "npm --prefix lang/crates/vo-web run test:ui-browser", "npm --prefix lang/crates/vo-web run test:ui-component-browser", "npm --prefix lang/crates/vo-web run test:uikit-gallery-browser", "npm --prefix lang/crates/vo-web run test:data-application-browser", "npm --prefix lang/crates/vo-web run test:content-site-browser", "npm --prefix lang/crates/vo-web run test:studio-aot-browser"]
+summary = "Real Wasm VM flows cover DOM, input, IME, accessibility, navigation, resources, modal focus, and rollback."
+commands = ["npm --prefix lang/crates/vo-web run test:ui", "npm --prefix lang/crates/vo-web run test:ui-browser", "npm --prefix lang/crates/vo-web run test:ui-component-browser", "npm --prefix lang/crates/vo-web run test:uikit-gallery-browser", "npm --prefix lang/crates/vo-web run test:data-application-browser", "npm --prefix lang/crates/vo-web run test:content-site-browser", "npm --prefix lang/crates/vo-web run test:studio-vm-browser"]
 evidence = ["lang/crates/vo-web/tests/ui_protocol.test.mjs", "lang/crates/vo-web/js/browser_smoke.ts", "ui/tests/nested-component-list/main.vo", "ui/showcases/component-gallery/main.vo", "ui/showcases/data-application/main.vo", "ui/showcases/content-site/main.vo", "apps/studio/app/app.vo", "eng/run-browser-smoke.mjs", ".github/workflows/ci.yml#wasm_web"]
 
 [[gate]]

@@ -1,0 +1,47 @@
+package ui
+
+type componentInputs struct {
+	values []any
+}
+
+// Explicit inputs are immutable comparable snapshots. Pointers identify stable
+// handles; changes inside such a handle must publish through reactive state.
+func comparableInputs(kind string, inputs []any) []any {
+	for _, input := range inputs {
+		compareInput(kind, input, input)
+	}
+	return append([]any{}, inputs...)
+}
+
+func compareInput(kind string, left any, right any) (same bool) {
+	defer func() {
+		if recover() != nil {
+			panic("ui: " + kind + " must be comparable snapshots")
+		}
+	}()
+	return left == right
+}
+
+func sameInputs(kind string, left []any, right []any) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i, input := range left {
+		if !compareInput(kind, input, right[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// Memo skips a parent's update when every declared capture is unchanged.
+// Include all ordinary props, children and callback dependencies. State and
+// context reads remain reactive; dirty descendants run even through a skipped
+// component. An empty list declares a component with no ordinary captures.
+func (view View) Memo(inputs ...any) View {
+	if view.component == nil {
+		panic("ui: Memo requires a component")
+	}
+	view.memo = &componentInputs{values: comparableInputs("component inputs", inputs)}
+	return view
+}

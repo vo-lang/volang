@@ -11,7 +11,7 @@ explicit module capability contract. It does not run installation scripts.
 3. Bound every decoded collection, byte payload, queue and recursive shape.
 4. Publish goroutine results through a generation or immutable input version.
 5. Preserve semantic output when a visual renderer is unavailable.
-6. Add VM/JIT, Core Wasm AOT and Native AOT evidence for declared targets.
+6. Add VM/JIT, Wasm VM and Native AOT evidence for declared targets.
 7. Declare module capabilities and profiles; request only the set the package
    imports.
 8. Record license, maintenance, security contact, provenance and compatibility

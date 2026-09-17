@@ -1,0 +1,46 @@
+package app
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var tabsPreviewType = ui.Define("studio.TabsPreview")
+
+var tabNoteType = ui.Define("studio.TabNote")
+
+func TabNote() ui.View {
+	return ui.Component(tabNoteType, func(scope *ui.Scope) ui.View {
+		note := ui.String(scope, "note", "")
+		return kit.Field("tab-note", "A note to come back to", "Your words stay here while you explore the other tabs.", ui.Element("input").Attr("value", note.Get()).Attr("placeholder", "Something worth remembering…").On("input", func(event ui.Event) {
+			note.Set(event.Value)
+		}))
+	})
+}
+
+func TabsPreview() ui.View {
+	return ui.Component(tabsPreviewType, func(scope *ui.Scope) ui.View {
+		selected := ui.String(scope, "selected", "overview")
+		return kit.Tabs(kit.TabsProps{
+			ID: "gallery-tabs", Label: "Explore this idea",
+			Value: func() string {
+				return selected.Get()
+			},
+			OnChange: func(value string) {
+				selected.Set(value)
+			},
+			Items: []kit.TabItem{
+				{
+					Key: "overview", Label: "Overview",
+					Content: paragraph("One idea, a few different perspectives. Use the arrow keys to find your way around."),
+				},
+				{Key: "notes", Label: "Your notes", Content: TabNote()},
+				{Key: "later", Label: "Later", Disabled: true, Content: ui.Text("")},
+				{
+					Key: "details", Label: "Details",
+					Content: paragraph("Each panel keeps its own state. Switching tabs leaves your work just where you put it."),
+				},
+			},
+		})
+	})
+}

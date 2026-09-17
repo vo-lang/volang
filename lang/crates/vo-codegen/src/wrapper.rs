@@ -7,9 +7,9 @@
 //! - `$promoted` wrappers: For promoted methods through embedding (navigate path, call original)
 
 use vo_analysis::objects::TypeKey;
-use vo_runtime::bytecode::ReturnShape;
-use vo_runtime::instruction::Opcode;
-use vo_runtime::{RuntimeType, SlotType, ValueKind, ValueRttid};
+use vo_common_core::bytecode::ReturnShape;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::{RuntimeType, SlotType, ValueKind, ValueRttid};
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
@@ -44,7 +44,7 @@ fn define_forwarded_params(
 }
 
 fn split_param_layouts(
-    param_types: &[vo_runtime::bytecode::TransferType],
+    param_types: &[vo_common_core::bytecode::TransferType],
     flat_slot_types: &[SlotType],
 ) -> Vec<Vec<SlotType>> {
     let mut layouts = Vec::with_capacity(param_types.len());
@@ -673,8 +673,8 @@ fn generate_embedded_iface_wrapper_impl(
 
     // Load embedded interface (2 slots)
     let iface_slot = builder.alloc_slots(&[
-        vo_runtime::SlotType::Interface0,
-        vo_runtime::SlotType::Interface1,
+        vo_common_core::SlotType::Interface0,
+        vo_common_core::SlotType::Interface1,
     ]);
     let start = crate::embed::TraverseStart::new(outer_recv, outer_is_pointer);
     crate::embed::emit_embed_path_traversal(
@@ -1070,7 +1070,7 @@ pub fn generate_defer_iface_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vo_runtime::bytecode::{ExtSlotKind, InstructionMetadata, ParamShape};
+    use vo_common_core::bytecode::{ExtSlotKind, InstructionMetadata, ParamShape};
 
     fn return_shape(slot_types: Vec<SlotType>) -> ReturnShape {
         ReturnShape::try_with_slot_types(slot_types).expect("test return shape should be valid")
@@ -1225,7 +1225,7 @@ mod tests {
     #[test]
     fn defer_extern_wrapper_uses_declared_extern_effect_manifest() {
         let mut ctx = CodegenContext::new("defer-extern-effects");
-        let extern_name = vo_runtime::vo_extern_name!("os", "blocking_fileRead");
+        let extern_name = vo_ffi_macro::vo_extern_name!("os", "blocking_fileRead");
 
         let _ = generate_defer_extern_wrapper(
             &mut ctx,
@@ -1246,14 +1246,14 @@ mod tests {
             .expect("defer wrapper should register extern");
         assert_eq!(
             extern_def.allowed_effects,
-            vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY
+            vo_common_core::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY
         );
     }
 
     #[test]
     fn defer_extern_wrapper_preserves_call_extern_param_abi_050() {
         let mut ctx = CodegenContext::new("defer-extern-param-abi");
-        let extern_name = vo_runtime::vo_extern_name!("pkg", "F");
+        let extern_name = vo_ffi_macro::vo_extern_name!("pkg", "F");
 
         let wrapper_id = generate_defer_extern_wrapper(
             &mut ctx,
@@ -1270,7 +1270,7 @@ mod tests {
             .expect("defer wrapper should register extern");
         assert_eq!(
             extern_def.params,
-            vo_runtime::bytecode::ParamShape::Exact { slots: 1 }
+            vo_common_core::bytecode::ParamShape::Exact { slots: 1 }
         );
         assert_eq!(extern_def.param_kinds, vec![ExtSlotKind::Bytes]);
 
@@ -1290,7 +1290,7 @@ mod tests {
     #[test]
     fn defer_extern_wrapper_cache_key_does_not_bypass_return_interface_metadata_060() {
         let mut ctx = CodegenContext::new("defer-extern-interface-return-shape");
-        let extern_name = vo_runtime::vo_extern_name!("pkg", "F");
+        let extern_name = vo_ffi_macro::vo_extern_name!("pkg", "F");
 
         let _ = generate_defer_extern_wrapper(
             &mut ctx,

@@ -1,0 +1,141 @@
+package app
+
+import (
+	"encoding/json"
+	"errors"
+	"strings"
+	"github.com/vo-lang/studio/next/documentation"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/data"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/web"
+)
+
+type searchPage struct {
+	ID string
+	Text string
+}
+
+type searchIndex struct {
+	Version int `json:"version"`
+	Pages []searchPage `json:"pages"`
+}
+
+// Decode the generated, separate content index. Its membership
+// must match the chapter catalog so stale or partial indexes fail locally.
+func decodeSearchIndex(source string) (searchIndex, error) {
+	if len(source) > 2 * 1024 * 1024 {
+		return searchIndex{}, errors.New("chapter search index exceeds 2 MiB")
+	}
+	var index searchIndex
+	if err := json.Unmarshal([]byte(source), &index); err != nil {
+		return searchIndex{}, err
+	}
+	if index.Version != 1 || len(index.Pages) != documentation.PageCount() {
+		return searchIndex{}, errors.New("chapter search index does not match this guide")
+	}
+	known := make(map[string]bool)
+	for _, page := range documentation.Pages() {
+		known[page.ID] = true
+	}
+	for _, page := range index.Pages {
+		if !known[page.ID] {
+			return searchIndex{}, errors.New("unknown or repeated chapter in search index")
+		}
+		delete(known, page.ID)
+	}
+	return index, nil
+}
+
+func (index searchIndex) match(query string) map[string]bool {
+	terms := strings.Fields(strings.ToLower(strings.TrimSpace(query)))
+	matches := make(map[string]bool)
+	for _, page := range index.Pages {
+		found := true
+		for _, term := range terms {
+			if !strings.Contains(page.Text, term) {
+				found = false
+				break
+			}
+		}
+		if found {
+			matches[page.ID] = true
+		}
+	}
+	return matches
+}
+
+func SearchChapters(source string, query string) (map[string]bool, error) {
+	index, err := decodeSearchIndex(source)
+	if err != nil {
+		return nil, err
+	}
+	return index.match(query), nil
+}
+
+// One bounded parsed-response memo belongs to this layout. Query edits scan
+// already-normalized text; they do not parse the complete JSON body again.
+// This pure decoding cache carries no application state or reactive writes.
+type searchMemo struct {
+	loaded bool
+	source string
+	index searchIndex
+	failure error
+}
+
+func (memo *searchMemo) read(source string, query string) (map[string]bool, error) {
+	if len(source) > 2 * 1024 * 1024 {
+		return nil, errors.New("chapter search index exceeds 2 MiB")
+	}
+	if !memo.loaded || memo.source != source {
+		memo.loaded = true
+		memo.source = source
+		memo.index, memo.failure = decodeSearchIndex(source)
+	}
+	if memo.failure != nil {
+		return nil, memo.failure
+	}
+	return memo.index.match(query), nil
+}
+
+func chapterMetadataMatches(page documentation.Page, query string) bool {
+	text := strings.ToLower(page.Title + " " + page.Summary + " " + page.Section)
+	for _, term := range strings.Fields(query) {
+		if !strings.Contains(text, term) {
+			return false
+		}
+	}
+	return true
+}
+
+func chapterContentMatches(scope *ui.Scope, client *data.Client, query string) (map[string]bool, ui.View) {
+	if query == "" {
+		return nil, ui.Fragment()
+	}
+	memo := ui.State(scope, "chapter-search-memo", func() any {
+		return &searchMemo{}
+	}).Get().(*searchMemo)
+	request := web.FetchText("/studio-docs/" + documentation.SearchAsset() + "?v=" +
+		documentation.SearchSHA256()).WithTimeout(10000)
+	result := data.Use(scope, "chapter-search-index", client, request)
+	var matches map[string]bool
+	failure := result.Error
+	if result.HasValue {
+		var err error
+		matches, err = memo.read(result.Value, query)
+		if err != nil {
+			failure = err.Error()
+		}
+	}
+	if failure != "" {
+		return nil, ui.Element("div", ui.Element("p", ui.Text("Chapter text search is unavailable. You can still search titles.")).Attr("role", "status"), kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				client.Invalidate(request)
+			},
+		}, ui.Text("Retry text search"))).Class("studio-doc-search-status")
+	}
+	if !result.HasValue {
+		return nil, ui.Element("p", ui.Text("Searching chapter text…")).Attr("role", "status").Class("studio-doc-search-status")
+	}
+	return matches, ui.Fragment()
+}

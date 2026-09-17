@@ -3,14 +3,14 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import { prepareApplication } from './server.mjs';
 import { deployedAssetRecords, verifyDeployedArtifact } from './deployed-artifact.mjs';
-import { PageContract, pollEvaluation, waitForAotInteractive } from './page-contract.mjs';
+import { PageContract, pollEvaluation, waitForVmInteractive } from './page-contract.mjs';
 import { runComponentStateSmoke } from './scenarios/component-state.mjs';
 import { runUikitGallerySmoke } from './scenarios/uikit-gallery.mjs';
 import { runDataApplicationSmoke } from './scenarios/data-application.mjs';
 import { runContentSiteSmoke } from './scenarios/content-site.mjs';
 import { runMediaApplicationSmoke } from './scenarios/media-application.mjs';
 import { runStudioWorkbenchSmoke } from './scenarios/studio-workbench.mjs';
-import { runStudioAotSmoke } from './scenarios/studio.mjs';
+import { runStudioVmSmoke } from './scenarios/studio.mjs';
 import { prepareStudioBootstrap, runStudioBootstrapSmoke } from './scenarios/studio-bootstrap.mjs';
 import { runStudioLifecycleSmoke } from './scenarios/studio-lifecycle.mjs';
 import { runStudioCanarySmoke } from './scenarios/studio-canary.mjs';
@@ -36,7 +36,7 @@ const scenarios = {
   contentSiteSmoke: runContentSiteSmoke,
   mediaApplicationSmoke: runMediaApplicationSmoke,
   studioWorkbenchSmoke: runStudioWorkbenchSmoke,
-  studioAotSmoke: runStudioAotSmoke,
+  studioVmSmoke: runStudioVmSmoke,
   studioCanarySmoke: runStudioCanarySmoke,
   studioBootstrapSmoke: runStudioBootstrapSmoke,
   studioLifecycleSmoke: runStudioLifecycleSmoke,
@@ -65,7 +65,7 @@ test(request.scenario, async ({ page, context, browser, applicationURL }, testIn
         bootHidden: (document.querySelector('#volang-boot') as HTMLElement)?.hidden,
       }));
       if (guard.phase !== 'ready') expect(guard).toMatchObject({ inert: true, busy: 'true', bootHidden: false });
-      await waitForAotInteractive(contract, request.timeout);
+      await waitForVmInteractive(contract, request.timeout);
     }
     if (process.env.VO_BROWSER_INJECT_FAILURE === request.scenario) {
       expect(false, `controlled diagnostic failure: ${request.scenario}`).toBe(true);

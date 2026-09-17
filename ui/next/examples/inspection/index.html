@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Volang UI · Component inspection</title>
+  <link rel="stylesheet" href="/ui-kit/theme.css">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f3f4ef; color: #243a30; font: 15px/1.6 system-ui, sans-serif; }
+    .workspace { max-width: 1360px; margin: 40px auto; padding: 0 24px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 32px; }
+    .inspection-demo { display: grid; gap: 20px; }
+    .task-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-block: 12px; }
+    h1 { font-size: 2.4rem; line-height: 1.15; letter-spacing: -.04em; }
+    h1, h2, p { margin: 0; }
+    h2 { font-size: 1.1rem; }
+    output { margin-inline-start: 20px; font-weight: 650; }
+    .eyebrow { font-size: .75rem; letter-spacing: .14em; }
+    #inspection { min-width: 0; padding: 24px; border-radius: 16px; background: white; border: 1px solid #d5ded3; align-self: start; }
+    #inspection-status { margin: 12px 0; color: #617167; font-size: .85rem; }
+    #inspection-content { overflow: auto; }
+    details { border-top: 1px solid #e2e8dd; padding: 12px 0; }
+    summary { cursor: pointer; font-weight: 600; overflow-wrap: anywhere; }
+    table { border-collapse: collapse; width: 100%; margin-block: 12px; font-size: .8rem; }
+    th, td { text-align: start; vertical-align: top; border-bottom: 1px solid #edf0e8; padding: 6px; overflow-wrap: anywhere; }
+    .source, .cause { font: 12px/1.6 ui-monospace, monospace; overflow-wrap: anywhere; }
+    .muted { color: #617167; font-size: .8rem; }
+    button { font: inherit; }
+    @media (max-width: 800px) { .workspace { grid-template-columns: minmax(0, 1fr); margin-top: 24px; padding: 0 16px; } }
+  </style>
+</head>
+<body>
+  <div class="workspace">
+    <div id="root"></div>
+    <section id="inspection" aria-labelledby="inspection-title">
+      <h2 id="inspection-title">Component inspector</h2>
+      <p class="muted">Read-only snapshots · development only</p>
+      <button id="capture-inspection" class="vui-button" type="button" disabled>Capture snapshot</button>
+      <p id="inspection-status" role="status">Starting the application…</p>
+      <div id="inspection-content"></div>
+    </section>
+  </div>
+  <script type="module" src="/host/ui_next/inspection-lab.js"></script>
+</body>
+</html>

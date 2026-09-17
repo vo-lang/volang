@@ -1,0 +1,56 @@
+package data
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+// Prefetch warms the same entry used by Use, without subscribing a view. It
+// returns false only when another background pin exceeds PrefetchLimit. Fresh
+// values and repeated requests reuse their entry. Call in handlers or effects.
+func (client *Client) Prefetch(request ui.Request) bool {
+	request = request.WithTimeout(request.TimeoutMilliseconds)
+	accepted := false
+	client.mutate(func() {
+		current := client.entries[request]
+		if current != nil {
+			if current.prefetched {
+				accepted = true
+				return
+			}
+			if !client.snapshot(request).Stale {
+				if current.retained {
+					client.activate(current)
+					client.retain(current)
+				}
+				accepted = true
+				return
+			}
+		}
+		if client.prefetching >= client.options.PrefetchLimit {
+			return
+		}
+		current = client.ensureEntry(request)
+		client.activate(current)
+		current.prefetched = true
+		client.prefetching++
+		if current.task == nil {
+			client.start(current)
+		}
+		accepted = true
+	})
+	return accepted
+}
+
+// CancelPrefetch releases this request's shared background pin. An ordinary
+// query observer keeps its pending task alive; completed cache data is retained.
+func (client *Client) CancelPrefetch(request ui.Request) {
+	client.mutate(func() {
+		current := client.entries[request]
+		if current == nil || !current.prefetched {
+			return
+		}
+		current.prefetched = false
+		client.prefetching--
+		client.release(current)
+	})
+}

@@ -1,0 +1,154 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/data"
+)
+
+func prefetchFixture(options data.Options) (*ui.Root, *data.Client) {
+	var client *data.Client
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		client = data.NewClient(scope, "client", options)
+		return ui.Text("cache owner")
+	}))
+	require(len(settleQueries(root)) == 0, "an idle cache started work")
+	return root, client
+}
+
+func prefetchContracts() {
+	first := ui.Request{Service: "query", Value: "first", TimeoutMilliseconds: 5000}
+	second := ui.Request{Service: "query", Value: "second", TimeoutMilliseconds: 5000}
+	third := ui.Request{Service: "query", Value: "third", TimeoutMilliseconds: 5000}
+	var client *data.Client
+	var visible *ui.BoolState
+	var snapshot data.Snapshot
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		client = data.NewClient(scope, "client", data.Options{FreshMilliseconds: 60000, PrefetchLimit: 2})
+		visible = ui.Bool(scope, "visible", false)
+		if !visible.Get() {
+			return ui.Text("listing")
+		}
+		return ui.Component(queryRowType, func(child *ui.Scope) ui.View {
+			snapshot = data.Use(child, "detail", client, first)
+			return ui.Text(snapshot.Value)
+		})
+	}))
+	initial := root.Flush()
+	require(len(initial.Commands) == 0, "prefetch started during SSR")
+	root.Commit(initial.Revision)
+	settleQueries(root)
+	require(client.Prefetch(first), "first prefetch was not admitted")
+	one := onlyStart(settleQueries(root))
+	require(client.Prefetch(first) && len(settleQueries(root)) == 0, "duplicate prefetch started work")
+	require(client.Prefetch(second), "second prefetch was not admitted")
+	two := onlyStart(settleQueries(root))
+	require(!client.Prefetch(third) && len(settleQueries(root)) == 0, "prefetch exceeded bounded admission")
+	visible.Set(true)
+	require(len(settleQueries(root)) == 0 && snapshot.Fetching, "detail did not adopt the pending prefetch")
+	client.CancelPrefetch(first)
+	require(len(settleQueries(root)) == 0, "cancelling the background pin cancelled an observed query")
+	require(root.Dispatch(ui.Event{Kind: "@task", Target: one, Value: "First detail", Sequence: 1}), "adopted prefetch result was lost")
+	settleQueries(root)
+	require(snapshot.Value == "First detail" && snapshot.HasValue, "adopted result did not reach its consumer")
+	visible.Set(false)
+	settleQueries(root)
+	require(client.Prefetch(first) && len(settleQueries(root)) == 0, "fresh data was fetched again")
+	visible.Set(true)
+	require(len(settleQueries(root)) == 0 && snapshot.Value == "First detail", "completed prefetch was not reused")
+	client.CancelPrefetch(second)
+	cancelled := settleQueries(root)
+	require(len(cancelled) == 1 && cancelled[0].Op == "cancel" && cancelled[0].ID == two, "unobserved prefetch was not cancelled")
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: two, Value: "obsolete", Sequence: 2}), "cancelled prefetch accepted late data")
+	require(client.Prefetch(third), "cancelled prefetch did not release admission")
+	three := onlyStart(settleQueries(root))
+	root.Dispatch(ui.Event{Kind: "@task", Target: three, Error: "timed out", Sequence: 3})
+	settleQueries(root)
+	require(client.Prefetch(second) && client.Prefetch(third), "failed prefetch did not release admission")
+	settleQueries(root)
+	client.CancelPrefetch(second)
+	client.CancelPrefetch(third)
+	settleQueries(root)
+	// A pin added to an ordinary refresh bridges the consumer's unmount.
+	client.Invalidate(first)
+	four := onlyStart(settleQueries(root))
+	require(client.Prefetch(first) && len(settleQueries(root)) == 0, "prefetch restarted an observed refresh")
+	visible.Set(false)
+	require(len(settleQueries(root)) == 0, "unmount cancelled a pinned refresh")
+	client.InvalidateAll()
+	replacement := settleQueries(root)
+	five := onlyStart(replacement)
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: four, Value: "obsolete", Sequence: 4}), "invalidation retained an obsolete prefetch")
+	root.Dispatch(ui.Event{Kind: "@task", Target: five, Value: "Refreshed detail", Sequence: 5})
+	settleQueries(root)
+	visible.Set(true)
+	require(len(settleQueries(root)) == 0 && snapshot.Value == "Refreshed detail", "inactive refreshed data was not retained")
+	client.Prefetch(second)
+	closing := onlyStart(settleQueries(root))
+	root.Close()
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: closing, Value: "closed", Sequence: 6}), "closed cache accepted prefetched data")
+	prefetchRetention(first, second, third)
+	prefetchRenderGuards(first)
+}
+
+func prefetchRetention(first ui.Request, second ui.Request, third ui.Request) {
+	root, client := prefetchFixture(data.Options{FreshMilliseconds: 60000, RetainedEntries: 2})
+	sequence := 0
+	complete := func(request ui.Request, value string) {
+		require(client.Prefetch(request), "retention fixture could not prefetch")
+		id := onlyStart(settleQueries(root))
+		sequence++
+		root.Dispatch(ui.Event{Kind: "@task", Target: id, Value: value, Sequence: sequence})
+		settleQueries(root)
+	}
+	complete(first, "one")
+	complete(second, "two")
+	client.Prefetch(first) // A fresh hit advances recency without another entry.
+	require(len(settleQueries(root)) == 0, "fresh prefetch did not reuse retained data")
+	complete(third, "three")
+	client.Prefetch(first)
+	require(len(settleQueries(root)) == 0, "fresh prefetch did not update LRU recency")
+	client.Prefetch(second)
+	onlyStart(settleQueries(root))
+	root.Close()
+	root, client = prefetchFixture(data.Options{FreshMilliseconds: 60000, RetainedBytes: 64})
+	client.Prefetch(first)
+	id := onlyStart(settleQueries(root))
+	root.Dispatch(ui.Event{Kind: "@task", Target: id, Value: strings.Repeat("x", 128), Sequence: 1})
+	settleQueries(root)
+	client.Prefetch(first)
+	onlyStart(settleQueries(root))
+	root.Close()
+}
+
+func prefetchRenderGuards(request ui.Request) {
+	for _, cancel := range []bool{false, true} {
+		var client *data.Client
+		var invalid *ui.BoolState
+		root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+			client = data.NewClient(scope, "client", data.Options{})
+			invalid = ui.Bool(scope, "invalid", false)
+			return ui.ErrorBoundary(func() ui.View {
+				return ui.Component(queryRowType, func(child *ui.Scope) ui.View {
+					if invalid.Get() {
+						if cancel {
+							client.CancelPrefetch(request)
+						} else {
+							client.Prefetch(request)
+						}
+					}
+					return ui.Text("healthy")
+				})
+			}, func(*ui.RenderError) ui.View {
+				return ui.Text("caught")
+			})
+		}))
+		settleQueries(root)
+		client.Prefetch(request)
+		pending := onlyStart(settleQueries(root))
+		invalid.Set(true)
+		require(len(settleQueries(root)) == 0 && strings.Contains(root.HTML(), "caught"), "render-time prefetch changed work before rejection")
+		require(root.Dispatch(ui.Event{Kind: "@task", Target: pending, Value: "retained", Sequence: 1}), "render-time cancellation changed parent work")
+		root.Close()
+	}
+}

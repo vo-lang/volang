@@ -1,0 +1,29 @@
+package main
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/wire"
+)
+
+func main() {
+	root := ui.NewRoot(ui.Fragment(ui.Element("title", ui.Text("Native <title> & \"quote\"\r\n中文")).Attr("id", "native-title"), ui.Element("style", ui.Text("#native-sample {color: rgb(17, 34, 51)}\n#native-sample::before {content: '< & text';}")).Attr("id", "native-style"), ui.Element("style", ui.Text("")).Attr("id", "empty-text"), ui.Element("style").Attr("id", "empty-element"), ui.Element("p", ui.Text("A sample")).Attr("id", "native-sample"), ui.Element("p", ui.Text("CR\r\nLF")).Attr("id", "ordinary-text").Attr("title", "CR\r\nLF")))
+	batch := root.Flush()
+	bytes, err := wire.EncodeBatch(batch)
+	if err != nil {
+		panic(err)
+	}
+	result, err := json.Marshal(struct {
+		HTML string `json:"html"`
+		Batch string `json:"batch"`
+	}{
+		HTML: root.HTML(), Batch: base64.StdEncoding.EncodeToString(bytes),
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Print(string(result))
+	root.Close()
+}

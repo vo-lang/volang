@@ -1,0 +1,89 @@
+package ui
+
+type storeSelection struct {
+	selectValue func(any) any
+	equal func(any, any) bool
+	value any
+}
+
+// Select observes a comparable projection of an immutable store snapshot.
+// A write only invalidates this reader when the projected value changes.
+func (state *Store) Select(selectValue func(any) any) any {
+	return state.SelectEqual(selectValue, func(left any, right any) bool {
+		return compareInput("selected values", left, right)
+	})
+}
+
+// SelectEqual supports immutable collection projections with an explicit pure
+// equality function. Both callbacks must depend only on their arguments. Equal
+// must cover every observable part of the projected snapshot, including callbacks.
+func (state *Store) SelectEqual(selectValue func(any) any, equal func(any, any) bool) any {
+	if selectValue == nil || equal == nil {
+		panic("ui: selection requires a projection and equality function")
+	}
+	state.requireLive()
+	selection := &storeSelection{selectValue: selectValue, equal: equal}
+	value := state.selectValue(selection, state.value, true)
+	reader := state.signal.owner.root.tracking
+	if reader != nil {
+		if state.selections == nil {
+			state.selections = make(map[*observation][]*storeSelection)
+		}
+		if reader.selections == nil {
+			reader.selections = make(map[*Store]bool)
+		}
+		selection.value = value
+		state.selections[reader] = append(state.selections[reader], selection)
+		reader.selections[state] = true
+	}
+	return value
+}
+
+func (state *Store) requireLive() {
+	if state.signal.owner.disposed {
+		panic("ui: reading state from a disposed component")
+	}
+}
+
+// Peek reads without subscribing. Prefer Select when a render depends on data.
+func (state *Store) Peek() any {
+	state.requireLive()
+	return state.value
+}
+
+func (state *Store) selectValue(selection *storeSelection, value any, validate bool) any {
+	root := state.signal.owner.root
+	previous := root.tracking
+	root.tracking = nil
+	root.computing++
+	defer func() {
+		root.tracking = previous
+		root.computing--
+	}()
+	result := selection.selectValue(value)
+	if validate {
+		selection.equal(result, result)
+	}
+	return result
+}
+
+func (state *Store) changedSelections(value any) []*observation {
+	root := state.signal.owner.root
+	previous := root.tracking
+	root.tracking = nil
+	root.computing++
+	defer func() {
+		root.tracking = previous
+		root.computing--
+	}()
+	changed := []*observation{}
+	for reader, selections := range state.selections {
+		for _, selection := range selections {
+			if !selection.equal(selection.value, selection.selectValue(value)) {
+				changed = append(changed, reader)
+				break
+			}
+		}
+	}
+	return changed
+}

@@ -1,0 +1,137 @@
+package ui
+
+// observation is shared by rendered components and lazy derived computations.
+type observation struct {
+	scope *Scope
+	derived *DerivedState
+	dependencies map[*Signal]bool
+	selections map[*Store]bool
+}
+
+func observe(scope *Scope) *observation {
+	return &observation{scope: scope}
+}
+
+func (reader *observation) detach() {
+	for state := range reader.selections {
+		delete(state.selections, reader)
+	}
+	reader.selections = nil
+	for signal := range reader.dependencies {
+		delete(signal.readers, reader)
+		delete(reader.dependencies, signal)
+	}
+}
+
+func (reader *observation) invalidate() {
+	if reader.scope.disposed {
+		return
+	}
+	if reader.derived != nil {
+		reader.derived.invalidate()
+	} else {
+		reader.scope.root.invalidate(reader.scope)
+	}
+}
+
+// DerivedState caches a pure computation until an observed input changes.
+type DerivedState struct {
+	signal Signal
+	reader *observation
+	compute func() any
+	value any
+	dirty bool
+	computing bool
+	declaration int
+	key string
+	memo bool
+	inputs []any
+}
+
+// Derived updates the capture on each owner render, so ordinary props stay fresh.
+// Reads between declarations are lazy and cached. Use typed package wrappers for
+// application-specific results until the language supports generic functions.
+func Derived(scope *Scope, key string, compute func() any) *DerivedState {
+	return declareDerived(scope, key, compute, false, nil)
+}
+
+// DerivedMemo retains a lazy cached result across owner renders with equal
+// explicit captures. Observed reactive dependencies invalidate it independently.
+func DerivedMemo(scope *Scope, key string, compute func() any, inputs ...any) *DerivedState {
+	return declareDerived(scope, key, compute, true, comparableInputs("derived inputs", inputs))
+}
+
+func declareDerived(scope *Scope, key string, compute func() any, memo bool, inputs []any) *DerivedState {
+	scope.requireState(key)
+	if compute == nil {
+		panic("ui: derived state requires a computation")
+	}
+	if stored, ok := scope.states[key]; ok {
+		state, valid := stored.(*DerivedState)
+		if !valid {
+			panic("ui: state key changed type: " + key)
+		}
+		if state.declaration == scope.renderVersion {
+			panic("ui: duplicate derived key: " + key)
+		}
+		state.declaration = scope.renderVersion
+		state.compute = compute
+		if !memo || !state.memo || !sameInputs("derived inputs", state.inputs, inputs) {
+			state.invalidate()
+		}
+		state.memo, state.inputs = memo, inputs
+		return state
+	}
+	state := &DerivedState{
+		signal: newSignal(scope), reader: observe(scope), compute: compute, dirty: true,
+		declaration: scope.renderVersion, key: key, memo: memo, inputs: inputs,
+	}
+	state.reader.derived = state
+	scope.storeState(key, state)
+	return state
+}
+
+func (state *DerivedState) invalidate() {
+	if !state.dirty {
+		state.dirty = true
+		state.signal.changed()
+	}
+}
+
+func (state *DerivedState) Get() any {
+	if state.computing {
+		panic("ui: cyclic derived computation: " + state.key)
+	}
+	state.signal.read()
+	if !state.dirty {
+		return state.value
+	}
+	root := state.signal.owner.root
+	previous := root.tracking
+	root.tracking = state.reader
+	root.computing++
+	state.computing = true
+	state.reader.detach()
+	defer func() {
+		root.tracking = previous
+		root.computing--
+		state.computing = false
+	}()
+	state.value = state.compute()
+	state.dirty = false
+	return state.value
+}
+
+func (scope *Scope) releaseState() {
+	scope.reader.detach()
+	for _, stored := range scope.states {
+		if state, ok := stored.(*DerivedState); ok {
+			state.reader.detach()
+			state.compute = nil
+			state.value = nil
+			state.inputs = nil
+		}
+	}
+	scope.states = nil
+	scope.contextSignals = nil
+}

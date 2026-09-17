@@ -1,0 +1,15 @@
+package ui
+
+type widgetBinding struct {
+	name string
+	receive func(Result)
+}
+
+// Widget gives a managed extension exclusive ownership of one DOM subtree.
+// Extension packages wrap this JSON boundary in ordinary typed Vo APIs.
+func Widget(name string, value string, receive func(Result)) View {
+	if name == "" || receive == nil {
+		panic("ui: widget requires a provider name and result handler")
+	}
+	return View{kind: "#widget", text: value, widget: &widgetBinding{name: name, receive: receive}}
+}

@@ -1,0 +1,92 @@
+package app
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var dialogType = ui.Define("studio.DialogPreview")
+
+func DialogPreview() ui.View {
+	return ui.Component(dialogType, func(scope *ui.Scope) ui.View {
+		open := ui.Bool(scope, "open", false)
+		nested := ui.Bool(scope, "nested", false)
+		confirming := ui.Bool(scope, "confirming", false)
+		name := ui.String(scope, "name", "A new beginning")
+		inputRef := ui.Ref(scope, "name-input")
+		triggerRef := ui.Ref(scope, "trigger")
+		innerTriggerRef := ui.Ref(scope, "inner-trigger")
+		resetTriggerRef := ui.Ref(scope, "reset-trigger")
+		trigger := kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				open.Set(true)
+				inputRef.Focus()
+			},
+		}, ui.Text("Open a dialog")).Ref(triggerRef).Attr("data-open-dialog", "")
+		input := kit.Field("dialog-name", "Give your idea a name", "", ui.Element("input").Ref(inputRef).Attr("value", name.Get()).On("input", func(event ui.Event) {
+			name.Set(event.Value)
+		}))
+		inner := kit.Dialog(kit.DialogProps{
+			ID: "gallery-inner-dialog", Title: "A little more detail", Motion: true,
+			Description: "This layer has its own focus. Escape takes you back one step.",
+			Open: func() bool {
+				return nested.Get() && open.Get()
+			},
+			ReturnFocus: innerTriggerRef,
+			OnOpenChange: func(value bool) {
+				nested.Set(value)
+			},
+		}, kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				nested.Set(false)
+			},
+		}, ui.Text("Back to your idea")).Attr("data-close-inner", ""))
+		confirmation := kit.AlertDialog(kit.AlertDialogProps{
+			ID: "gallery-reset-dialog", Title: "Make a fresh start?", Motion: true,
+			Description: "This will replace your idea’s name. Everything else stays just as you left it.",
+			Open: func() bool {
+				return open.Get() && confirming.Get()
+			},
+			ReturnFocus: resetTriggerRef, ConfirmLabel: "Reset the name", CancelLabel: "Keep editing",
+			OnOpenChange: func(value bool) {
+				confirming.Set(value)
+			},
+			OnConfirm: func() {
+				name.Set("A new beginning")
+				confirming.Set(false)
+			},
+		})
+		dialog := kit.Dialog(kit.DialogProps{
+			ID: "gallery-dialog", Title: "Make room for an idea", Motion: true,
+			Description: "A focused space, with everything else waiting patiently.",
+			Open: func() bool {
+				return open.Get()
+			},
+			ReturnFocus: triggerRef,
+			OnOpenChange: func(value bool) {
+				open.Set(value)
+				if !value {
+					nested.Set(false)
+					confirming.Set(false)
+				}
+			},
+		}, input, ui.Element("div", kit.Button(kit.ButtonProps{
+			Variant: "secondary",
+			OnPress: func() {
+				nested.Set(true)
+			},
+		}, ui.Text("A little more detail")).Ref(innerTriggerRef).Attr("data-open-inner", ""), kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				open.Set(false)
+				nested.Set(false)
+				confirming.Set(false)
+			},
+		}, ui.Text("Keep this idea")).Attr("data-close-dialog", ""), kit.Button(kit.ButtonProps{
+			Variant: "quiet",
+			OnPress: func() {
+				confirming.Set(true)
+			},
+		}, ui.Text("Start fresh…")).Ref(resetTriggerRef).Attr("data-open-reset", "")).Attr("class", "studio-actions"), inner, confirmation)
+		return ui.Fragment(ui.Element("div", trigger, ui.Element("p", ui.Text("Try Tab, Shift + Tab, and Escape.")).Attr("class", "vui-hint")).Attr("class", "studio-dialog-demo"), dialog)
+	}).Memo()
+}

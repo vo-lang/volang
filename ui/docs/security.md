@@ -9,7 +9,7 @@ support, quota, context cancellation and lifetime.
 
 - module source and artifacts are digest checked through `vo.lock`;
 - compiler package provenance is embedded in a versioned sidecar;
-- Web AOT rejects server-authority packages before emission;
+- Web bytecode target verification rejects server-authority packages before emission;
 - binary UI, event, system, accessibility, paint and browser frames validate
   magic, version, bounds, identities, numbers and trailing data;
 - paths, URLs, origins, headers, asset programs, state payloads and queues are

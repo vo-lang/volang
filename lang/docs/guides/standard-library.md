@@ -76,4 +76,4 @@ platform requirements in the application manifest.
 
 The maintained package source lives under `lang/stdlib`. Its tests in
 `tests/lang` are the executable compatibility contract across VM, JIT, GC
-stress, Native AOT, and Core Wasm AOT lanes.
+stress, Native AOT, and Wasm VM lanes.

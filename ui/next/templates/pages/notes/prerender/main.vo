@@ -1,0 +1,10 @@
+package main
+
+import (
+	"{{module}}/notes/app"
+	"github.com/vo-lang/ui/next/prerender"
+)
+
+func main() {
+	prerender.Run(app.View)
+}

@@ -1,0 +1,99 @@
+package collection
+
+import (
+	"math"
+	ui "github.com/vo-lang/ui/next"
+)
+
+// WindowOptions describes a fixed-row scroll area in CSS pixels. The supported
+// extent is capped at eight million pixels, including in SSR, to keep native
+// scroll coordinates bounded across supported browser engines.
+type WindowOptions struct {
+	Count int
+	RowHeight int
+	Height int
+	Overscan int
+}
+
+type Window struct {
+	Start int
+	End int
+	Total int
+	RowHeight int
+}
+
+func (window Window) Contains(index int) bool {
+	return index >= window.Start && index < window.End
+}
+
+func (options WindowOptions) validate() {
+	if options.RowHeight < 1 || options.RowHeight > maxWindowExtent || options.Count < 0 ||
+		options.Count > maxWindowExtent / options.RowHeight ||
+		options.Height < 1 ||
+		options.Height > maxWindowExtent ||
+		options.Overscan < 0 ||
+		options.Overscan > 64 {
+		panic("collection: invalid fixed-row window dimensions or extent")
+	}
+}
+
+func (options WindowOptions) row(top float64) int {
+	if math.IsNaN(top) || top <= 0 {
+		return 0
+	}
+	if top >= float64(options.Count * options.RowHeight) {
+		return options.Count
+	}
+	return int(top / float64(options.RowHeight))
+}
+
+func (options WindowOptions) window(row int, height int) Window {
+	if height < 1 {
+		height = options.Height
+	}
+	if height > maxWindowExtent {
+		height = maxWindowExtent
+	}
+	// The extra row covers a fractional or partially visible first row.
+	visible := (height + options.RowHeight - 1) / options.RowHeight + 1
+	last := options.Count - (height + options.RowHeight - 1) / options.RowHeight
+	if last < 0 {
+		last = 0
+	}
+	if row > last {
+		row = last
+	}
+	start, end := row - options.Overscan, row + visible + options.Overscan
+	if start < 0 {
+		start = 0
+	}
+	if end > options.Count {
+		end = options.Count
+	}
+	return Window{
+		Start: start, End: end, Total: options.Count * options.RowHeight, RowHeight: options.RowHeight,
+	}
+}
+
+// WindowFor is deterministic and can also be used without a component scope.
+func WindowFor(options WindowOptions, top float64, height int) Window {
+	options.validate()
+	return options.window(options.row(top), height)
+}
+
+// Virtual returns a window and an OnViewport callback. It retains two scalar
+// states under key, regardless of collection length or scroll history. Render
+// the returned range with stable keys inside a Total-pixel spacer. Applications
+// own row semantics, retained data, and any extra row pinned for keyboard focus.
+// Height supplies the SSR/hidden-container fallback. Scrolling within the same
+// row does not invalidate the component.
+func Virtual(scope *ui.Scope, key string, options WindowOptions) (Window, func(ui.Viewport)) {
+	options.validate()
+	row := ui.Int(scope, key + "/row", 0)
+	height := ui.Int(scope, key + "/height", options.Height)
+	window := options.window(row.Get(), height.Get())
+	return window, func(viewport ui.Viewport) {
+		row.Set(options.row(viewport.Top))
+		height.Set(viewport.Height)
+	}
+}

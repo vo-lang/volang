@@ -4,6 +4,7 @@
 //! artifacts outlive that context, so the runtime-facing form deliberately
 //! contains no Cranelift references and is retained beside the code pointer.
 
+#[cfg(feature = "compiler")]
 use cranelift_codegen::ir::{types, Type};
 
 use crate::JitError;
@@ -49,6 +50,10 @@ pub struct NativeStackMap {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+// Compatibility schema for admitted native metadata. The current compiler
+// emits no speculative deopt states, but native image decoding still validates
+// these records. Remove only with a coordinated native image/JitContext ABI
+// change; ordinary tier-up and runtime transitions do not use this protocol.
 pub enum DeoptValueKind {
     Word = 0,
     Float64 = 1,
@@ -89,10 +94,12 @@ pub struct JitArtifactMetadata {
     pub code_size: u32,
     pub stack_maps: Box<[NativeStackMap]>,
     safepoint_index: Box<[u32]>,
+    sparse_safepoint_index: bool,
     pub deopt_states: Box<[DeoptFrameState]>,
 }
 
 impl JitArtifactMetadata {
+    #[cfg(feature = "compiler")]
     pub(crate) fn from_entries(
         code_size: usize,
         entries: impl IntoIterator<Item = (u32, u32, u32, Vec<(Type, u32)>)>,
@@ -233,26 +240,46 @@ impl JitArtifactMetadata {
 
         let index_len = maps
             .iter()
-            .map(|map| map.safepoint_id)
+            .map(|map| u64::from(map.safepoint_id) + 1)
             .max()
-            .map_or(0usize, |max| max as usize + 1);
-        let mut safepoint_index = vec![u32::MAX; index_len];
-        for (map_index, map) in maps.iter().enumerate() {
-            let entry = &mut safepoint_index[map.safepoint_id as usize];
-            if *entry != u32::MAX {
+            .unwrap_or(0);
+        // Dense generated identifiers retain constant-time lookup. Sparse image
+        // identifiers use a sorted permutation, keeping admission proportional
+        // to the number of actual records, even for an id of u32::MAX.
+        let sparse_safepoint_index = index_len > (maps.len() as u64).saturating_mul(2) + 64;
+        let mut safepoint_index = if sparse_safepoint_index {
+            let mut indices: Vec<u32> = (0..maps.len()).map(|index| index as u32).collect();
+            indices.sort_unstable_by_key(|index| maps[*index as usize].safepoint_id);
+            if indices.windows(2).any(|pair| {
+                maps[pair[0] as usize].safepoint_id == maps[pair[1] as usize].safepoint_id
+            }) {
                 return Err(JitError::Internal(format!(
-                    "native stack maps for {name} contain duplicate safepoint id {}",
-                    map.safepoint_id
+                    "native stack maps for {name} contain duplicate safepoint ids"
                 )));
             }
-            *entry = u32::try_from(map_index)
-                .map_err(|_| JitError::Internal("native stack map index overflow".into()))?;
+            indices
+        } else {
+            vec![u32::MAX; index_len as usize]
+        };
+        if !sparse_safepoint_index {
+            for (map_index, map) in maps.iter().enumerate() {
+                let entry = &mut safepoint_index[map.safepoint_id as usize];
+                if *entry != u32::MAX {
+                    return Err(JitError::Internal(format!(
+                        "native stack maps for {name} contain duplicate safepoint id {}",
+                        map.safepoint_id
+                    )));
+                }
+                *entry = u32::try_from(map_index)
+                    .map_err(|_| JitError::Internal("native stack map index overflow".into()))?;
+            }
         }
 
         Self {
             code_size,
             stack_maps: maps.into_boxed_slice(),
             safepoint_index: safepoint_index.into_boxed_slice(),
+            sparse_safepoint_index,
             deopt_states: Box::new([]),
         }
         .with_deopt_states(deopt_states, name)
@@ -344,7 +371,17 @@ impl JitArtifactMetadata {
     }
 
     pub fn map_for_safepoint_id(&self, safepoint_id: u32) -> Option<&NativeStackMap> {
-        let index = *self.safepoint_index.get(safepoint_id as usize)?;
+        let index = if self.sparse_safepoint_index {
+            let position = self
+                .safepoint_index
+                .binary_search_by_key(&safepoint_id, |index| {
+                    self.stack_maps[*index as usize].safepoint_id
+                })
+                .ok()?;
+            self.safepoint_index[position]
+        } else {
+            *self.safepoint_index.get(safepoint_id as usize)?
+        };
         (index != u32::MAX).then(|| &self.stack_maps[index as usize])
     }
 
@@ -356,6 +393,7 @@ impl JitArtifactMetadata {
     }
 }
 
+#[cfg(feature = "compiler")]
 fn root_kind_for_type(ty: Type) -> Option<NativeRootKind> {
     match ty {
         types::I64 => Some(NativeRootKind::GcRef),
@@ -364,7 +402,7 @@ fn root_kind_for_type(ty: Type) -> Option<NativeRootKind> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "compiler"))]
 mod tests {
     use super::*;
 
@@ -390,6 +428,7 @@ mod tests {
             ]
             .into_boxed_slice(),
             safepoint_index: vec![0, 1].into_boxed_slice(),
+            sparse_safepoint_index: false,
             deopt_states: Box::new([]),
         };
 
@@ -425,6 +464,7 @@ mod tests {
             }]
             .into_boxed_slice(),
             safepoint_index: vec![0].into_boxed_slice(),
+            sparse_safepoint_index: false,
             deopt_states: Box::new([]),
         };
 
@@ -495,5 +535,50 @@ mod tests {
             )
             .expect_err("absent parent must fail");
         assert!(error.to_string().contains("absent parent state"));
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    #[test]
+    fn sparse_ids_have_bounded_storage_and_exact_lookup() {
+        let make = |id, offset| NativeStackMap {
+            safepoint_id: id,
+            return_address_offset: offset,
+            frame_size: 16,
+            anchor_sp_offset: 0,
+            roots: Box::new([]),
+        };
+        let metadata = JitArtifactMetadata::try_from_parts(
+            8,
+            vec![make(u32::MAX, 1), make(2, 2)],
+            vec![],
+            "sparse",
+        )
+        .unwrap();
+        assert_eq!(metadata.safepoint_index.len(), 2);
+        assert_eq!(
+            metadata
+                .map_for_safepoint_id(u32::MAX)
+                .unwrap()
+                .return_address_offset,
+            1
+        );
+        assert_eq!(
+            metadata
+                .map_for_safepoint_id(2)
+                .unwrap()
+                .return_address_offset,
+            2
+        );
+        assert!(metadata.map_for_safepoint_id(3).is_none());
+        assert!(JitArtifactMetadata::try_from_parts(
+            8,
+            vec![make(u32::MAX, 1), make(u32::MAX, 2)],
+            vec![],
+            "duplicate"
+        )
+        .is_err());
     }
 }

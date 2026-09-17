@@ -534,7 +534,7 @@ fn validate_materialized_frame_invariants(
     sp: usize,
     resume_stack_empty: bool,
 ) -> Result<(), &'static str> {
-    #[cfg(feature = "jit")]
+    #[cfg(feature = "native")]
     if !resume_stack_empty {
         return Err("resume_stack must be empty after JIT frame materialization");
     }

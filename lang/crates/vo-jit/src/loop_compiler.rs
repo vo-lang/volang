@@ -10,13 +10,9 @@ use crate::loop_analysis::LoopInfo;
 use crate::translate::translate_inst;
 use crate::translator::{HelperKind, HelperRefs, RuntimeContext as _, SlotAccess, TranslateResult};
 use crate::{analysis::FunctionAnalysis, JitCompileEnv, JitError};
-use vo_runtime::bytecode::{FunctionDef, InstructionMetadata, Module as VoModule};
+use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
-use vo_runtime::jit_api::{JitContext, JitContextField, JitResult};
-
-/// Loop function signature. Returns JitResult like function JIT.
-/// On Ok, loop_exit_pc in JitContext contains the PC to resume at.
-pub type LoopFunc = extern "C" fn(*mut JitContext, *mut u64) -> JitResult;
+use vo_runtime::jit_api::{JitContextField, JitResult};
 
 pub struct CompiledLoop {
     pub(crate) code_ptr: *const u8,
@@ -34,6 +30,8 @@ pub struct LoopCompiler<'a> {
     exit_block: Block,
     locals_ptr_var: Variable,
     ctx_ptr: Value,
+    frame_bp: Value,
+    frame_sp: Value,
     instruction_optimization: &'a crate::optimizer::OptimizedFunction,
     optimization_plan: &'a crate::optimizer::ModuleOptimizationPlan,
 }
@@ -80,6 +78,8 @@ impl<'a> LoopCompiler<'a> {
             exit_block,
             locals_ptr_var,
             ctx_ptr: Value::from_u32(0),
+            frame_bp: Value::from_u32(0),
+            frame_sp: Value::from_u32(0),
             instruction_optimization,
             optimization_plan,
         })
@@ -109,6 +109,8 @@ impl<'a> LoopCompiler<'a> {
         crate::compile_common::drive_compile(&mut self)?;
 
         self.builder.seal_all_blocks();
+        crate::compile_common::forward_execution_budget(self.builder.func);
+        crate::compile_common::propagate_cold_paths(self.builder.func);
         self.builder.finalize(frontend_config);
 
         Ok(())
@@ -121,6 +123,15 @@ impl<'a> LoopCompiler<'a> {
         let params = self.builder.block_params(self.core.entry_block);
         self.ctx_ptr = params[0];
         let locals_ptr_init = params[1];
+        // OSR dispatch establishes this activation's BP and SP = BP + local_slots.
+        // Calls can relocate the stack, but an OK return preserves these slot
+        // indices. Any activation change exits the artifact through the VM.
+        self.frame_bp = self.load_context_field(types::I32, JitContextField::JitBp);
+        self.frame_sp = self
+            .builder
+            .ins()
+            .iadd_imm_u(self.frame_bp, i64::from(self.core.func_def.local_slots));
+        crate::call_helpers::initialize_native_stack_budget(self);
         let current_func_id = self
             .builder
             .ins()
@@ -326,47 +337,11 @@ impl<'a> LoopCompiler<'a> {
         };
         let Some(inline) = self
             .optimization_plan
-            .pure_leaf_inline(self.core.func_id, target)
+            .small_inline(self.core.func_id, target)
         else {
             return Ok(false);
         };
-        let Some(metadata) = self
-            .core
-            .func_def
-            .instruction_metadata
-            .get(self.core.current_pc)
-        else {
-            return Ok(false);
-        };
-        let (arg_slots, ret_slots) = match (inst.opcode(), metadata) {
-            (
-                Opcode::CallClosure,
-                InstructionMetadata::CallLayout {
-                    arg_layout,
-                    ret_layout,
-                },
-            )
-            | (
-                Opcode::CallIface,
-                InstructionMetadata::CallIfaceLayout {
-                    arg_layout,
-                    ret_layout,
-                    ..
-                },
-            ) => (arg_layout.len(), ret_layout.len()),
-            _ => return Ok(false),
-        };
-        if !inline.supports_dynamic_layout(arg_slots, ret_slots) {
-            return Ok(false);
-        }
-        let slot0 = match inst.opcode() {
-            Opcode::CallClosure => self.read_var(inst.a),
-            Opcode::CallIface => self.read_var(inst.a + 1),
-            _ => unreachable!("dynamic inline was filtered by opcode"),
-        };
-        let arg_start = usize::from(inst.b);
-        inline.emit_dynamic(self, slot0, arg_start, arg_start + arg_slots)?;
-        Ok(true)
+        inline.try_emit_dynamic_call(self, inst)
     }
 
     fn jump(&mut self, inst: &Instruction) -> Result<(), JitError> {
@@ -561,34 +536,17 @@ impl<'a> LoopCompiler<'a> {
             .filter(|target| *target == func_id)
             .and_then(|_| {
                 self.optimization_plan
-                    .static_inline(self.core.func_id, func_id)
+                    .small_inline(self.core.func_id, func_id)
             });
         if let Some(inline) = planned_inline {
             inline.emit(self, call_plan.arg_start)?;
             return Ok(false);
         }
 
-        let recursive_edge = self
-            .optimization_plan
-            .is_recursive_edge(self.core.func_id, func_id);
-
-        match call_plan.route_for_loop() {
-            crate::call_helpers::CallRoute::DynamicJitTable => {
-                crate::call_helpers::emit_jit_call_with_vm_materialization(
-                    self,
-                    call_plan,
-                    None,
-                    recursive_edge,
-                )?;
-                Ok(false)
-            }
-            crate::call_helpers::CallRoute::PreparedJitTable => {
-                crate::call_helpers::emit_jit_call_with_vm_materialization(
-                    self,
-                    call_plan,
-                    None,
-                    recursive_edge,
-                )?;
+        match call_plan.route() {
+            crate::call_helpers::CallRoute::DynamicJitTable
+            | crate::call_helpers::CallRoute::PreparedJitTable => {
+                crate::call_helpers::emit_jit_call_with_vm_materialization(self, call_plan, None)?;
                 Ok(false)
             }
             crate::call_helpers::CallRoute::VmCallMaterialization => {
@@ -625,7 +583,7 @@ impl<'a> crate::compile_common::CompileDriver for LoopCompiler<'a> {
     }
 
     fn set_current_pc(&mut self, pc: usize) {
-        self.core.current_pc = pc;
+        self.core.begin_instruction(pc);
         self.core.current_bounds_check_elided = self
             .instruction_optimization
             .instruction(pc)
@@ -659,10 +617,6 @@ impl<'a> crate::compile_common::CompileDriver for LoopCompiler<'a> {
             }
         }
         Ok(())
-    }
-
-    fn apply_pc_facts(&mut self, pc: usize) -> Result<(), JitError> {
-        self.core.apply_ir_facts(pc)
     }
 
     fn instruction_for_pc(
@@ -836,6 +790,14 @@ impl<'a> crate::translator::RuntimeContext<'a> for LoopCompiler<'a> {
 crate::translator::impl_shared_compiler_traits!(LoopCompiler<'_>);
 
 impl crate::translator::FrameBoundary for LoopCompiler<'_> {
+    fn cold_recovery_values(&mut self) -> Vec<(cranelift_frontend::Variable, Value)> {
+        self.core.cold_recovery_values(&mut self.builder)
+    }
+
+    fn native_trap_blocks(&mut self) -> &mut crate::translator::NativeTrapBlocks {
+        &mut self.core.native_trap_blocks
+    }
+
     fn publish_current_frame_state(&mut self) {
         self.emit_variable_spill();
     }
@@ -845,32 +807,22 @@ impl<'a> crate::translator::SelectSync<'a> for LoopCompiler<'a> {}
 
 impl<'a> crate::translator::CallBoundary<'a> for LoopCompiler<'a> {
     fn call_caller_bp(&mut self) -> Value {
-        self.load_context_field(types::I32, JitContextField::JitBp)
+        self.frame_bp
     }
     fn call_old_fiber_sp(&mut self) -> Value {
-        self.load_context_field(types::I32, JitContextField::FiberSp)
+        self.frame_sp
     }
     fn call_caller_func_id(&mut self) -> Value {
         self.builder
             .ins()
             .iconst(types::I32, i64::from(self.core.func_id))
     }
-    fn emit_residual_inline_call(
-        &mut self,
-        _inst: &Instruction,
-        _arguments: &[(Value, bool)],
-    ) -> Result<(), JitError> {
-        Err(JitError::Internal(
-            "acyclic recursive inline recipe reached OSR lowering".into(),
-        ))
-    }
 }
 
 impl crate::translator::StackRefresh for LoopCompiler<'_> {
     fn refresh_stack_base_after_reallocation(&mut self) {
         let stack_ptr = self.load_context_field(types::I64, JitContextField::StackPtr);
-        let jit_bp_i32 = self.load_context_field(types::I32, JitContextField::JitBp);
-        let jit_bp_i64 = self.builder.ins().uextend(types::I64, jit_bp_i32);
+        let jit_bp_i64 = self.builder.ins().uextend(types::I64, self.frame_bp);
         let bp_offset = self.builder.ins().imul_imm_u(jit_bp_i64, 8);
         let refreshed = self.builder.ins().iadd(stack_ptr, bp_offset);
         self.builder.def_var(self.locals_ptr_var, refreshed);

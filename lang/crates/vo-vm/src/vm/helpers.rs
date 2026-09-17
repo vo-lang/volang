@@ -16,7 +16,7 @@ use crate::exec;
 use crate::fiber::{Fiber, PendingSpawn};
 use crate::frame_call::{validate_closure_arg_shape, validate_closure_target, ValidClosureTarget};
 
-// String and slice have identical layout - use slice constants for both
+// Slice geometry. Strings have their own compact descriptor below.
 const FIELD_DATA_PTR: usize = slice::FIELD_DATA_PTR;
 const FIELD_LEN: usize = slice::FIELD_LEN;
 const FIELD_CAP: usize = slice::FIELD_CAP;
@@ -59,16 +59,15 @@ pub fn slice_cap(s: GcRef) -> usize {
     slot_to_usize(slot)
 }
 
-// String uses same layout as slice
 #[inline(always)]
 pub fn string_len(s: GcRef) -> usize {
-    let slot = unsafe { *(s as *const Slot).add(FIELD_LEN) };
+    let slot = unsafe { *(s as *const Slot).add(string::FIELD_LEN) };
     slot_to_usize(slot)
 }
 
 #[inline(always)]
 pub fn string_index(s: GcRef, idx: usize) -> u8 {
-    let slot = unsafe { *(s as *const Slot).add(FIELD_DATA_PTR) };
+    let slot = unsafe { *(s as *const Slot).add(string::FIELD_DATA_PTR) };
     let data_ptr: *const u8 = slot_to_ptr(slot);
     unsafe { *data_ptr.add(idx) }
 }
@@ -149,9 +148,8 @@ pub fn runtime_panic(
     msg: String,
 ) -> ExecResult {
     fiber.capture_panic_source_loc();
-    let panic_str = string::new_from_string(gc, msg);
-    let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-    fiber.set_recoverable_trap(kind, InterfaceSlot::new(slot0, panic_str as u64));
+    let value = vo_runtime::objects::interface::diagnostic_string(gc, module, msg);
+    fiber.set_recoverable_trap(kind, value);
     panic_unwind(gc, fiber, stack, module)
 }
 
@@ -195,7 +193,7 @@ pub fn runtime_panic_msg_at(
     pc: u32,
     msg: String,
 ) -> ExecResult {
-    fiber.panic_source_loc = Some((func_id, pc));
+    fiber.panic_source_loc = vo_common_core::debug_info::DiagnosticSource::new(func_id, pc);
     runtime_panic_msg_after_source_capture(gc, fiber, stack, module, msg)
 }
 
@@ -207,9 +205,8 @@ fn runtime_panic_msg_after_source_capture(
     module: &Module,
     msg: String,
 ) -> ExecResult {
-    let panic_str = string::new_from_string(gc, msg);
-    let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
-    fiber.set_recoverable_panic(InterfaceSlot::new(slot0, panic_str as u64));
+    let value = vo_runtime::objects::interface::diagnostic_string(gc, module, msg);
+    fiber.set_recoverable_panic(value);
     panic_unwind(gc, fiber, stack, module)
 }
 

@@ -1,0 +1,161 @@
+package main
+
+import (
+	"encoding/json"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/web"
+)
+
+// Drain the guest's post-commit effects without simulating host task completion.
+func drainUi(root *ui.Root) ui.Batch {
+	result := ui.Batch{}
+	for turns := 0; root.Pending(); turns++ {
+		require(turns < 24, "UI did not settle after its post-commit effects")
+		batch := flush(root)
+		result.Mutations = append(result.Mutations, batch.Mutations...)
+		result.Commands = append(result.Commands, batch.Commands...)
+	}
+	return result
+}
+
+func toastContracts() {
+	var queue *kit.ToastQueue
+	var visible *ui.BoolState
+	now := int64(100)
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		queue = kit.NewToasts(scope, "messages", kit.ToastOptions{Capacity: 3})
+		visible = ui.Bool(scope, "visible", true)
+		trigger := ui.Ref(scope, "trigger")
+		region := ui.Fragment()
+		if visible.Get() {
+			region = kit.ToastRegion(kit.ToastRegionProps{
+				ID: "messages", Queue: queue, ReturnFocus: trigger, Visible: 2,
+				Now: func() int64 {
+					return now
+				},
+			})
+		}
+		return ui.Fragment(ui.Element("button").Ref(trigger).Attr("data-name", "trigger"), region)
+	}))
+	initial := drainUi(root)
+	region, page := 0, 0
+	for _, mutation := range initial.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "id" && mutation.Value == "messages" {
+			region = mutation.ID
+		}
+	}
+	for _, command := range initial.Commands {
+		if command.Name == "web.page-active" {
+			page = command.ID
+		}
+	}
+	require(region > 0 && page > 0, "toast region did not own its page subscription")
+	sequence := 0
+	send := func(target int, kind string, value string) bool {
+		sequence++
+		return root.Dispatch(ui.Event{Target: target, Kind: kind, Value: value, Sequence: sequence})
+	}
+	task := func(batch ui.Batch) (int, int) {
+		for _, command := range batch.Commands {
+			if command.Op == "start" && command.Name == "web.delay" {
+				var delay web.DelayRequest
+				err := json.Unmarshal([]byte(command.Value), &delay)
+				require(err == nil, "invalid toast delay")
+				return command.ID, delay.Milliseconds
+			}
+		}
+		return 0, 0
+	}
+	message := kit.ToastMessage{Key: "first", Title: "Saved your thought", DurationMilliseconds: 5000}
+	require(queue.Show(message), "initial notification was not accepted")
+	created := drainUi(root)
+	firstToast := 0
+	for _, mutation := range created.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "data-toast-key" && mutation.Value == "first" {
+			firstToast = mutation.ID
+		}
+	}
+	blocked, _ := task(created)
+	require(firstToast > 0 && blocked == 0 && focusTarget(created) == 0, "toast started a hidden-page timer or stole focus")
+	send(page, "@task", "true")
+	work, duration := task(drainUi(root))
+	require(work > 0 && duration == 5000, "toast did not start its declared countdown")
+	now += 1200
+	send(region, "pointerenter", "")
+	paused := drainUi(root)
+	cancelled := false
+	for _, command := range paused.Commands {
+		if command.Op == "cancel" && command.ID == work {
+			cancelled = true
+		}
+	}
+	require(cancelled, "hover did not cancel the active countdown")
+	require(!send(work, "@task", "dismiss"), "paused toast accepted a late timer result")
+	send(firstToast, "focusin", "")
+	send(region, "pointerleave", "")
+	now += 2000
+	blocked, _ = task(drainUi(root))
+	require(blocked == 0, "focused toast resumed its countdown")
+	send(firstToast, "focusout", "")
+	work, duration = task(drainUi(root))
+	require(work > 0 && duration == 3800, "resuming did not retain the unelapsed countdown")
+	message.Title = "Updated your thought"
+	queue.Show(message)
+	replaced := drainUi(root)
+	next, duration := task(replaced)
+	require(next > work && duration == 5000 && queue.Len() == 1, "updating a key did not replace and restart its notification")
+	require(!send(work, "@task", "dismiss"), "replaced toast accepted its earlier countdown")
+	queue.Show(kit.ToastMessage{Key: "second", Title: "Second notification"})
+	queue.Show(kit.ToastMessage{Key: "third", Title: "Waiting for space"})
+	require(!queue.Show(kit.ToastMessage{Key: "fourth", Title: "Overflow"}) && queue.Len() == 3, "toast capacity evicted a notification")
+	drainUi(root)
+	require(!strings.Contains(root.HTML(), "Waiting for space"), "queued toast mounted or announced before visible space")
+	send(firstToast, "focusin", "")
+	drainUi(root)
+	sequence = kitModifiedKeys(root, firstToast, "Escape", false, sequence)
+	sequence++
+	root.Dispatch(ui.Event{Target: firstToast, Kind: "keydown", Key: "Escape", Sequence: sequence})
+	advanced := drainUi(root)
+	require(focusTarget(advanced) > 0 && strings.Contains(root.HTML(), "Waiting for space"), "dismissing a focused toast did not advance queue and focus")
+	queue.Clear()
+	drainUi(root)
+	actions := 0
+	queue.Show(kit.ToastMessage{
+		Key: "action", Title: "Ready", ActionLabel: "Undo",
+		OnAction: func() {
+			actions++
+		},
+	})
+	created = drainUi(root)
+	action := createdTextParent(created, "Undo")
+	toast := 0
+	for _, mutation := range created.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "data-toast-key" {
+			toast = mutation.ID
+		}
+	}
+	send(toast, "focusin", "")
+	send(action, "click", "")
+	send(action, "click", "")
+	require(actions == 1 && queue.Len() == 0, "action burst invoked a dismissed notification twice")
+	require(focusTarget(drainUi(root)) == target(initial, "trigger"), "last focused notification did not return to its logical target")
+	queue.Show(message)
+	work, _ = task(drainUi(root))
+	require(work > 0, "replacement notification did not start")
+	visible.Set(false)
+	removed := drainUi(root)
+	cancelled = false
+	for _, command := range removed.Commands {
+		if command.Op == "cancel" && command.ID == work {
+			cancelled = true
+		}
+	}
+	require(cancelled && !send(work, "@task", "dismiss") && !send(page, "@task", "true"), "removed toast region retained timers or page listeners")
+	require(!queue.Focus(), "removed toast region retained its focus callback")
+	root.Close()
+	expectPanic(func() {
+		queue.Show(message)
+	}, "disposed component")
+}

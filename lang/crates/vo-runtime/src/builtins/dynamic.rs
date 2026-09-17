@@ -3186,73 +3186,24 @@ struct DynamicExternEntry {
     effects: crate::bytecode::ExternEffects,
 }
 
-const REGISTERED_EXTERNS: &[DynamicExternEntry] = &[
-    DynamicExternEntry {
-        name: crate::vo_extern_name!("dyn", "getDynErrors"),
-        func: get_dyn_errors,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    DynamicExternEntry {
-        name: "dyn_field",
-        func: dyn_field,
-        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
-    },
-    DynamicExternEntry {
-        name: "dyn_index",
-        func: dyn_index,
-        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
-    },
-    DynamicExternEntry {
-        name: "dyn_set_field",
-        func: dyn_set_field,
-        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
-    },
-    DynamicExternEntry {
-        name: "dyn_set_index_unified",
-        func: dyn_set_index_unified,
-        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
-    },
-    DynamicExternEntry {
-        name: "dyn_call",
-        func: dyn_call,
-        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
-    },
-    DynamicExternEntry {
-        name: "dyn_method",
-        func: dyn_method,
-        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
-    },
-    DynamicExternEntry {
-        name: "dyn_pack_any_slice",
-        func: dyn_pack_any_slice,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    DynamicExternEntry {
-        name: "dyn_type_assert_error",
-        func: dyn_type_assert_error,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    DynamicExternEntry {
-        name: crate::vo_extern_name!("dyn", "GetAttr"),
-        func: dyn_get_attr,
-        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
-    },
-    DynamicExternEntry {
-        name: crate::vo_extern_name!("dyn", "GetIndex"),
-        func: dyn_get_index,
-        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
-    },
-    DynamicExternEntry {
-        name: crate::vo_extern_name!("dyn", "SetAttr"),
-        func: dyn_set_attr,
-        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
-    },
-    DynamicExternEntry {
-        name: crate::vo_extern_name!("dyn", "SetIndex"),
-        func: dyn_set_index,
-        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
-    },
-];
+macro_rules! extern_name {
+    (canonical($package:literal, $function:literal)) => {
+        crate::vo_extern_name!($package, $function)
+    };
+    (internal($name:literal)) => {
+        $name
+    };
+}
+macro_rules! registered_externs {
+    ($(($kind:ident($($name:literal),+), $function:ident, $effects:expr)),* $(,)?) => {
+        const REGISTERED_EXTERNS: &[DynamicExternEntry] = &[$(DynamicExternEntry {
+            name: extern_name!($kind($($name),+)),
+            func: $function,
+            effects: $effects,
+        }),*];
+    };
+}
+vo_common_core::vo_dynamic_extern_contracts!(registered_externs);
 
 pub fn known_extern_allowed_effects(name: &str) -> Option<crate::bytecode::ExternEffects> {
     REGISTERED_EXTERNS

@@ -1,0 +1,244 @@
+package navigation
+
+import (
+	"net/url"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+// Route describes a relative path and optional nested layout. A leaf with an
+// empty path is the default child. Declare the resulting Routes once.
+type Route struct {
+	ID string
+	Path string
+	Render func(*ui.Scope, Match, ui.View) ui.View
+	Children []Route
+}
+
+type routeNode struct {
+	id string
+	definition *ui.Type
+	render func(*ui.Scope, Match, ui.View) ui.View
+}
+
+type routeBranch struct {
+	segments []string
+	chain []*routeNode
+}
+
+type Routes struct {
+	branches []routeBranch
+}
+
+type Match struct {
+	// ID is the matched leaf route, including inside its ancestor layouts.
+	ID string
+	Location Location
+	params map[string]string
+	branch routeBranch
+}
+
+func (match Match) Param(name string) string {
+	return match.params[name]
+}
+
+func validParam(name string) bool {
+	if name == "" {
+		return false
+	}
+	for index, char := range name {
+		if char == '_' || char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' ||
+			index > 0 && char >= '0' && char <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// NewRoutes copies and validates a route tree. Static segments outrank named
+// parameters, which outrank a terminal *rest. Declaration order breaks no ties:
+// patterns with the same matching shape are rejected.
+func NewRoutes(routes []Route) *Routes {
+	result := &Routes{}
+	ids := make(map[string]bool)
+	patterns := make(map[string]bool)
+	var visit func([]Route, []string, []*routeNode)
+	visit = func(children []Route, prefix []string, ancestors []*routeNode) {
+		if len(ancestors) >= 64 {
+			panic("navigation: route nesting exceeds 64 layouts")
+		}
+		for _, route := range children {
+			if route.ID == "" || ids[route.ID] {
+				panic("navigation: route IDs must be nonempty and unique: " + route.ID)
+			}
+			ids[route.ID] = true
+			if strings.HasPrefix(route.Path, "/") || strings.HasSuffix(route.Path, "/") ||
+				strings.ContainsAny(route.Path, "?#") {
+				panic("navigation: route paths must be relative without query, fragment or trailing slash")
+			}
+			segments := append([]string{}, prefix...)
+			if route.Path != "" {
+				segments = append(segments, strings.Split(route.Path, "/")...)
+			}
+			names := make(map[string]bool)
+			shape := []string{}
+			for index, segment := range segments {
+				if segment == "" || segment == "." || segment == ".." {
+					panic("navigation: route segments must be nonempty and cannot be dot segments")
+				}
+				if segment[0] == ':' || segment[0] == '*' {
+					name := segment[1:]
+					if !validParam(name) || names[name] {
+						panic("navigation: parameter names must be valid and unique within a branch")
+					}
+					names[name] = true
+					if segment[0] == '*' && (index != len(segments) - 1 || len(route.Children) > 0) {
+						panic("navigation: a rest parameter must end a leaf route")
+					}
+					shape = append(shape, segment[:1])
+				} else {
+					shape = append(shape, "=" + url.PathEscape(segment))
+				}
+			}
+			node := &routeNode{
+				id: route.ID, definition: ui.Define("route." + route.ID), render: route.Render,
+			}
+			chain := append(append([]*routeNode{}, ancestors...), node)
+			if len(route.Children) > 0 {
+				visit(route.Children, segments, chain)
+				continue
+			}
+			if route.Render == nil {
+				panic("navigation: leaf routes require a render function")
+			}
+			signature := strings.Join(shape, "/")
+			if patterns[signature] {
+				panic("navigation: ambiguous route pattern: " + route.Path)
+			}
+			patterns[signature] = true
+			result.branches = append(result.branches, routeBranch{segments: segments, chain: chain})
+		}
+	}
+	visit(routes, nil, nil)
+	return result
+}
+
+func segmentRank(segments []string, index int) int {
+	if index >= len(segments) {
+		return 4 // Exact termination outranks an empty rest match.
+	}
+	segment := segments[index]
+	if segment[0] == '*' {
+		return 1
+	}
+	if segment[0] == ':' {
+		return 2
+	}
+	return 3
+}
+
+func moreSpecific(left []string, right []string) bool {
+	for index := 0; index < len(left) || index < len(right); index++ {
+		one, two := segmentRank(left, index), segmentRank(right, index)
+		if one != two {
+			return one > two
+		}
+	}
+	return false
+}
+
+func matchSegments(pattern []string, parts []string) (map[string]string, bool) {
+	params := make(map[string]string)
+	for index, segment := range pattern {
+		if segment[0] == '*' {
+			params[segment[1:]] = strings.Join(parts[index:], "/")
+			return params, true
+		}
+		if index >= len(parts) {
+			return nil, false
+		}
+		if segment[0] == ':' {
+			params[segment[1:]] = parts[index]
+		} else if segment != parts[index] {
+			return nil, false
+		}
+	}
+	return params, len(pattern) == len(parts)
+}
+
+// Match accepts parsed locations from Parse or Router.Current. Matching decodes
+// each path segment once, preserving an encoded slash inside a named parameter.
+func (routes *Routes) Match(location Location) (Match, bool) {
+	path := location.escapedPath
+	if path == "" {
+		path = (&url.URL{Path: location.Path}).EscapedPath()
+	}
+	if path != "" && (!strings.HasPrefix(path, "/") || strings.Contains(path, "//")) {
+		return Match{}, false
+	}
+	path = strings.TrimPrefix(path, "/")
+	path = strings.TrimSuffix(path, "/")
+	parts := []string{}
+	if path != "" {
+		for _, part := range strings.Split(path, "/") {
+			decoded, err := url.PathUnescape(part)
+			if err != nil || decoded == "" {
+				return Match{}, false
+			}
+			parts = append(parts, decoded)
+		}
+	}
+	match := Match{}
+	found := false
+	for _, branch := range routes.branches {
+		params, ok := matchSegments(branch.segments, parts)
+		if ok && (!found || moreSpecific(branch.segments, match.branch.segments)) {
+			match = Match{
+				ID: branch.chain[len(branch.chain) - 1].id, Location: cloneLocation(location), params: params,
+				branch: branch,
+			}
+			found = true
+		}
+	}
+	return match, found
+}
+
+func cloneLocation(location Location) Location {
+	query := make(url.Values)
+	for name, values := range location.Query {
+		query[name] = append([]string{}, values...)
+	}
+	location.Query = query
+	return location
+}
+
+func routeView(node *routeNode, match Match, outlet ui.View) ui.View {
+	return ui.Component(node.definition, func(scope *ui.Scope) ui.View {
+		local := match
+		local.Location = cloneLocation(match.Location)
+		if node.render == nil {
+			return outlet
+		}
+		return node.render(scope, local, outlet)
+	}).Key(node.id)
+}
+
+// View retains each ancestor scope while its selected child changes. Parameters
+// and queries update props without resetting route state. Key an inner component
+// explicitly when its lifetime should follow a particular parameter instead.
+func (match Match) View() ui.View {
+	outlet := ui.Fragment()
+	for index := len(match.branch.chain) - 1; index >= 0; index-- {
+		outlet = routeView(match.branch.chain[index], match, outlet)
+	}
+	return outlet
+}
+
+func (routes *Routes) View(location Location, fallback ui.View) ui.View {
+	match, ok := routes.Match(location)
+	if !ok {
+		return fallback
+	}
+	return match.View()
+}

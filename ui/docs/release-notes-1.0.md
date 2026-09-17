@@ -1,7 +1,7 @@
 # Volang UI 1.0 release notes
 
 Volang UI 1.0 establishes a pure-Volang Web and desktop application stack with
-VM/JIT development and Wasm/Native AOT release.
+VM/JIT development and Wasm VM Web releases and Native AOT desktop releases.
 
 The GA contract completes E0-E8, 57 stable required capabilities, 63 governed
 UIKit components with no open baseline gap, five showcases, and twelve product

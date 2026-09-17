@@ -188,7 +188,11 @@ function sensitiveSharePath(path) {
 function compilerDiagnostic(path, message, code = 'web/compiler') {
   let line = 1;
   let column = 1;
-  for (const match of message.matchAll(/(?:^|\s)at\s+.+:(\d+):(\d+)(?:\s|$)/gmu)) {
+  const positions = [
+    ...message.matchAll(/(?:^|\s)at\s+.+:(\d+):(\d+)(?:\s|$)/gmu),
+    ...message.matchAll(/(?:^|\n)[^\r\n]*:(\d+):(\d+):\s*(?:error|warning)(?:\[[^\]\r\n]+\])?:/gmu),
+  ];
+  for (const match of positions) {
     const candidateLine = Number.parseInt(match[1], 10);
     const candidateColumn = Number.parseInt(match[2], 10);
     if (candidateLine > 0 && candidateColumn > 0) {

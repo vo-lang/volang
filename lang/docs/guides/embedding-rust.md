@@ -97,8 +97,7 @@ follow the documented thread and re-entry restrictions.
 
 The core bytecode and runtime layers support constrained builds. Compile source
 on a full host, serialize a verified `.vob`, and load it into a compatible
-runtime. Core Wasm AOT hosts instead instantiate the lowered image and provide
-the versioned AOT imports.
+runtime. Browser hosts load the matching Wasm VM runtime and verified bytecode.
 
 The language source must not assume that every native standard-library effect
 exists. Unsupported capabilities return defined errors, and the embedder

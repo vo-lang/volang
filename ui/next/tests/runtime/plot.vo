@@ -1,0 +1,44 @@
+package main
+
+import (
+	"encoding/json"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/web/plot"
+)
+
+func preparedPlotContracts() {
+	data := plot.Data{X: []float64{1, 2}, Y: []float64{3, 4}}
+	prepared, err := plot.Prepare(data)
+	require(err == nil, "plot preparation failed")
+	data.Y[0] = 99
+	var tick *ui.IntState
+	captured := -1
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		tick = ui.Int(scope, "tick", 0)
+		value := tick.Get()
+		return plot.Chart(plot.Props{
+			Prepared: prepared,
+			OnCursor: func(int) {
+				captured = value
+			},
+		})
+	}))
+	batch := flush(root)
+	id := 0
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "widget" {
+			id = mutation.ID
+			var data plot.Data
+			err := json.Unmarshal([]byte(mutation.Value), &data)
+			require(err == nil && len(data.Y) == 2 && data.Y[0] == 3, "prepared series aliased its caller")
+		}
+	}
+	require(id != 0, "prepared plot not mounted")
+	tick.Set(1)
+	require(len(flush(root).Mutations) == 0, "unchanged prepared series retransmitted")
+	require(root.Dispatch(ui.Event{Target: id, Kind: "@widget", Sequence: 1, Value: "0"}) &&
+		captured == 1, "prepared data retained a stale callback")
+	root.Close()
+	_, err = plot.Prepare(plot.Data{X: []float64{2, 1}, Y: []float64{3, 4}})
+	require(err != nil, "unordered series accepted")
+}

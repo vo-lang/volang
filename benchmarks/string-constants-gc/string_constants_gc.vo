@@ -1,0 +1,28 @@
+package main
+
+import (
+	"runtime/mem"
+)
+
+func label(index int) string {
+	return "s0000"
+}
+
+func main() {
+	sum := 0
+	var retained string
+	for i := 0; i < 262144; i++ {
+		s := label(i & 0)
+		sum = (sum * 1664525 + len(s) + int(s[1]) * 17 + int(s[2]) * 19 + int(s[3]) * 23 + int(s[4]) * 29) &
+			2147483647
+		if i & 4095 == 0 {
+			retained = s
+		}
+		if i & 255 == 0 {
+			assert(mem.GCCollect())
+		}
+	}
+	sum += len(retained)
+	assert(sum == 932970501)
+	println(sum)
+}

@@ -22,9 +22,11 @@ func main() {
 	}()
 	assert(val == 30, "Nested IIFE closure should result in 30, got ", val)
 	// Test: IIFE as map value
-	m := map[string]int{"computed": func() int {
-		return 7 * 8
-	}()}
+	m := map[string]int{
+		"computed": func() int {
+			return 7 * 8
+		}(),
+	}
 	assert(m["computed"] == 56, "IIFE as map value")
 	// Test: Chain of IIFE calls
 	chain := func() func() int {
@@ -45,12 +47,14 @@ func main() {
 	// Test: IIFE in slice literal
 	computed := []int{
 		func() int {
-	return 1
-}(), func() int {
-	return 2
-}(), func() int {
-	return 3
-}(),
+			return 1
+		}(),
+		func() int {
+			return 2
+		}(),
+		func() int {
+			return 3
+		}(),
 	}
 	assert(len(computed) == 3, "computed slice len")
 	assert(computed[0] + computed[1] + computed[2] == 6, "computed slice sum")

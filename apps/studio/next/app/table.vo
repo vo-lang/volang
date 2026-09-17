@@ -1,0 +1,111 @@
+package app
+
+import (
+	"fmt"
+	"sort"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+type ideaRecord struct {
+	Key string
+	Title string
+	Minutes int
+}
+
+type ideaOrder struct {
+	items []ideaRecord
+	column string
+	descending bool
+}
+
+func (order ideaOrder) Len() int {
+	return len(order.items)
+}
+
+func (order ideaOrder) Swap(left int, right int) {
+	order.items[left], order.items[right] = order.items[right], order.items[left]
+}
+
+func (order ideaOrder) Less(left int, right int) bool {
+	if order.descending {
+		left, right = right, left
+	}
+	if order.column == "minutes" {
+		return order.items[left].Minutes < order.items[right].Minutes
+	}
+	return order.items[left].Title < order.items[right].Title
+}
+
+var tablePreviewType = ui.Define("studio.TablePreview")
+
+func TablePreview() ui.View {
+	return ui.Component(tablePreviewType, func(scope *ui.Scope) ui.View {
+		column := ui.String(scope, "column", "title")
+		descending := ui.Bool(scope, "descending", false)
+		page := ui.Int(scope, "page", 1)
+		notes := ui.State(scope, "notes", func() any {
+			return make(map[string]string)
+		})
+		order := ideaOrder{
+			column: column.Get(), descending: descending.Get(),
+			items: []ideaRecord{
+				{Key: "outdoors", Title: "A day outdoors", Minutes: 15},
+				{Key: "letter", Title: "A handwritten letter", Minutes: 25},
+				{Key: "sketch", Title: "A little sketch", Minutes: 10},
+				{Key: "morning", Title: "A quiet morning", Minutes: 20},
+				{Key: "walk", Title: "An evening walk", Minutes: 30},
+				{Key: "read", Title: "Something to read", Minutes: 15},
+				{Key: "recipe", Title: "Try a new recipe", Minutes: 40},
+				{Key: "visit", Title: "Visit somewhere new", Minutes: 60},
+				{Key: "story", Title: "Write a little story", Minutes: 35},
+			},
+		}
+		sort.Stable(order)
+		rows := []kit.TableRow{}
+		values := notes.Get().(map[string]string)
+		for _, item := range order.items[(page.Get() - 1) * 3:page.Get() * 3] {
+			note := ui.Element("input").Attr("id", "gallery-table-note-" + item.Key).Attr("aria-label", "Note for " +
+				item.Title)
+			note = note.Attr("placeholder", "A little thought…").Attr("value", values[item.Key]).Class("vui-input")
+			note = note.On("input", func(event ui.Event) {
+				notes.Update(func(previous any) any {
+					next := make(map[string]string)
+					for key, value := range previous.(map[string]string) {
+						next[key] = value
+					}
+					next[item.Key] = event.Value
+					return next
+				})
+			})
+			rows = append(rows, kit.TableRow{
+				Key: item.Key,
+				Cells: []ui.View{ui.Text(item.Title), ui.Text(fmt.Sprint(item.Minutes, " min")), note},
+			})
+		}
+		return ui.Element("div", kit.Table(kit.TableProps{
+			Caption: "Ideas for your day", Rows: rows,
+			Columns: []kit.TableColumn{
+				{Key: "title", Label: "Thought", Sortable: true, RowHeader: true},
+				{Key: "minutes", Label: "Time", Sortable: true}, {Key: "note", Label: "Your note"},
+			},
+			Sort: func() kit.TableSort {
+				return kit.TableSort{Column: column.Get(), Descending: descending.Get()}
+			},
+			OnSortChange: func(order kit.TableSort) {
+				column.Set(order.Column)
+				descending.Set(order.Descending)
+				page.Set(1)
+			},
+		}).Attr("id", "gallery-table"), kit.Pagination(kit.PaginationProps{
+			Label: "Idea library pages",
+			Page: func() int {
+				return page.Get()
+			},
+			PageCount: 3,
+			OnChange: func(value int) {
+				page.Set(value)
+			},
+		}), ui.Element("p", ui.Text(fmt.Sprint("Page ", page.Get(), " of 3. Your notes stay with each thought."))).Class("vui-hint").Attr("data-gallery-table-page", "")).Class("studio-field-demo")
+	})
+}

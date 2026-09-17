@@ -62,10 +62,11 @@ func testNestedClosureReturnIface() {
 func testClosureSliceReturnIface() {
 	funcs := []func() Stringer{
 		func() Stringer {
-	return Named{name: "first"}
-}, func() Stringer {
-	return Named{name: "second"}
-},
+			return Named{name: "first"}
+		},
+		func() Stringer {
+			return Named{name: "second"}
+		},
 	}
 	assert(funcs[0]().String() == "first", "slice func 0")
 	assert(funcs[1]().String() == "second", "slice func 1")

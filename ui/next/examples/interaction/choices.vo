@@ -1,0 +1,66 @@
+package main
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var controlledChoicesType = ui.Define("interaction.ControlledChoices")
+
+func ControlledChoices() ui.View {
+	return ui.Component(controlledChoicesType, func(scope *ui.Scope) ui.View {
+		checked := ui.Bool(scope, "checked", false)
+		selected := ui.String(scope, "selected", "a")
+		theme := ui.String(scope, "theme", "a")
+		disabled := ui.Bool(scope, "disabled", false)
+		saved := ui.String(scope, "saved", "")
+		ref := ui.Ref(scope, "radio")
+		options := []kit.ChoiceOption{
+			{Value: "a", Label: "Alpha"}, {Value: "blocked", Label: "Unavailable", Disabled: true},
+			{Value: "b", Label: "Beta"},
+		}
+		form := ui.Element("form", kit.Slider(kit.SliderProps{
+			ID: "native-range", Name: "range", Label: "A native range", Max: 1, Step: 0.25,
+			DefaultValue: func() float64 {
+				return 0.25
+			},
+		}), kit.Checkbox(kit.CheckboxProps{
+			ID: "controlled-check", Name: "check", Label: "Controlled checkbox", Disabled: disabled.Get(),
+			Checked: func() bool {
+				return checked.Get()
+			},
+			OnChange: func(value bool) {
+				checked.Set(value)
+			},
+		}), kit.RadioGroup(kit.RadioGroupProps{
+			ID: "controlled-radio", Name: "plan", Label: "Controlled plan", Options: options,
+			Disabled: disabled.Get(), InputRef: ref,
+			Value: func() string {
+				return selected.Get()
+			},
+			OnChange: func(value string) {
+				selected.Set(value)
+			},
+		}), kit.Select(kit.SelectProps{
+			ID: "controlled-select", Name: "theme", Label: "Controlled theme", Options: options,
+			Disabled: disabled.Get(),
+			Value: func() string {
+				return theme.Get()
+			},
+			OnChange: func(value string) {
+				theme.Set(value)
+			},
+		}), ui.Element("button", ui.Text("Submit choices")).Attr("type", "submit"), ui.Element("button", ui.Text("Reset choices")).Attr("type", "reset")).Attr("id", "controlled-choice-form").On("submit", func(ui.Event) {
+			saved.Set(fmt.Sprint(checked.Get()) + "/" + selected.Get() + "/" + theme.Get())
+		})
+		return ui.Element("section", ui.Element("h2", ui.Text("Controlled selections")), form, kit.Checkbox(kit.CheckboxProps{
+			ID: "external-choice", Name: "external", Label: "Outside the form",
+			Form: "controlled-choice-form", DefaultChecked: true,
+		}), ui.Element("button", ui.Text("Toggle choice availability")).Attr("type", "button").Attr("data-disable-choices", "").On("click", func(ui.Event) {
+			disabled.Set(!disabled.Get())
+		}), ui.Element("button", ui.Text("Focus selected choice")).Attr("type", "button").Attr("data-focus-choice", "").On("click", func(ui.Event) {
+			ref.Focus()
+		}), ui.Element("p", ui.Text(saved.Get())).Attr("data-choice-saved", "")).Attr("class", "card")
+	})
+}

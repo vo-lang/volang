@@ -12,8 +12,8 @@ A Volang program passes through four stable layers:
 1. The frontend parses and type-checks packages.
 2. Code generation produces a verified register-based bytecode module.
 3. Development executes that module with the VM or Cranelift JIT.
-4. Release builds lower the verified module to a Native AOT executable/object
-   or a Core Wasm AOT image.
+4. Native releases lower the verified module to a Native AOT executable/object.
+   Web releases package bytecode with the Wasm VM.
 
 The VM, JIT, and AOT paths share language semantics, standard-library
 contracts, stack maps, and runtime metadata. A backend choice changes startup,
@@ -28,7 +28,7 @@ dialect.
   executables.
 - Build browser and desktop products with the official pure-Volang UI
   framework.
-- Run sandboxed workloads with a bounded VM or Core Wasm AOT host.
+- Run sandboxed workloads with a bounded native or Wasm VM host.
 - Express concurrent services with goroutines, channels, contexts, and
   isolated cross-thread or cross-instance islands.
 
@@ -70,7 +70,7 @@ vo = "0.1.4"
 Use `vo check`, `vo fmt`, and `vo test` for the normal feedback loop. Use
 `vo run --mode=vm` for short startup and `--mode=jit` for longer native
 sessions. `vo build` creates a native AOT executable by default;
-`vo build --kind=wasm` creates a Core Wasm AOT image.
+`vo build --kind=bytecode --target=wasm32-unknown-unknown` creates Web bytecode.
 
 UI applications add `vo ui dev`, `vo ui run`, `vo ui test`, `vo ui build`, and
 `vo ui package`. Their product code stays in `.vo` files. Browser and desktop

@@ -1,0 +1,130 @@
+package forms
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+func (form *Form) validationFailed(current snapshot) {
+	focus := current.submitRequested
+	current.submitRequested = false
+	form.write(current)
+	if focus && form.options.FocusInvalid != nil {
+		for _, name := range form.fieldNames(current.values) {
+			if current.errors[name] != "" {
+				form.options.FocusInvalid(name)
+				return
+			}
+		}
+		form.options.FocusInvalid("")
+	}
+}
+
+func (form *Form) validate(then func(Data)) {
+	current := form.read()
+	current.work.validation.Cancel()
+	current.work.validation = nil
+	data := form.data(current)
+	if current.submitRequested {
+		current.serverErrors = nil
+	}
+	current.errors = includeServerErrors(form.check(data), current.serverErrors)
+	current.validating = false
+	if len(current.errors) > 0 {
+		form.validationFailed(current)
+		return
+	}
+	if form.options.ValidateAsync == nil {
+		form.write(current)
+		if len(current.errors) == 0 && then != nil {
+			then(data)
+		}
+		return
+	}
+	current.validating = true
+	current.work.validation = ui.Start(form.scope, form.options.ValidateAsync(cloneData(data)), func(result ui.Result) {
+		latest := form.read()
+		latest.validating, latest.work.validation = false, nil
+		if result.Error != "" {
+			latest.errors = Errors{"": result.Error}
+		} else {
+			latest.errors = form.normalize(form.options.DecodeValidation(result))
+		}
+		latest.errors = includeServerErrors(latest.errors, latest.serverErrors)
+		if len(latest.errors) > 0 {
+			form.validationFailed(latest)
+			return
+		}
+		form.write(latest)
+		if len(latest.errors) == 0 && then != nil {
+			then(data)
+		}
+	})
+	form.write(current)
+}
+
+// Submit validates a frozen snapshot and starts at most one scoped request.
+// Editing during validation cancels that attempt. Editing during submission is
+// retained; a successful response advances the baseline to the submitted values.
+func (form *Form) Submit(request func(Data) ui.Request, decode func(ui.Result) Outcome) bool {
+	form.requireLive()
+	if request == nil || decode == nil {
+		panic("forms: submission requires a request and a decoder")
+	}
+	current := form.read()
+	if current.submitRequested || current.submitting {
+		return false
+	}
+	current.submitted, current.message = true, ""
+	current.submitRequested = true
+	form.write(current)
+	form.validate(func(data Data) {
+		latest := form.read()
+		latest.submitting = true
+		latest.submitRequested = false
+		latest.work.submission = ui.Start(form.scope, request(cloneData(data)), func(result ui.Result) {
+			outcome := Outcome{}
+			if result.Error != "" {
+				outcome.Errors = Errors{"": result.Error}
+			} else {
+				outcome = decode(result)
+			}
+			current := form.read()
+			current.submitting, current.work.submission = false, nil
+			current.message = outcome.Message
+			errors := form.normalize(outcome.Errors)
+			latestData := form.data(current)
+			current.errors = form.check(latestData)
+			current.serverErrors = make(Errors)
+			for name, message := range errors {
+				if name == "" || latestData.equalField(data, name) {
+					current.serverErrors[name] = message
+				}
+			}
+			current.errors = includeServerErrors(current.errors, current.serverErrors)
+			if len(errors) == 0 {
+				current.baseline = copyValueMap(current.baseline)
+				for _, array := range current.arrays {
+					if _, submitted := data.Values[array]; submitted {
+						for name := range current.baseline {
+							if arrayDescendant(array, name) {
+								delete(current.baseline, name)
+							}
+						}
+					}
+				}
+				current.files = cloneFiles(current.files)
+				for name, selection := range data.Files {
+					if latestData.equalField(data, name) {
+						current.files[name] = selection.Clear()
+					}
+				}
+				for name, value := range data.Values {
+					current.baseline[name] = value
+				}
+			}
+			form.write(current)
+		})
+		form.write(latest)
+	})
+	return true
+}

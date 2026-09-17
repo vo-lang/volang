@@ -1,0 +1,51 @@
+package ui
+
+// A nil result means retained ranges are already ordered. Otherwise the marked
+// entries form a longest increasing subsequence of old positions. Moving the
+// remaining ranges is sufficient and minimizes retained-node moves.
+func retainedOrder(positions []int) []bool {
+	last, ordered := -1, true
+	for _, position := range positions {
+		if position < 0 {
+			continue
+		}
+		if position < last {
+			ordered = false
+			break
+		}
+		last = position
+	}
+	if ordered {
+		return nil
+	}
+	tails := make([]int, 0, len(positions))
+	predecessor := make([]int, len(positions))
+	for i, position := range positions {
+		if position < 0 {
+			continue
+		}
+		low, high := 0, len(tails)
+		for low < high {
+			middle := low + (high - low) / 2
+			if positions[tails[middle]] < position {
+				low = middle + 1
+			} else {
+				high = middle
+			}
+		}
+		predecessor[i] = -1
+		if low > 0 {
+			predecessor[i] = tails[low - 1]
+		}
+		if low == len(tails) {
+			tails = append(tails, i)
+		} else {
+			tails[low] = i
+		}
+	}
+	stable := make([]bool, len(positions))
+	for index := tails[len(tails) - 1]; index >= 0; index = predecessor[index] {
+		stable[index] = true
+	}
+	return stable
+}

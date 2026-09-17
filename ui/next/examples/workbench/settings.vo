@@ -1,0 +1,64 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/web"
+)
+
+var formType = ui.Define("workbench.Settings")
+
+func Settings() ui.View {
+	return ui.Component(formType, func(scope *ui.Scope) ui.View {
+		nameRef := ui.Ref(scope, "name-input")
+		saved := ui.String(scope, "saved", "No changes saved yet")
+		form := forms.Use(scope, "profile", forms.Options{
+			Initial: forms.Values{
+				"name": []string{"Ada"}, "email": []string{"false"}, "frequency": []string{"weekly"},
+			},
+			FieldValidators: map[string]func([]string) string{
+				"name": func(values []string) string {
+					if len(values) == 0 || strings.TrimSpace(values[0]) == "" {
+						return "Enter your name before saving."
+					}
+					return ""
+				},
+			},
+			FocusInvalid: func(name string) {
+				nameRef.Focus()
+			},
+		})
+		name := form.Field("name", func(form *forms.Form) ui.View {
+			input := form.Input("name", ui.Element("input").Ref(nameRef).Attr("id", "profile-name")).Attr("aria-invalid", fmt.Sprint(form.Error("name") !=
+				"")).DescribedBy("profile-error")
+			return ui.Fragment(ui.Element("label", ui.Text("Display name")).Attr("for", "profile-name"), input, ui.Element("p", ui.Text(form.Error("name"))).Attr("id", "profile-error").Attr("role", "alert"))
+		})
+		checkbox := form.Field("email", func(form *forms.Form) ui.View {
+			return ui.Element("label", form.Checkbox("email", ui.Element("input").Attr("id", "profile-email")), ui.Text("Email updates")).Attr("class", "check")
+		})
+		frequency := form.Field("frequency", func(form *forms.Form) ui.View {
+			return ui.Fragment(ui.Element("label", ui.Text("Frequency")).Attr("for", "profile-frequency"), form.Input("frequency", ui.Element("select", ui.Element("option", ui.Text("Daily")).Attr("value", "daily"), ui.Element("option", ui.Text("Weekly")).Attr("value", "weekly")).Attr("id", "profile-frequency")))
+		})
+		buttonText := "Save preferences"
+		if form.Pending() {
+			buttonText = "Saving…"
+		}
+		actions := ui.Element("div", ui.Element("button", ui.Text(buttonText)).Attr("type", "submit").Attr("disabled", fmt.Sprint(form.Pending())), ui.Element("button", ui.Text("Cancel save")).Attr("type", "button").Attr("data-cancel-save", "").Attr("disabled", fmt.Sprint(!form.Pending())).On("click", func(event ui.Event) {
+			form.Cancel()
+		}), ui.Element("button", ui.Text("Reset form")).Attr("type", "reset").Attr("data-reset-form", "")).Attr("class", "actions")
+		view := form.View(func(data forms.Data) ui.Request {
+			values := data.Values
+			return web.After(400, values.Get("name") + " · " + values.Get("frequency") + " · email " +
+				values.Get("email"))
+		}, func(result ui.Result) forms.Outcome {
+			saved.Set(result.Value)
+			return forms.Outcome{Message: result.Value}
+		}, name, checkbox, frequency, actions, ui.Element("p", ui.Text(form.Error(""))).Attr("role", "alert")).On("reset", func(event ui.Event) {
+			form.Reset()
+			nameRef.Focus()
+		})
+		return ui.Element("section", ui.Element("h2", ui.Text("Your preferences")), view, ui.Element("output", ui.Text(saved.Get())).Attr("data-saved", "").Attr("aria-live", "polite")).Attr("class", "card").Attr("data-theme", ui.UseContext(scope, theme).(string))
+	})
+}

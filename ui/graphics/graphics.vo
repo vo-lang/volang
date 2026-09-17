@@ -1,6 +1,6 @@
 // Package graphics provides bounded renderer-neutral vector scenes and canvas
 // command streams. The compact VGC1 format is deterministic across VM, JIT,
-// Native AOT, Core Wasm AOT, SSR, and replay tests.
+// Native AOT, Wasm VM, SSR, and replay tests.
 package graphics
 
 import (

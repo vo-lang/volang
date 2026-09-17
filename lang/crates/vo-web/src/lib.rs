@@ -13,7 +13,8 @@
 //!
 //! # Features
 //! - `compiler` (default): Full compiler chain
-//! - No features: Bytecode execution only
+//! - `legacy-ui` (default): Previous UI kernel and host methods
+//! - No features: Bytecode execution and the isolated UI transport
 
 // ── Submodules ──────────────────────────────────────────────────────────────
 

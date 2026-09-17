@@ -1,0 +1,10 @@
+package main
+
+import (
+	"{{module}}/notes/app"
+	"github.com/vo-lang/ui/next/host"
+)
+
+func main() {
+	host.RunWithData(app.View)
+}

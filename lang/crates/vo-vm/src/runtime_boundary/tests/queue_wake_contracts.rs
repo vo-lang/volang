@@ -291,6 +291,7 @@ fn vm_select_woken_payload_contract_019_rejects_slot_kind_drift_before_storage()
         let fiber = vm.scheduler.get_fiber_mut(fiber_id);
         fiber.select_state = Some(SelectState {
             cases: vec![SelectCase {
+                _storage: None,
                 kind: SelectCaseKind::Recv,
                 result_index: 0,
                 queue_reg: 0,
@@ -298,7 +299,8 @@ fn vm_select_woken_payload_contract_019_rejects_slot_kind_drift_before_storage()
                 elem_slots: 1,
                 elem_layout: None,
                 has_ok: false,
-            }],
+            }]
+            .into(),
             expected_cases: 1,
             has_default: false,
             woken_index: None,
@@ -308,7 +310,8 @@ fn vm_select_woken_payload_contract_019_rejects_slot_kind_drift_before_storage()
                 case_index: 0,
                 queue: ch,
                 kind: SelectCaseKind::Recv,
-            }],
+            }]
+            .into(),
         });
     }
     vm.scheduler.schedule_next().unwrap();
@@ -336,8 +339,8 @@ fn vm_select_woken_payload_contract_019_rejects_slot_kind_drift_before_storage()
     transition.wakes.push(WakeCommand::queue_waiter_with_result(
         waiter,
         SelectWokenResult::Recv {
-            data: vec![forged_root as u64],
-            slot_types: vec![vo_runtime::SlotType::Value],
+            data: vec![forged_root as u64].into(),
+            slot_types: vec![vo_runtime::SlotType::Value].into(),
             closed: false,
         },
     ));
@@ -639,6 +642,7 @@ fn duplicate_select_wakes_reject_before_partial_apply_055() {
         fiber.select_state = Some(SelectState {
             cases: vec![
                 SelectCase {
+                    _storage: None,
                     kind: SelectCaseKind::Recv,
                     result_index: 0,
                     queue_reg: 0,
@@ -648,6 +652,7 @@ fn duplicate_select_wakes_reject_before_partial_apply_055() {
                     has_ok: false,
                 },
                 SelectCase {
+                    _storage: None,
                     kind: SelectCaseKind::Recv,
                     result_index: 0,
                     queue_reg: 0,
@@ -656,7 +661,8 @@ fn duplicate_select_wakes_reject_before_partial_apply_055() {
                     elem_layout: None,
                     has_ok: false,
                 },
-            ],
+            ]
+            .into(),
             expected_cases: 2,
             has_default: false,
             woken_index: None,
@@ -673,7 +679,8 @@ fn duplicate_select_wakes_reject_before_partial_apply_055() {
                     queue: ch,
                     kind: SelectCaseKind::Recv,
                 },
-            ],
+            ]
+            .into(),
         });
     }
     vm.scheduler.schedule_next().unwrap();
@@ -779,6 +786,7 @@ fn accepted_select_wake_cancels_sibling_waiters_056() {
         fiber.select_state = Some(SelectState {
             cases: vec![
                 SelectCase {
+                    _storage: None,
                     kind: SelectCaseKind::Recv,
                     result_index: 0,
                     queue_reg: 0,
@@ -788,6 +796,7 @@ fn accepted_select_wake_cancels_sibling_waiters_056() {
                     has_ok: false,
                 },
                 SelectCase {
+                    _storage: None,
                     kind: SelectCaseKind::Recv,
                     result_index: 0,
                     queue_reg: 2,
@@ -796,7 +805,8 @@ fn accepted_select_wake_cancels_sibling_waiters_056() {
                     elem_layout: None,
                     has_ok: false,
                 },
-            ],
+            ]
+            .into(),
             expected_cases: 2,
             has_default: false,
             woken_index: None,
@@ -813,7 +823,8 @@ fn accepted_select_wake_cancels_sibling_waiters_056() {
                     queue: sibling,
                     kind: SelectCaseKind::Recv,
                 },
-            ],
+            ]
+            .into(),
         });
     }
     let selected_waiter = QueueWaiter::try_select(
@@ -868,4 +879,93 @@ fn accepted_select_wake_cancels_sibling_waiters_056() {
         select_state.registered_queues.is_empty(),
         "registered queue roots must stop describing wait ownership after wake acceptance"
     );
+}
+
+#[test]
+fn local_wake_staging_retains_the_owned_workspace_and_input_order() {
+    let vm = Vm::new();
+    for count in [0, 1, 3, 64] {
+        let mut wakes = Vec::with_capacity(count + 2);
+        for index in 0..count {
+            let waiter = QueueWaiter::try_queue(
+                vm.state.current_island_id,
+                (1_u64 << 32) | index as u64,
+                0x1000,
+                SelectWaitKind::Recv,
+            )
+            .unwrap();
+            wakes.push(WakeCommand::queue_waiter(waiter));
+        }
+        let keys: Vec<_> = wakes.iter().map(WakeCommand::activation_key).collect();
+        let pointer = wakes.as_ptr();
+        let capacity = wakes.capacity();
+        let (local, remote) = vm.split_remote_wake_commands_before_commit(wakes).unwrap();
+        assert_eq!(
+            local.as_ptr(),
+            pointer,
+            "local staging must reuse the input allocation"
+        );
+        assert_eq!(local.capacity(), capacity);
+        assert_eq!(
+            local
+                .iter()
+                .map(WakeCommand::activation_key)
+                .collect::<Vec<_>>(),
+            keys
+        );
+        assert!(remote.is_empty());
+        assert_eq!(
+            remote.capacity(),
+            0,
+            "local staging must not allocate a remote workspace"
+        );
+    }
+}
+
+#[test]
+fn local_wake_batch_preserves_ready_fifo_and_yields_the_current_fiber() {
+    let mut vm = Vm::new();
+    let mut blocked = Vec::new();
+    let mut waiters = Vec::new();
+    for _ in 0..3 {
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        assert_eq!(vm.scheduler.schedule_next(), Some(fid));
+        let waiter = QueueWaiter::try_queue(
+            vm.state.current_island_id,
+            vm.scheduler.get_fiber(fid).wake_key_packed(),
+            0x1000,
+            SelectWaitKind::Recv,
+        )
+        .unwrap();
+        vm.scheduler
+            .current_fiber_mut()
+            .unwrap()
+            .begin_queue_wait(&waiter);
+        vm.scheduler.block_for_queue();
+        blocked.push(fid);
+        waiters.push(waiter);
+    }
+    let current = vm.scheduler.spawn(Fiber::new(0));
+    assert_eq!(vm.scheduler.schedule_next(), Some(current));
+    let already_ready = vm.scheduler.spawn(Fiber::new(0));
+    let mut transition = RuntimeTransition::new(
+        RuntimeBoundary::Yield,
+        ResumePolicy::PreserveFramePc,
+        GcRootEffect::CurrentFiberDirty,
+    );
+    for index in [2, 0, 1] {
+        transition
+            .wakes
+            .push(WakeCommand::queue_waiter(waiters[index].clone()));
+    }
+    vm.apply_runtime_transition(Some(current), transition)
+        .unwrap();
+    assert_eq!(vm.scheduler.current, None);
+    assert_eq!(
+        vm.scheduler.ready_queue.iter().copied().collect::<Vec<_>>(),
+        vec![already_ready, blocked[2], blocked[0], blocked[1], current]
+    );
+    for fid in blocked {
+        assert_eq!(vm.scheduler.get_fiber(fid).state, FiberState::Runnable);
+    }
 }

@@ -5,7 +5,7 @@ protocol = "volang.studio.host.v3"
 application_language = "volang"
 browser_component_runtime = false
 development_backends = ["vm", "jit"]
-release_backends = ["core-wasm-aot", "native-aot"]
+release_backends = ["wasm-vm", "native-aot"]
 
 [capabilities]
 home = "implemented-pure-volang"
@@ -31,7 +31,7 @@ github_account = "implemented-host-isolated-browser-verification-and-native-gh-c
 credentials = "excluded-from-guest-protocol-host-owned-account-only"
 native_host = "implemented-vm-jit"
 web_host = "implemented-opfs-worker-compiler"
-aot_release = "implemented-core-wasm-and-native-custom-host-aot"
+aot_release = "implemented-native-custom-host-aot"
 
 [parity]
 matrix = "product-parity.toml"

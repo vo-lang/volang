@@ -1787,6 +1787,7 @@ fn register_extern_definitions(
     registry: &mut ExternRegistry,
     externs: &[ExternDef],
 ) -> Result<(), ExternContractError> {
+    vo_ui_bridge::register_externs(registry, externs)?;
     for (id, definition) in unique_extern_providers(externs) {
         let Ok(key) = decode_extern_name(&definition.name) else {
             continue;

@@ -6,15 +6,21 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+mod encode_layout;
+#[cfg(test)]
+use encode_layout::checked_encode_transfer_meta;
+use encode_layout::{validate_sendable_type_graph, TransferLayoutValidator};
+
 use crate::gc::{Gc, GcRef};
 use crate::gc_types::try_typed_write_barrier;
 use crate::island::{EndpointRequestKind, EndpointResponseKind, EndpointWaitKey, IslandCommand};
 use crate::objects::array;
+#[cfg(test)]
+use crate::pack::{pack_slots_with_named_type_metas_and_cache_limited, PackObjectGraph};
 use crate::pack::{
-    pack_slots_with_named_type_metas_and_cache_limited,
     unpack_slots_expected_with_queue_handle_resolver_and_object_cache,
-    validate_packed_slots_expected_with_named_type_metas_and_cache, PackObjectGraph,
-    PackOutputError, PackTypeContext, PackedValue, QueueHandleInfo, UnpackObjectCache,
+    validate_packed_slots_expected_with_named_type_metas_and_cache, PackOutputError,
+    PackTypeContext, PackedValue, PacketEncoder, QueueHandleInfo, UnpackObjectCache,
     ValidateObjectCache,
 };
 use crate::slot::{Slot, SLOT_BYTES};
@@ -333,56 +339,16 @@ fn try_vec_with_capacity(
     Ok(buf)
 }
 
-fn reserve_append(
-    buf: &mut Vec<u8>,
-    additional: usize,
-    field: &'static str,
-) -> Result<(), IslandMessageEncodeError> {
-    let requested = checked_encoded_size(buf.len(), additional, field)?;
-    if requested > MAX_ISLAND_MESSAGE_BYTES {
-        return Err(IslandMessageEncodeError::LengthOverflow {
-            field,
-            len: requested,
-            max: MAX_ISLAND_MESSAGE_BYTES,
-        });
-    }
-    if buf.capacity().saturating_sub(buf.len()) >= additional {
-        return Ok(());
-    }
-    let geometric = buf.capacity().checked_mul(2).unwrap_or(requested);
-    let target_capacity = geometric.max(requested);
-    let reserve = target_capacity
-        .checked_sub(buf.len())
-        .ok_or(IslandMessageEncodeError::SizeOverflow { field })?;
-    buf.try_reserve_exact(reserve)
-        .map_err(|_| IslandMessageEncodeError::AllocationFailed {
-            field,
-            requested: target_capacity,
-        })
-}
-
-fn append_packed_chunk(
-    buf: &mut Vec<u8>,
-    packed_data: &[u8],
-    field: &'static str,
-) -> Result<(), IslandMessageEncodeError> {
-    let len = wire_len_u32(packed_data.len(), field)?;
-    let additional = checked_encoded_size(4, packed_data.len(), field)?;
-    reserve_append(buf, additional, field)?;
-    buf.extend_from_slice(&len.to_le_bytes());
-    buf.extend_from_slice(packed_data);
-    Ok(())
-}
-
 fn map_pack_output_error(error: PackOutputError, field: &'static str) -> IslandMessageEncodeError {
     match error {
-        PackOutputError::LengthOverflow { attempted: len, .. } => {
-            IslandMessageEncodeError::LengthOverflow {
-                field,
-                len,
-                max: u32::MAX as usize,
-            }
-        }
+        PackOutputError::LengthOverflow {
+            limit,
+            attempted: len,
+        } => IslandMessageEncodeError::LengthOverflow {
+            field,
+            len,
+            max: limit,
+        },
         PackOutputError::AllocationFailed { requested } => {
             IslandMessageEncodeError::AllocationFailed { field, requested }
         }
@@ -401,206 +367,19 @@ fn expected_argument_slots(
     })
 }
 
-fn checked_encode_transfer_meta(
-    transfer_type: TransferType,
-    field: &'static str,
-    struct_metas: &[StructMeta],
-    named_type_metas: &[NamedTypeMeta],
-    runtime_types: &[RuntimeType],
-) -> Result<ValueMeta, IslandMessageEncodeError> {
-    let value_meta = ValueMeta::try_from_raw(transfer_type.meta_raw)
-        .ok_or(IslandMessageEncodeError::InvalidLayout { field })?;
-    let value_rttid = ValueRttid::try_from_raw(transfer_type.rttid_raw)
-        .ok_or(IslandMessageEncodeError::InvalidLayout { field })?;
-    if value_meta.try_value_kind() != value_rttid.try_value_kind() {
-        return Err(IslandMessageEncodeError::InvalidLayout { field });
-    }
-    if matches!(
-        value_meta.try_value_kind(),
-        Some(ValueKind::Channel | ValueKind::Closure | ValueKind::Interface | ValueKind::Island)
-    ) {
-        return Err(IslandMessageEncodeError::InvalidLayout { field });
-    }
-    let resolver = RuntimeTypeResolver::new(struct_metas, named_type_metas, runtime_types);
-    if resolver.canonical_value_meta_for_value_rttid(value_rttid) != Some(value_meta)
-        || resolver.slot_count_for_value_rttid(value_rttid) != Some(transfer_type.slots as usize)
-    {
-        return Err(IslandMessageEncodeError::InvalidLayout { field });
-    }
-    validate_sendable_type_graph(value_rttid, field, struct_metas, runtime_types, resolver)?;
-    Ok(value_meta)
-}
-
-fn checked_encode_transfer_metas(
-    transfer_types: &[TransferType],
-    field: &'static str,
-    struct_metas: &[StructMeta],
-    named_type_metas: &[NamedTypeMeta],
-    runtime_types: &[RuntimeType],
-) -> Result<Vec<ValueMeta>, IslandMessageEncodeError> {
-    let mut value_metas = Vec::new();
-    value_metas
-        .try_reserve_exact(transfer_types.len())
-        .map_err(|_| IslandMessageEncodeError::AllocationFailed {
-            field,
-            requested: transfer_types.len(),
-        })?;
-    for &transfer_type in transfer_types {
-        value_metas.push(checked_encode_transfer_meta(
-            transfer_type,
-            field,
-            struct_metas,
-            named_type_metas,
-            runtime_types,
-        )?);
-    }
-    Ok(value_metas)
-}
-
-fn validate_sendable_type_graph(
-    root: ValueRttid,
-    field: &'static str,
-    struct_metas: &[StructMeta],
-    runtime_types: &[RuntimeType],
-    resolver: RuntimeTypeResolver<'_>,
-) -> Result<(), IslandMessageEncodeError> {
-    fn enqueue(
-        value_rttid: ValueRttid,
-        field: &'static str,
-        runtime_types: &[RuntimeType],
-        seen: &mut [bool],
-        pending: &mut Vec<ValueRttid>,
-    ) -> Result<(), IslandMessageEncodeError> {
-        let value_rttid = ValueRttid::try_from_raw(value_rttid.to_raw())
-            .ok_or(IslandMessageEncodeError::InvalidLayout { field })?;
-        let index = value_rttid.rttid() as usize;
-        runtime_types
-            .get(index)
-            .ok_or(IslandMessageEncodeError::InvalidLayout { field })?;
-        if !seen[index] {
-            seen[index] = true;
-            pending.push(value_rttid);
-        }
-        Ok(())
-    }
-
-    let type_count = runtime_types.len();
-    let mut seen = Vec::new();
-    seen.try_reserve_exact(type_count)
-        .map_err(|_| IslandMessageEncodeError::AllocationFailed {
-            field,
-            requested: type_count,
-        })?;
-    seen.resize(type_count, false);
-    let mut pending = Vec::new();
-    pending.try_reserve_exact(type_count).map_err(|_| {
-        IslandMessageEncodeError::AllocationFailed {
-            field,
-            requested: type_count,
-        }
-    })?;
-    enqueue(root, field, runtime_types, &mut seen, &mut pending)?;
-
-    while let Some(value_rttid) = pending.pop() {
-        if resolver
-            .canonical_value_meta_for_value_rttid(value_rttid)
-            .is_none()
-            || resolver.slot_count_for_value_rttid(value_rttid).is_none()
-        {
-            return Err(IslandMessageEncodeError::InvalidLayout { field });
-        }
-        let (resolved_rttid, runtime_type) = resolver
-            .resolve_value_rttid(value_rttid)
-            .ok_or(IslandMessageEncodeError::InvalidLayout { field })?;
-        let resolved_index = resolved_rttid.rttid() as usize;
-        if let Some(resolved_seen) = seen.get_mut(resolved_index) {
-            *resolved_seen = true;
-        } else {
-            return Err(IslandMessageEncodeError::InvalidLayout { field });
-        }
-
-        let mut push = |nested| enqueue(nested, field, runtime_types, &mut seen, &mut pending);
-        match runtime_type {
-            RuntimeType::Basic(kind) => {
-                if matches!(
-                    kind,
-                    ValueKind::Channel
-                        | ValueKind::Closure
-                        | ValueKind::Interface
-                        | ValueKind::Island
-                ) {
-                    return Err(IslandMessageEncodeError::InvalidLayout { field });
-                }
-            }
-            RuntimeType::Pointer(elem)
-            | RuntimeType::Slice(elem)
-            | RuntimeType::Array { elem, .. } => push(*elem)?,
-            RuntimeType::Port { dir, elem } => {
-                if *dir != vo_common_core::ChanDir::Send {
-                    return Err(IslandMessageEncodeError::InvalidLayout { field });
-                }
-                push(*elem)?;
-            }
-            RuntimeType::Map { key, val } => {
-                push(*key)?;
-                push(*val)?;
-            }
-            RuntimeType::Struct { fields, meta_id } => {
-                let physical = struct_metas
-                    .get(*meta_id as usize)
-                    .ok_or(IslandMessageEncodeError::InvalidLayout { field })?;
-                if fields.len() != physical.fields.len() {
-                    return Err(IslandMessageEncodeError::InvalidLayout { field });
-                }
-                let mut expected_offset = 0usize;
-                for (identity_field, physical_field) in fields.iter().zip(&physical.fields) {
-                    if identity_field.name != physical_field.name
-                        || identity_field.typ != physical_field.type_info
-                        || identity_field.embedded != physical_field.embedded
-                        || identity_field.tag != physical_field.tag.as_deref().unwrap_or("")
-                    {
-                        return Err(IslandMessageEncodeError::InvalidLayout { field });
-                    }
-                    let field_layout = resolver
-                        .slot_layout_for_value_rttid(physical_field.type_info)
-                        .ok_or(IslandMessageEncodeError::InvalidLayout { field })?;
-                    if physical_field.offset as usize != expected_offset
-                        || physical_field.slot_count as usize != field_layout.len()
-                    {
-                        return Err(IslandMessageEncodeError::InvalidLayout { field });
-                    }
-                    let field_end = expected_offset
-                        .checked_add(field_layout.len())
-                        .ok_or(IslandMessageEncodeError::InvalidLayout { field })?;
-                    if physical.slot_types.get(expected_offset..field_end)
-                        != Some(field_layout.as_slice())
-                    {
-                        return Err(IslandMessageEncodeError::InvalidLayout { field });
-                    }
-                    expected_offset = field_end;
-                    push(identity_field.typ)?;
-                }
-                let zero_size_workaround = expected_offset == 0
-                    && physical.slot_types.as_slice() == [vo_common_core::SlotType::Value]
-                    && !physical.fields.is_empty();
-                if !physical.fields.is_empty()
-                    && expected_offset != physical.slot_types.len()
-                    && !zero_size_workaround
-                {
-                    return Err(IslandMessageEncodeError::InvalidLayout { field });
-                }
-            }
-            RuntimeType::Chan { .. }
-            | RuntimeType::Func { .. }
-            | RuntimeType::Interface { .. }
-            | RuntimeType::Tuple(_)
-            | RuntimeType::Island
-            | RuntimeType::Named { .. } => {
-                return Err(IslandMessageEncodeError::InvalidLayout { field });
-            }
-        }
-    }
-    Ok(())
+#[inline]
+fn spawn_payload_header(
+    func_id: u32,
+    capture_count: u16,
+    argument_count: u16,
+    raw_capture_count: u16,
+) -> Result<Vec<u8>, IslandMessageEncodeError> {
+    let mut bytes = try_vec_with_capacity(HEADER_SIZE, "spawn payload")?;
+    bytes.extend_from_slice(&func_id.to_le_bytes());
+    bytes.extend_from_slice(&capture_count.to_le_bytes());
+    bytes.extend_from_slice(&argument_count.to_le_bytes());
+    bytes.extend_from_slice(&raw_capture_count.to_le_bytes());
+    Ok(bytes)
 }
 
 #[inline]
@@ -731,6 +510,11 @@ pub fn encode_spawn_payload_from_capture_descriptors(
             actual: args.len(),
         });
     }
+    // A shape-checked empty packet has no values or type graph to traverse.
+    // Leave the traversal/cache workspace uninitialized on this common path.
+    if capture_count == 0 && argument_count == 0 {
+        return spawn_payload_header(func_id, 0, 0, 0);
+    }
     for (capture, &transfer_type) in capture_values.iter().zip(capture_types) {
         if let Some(value_slots) = capture.slots {
             let expected = transfer_type.slots as usize;
@@ -743,20 +527,9 @@ pub fn encode_spawn_payload_from_capture_descriptors(
             }
         }
     }
-    let capture_metas = checked_encode_transfer_metas(
-        capture_types,
-        "spawn capture transfer metadata",
-        struct_metas,
-        named_type_metas,
-        runtime_types,
-    )?;
-    let argument_metas = checked_encode_transfer_metas(
-        param_types,
-        "spawn argument transfer metadata",
-        struct_metas,
-        named_type_metas,
-        runtime_types,
-    )?;
+    let mut layouts = TransferLayoutValidator::new(struct_metas, named_type_metas, runtime_types);
+    let capture_metas = layouts.metas(capture_types, "spawn capture transfer metadata")?;
+    let argument_metas = layouts.metas(param_types, "spawn argument transfer metadata")?;
     for (capture, &value_meta) in capture_values.iter().zip(&capture_metas) {
         if capture.storage == SpawnCaptureStorage::HeapArray
             && (capture.slots.is_none() || value_meta.value_kind() != ValueKind::Array)
@@ -767,38 +540,28 @@ pub fn encode_spawn_payload_from_capture_descriptors(
         }
     }
 
-    let mut buf = try_vec_with_capacity(HEADER_SIZE, "spawn payload")?;
-    let mut object_graph = PackObjectGraph::default();
-
-    buf.extend_from_slice(&func_id.to_le_bytes());
-    buf.extend_from_slice(&capture_count.to_le_bytes());
-    buf.extend_from_slice(&argument_count.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
+    let buf = spawn_payload_header(func_id, capture_count, argument_count, 0)?;
+    let mut packet = PacketEncoder::new(
+        gc,
+        PackTypeContext::with_named_types(struct_metas, named_type_metas, runtime_types),
+        buf,
+        MAX_ISLAND_MESSAGE_BYTES,
+    )
+    .map_err(|error| map_pack_output_error(error, "spawn payload"))?;
 
     for (capture, &value_meta) in capture_values.iter().zip(&capture_metas) {
-        reserve_append(&mut buf, 1, "spawn capture storage")?;
-        buf.push(capture.storage as u8);
+        packet
+            .extend(&[capture.storage as u8])
+            .map_err(|error| map_pack_output_error(error, "spawn capture storage"))?;
         let Some(value_slots) = capture.slots else {
-            reserve_append(&mut buf, 4, "nil packed capture")?;
-            buf.extend_from_slice(&0u32.to_le_bytes());
+            packet
+                .extend(&0u32.to_le_bytes())
+                .map_err(|error| map_pack_output_error(error, "nil packed capture"))?;
             continue;
         };
         // Safety: capture slots and metadata are produced by verified bytecode.
-        let packed = unsafe {
-            pack_slots_with_named_type_metas_and_cache_limited(
-                gc,
-                value_slots,
-                value_meta,
-                struct_metas,
-                named_type_metas,
-                runtime_types,
-                &mut object_graph,
-                u32::MAX as usize,
-            )
-        }
-        .map_err(|error| map_pack_output_error(error, "packed capture"))?;
-        let packed_data = packed.data();
-        append_packed_chunk(&mut buf, packed_data, "packed capture")?;
+        unsafe { packet.append_chunk(value_slots, value_meta) }
+            .map_err(|error| map_pack_output_error(error, "packed capture"))?;
     }
 
     let mut arg_offset = 0usize;
@@ -807,24 +570,14 @@ pub fn encode_spawn_payload_from_capture_descriptors(
         let arg_end = checked_encoded_size(arg_offset, slots_usize, "spawn argument slots")?;
         let value_slots = &args[arg_offset..arg_end];
         // Safety: parameter slots and metadata come from the verified call layout.
-        let packed = unsafe {
-            pack_slots_with_named_type_metas_and_cache_limited(
-                gc,
-                value_slots,
-                value_meta,
-                struct_metas,
-                named_type_metas,
-                runtime_types,
-                &mut object_graph,
-                u32::MAX as usize,
-            )
-        }
-        .map_err(|error| map_pack_output_error(error, "packed argument"))?;
-        append_packed_chunk(&mut buf, packed.data(), "packed argument")?;
+        unsafe { packet.append_chunk(value_slots, value_meta) }
+            .map_err(|error| map_pack_output_error(error, "packed argument"))?;
         arg_offset = arg_end;
     }
 
-    Ok(buf)
+    packet
+        .finish()
+        .map_err(|error| map_pack_output_error(error, "spawn payload"))
 }
 
 /// Encode a direct method-value closure payload.
@@ -866,44 +619,22 @@ pub fn encode_spawn_payload_from_raw_capture_slots(
             actual: args.len(),
         });
     }
-    let capture_meta = checked_encode_transfer_meta(
-        capture_type,
-        "raw receiver capture transfer metadata",
-        struct_metas,
-        named_type_metas,
-        runtime_types,
-    )?;
-    let argument_metas = checked_encode_transfer_metas(
-        param_types,
-        "spawn argument transfer metadata",
-        struct_metas,
-        named_type_metas,
-        runtime_types,
-    )?;
+    let mut layouts = TransferLayoutValidator::new(struct_metas, named_type_metas, runtime_types);
+    let capture_meta = layouts.meta(capture_type, "raw receiver capture transfer metadata")?;
+    let argument_metas = layouts.metas(param_types, "spawn argument transfer metadata")?;
 
-    let mut buf = try_vec_with_capacity(HEADER_SIZE, "spawn payload")?;
-    let mut object_graph = PackObjectGraph::default();
-
-    buf.extend_from_slice(&func_id.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&argument_count.to_le_bytes());
-    buf.extend_from_slice(&raw_capture_count.to_le_bytes());
+    let buf = spawn_payload_header(func_id, 1, argument_count, raw_capture_count)?;
+    let mut packet = PacketEncoder::new(
+        gc,
+        PackTypeContext::with_named_types(struct_metas, named_type_metas, runtime_types),
+        buf,
+        MAX_ISLAND_MESSAGE_BYTES,
+    )
+    .map_err(|error| map_pack_output_error(error, "spawn payload"))?;
 
     // Safety: direct receiver captures are checked against `capture_type` above.
-    let packed = unsafe {
-        pack_slots_with_named_type_metas_and_cache_limited(
-            gc,
-            raw_capture_slots,
-            capture_meta,
-            struct_metas,
-            named_type_metas,
-            runtime_types,
-            &mut object_graph,
-            u32::MAX as usize,
-        )
-    }
-    .map_err(|error| map_pack_output_error(error, "packed receiver"))?;
-    append_packed_chunk(&mut buf, packed.data(), "packed receiver")?;
+    unsafe { packet.append_chunk(raw_capture_slots, capture_meta) }
+        .map_err(|error| map_pack_output_error(error, "packed receiver"))?;
 
     let mut arg_offset = 0usize;
     for (&transfer_type, &value_meta) in param_types.iter().zip(&argument_metas) {
@@ -911,24 +642,14 @@ pub fn encode_spawn_payload_from_raw_capture_slots(
         let arg_end = checked_encoded_size(arg_offset, slots_usize, "spawn argument slots")?;
         let value_slots = &args[arg_offset..arg_end];
         // Safety: parameter slots and metadata come from the verified call layout.
-        let packed = unsafe {
-            pack_slots_with_named_type_metas_and_cache_limited(
-                gc,
-                value_slots,
-                value_meta,
-                struct_metas,
-                named_type_metas,
-                runtime_types,
-                &mut object_graph,
-                u32::MAX as usize,
-            )
-        }
-        .map_err(|error| map_pack_output_error(error, "packed argument"))?;
-        append_packed_chunk(&mut buf, packed.data(), "packed argument")?;
+        unsafe { packet.append_chunk(value_slots, value_meta) }
+            .map_err(|error| map_pack_output_error(error, "packed argument"))?;
         arg_offset = arg_end;
     }
 
-    Ok(buf)
+    packet
+        .finish()
+        .map_err(|error| map_pack_output_error(error, "spawn payload"))
 }
 
 /// Decoded spawn fiber payload.
@@ -1946,6 +1667,84 @@ mod tests {
     }
 
     #[test]
+    fn empty_spawn_packet_keeps_its_wire_header_and_rejects_inconsistent_shapes() {
+        let gc = Gc::new();
+        let types = [RuntimeType::Basic(ValueKind::Int64)];
+        let int = TransferType {
+            meta_raw: ValueMeta::new(0, ValueKind::Int64).to_raw(),
+            rttid_raw: ValueRttid::new(0, ValueKind::Int64).to_raw(),
+            slots: 1,
+        };
+        assert_eq!(
+            encode_spawn_payload_from_capture_values(
+                &gc,
+                0x1234_5678,
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &types,
+            )
+            .unwrap(),
+            [0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0, 0, 0],
+        );
+        assert!(matches!(
+            encode_spawn_payload_from_capture_descriptors(
+                &gc,
+                0,
+                &[],
+                &[int],
+                &[],
+                &[],
+                &[],
+                &[],
+                &types,
+            ),
+            Err(IslandMessageEncodeError::LayoutMismatch {
+                field: "spawn capture type count",
+                ..
+            })
+        ));
+        assert!(matches!(
+            encode_spawn_payload_from_capture_descriptors(
+                &gc,
+                0,
+                &[],
+                &[],
+                &[7],
+                &[],
+                &[],
+                &[],
+                &types,
+            ),
+            Err(IslandMessageEncodeError::LayoutMismatch {
+                field: "spawn argument slots",
+                ..
+            })
+        ));
+        // A malformed zero-width argument still has a logical parameter and
+        // must go through complete metadata validation.
+        assert_eq!(
+            encode_spawn_payload_from_capture_descriptors(
+                &gc,
+                0,
+                &[],
+                &[],
+                &[],
+                &[TransferType { slots: 0, ..int }],
+                &[],
+                &[],
+                &types,
+            ),
+            Err(IslandMessageEncodeError::InvalidLayout {
+                field: "spawn argument transfer metadata"
+            }),
+        );
+    }
+
+    #[test]
     fn spawn_encoder_rejects_noncanonical_metadata_and_layout_without_panicking() {
         let gc = Gc::new();
         let runtime_types = vec![RuntimeType::Basic(ValueKind::Int64)];
@@ -2576,6 +2375,129 @@ mod tests {
         assert!(visited.iter().all(|&child| {
             unsafe { Gc::header(child) }.value_meta() == ValueMeta::new(0, ValueKind::String)
         }));
+    }
+
+    #[test]
+    fn spawn_packet_preserves_cross_capture_argument_aliases_and_cycles_in_a_new_heap() {
+        use vo_common_core::bytecode::FieldMeta;
+        use vo_common_core::SlotType;
+        let int_rttid = ValueRttid::new(0, ValueKind::Int64);
+        let pointer_rttid = ValueRttid::new(1, ValueKind::Pointer);
+        let node_rttid = ValueRttid::new(2, ValueKind::Struct);
+        let node_meta = ValueMeta::new(0, ValueKind::Struct);
+        let pointer_meta = ValueMeta::new(0, ValueKind::Pointer);
+        let types = vec![
+            RuntimeType::Basic(ValueKind::Int64),
+            RuntimeType::Pointer(node_rttid),
+            RuntimeType::Struct {
+                fields: [("value", int_rttid), ("next", pointer_rttid)]
+                    .into_iter()
+                    .map(|(name, typ)| vo_common_core::runtime_type::StructField {
+                        name: name.into(),
+                        typ,
+                        tag: String::new(),
+                        embedded: false,
+                        pkg: "transfer_graph_test".into(),
+                    })
+                    .collect(),
+                meta_id: 0,
+            },
+        ];
+        let metas = vec![StructMeta {
+            slot_types: vec![SlotType::Value, SlotType::GcRef],
+            fields: vec![
+                FieldMeta {
+                    name: "value".into(),
+                    offset: 0,
+                    slot_count: 1,
+                    type_info: int_rttid,
+                    embedded: false,
+                    tag: None,
+                },
+                FieldMeta {
+                    name: "next".into(),
+                    offset: 1,
+                    slot_count: 1,
+                    type_info: pointer_rttid,
+                    embedded: false,
+                    tag: None,
+                },
+            ],
+            field_index: [("value".into(), 0), ("next".into(), 1)]
+                .into_iter()
+                .collect(),
+        }];
+        vo_common_core::bytecode::RuntimeTypeFacts::from_module_parts(&metas, &[], &types)
+            .expect("canonical recursive source graph");
+        let transfer = TransferType {
+            meta_raw: pointer_meta.to_raw(),
+            rttid_raw: pointer_rttid.to_raw(),
+            slots: 1,
+        };
+        let mut source = Gc::new();
+        let left = source.alloc(node_meta, 2);
+        let right = source.alloc(node_meta, 2);
+        unsafe {
+            Gc::write_slot(left, 0, 111);
+            Gc::write_slot(left, 1, right as u64);
+            Gc::write_slot(right, 0, 222);
+            Gc::write_slot(right, 1, left as u64);
+        }
+        let captures = [
+            Some(vec![left as u64]),
+            Some(vec![right as u64]),
+            Some(vec![left as u64]),
+        ];
+        let capture_types = [transfer; 3];
+        let arg_types = [transfer; 2];
+        let encoded = encode_spawn_payload_from_capture_values(
+            &source,
+            7,
+            &captures,
+            &capture_types,
+            &[left as u64, right as u64],
+            &arg_types,
+            &metas,
+            &[],
+            &types,
+        )
+        .expect("encode cyclic shared captures and arguments");
+        let header = decode_spawn_header(&encoded).unwrap();
+        let mut destination = Gc::new();
+        let (copies, args) = unpack_spawn_payload(
+            &mut destination,
+            &encoded,
+            &header,
+            &capture_types,
+            &arg_types,
+            &metas,
+            &[],
+            &types,
+            |_, _| panic!("this graph contains no remote queues"),
+        )
+        .unwrap();
+        let copied_left = unsafe { Gc::read_slot(copies[0] as GcRef, 0) } as GcRef;
+        let copied_right = unsafe { Gc::read_slot(copies[1] as GcRef, 0) } as GcRef;
+        assert_ne!(copied_left, left);
+        assert_ne!(copied_right, right);
+        assert_ne!(copied_left, copied_right);
+        assert_eq!(
+            unsafe { Gc::read_slot(copies[2] as GcRef, 0) },
+            copied_left as u64
+        );
+        assert_eq!(args, [copied_left as u64, copied_right as u64]);
+        assert_eq!(unsafe { Gc::read_slot(copied_left, 0) }, 111);
+        assert_eq!(unsafe { Gc::read_slot(copied_right, 0) }, 222);
+        assert_eq!(
+            unsafe { Gc::read_slot(copied_left, 1) },
+            copied_right as u64
+        );
+        assert_eq!(
+            unsafe { Gc::read_slot(copied_right, 1) },
+            copied_left as u64
+        );
+        unsafe { Gc::write_slot(copied_left, 0, 333) };
+        assert_eq!(unsafe { Gc::read_slot(left, 0) }, 111);
     }
 
     #[test]
@@ -3224,5 +3146,53 @@ mod tests {
             )) => {}
             other => panic!("expected an empty-command error, got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod transfer_kind_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_type_identity_must_preserve_each_edge_kind() {
+        for invalid in [ValueKind::Uint64, ValueKind::Channel, ValueKind::Closure] {
+            for reversed in [false, true] {
+                let valid = ValueRttid::new(0, ValueKind::Int64);
+                let invalid = ValueRttid::new(0, invalid);
+                let (key, val) = if reversed {
+                    (invalid, valid)
+                } else {
+                    (valid, invalid)
+                };
+                let types = [
+                    RuntimeType::Basic(ValueKind::Int64),
+                    RuntimeType::Map { key, val },
+                ];
+                let transfer = TransferType {
+                    meta_raw: ValueMeta::new(0, ValueKind::Map).to_raw(),
+                    rttid_raw: ValueRttid::new(1, ValueKind::Map).to_raw(),
+                    slots: 1,
+                };
+                for field in ["spawn capture metadata", "spawn argument metadata"] {
+                    assert_eq!(
+                        checked_encode_transfer_meta(transfer, field, &[], &[], &types),
+                        Err(IslandMessageEncodeError::InvalidLayout { field })
+                    );
+                }
+            }
+        }
+        let types = [
+            RuntimeType::Basic(ValueKind::Int64),
+            RuntimeType::Map {
+                key: ValueRttid::new(0, ValueKind::Int64),
+                val: ValueRttid::new(0, ValueKind::Int64),
+            },
+        ];
+        let root = ValueRttid::new(1, ValueKind::Map);
+        let resolver = RuntimeTypeResolver::new(&[], &[], &types);
+        assert_eq!(
+            validate_sendable_type_graph(root, "valid repeated edge", &[], &types, resolver),
+            Ok(())
+        );
     }
 }

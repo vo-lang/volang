@@ -410,13 +410,46 @@ fn build_with_identity(
         &format!("cargo build AOT runtime {}", target.target),
     )?;
     require_ui_web_runtime(root)?;
+    build_ui_web_toolchain(root, &target.target, &binary)?;
     record_release_build(root, release, &target.target, identity, &verified_binary)
+}
+
+fn build_ui_web_toolchain(root: &Path, target: &str, binary: &Path) -> Result<()> {
+    let directory = crate::release_archive::toolchain::directory(root, target);
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata)
+            if metadata.file_type().is_dir()
+                && directory.join("tools/toolchain.json").is_file() =>
+        {
+            fs::remove_dir_all(&directory)?
+        }
+        Ok(_) => bail!(
+            "release UI toolchain output is not an owned package: {}",
+            directory.display()
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    run_status(
+        Command::new("node")
+            .arg("eng/ui-next/cli.mjs")
+            .arg("package")
+            .arg(&directory)
+            .arg("--compiler")
+            .arg(binary)
+            .current_dir(root),
+        "package the release Web UI toolchain",
+    )
 }
 
 fn build_ui_web_runtime(root: &Path) -> Result<()> {
     let directory = root.join("lang/crates/vo-web");
-    for name in ["dist", "pkg", "aot-support"] {
-        let output = directory.join(name);
+    for relative in [
+        "lang/crates/vo-web/dist",
+        "lang/crates/vo-web/pkg",
+        "target/ui-next/wasm-runtime",
+    ] {
+        let output = root.join(relative);
         match fs::symlink_metadata(&output) {
             Ok(metadata) if metadata.file_type().is_dir() => fs::remove_dir_all(&output)
                 .with_context(|| format!("could not clear {}", output.display()))?,
@@ -439,16 +472,24 @@ fn build_ui_web_runtime(root: &Path) -> Result<()> {
 
     let mut build = Command::new("npm");
     build.args(["run", "build:release"]).current_dir(&directory);
-    run_status(&mut build, "npm run build:release for the UI Web runtime")
+    run_status(&mut build, "npm run build:release for the UI Web runtime")?;
+    run_status(
+        Command::new("npm")
+            .args(["ci", "--ignore-scripts"])
+            .current_dir(root.join("eng/ui-next")),
+        "npm ci for the replacement UI runtime builder",
+    )?;
+    run_status(
+        Command::new("node")
+            .arg("eng/ui-next/build-runtime.mjs")
+            .current_dir(root),
+        "build the replacement UI execution runtime",
+    )
 }
 
 fn require_ui_web_runtime(root: &Path) -> Result<()> {
     let directory = root.join("lang/crates/vo-web");
-    for relative in [
-        "dist/index.js",
-        "pkg/vo_web_bg.wasm",
-        "aot-support/vo_aot_support_wasm_bg.wasm",
-    ] {
+    for relative in ["dist/index.js", "pkg/vo_web_bg.wasm"] {
         let path = directory.join(relative);
         let metadata = fs::symlink_metadata(&path)
             .with_context(|| format!("release Web runtime is missing: {}", path.display()))?;

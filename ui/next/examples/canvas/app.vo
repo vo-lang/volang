@@ -1,0 +1,92 @@
+package app
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/web/canvas"
+)
+
+var appType = ui.Define("bitmap.App")
+
+func landscape(warm bool) *canvas.Bitmap {
+	width, height := 96, 64
+	pixels := make([]byte, width * height * 4)
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			cx, cy := float64(x) / float64(width) * 3.2 - 2.2, float64(y) / float64(height) * 2.2 - 1.1
+			zx, zy := 0.0, 0.0
+			n := 0
+			for n < 32 && zx * zx + zy * zy <= 4 {
+				zx, zy = zx * zx - zy * zy + cx, 2 * zx * zy + cy
+				n++
+			}
+			i := (y * width + x) * 4
+			if n == 32 {
+				pixels[i], pixels[i + 1], pixels[i + 2] = 30, 49, 46
+			} else if warm {
+				pixels[i], pixels[i + 1], pixels[i + 2] = byte(160 + n * 3), byte(80 + n * 4), byte(40 + n * 2)
+			} else {
+				pixels[i], pixels[i + 1], pixels[i + 2] = byte(45 + n * 4), byte(100 + n * 3), byte(140 + n * 3)
+			}
+			pixels[i + 3] = 255
+		}
+	}
+	return canvas.NewBitmap(width, height, pixels)
+}
+
+func App(scope *ui.Scope, initial string) ui.View {
+	warm := ui.Bool(scope, "warm", false)
+	visible := ui.Bool(scope, "visible", true)
+	count := ui.Int(scope, "count", 0)
+	generation := ui.Int(scope, "generation", 0)
+	failure := ui.String(scope, "failure", "")
+	bitmap := ui.State(scope, "bitmap", func() any {
+		return landscape(warm.Get())
+	})
+	image := bitmap.Get().(*canvas.Bitmap)
+	label := "A blue Mandelbrot landscape, calculated in Vo"
+	if warm.Get() {
+		label = "A copper Mandelbrot landscape, calculated in Vo"
+	}
+	view := ui.Element("p", ui.Text("The landscape is hidden.")).Class("placeholder")
+	if visible.Get() {
+		view = canvas.View(image, canvas.Options{
+			Label: label,
+			OnError: func(message string) {
+				failure.Set(message)
+			},
+		}).Key(fmt.Sprint(generation.Get())).Class("landscape")
+	}
+	if failure.Get() != "" {
+		view = ui.Element("div", ui.Element("p", ui.Text("This landscape could not be displayed.")).Attr("role", "alert"), kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				failure.Set("")
+				generation.Set(generation.Get() + 1)
+			},
+		}, ui.Text("Try again"))).Class("placeholder")
+	}
+	return ui.Element("main", ui.Element("p", ui.Text("A LITTLE EXPERIMENT")).Class("eyebrow"), ui.Element("h1", ui.Text("A world in small pixels.")), ui.Element("p", ui.Text("One simple rule, repeated until a landscape appears. Every pixel is calculated in Vo.")).Class("intro"), ui.Element("figure", view, ui.Element("figcaption", ui.Text("96 × 64 pixels · The Mandelbrot set"))), ui.Element("div", kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			warm.Set(!warm.Get())
+			bitmap.Update(func(any) any {
+				return landscape(warm.Get())
+			})
+		},
+	}, ui.Text("Change palette")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			visible.Set(!visible.Get())
+		},
+	}, ui.Text("Show or hide")), kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			count.Set(count.Get() + 1)
+		},
+	}, ui.Text("Count a moment"))).Class("actions"), ui.Element("output", ui.Text(fmt.Sprint(count.Get()) +
+		" moments")).Attr("aria-live", "polite").Attr("data-count", "")).Class("vui", "starter").StyleScope("bitmap-app")
+}
+
+func View(initial string) ui.View {
+	return ui.Component(appType, func(scope *ui.Scope) ui.View {
+		return App(scope, initial)
+	})
+}

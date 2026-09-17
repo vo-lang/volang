@@ -1,0 +1,330 @@
+package main
+
+import (
+	"encoding/json"
+	"slices"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+)
+
+func arrayInitial() forms.Values {
+	first := forms.WithArray(forms.Values{"name": []string{"Ada"}}, "phones", []forms.Values{
+		{"number": []string{"111"}},
+	})
+	second := forms.WithArray(forms.Values{"name": []string{"Grace"}}, "phones", nil)
+	return forms.WithArray(forms.Values{"title": []string{"Team"}}, "people", []forms.Values{
+		first, second,
+	})
+}
+
+func arrayFormContracts() {
+	initial := arrayInitial()
+	var form *forms.Form
+	var array *forms.FieldArray
+	var hidden *ui.BoolState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		hidden = ui.Bool(scope, "hidden", false)
+		fields := []string{"title", "people"}
+		if hidden.Get() {
+			fields = []string{"title"}
+		}
+		form = forms.Use(scope, "array", forms.Options{
+			Initial: initial, Arrays: []string{"people"}, Fields: fields,
+			Validate: func(data forms.Data) forms.Errors {
+				values := data.Values
+				errors := forms.Errors{}
+				for name, entries := range values {
+					if strings.HasSuffix(name, ".name") && (len(entries) == 0 || entries[0] == "") {
+						errors[name] = "Enter a name."
+					}
+				}
+				return errors
+			},
+		})
+		if hidden.Get() {
+			return ui.Text("hidden")
+		}
+		array = form.Array("people")
+		children := []ui.View{array.OrderInputs()}
+		for _, row := range array.Items() {
+			children = append(children, ui.Element("label", form.Input(row.Field("name"), ui.Element("input")).Attr("data-name", row.Key)).Key(row.Key))
+		}
+		return ui.Element("form", children...)
+	}))
+	batch := flush(root)
+	rows := array.Items()
+	first, second := rows[0], rows[1]
+	firstID := target(batch, first.Key)
+	initial[first.Field("name")][0] = "caller mutation"
+	require(form.Value(first.Field("name")) == "Ada" && !form.Dirty(), "array initial snapshot was shared")
+	form.Change(first.Field("name"), "")
+	form.Blur(first.Field("name"))
+	array.Move(first.Key, 1)
+	require(array.Items()[1].Key == first.Key && form.Error(first.Field("name")) == "Enter a name." &&
+		form.Touched(first.Field("name")), "array move lost row value/error/touched identity")
+	moved := flush(root)
+	for _, mutation := range moved.Mutations {
+		require(mutation.Op != "create" && mutation.Op != "remove", "array move replaced retained controls")
+	}
+	require(root.Dispatch(ui.Event{Kind: "input", Target: firstID, Value: "Ada Lovelace", Sequence: 1}), "moved row lost input target")
+	require(form.Value(first.Field("name")) == "Ada Lovelace", "moved row event edited the wrong position")
+	phones := form.Array(first.Field("phones"))
+	phone := phones.Append(forms.Values{"number": []string{"222"}})
+	form.Change(phone.Field("number"), "333")
+	require(len(phones.Items()) == 2 && form.Value(phone.Field("number")) == "333", "nested append was unavailable before render")
+	phones.Remove(phones.Items()[0].Key)
+	phoneValues := form.Values()
+	phoneValues[phone.Field("number")][0] = "caller mutation"
+	require(form.Value(phone.Field("number")) == "333", "nested values escaped snapshot ownership")
+	added := array.Insert(1, forms.WithArray(forms.Values{"name": []string{"New"}}, "phones", nil))
+	require(array.Items()[1].Key == added.Key && len(array.Items()) == 3, "array insertion position was wrong")
+	require(array.Remove(added.Key) && !array.Remove(added.Key), "array remove reused a retired row")
+	next := array.Append(forms.WithArray(forms.Values{"name": []string{"Later"}}, "phones", nil))
+	require(next.Key != added.Key, "removed array identity was recycled")
+	expectPanic(func() {
+		form.Change(added.Field("name"), "stale")
+	}, "not active")
+	flush(root)
+	request := func(data forms.Data) ui.Request {
+		values := data.Values
+		return ui.Request{Service: "save", Value: values.Get("title")}
+	}
+	decode := func(ui.Result) forms.Outcome {
+		return forms.Outcome{}
+	}
+	form.Submit(request, decode)
+	pending := startCommand(flush(root))
+	array.Move(next.Key, 0)
+	require(!form.Pending() && !root.Dispatch(ui.Event{Kind: "@task", Target: pending, Sequence: 2}), "structural edit retained a stale submission")
+	flush(root)
+	form.Submit(request, decode)
+	pending = startCommand(flush(root))
+	require(root.Dispatch(ui.Event{Kind: "@task", Target: pending, Sequence: 3}) && !form.Dirty(), "array save did not advance its shape baseline")
+	array.Remove(first.Key)
+	// Native input/blur can already be queued behind the removal event while the
+	// old control is still mounted. Retiring the row must make those bindings inert.
+	root.Dispatch(ui.Event{Kind: "input", Target: firstID, Value: "late removed edit", Sequence: 4})
+	root.Dispatch(ui.Event{Kind: "blur", Target: firstID, Sequence: 5})
+	require(form.Dirty(), "removing a saved row stayed pristine")
+	form.Revert()
+	require(array.Items()[0].Key == next.Key && len(array.Items()) == 3 &&
+		form.Value(phone.Field("number")) == "333" &&
+		!form.Dirty(), "revert lost saved nested shape")
+	require(len(form.Array(first.Field("phones")).Items()) == 1, "saved baseline retained removed nested fields")
+	form.Reset()
+	require(len(array.Items()) == 2 && array.Items()[0].Key == first.Key &&
+		form.Value(first.Field("name")) == "Ada" &&
+		!form.Dirty(), "reset lost original copied rows")
+	newAfterReset := array.Append(forms.WithArray(forms.Values{"name": []string{"After reset"}}, "phones", nil))
+	require(newAfterReset.Key != next.Key && newAfterReset.Key != added.Key, "reset recycled dynamic row identity")
+	flush(root)
+	hidden.Set(true)
+	flush(root)
+	require(len(form.Values()) == 1 && form.Values().Get("title") == "Team", "hidden array descendants entered submitted values")
+	hidden.Set(false)
+	flush(root)
+	require(len(array.Items()) == 3 && array.Items()[1].Key == second.Key, "conditional array lost its rows")
+	expectPanic(func() {
+		array.Append(forms.Values{})
+	}, "at least one field")
+	expectPanic(func() {
+		array.Move(first.Key, 99)
+	}, "out of range")
+	expectPanic(func() {
+		form.ChangeAll("people", []string{""})
+	}, "FieldArray")
+	root.Close()
+	arrayServerSeed()
+	arrayReloadContracts()
+	arrayValidationCancellation()
+}
+
+func arrayReloadContracts() {
+	var form *forms.Form
+	view := func(schema int) ui.View {
+		return ui.Component(reloadPageType, func(scope *ui.Scope) ui.View {
+			initial := arrayInitial()
+			if schema == 1 {
+				initial["title"] = []string{"New default"}
+			}
+			if schema == 2 {
+				initial["people[initial-0].added"] = []string{"New field"}
+			}
+			form = forms.Use(scope, "form", forms.Options{Initial: initial, Arrays: []string{"people"}})
+			return ui.Text(form.Value("title"))
+		})
+	}
+	root := ui.NewRoot(view(0))
+	flush(root)
+	array := form.Array("people")
+	added := array.Append(forms.WithArray(forms.Values{"name": []string{"Added"}}, "phones", nil))
+	array.Move(added.Key, 0)
+	form.Submit(func(forms.Data) ui.Request {
+		return ui.Request{Service: "save"}
+	}, func(ui.Result) forms.Outcome {
+		return forms.Outcome{}
+	})
+	pending := startCommand(flush(root))
+	require(root.Dispatch(ui.Event{Kind: "@task", Target: pending, Sequence: 1}), "a submission started after array edits in one turn was cancelled at commit")
+	form.Change(added.Field("name"), "Newer edit")
+	form.Change("title", "Edited title")
+	flush(root)
+	encoded, err := root.SaveReload()
+	require(err == nil, "array snapshot could not be saved for reload")
+	root.Close()
+	fresh := ui.NewRoot(view(1))
+	report, err := fresh.RestoreReload(encoded)
+	require(err == nil, "array reload setup failed")
+	flush(fresh)
+	require(report.Restored == 1 && report.Reset == 0 && len(report.Messages) == 0, "compatible array snapshot was reset")
+	array = form.Array("people")
+	require(array.Items()[0].Key == added.Key && form.Value(added.Field("name")) == "Newer edit" &&
+		form.Dirty() &&
+		form.Value("title") == "Edited title", "reload lost dynamic shape, values or scalar edits")
+	form.Revert()
+	require(form.Value(added.Field("name")) == "Added" && !form.Dirty(), "reload lost saved array baseline")
+	newRow := array.Append(forms.WithArray(forms.Values{"name": []string{"After reload"}}, "phones", nil))
+	require(newRow.Key != added.Key, "reload recycled an existing dynamic row key")
+	form.Reset()
+	require(len(array.Items()) == 2 && form.Value("title") == "New default", "reload reset ignored new source defaults")
+	fresh.Close()
+	changed := ui.NewRoot(view(2))
+	report, err = changed.RestoreReload(encoded)
+	require(err == nil, "changed array reload setup failed")
+	flush(changed)
+	require(form.Value("title") == "Edited title" && len(form.Array("people").Items()) == 2 &&
+		form.Value("people[initial-0].added") == "New field", "changed array source schema did not reset that array alone")
+	changed.Close()
+	var envelope formReloadEnvelope
+	err = json.Unmarshal([]byte(encoded), &envelope)
+	require(err == nil && len(envelope.States) == 1, "unexpected form reload envelope")
+	before := envelope.States[0].Value
+	envelope.States[0].Value = strings.ReplaceAll(before, `"nextRow":2`, `"nextRow":1`)
+	require(envelope.States[0].Value != before, "array counter corruption fixture did not change its payload")
+	bad, err := json.Marshal(envelope)
+	require(err == nil, "invalid array fixture could not encode")
+	rejected := ui.NewRoot(view(1))
+	report, err = rejected.RestoreReload(string(bad))
+	require(err == nil, "array counter test did not reach the form decoder")
+	flush(rejected)
+	require(report.Reset == 1 && len(report.Messages) > 0 && len(form.Array("people").Items()) == 2, "malformed array identity counter was admitted without a reset diagnostic")
+	rejected.Close()
+	legacyFormReload()
+}
+
+// The envelope is the public Root reload transport. Its Store value is encoded
+// independently so legacy and malformed form payloads reach the real decoder.
+type formReloadEnvelope struct {
+	Version int `json:"version"`
+	States []formReloadField `json:"states"`
+}
+
+type formReloadField struct {
+	Path string `json:"path"`
+	Key string `json:"key"`
+	Kind string `json:"kind"`
+	Value string `json:"value"`
+}
+
+func legacyFormReload() {
+	var form *forms.Form
+	view := func() ui.View {
+		return ui.Component(reloadPageType, func(scope *ui.Scope) ui.View {
+			form = forms.Use(scope, "form", forms.Options{
+				Initial: forms.Values{"name": []string{"New default"}},
+			})
+			return ui.Text(form.Value("name"))
+		})
+	}
+	root := ui.NewRoot(view())
+	flush(root)
+	encoded, err := root.SaveReload()
+	require(err == nil, "legacy form fixture could not capture a root")
+	root.Close()
+	var envelope formReloadEnvelope
+	err = json.Unmarshal([]byte(encoded), &envelope)
+	require(err == nil && len(envelope.States) == 1, "legacy form fixture envelope was invalid")
+	envelope.States[0].Value = `{"version":1,"values":{"name":["Previous edit"]},"baseline":{"name":["Saved name"]}}`
+	bytes, err := json.Marshal(envelope)
+	require(err == nil, "legacy form fixture could not encode")
+	fresh := ui.NewRoot(view())
+	report, err := fresh.RestoreReload(string(bytes))
+	require(err == nil, "legacy form root reload failed")
+	flush(fresh)
+	require(report.Restored == 1 && report.Reset == 0 && form.Value("name") == "Previous edit" &&
+		form.Dirty(), "legacy v1 scalar form did not restore into the current form implementation")
+	form.Revert()
+	require(form.Value("name") == "Saved name" && !form.Dirty(), "legacy form lost its saved baseline")
+	form.Reset()
+	require(form.Value("name") == "New default", "legacy form reset ignored current source defaults")
+	fresh.Close()
+}
+
+func arrayValidationCancellation() {
+	var form *forms.Form
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		form = forms.Use(scope, "form", forms.Options{
+			Initial: arrayInitial(), Arrays: []string{"people"},
+			ValidateAsync: func(forms.Data) ui.Request {
+				return ui.Request{Service: "validate"}
+			},
+			DecodeValidation: func(ui.Result) forms.Errors {
+				return forms.Errors{"people[initial-0].name": "Old error"}
+			},
+		})
+		return ui.Text("ready")
+	}))
+	flush(root)
+	form.Blur("people[initial-0].name")
+	pending := startCommand(flush(root))
+	form.Array("people").Remove("initial-0")
+	require(!form.Validating() && !root.Dispatch(ui.Event{Kind: "@task", Target: pending, Sequence: 1}), "removed array row accepted an old asynchronous validation")
+	root.Close()
+	invalid := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		forms.Use(scope, "form", forms.Options{
+			Initial: arrayInitial(), Arrays: []string{"people"}, Fields: []string{"people[initial-0].name"},
+		})
+		return ui.Text("invalid")
+	}))
+	expectPanic(func() {
+		invalid.Flush()
+	}, "select the owning array")
+	invalid.Close()
+}
+
+func arrayServerSeed() {
+	values := forms.WithArray(forms.Values{"title": []string{"Submitted"}}, "people", []forms.Values{
+		forms.WithArray(forms.Values{"name": []string{"Submitted person"}}, "phones", nil),
+	})
+	rows, err := forms.ArrayRows(values, "people")
+	require(err == nil && len(rows) == 1, "native array decoder lost its row")
+	var form *forms.Form
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		form = forms.Use(scope, "server-array", forms.Options{
+			Initial: arrayInitial(), Arrays: []string{"people"}, Fields: []string{"people", "title"},
+			Submission: &forms.Submission{
+				Values: values, Errors: forms.Errors{rows[0].Field("name"): "Returned error"},
+			},
+		})
+		return form.Array("people").OrderInputs()
+	}))
+	flush(root)
+	require(len(form.Array("people").Items()) == 1 &&
+		form.Error(rows[0].Field("name")) == "Returned error" &&
+		form.Dirty(), "server array seed lost values, shape or returned error")
+	form.Array("people").Remove(rows[0].Key)
+	flush(root)
+	require(strings.Contains(root.HTML(), "name=\"people\" value=\"\""), "empty array omitted its native order control")
+	form.Reset()
+	require(len(form.Array("people").Items()) == 2, "server array reset lost persisted initial values")
+	root.Close()
+	bad := forms.Values{"people": []string{"", "orphan"}}
+	_, err = forms.ArrayRows(bad, "people")
+	require(err != nil, "empty row object was accepted")
+	bad = forms.Values{"people": []string{"", "same", "same"}, "people[same].name": []string{"Name"}}
+	_, err = forms.ArrayRows(bad, "people")
+	require(err != nil, "duplicate native row ID was accepted")
+	valid := forms.WithArray(nil, "empty", nil)
+	require(slices.EqualString(valid["empty"], []string{""}), "empty native array representation changed")
+}

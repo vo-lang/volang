@@ -1,0 +1,55 @@
+package main
+
+func label(index int) string {
+	switch index {
+		case 0:
+			return "s0000"
+		case 1:
+			return "s0001"
+		case 2:
+			return "s0002"
+		case 3:
+			return "s0003"
+		case 4:
+			return "s0004"
+		case 5:
+			return "s0005"
+		case 6:
+			return "s0006"
+		case 7:
+			return "s0007"
+		case 8:
+			return "s0008"
+		case 9:
+			return "s0009"
+		case 10:
+			return "s0010"
+		case 11:
+			return "s0011"
+		case 12:
+			return "s0012"
+		case 13:
+			return "s0013"
+		case 14:
+			return "s0014"
+		case 15:
+			return "s0015"
+	}
+	panic("invalid literal index")
+}
+
+func main() {
+	sum := 0
+	var retained string
+	for i := 0; i < 262144; i++ {
+		s := label(i & 15)
+		sum = (sum * 1664525 + len(s) + int(s[1]) * 17 + int(s[2]) * 19 + int(s[3]) * 23 + int(s[4]) * 29) &
+			2147483647
+		if i & 4095 == 0 {
+			retained = s
+		}
+	}
+	sum += len(retained)
+	assert(sum == 869433349)
+	println(sum)
+}

@@ -472,6 +472,9 @@ fn vm_call_iface_contract_061_rejects_return_offset_overflow_before_ic_mutation(
 #[test]
 fn vm_call_iface_contract_061_rejects_frame_capacity_before_ic_mutation() {
     let mut module = Module::new("call-iface-frame-capacity-test".to_string());
+    module
+        .runtime_types
+        .push(vo_runtime::RuntimeType::Basic(ValueKind::String));
     let mut caller = function(4);
     caller.slot_types = vec![
         SlotType::Interface0,

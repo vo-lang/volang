@@ -1,0 +1,15 @@
+* { box-sizing: border-box; }
+body { margin: 0; background: #f6f5ef; color: #253d32; font-family: ui-sans-serif, system-ui, sans-serif; }
+.starter { max-width: 720px; margin: 7vh auto; padding: 24px; }
+.eyebrow { font-size: 11px; font-weight: 750; letter-spacing: .18em; color: #61756a; }
+h1 { font-size: clamp(36px, 7vw, 56px); line-height: 1.1; letter-spacing: -.05em; font-weight: 550; margin: 24px 0; }
+.intro { color: #647368; font-size: 16px; line-height: 1.8; margin-bottom: 32px; }
+figure { margin: 0; }
+.landscape, .placeholder { aspect-ratio: 3 / 2; width: 100%; overflow: hidden; border-radius: 16px; background: #e5ebe4; }
+.placeholder { display: grid; place-content: center; text-align: center; margin: 0; }
+figcaption { margin: 14px 0 28px; font-size: 13px; color: #647368; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 24px; }
+output { font-size: 13px; color: #647368; }
+#status { max-width: 720px; margin: 24px auto; padding: 0 24px; font-size: 14px; }
+#status:empty { display: none; }
+@media (max-width: 480px) { .starter { margin-top: 2vh; } }

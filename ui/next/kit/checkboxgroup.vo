@@ -1,0 +1,94 @@
+package kit
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type CheckboxGroupProps struct {
+	ID string
+	Label string
+	Name string
+	Form string
+	Options []ChoiceOption
+	// Value reads the current selection, including during a burst of native edits.
+	Value func() []string
+	OnChange func([]string)
+	OnBlur func()
+	Disabled bool
+	Hint string
+	Error string
+	Class string
+	InputClass string
+	// InputRef binds the first enabled choice for group validation focus.
+	InputRef *ui.ElementRef
+	Option func(ChoiceOption) ui.View
+}
+
+// CheckboxGroup uses native checkboxes and one shared name. Changed selections
+// follow declaration order; disabled selected values remain in application state
+// and are excluded by the browser from native FormData.
+func CheckboxGroup(props CheckboxGroupProps) ui.View {
+	if props.ID == "" || props.Label == "" || props.Value == nil {
+		panic("kit: checkbox groups require an ID, label and selection reader")
+	}
+	props.Options = append([]ChoiceOption{}, props.Options...)
+	options := choiceValues(props.Options, true)
+	selection := func() map[string]bool {
+		selected := make(map[string]bool)
+		for _, value := range props.Value() {
+			if _, found := options[value]; !found || selected[value] {
+				panic("kit: checkbox group selection requires unique declared option values")
+			}
+			selected[value] = true
+		}
+		return selected
+	}
+	selected := selection()
+	name := props.Name
+	if name == "" {
+		name = props.ID
+	}
+	children := []ui.View{ui.Element("legend", ui.Text(props.Label))}
+	focus := false
+	for index, option := range props.Options {
+		input := CheckboxProps{
+			ID: props.ID + "-option-" + fmt.Sprint(index), Label: option.Label, Name: name,
+			Value: option.Value, Form: props.Form, Disabled: option.Disabled || props.Disabled,
+			InputClass: props.InputClass,
+			Checked: func() bool {
+				return selected[option.Value]
+			},
+			OnBlur: props.OnBlur,
+		}
+		if !focus && !input.Disabled {
+			input.InputRef = props.InputRef
+			focus = true
+		}
+		if props.Option != nil {
+			input.LabelContent = func() ui.View {
+				return props.Option(option)
+			}
+		}
+		if props.OnChange != nil {
+			input.OnChange = func(checked bool) {
+				current := selection()
+				current[option.Value] = checked
+				next := []string{}
+				for _, item := range props.Options {
+					if current[item.Value] {
+						next = append(next, item.Value)
+					}
+				}
+				props.OnChange(next)
+			}
+		}
+		// Explicitly retain an empty option value instead of the native "on"
+		// default used by a standalone checkbox without a supplied value.
+		choice := checkable(input, false, true)
+		children = append(children, choice.Key("option:" + option.Value))
+	}
+	children = append(children, fieldMessages(props.ID, props.Hint, props.Error)...)
+	group := ui.Element("fieldset", children...).Attr("id", props.ID).Attr("disabled", fmt.Sprint(props.Disabled))
+	return describeField(group, props.ID, props.Hint, props.Error).Class("vui-checkbox-group").Class(props.Class)
+}

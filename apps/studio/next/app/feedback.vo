@@ -1,0 +1,64 @@
+package app
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/web"
+)
+
+var feedbackPreviewType = ui.Define("studio.FeedbackPreview")
+
+func FeedbackPreview() ui.View {
+	return ui.Component(feedbackPreviewType, func(scope *ui.Scope) ui.View {
+		amount := ui.Int(scope, "amount", 35)
+		// This flag belongs to the pending timer, which is cancelled on reload.
+		busy := ui.State(scope, "busy", func() any {
+			return false
+		})
+		ready := ui.Bool(scope, "ready", false)
+		trigger := ui.Ref(scope, "trigger")
+		feedback := ui.Fragment()
+		if busy.Get().(bool) {
+			feedback = kit.Spinner(kit.SpinnerProps{Label: "Preparing your preview"})
+		} else if ready.Get() {
+			feedback = kit.Alert(kit.AlertProps{
+				Title: "Ready when you are", Variant: "success", DismissLabel: "Dismiss preview message",
+				OnDismiss: func() {
+					ready.Set(false)
+					trigger.Focus()
+				},
+			}, ui.Text("Your next idea has room to grow."))
+		}
+		return ui.Element("div", kit.Slider(kit.SliderProps{
+			ID: "gallery-pace", Label: "Move at your own pace", Step: 5, Disabled: busy.Get().(bool),
+			Value: func() float64 {
+				return float64(amount.Get())
+			},
+			ValueText: fmt.Sprint(amount.Get()) + "% complete",
+			OnChange: func(value float64) {
+				amount.Set(int(value))
+			},
+		}), kit.Progress(kit.ProgressProps{
+			ID: "gallery-progress", Label: "Every little step counts", Max: 100,
+			Value: float64(amount.Get()), Indeterminate: busy.Get().(bool),
+		}), kit.Button(kit.ButtonProps{
+			Variant: "secondary", Disabled: busy.Get().(bool),
+			OnPress: func() {
+				if busy.Get().(bool) {
+					return
+				}
+				busy.Update(func(any) any {
+					return true
+				})
+				ready.Set(false)
+				ui.Start(scope, web.After(350, "ready"), func(ui.Result) {
+					busy.Update(func(any) any {
+						return false
+					})
+					ready.Set(true)
+				})
+			},
+		}, ui.Text("Prepare a preview")).Ref(trigger).Attr("id", "gallery-prepare"), ui.Element("div", feedback).Attr("data-progress-feedback", "")).Class("studio-choice-demo")
+	})
+}

@@ -1,0 +1,122 @@
+package app
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var appType = ui.Define("portal.App")
+
+var noteType = ui.Define("portal.Note")
+
+var sourceType = ui.Define("portal.Source")
+
+var destinationType = ui.Define("portal.Destination")
+
+var notebook = ui.NewContext("portal.notebook", "No notebook")
+
+func Note(target *ui.ElementRef) ui.View {
+	return ui.Component(noteType, func(scope *ui.Scope) ui.View {
+		draft := ui.String(scope, "draft", "A small idea, ready to move.")
+		saved := ui.Int(scope, "saved", 0)
+		return ui.Element("section", ui.Element("p", ui.Text(ui.UseContext(scope, notebook).(string))).Attr("data-notebook", "").Class("eyebrow"), ui.Element("label", ui.Text("A small note")).Attr("for", "portal-note"), ui.Element("textarea").Attr("id", "portal-note").Attr("rows", "4").Attr("value", draft.Get()).Class("vui-input").On("input", func(event ui.Event) {
+			draft.Set(event.Value)
+		}), kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				saved.Set(saved.Get() + 1)
+			},
+		}, ui.Text("Save note")), ui.Element("output", ui.Text(fmt.Sprint(saved.Get()) + " saves")).Attr("data-saved", ""), ui.Element("p", ui.Text(draft.Get())).Attr("data-draft", "")).Attr("id", "moving-note").Class("vui-card", "note").Portal(target)
+	})
+}
+
+func Destination(ref *ui.ElementRef, id string, title string, visible bool) ui.View {
+	return ui.Component(destinationType, func(scope *ui.Scope) ui.View {
+		ui.Provide(scope, notebook, "Destination context")
+		content := ui.Fragment()
+		if visible {
+			content = ui.Element("div").Ref(ref).Attr("id", id).Class("destination-content")
+		}
+		return ui.Element("section", ui.Element("h2", ui.Text(title)), content).Class("destination")
+	}).Key(id)
+}
+
+func View(initial string) ui.View {
+	return ui.Component(appType, func(scope *ui.Scope) ui.View {
+		location := ui.Int(scope, "location", 1)
+		available := ui.Bool(scope, "available", true)
+		visible := ui.Bool(scope, "visible", true)
+		modal := ui.Bool(scope, "modal", false)
+		first, second, dialog := ui.Ref(scope, "inbox"), ui.Ref(scope, "pinboard"), ui.Ref(scope, "dialog")
+		var selected *ui.ElementRef
+		if location.Get() == 1 {
+			selected = first
+		}
+		if location.Get() == 2 {
+			selected = second
+		}
+		if location.Get() == 3 {
+			selected = dialog
+		}
+		return ui.Element("main", ui.Element("header", ui.Element("p", ui.Text("VOLANG UI / PORTAL")).Class("eyebrow"), ui.Element("h1", ui.Text("Give your idea some room.")), ui.Element("p", ui.Text("Move a note between spaces. Your words stay with it."))), ui.Element("div", kit.Button(kit.ButtonProps{
+			Variant: "secondary",
+			OnPress: func() {
+				location.Set(1)
+			},
+		}, ui.Text("Move to inbox")), kit.Button(kit.ButtonProps{
+			Variant: "secondary",
+			OnPress: func() {
+				location.Set(2)
+			},
+		}, ui.Text("Move to pinboard")), kit.Button(kit.ButtonProps{
+			Variant: "secondary",
+			OnPress: func() {
+				location.Set(0)
+			},
+		}, ui.Text("Keep inline")), kit.Button(kit.ButtonProps{
+			Variant: "secondary",
+			OnPress: func() {
+				available.Set(!available.Get())
+			},
+		}, ui.Text("Toggle inbox")), kit.Button(kit.ButtonProps{
+			Variant: "secondary",
+			OnPress: func() {
+				visible.Set(!visible.Get())
+			},
+		}, ui.Text("Toggle note")), kit.Button(kit.ButtonProps{
+			Variant: "secondary",
+			OnPress: func() {
+				location.Set(3)
+				modal.Set(true)
+			},
+		}, ui.Text("Open focus room"))).Class("controls"), ui.Component(sourceType, func(source *ui.Scope) ui.View {
+			ui.Provide(source, notebook, "My notebook")
+			content := ui.Fragment()
+			if visible.Get() {
+				content = Note(selected)
+			}
+			return ui.Element("section", ui.Element("h2", ui.Text("The original space")), content).Attr("id", "note-source").Class("source")
+		}), ui.Element("div", Destination(first, "inbox", "Inbox", available.Get()), Destination(second, "pinboard", "Pinboard", true)).Class("destinations"), ui.Element("dialog", ui.Element("h2", ui.Text("A little room to focus")), ui.Element("div").Ref(dialog).Attr("id", "focus-room"), kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				location.Set(1)
+				modal.Set(false)
+			},
+		}, ui.Text("Close focus room"))).Attr("aria-label", "Focus room").OnWith("cancel", ui.EventOptions{
+			PreventDefault: true,
+		}, func(ui.Event) {
+			location.Set(1)
+			modal.Set(false)
+		}).Modal(modal.Get())).Class("vui", "portal-example").Attr("data-initial", initial).OnWith("keydown", ui.EventOptions{
+			Capture: true, PreventDefault: true, Keys: []string{"ArrowLeft", "ArrowRight"},
+			Modifiers: []ui.KeyboardModifiers{{Alt: true}},
+		}, func(event ui.Event) {
+			if !modal.Get() {
+				if event.Key == "ArrowLeft" {
+					location.Set(1)
+				} else {
+					location.Set(2)
+				}
+			}
+		})
+	})
+}

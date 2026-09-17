@@ -5,7 +5,7 @@ import { join } from 'node:path';
 export async function runContentSiteSmoke(contract, timeoutMilliseconds, projectRoot) {
   const routeFiles = new Map([
     ["/", "index.html"],
-    ["/articles/wasm-aot", "articles/wasm-aot/index.html"],
+    ["/articles/wasm-vm", "articles/wasm-vm/index.html"],
     ["/guides/concurrency", "guides/concurrency/index.html"],
     ["/search", "search/index.html"],
     ["/subscribe", "subscribe/index.html"],
@@ -13,7 +13,7 @@ export async function runContentSiteSmoke(contract, timeoutMilliseconds, project
   ]);
   const routeContent = new Map([
     ["/", "A content site with zero JavaScript application code"],
-    ["/articles/wasm-aot", "Wasm AOT without a JavaScript framework"],
+    ["/articles/wasm-vm", "Wasm VM without a JavaScript framework"],
     ["/guides/concurrency", "Goroutines in interactive applications"],
     ["/search", "Search Field Notes"],
     ["/subscribe", "Subscribe to Field Notes"],
@@ -102,11 +102,11 @@ export async function runContentSiteSmoke(contract, timeoutMilliseconds, project
     timeoutMilliseconds,
   );
 
-  await navigateLink("Wasm AOT", "/articles/wasm-aot");
+  await navigateLink("Wasm VM", "/articles/wasm-vm");
   checkpoints.article = await pollEvaluation(contract,
     `({ path: location.pathname, main: document.querySelector('[role="main"]')?.textContent ?? "" })`,
-    (value) => value?.path === "/articles/wasm-aot"
-      && value?.main.includes("Wasm AOT without a JavaScript framework")
+    (value) => value?.path === "/articles/wasm-vm"
+      && value?.main.includes("Wasm VM without a JavaScript framework")
       && value?.main.includes("Server node identities")
       && !value?.main.includes("zero JavaScript application code"),
     timeoutMilliseconds,

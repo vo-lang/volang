@@ -4,9 +4,9 @@
 //! - Method value: `t.M` where M is a method, creates a closure capturing the receiver
 //! - Method expression: `T.M` or `(*T).M`, returns a function with receiver as first param
 
-use vo_runtime::bytecode::TransferType;
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::bytecode::TransferType;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 use vo_syntax::ast::Expr;
 
 use crate::context::CodegenContext;

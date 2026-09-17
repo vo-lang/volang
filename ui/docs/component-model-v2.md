@@ -20,7 +20,7 @@ the foundation renderer, protocol, scheduler, transaction, and AOT invariants.
   generic keyed reconciler under the same public behavior.
 - Each root has one UI writer. Worker goroutines return typed messages through
   bounded, generation-checked scheduler turns.
-- VM, JIT, Native AOT, Core Wasm AOT, and headless consume one authenticated
+- VM, JIT, Native AOT, Wasm VM, and headless consume one authenticated
   component bundle contract.
 
 ## Compiler-neutral identities
@@ -157,11 +157,11 @@ bundle, instance forest, handlers, state, tasks, replay phase, and visible UI.
 
 Add component and call-site identities, bounded component definition tables,
 import requirements, codecs, negative tests, fuzz targets, and artifact
-preservation through VOB, cache, Native AOT, and Core Wasm AOT.
+preservation through VOB, cache, Native AOT, and Wasm VM.
 
 Status: complete. VUB1 round-trip and hostile truncation tests live with the
 codec; backend-owned tests preserve the sidecar through VOB, the compile cache,
-Native AOT objects, and Core Wasm AOT custom sections. The independent fuzz
+Native AOT objects, and verified Wasm VM bytecode. The independent fuzz
 target applies deliberately smaller allocation and traversal limits.
 
 ### B2 — Compiler discovery and linking
@@ -216,14 +216,14 @@ authoring APIs are delivered in E2 on this contract.
 ### B6 — Cross-backend and reload certification
 
 Run the nested-component and asynchronous-search probes through headless, Web
-VM, Web Wasm AOT, desktop VM/JIT, and Native AOT. Add state-preserving reload,
+VM, Web Wasm VM, desktop VM/JIT, and Native AOT. Add state-preserving reload,
 failure rollback, performance, OOM, and fuzz evidence.
 
 Status: complete. Headless, VM, and JIT cover nested keyed mounting,
 instance-local state and handlers, imported package execution, GC retention,
 incremental node reuse, generational disposal, and transactional
 state-preserving reload. The authored contract probe now performs keyed move,
-remove, reinsert, and replacement through VM, JIT, a real Core Wasm AOT
+remove, reinsert, and replacement through VM, JIT, a real Wasm VM
 browser, and a linked Native AOT window on Linux, macOS, and Windows. The
 optimized certification workload also enforces stable identities and an 8 ms
 p95 budget while updating 256 keyed stateful component instances; the current
@@ -239,7 +239,7 @@ E1 completes only when:
 - removed instances cannot receive events or asynchronous completion;
 - imported components use the same compiled path as local components;
 - failed candidate render and failed hot reload retain the old interactive UI;
-- VM, JIT, Native AOT, Core Wasm AOT, and headless agree on component behavior;
+- VM, JIT, Native AOT, Wasm VM, and headless agree on component behavior;
 - foundation certification, no-std checks, protocol validation, GC precision,
   and current renderer performance budgets continue to pass.
 

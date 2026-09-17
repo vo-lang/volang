@@ -62,7 +62,7 @@ streams = ["component-runtime", "state-concurrency", "tooling-quality-ecosystem"
 outcomes = [
   "A component artifact graph replaces the single-root optimization boundary.",
   "Nested and imported components own stable instances, structured state, lifecycle, tasks, effects, and reload schemas.",
-  "VM, JIT, Native AOT, and Core Wasm AOT link and execute the same component identities.",
+  "VM, JIT, Native AOT, and Wasm VM link and execute the same component identities.",
 ]
 exit = [
   "Keyed insertion, removal, movement, and replacement preserve the correct component state.",
@@ -176,7 +176,7 @@ name = "Nested keyed component list"
 status = "complete"
 increment = "E0"
 capabilities = ["component-instance-graph", "structured-state", "package-component-linking", "incremental-dev-reload"]
-targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+targets = ["headless", "web-vm", "desktop-vm", "desktop-jit", "desktop-native-aot"]
 acceptance = [
   "Two instances of one component keep independent state.",
   "Keyed insertion, removal, and reordering preserve the matching instance and dispose removed scopes.",
@@ -189,7 +189,7 @@ name = "Asynchronous search with stale-result isolation"
 status = "complete"
 increment = "E0"
 capabilities = ["component-lifecycle", "scoped-task-api", "async-data-model", "bounded-ui-scheduler"]
-targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+targets = ["headless", "web-vm", "desktop-vm", "desktop-jit", "desktop-native-aot"]
 acceptance = [
   "Debounce and latest policies cancel superseded work and reject late results.",
   "Bursty completion remains bounded and produces at most one visible commit per UI turn.",
@@ -202,7 +202,7 @@ name = "Modal validation form"
 status = "complete"
 increment = "E0"
 capabilities = ["comfortable-public-api", "focus-overlay-command", "forms-commands-patterns", "apg-inclusive-interaction", "native-text-baseline"]
-targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+targets = ["headless", "web-vm", "desktop-vm", "desktop-jit", "desktop-native-aot"]
 acceptance = [
   "Typed value and action callbacks avoid generic event handling in application code.",
   "Focus trap, Escape, focus-to-error, IME, accessible descriptions, dismissal, and restoration share one behavior contract.",
@@ -214,7 +214,7 @@ name = "Large virtual data grid"
 status = "complete"
 increment = "E0"
 capabilities = ["virtual-collections", "structured-state", "command-system", "quality-budgets"]
-targets = ["headless", "web-wasm-aot", "desktop-native-aot"]
+targets = ["headless", "desktop-native-aot"]
 acceptance = [
   "One hundred thousand rows use bounded materialization, semantics, selection, sorting, and keyboard navigation.",
   "Stable row identity survives filtering, insertion, and reorder within governed memory and frame budgets.",
@@ -226,7 +226,7 @@ name = "SSR route with selective activation"
 status = "complete"
 increment = "E0"
 capabilities = ["web-server-authority", "web-fullstack-production", "typed-navigation"]
-targets = ["server-native-aot", "web-wasm-aot"]
+targets = ["server-native-aot"]
 acceptance = [
   "The route streams useful semantic HTML and remains navigable before client activation.",
   "Server-only authority cannot enter the Wasm artifact and activation preserves component identity.",

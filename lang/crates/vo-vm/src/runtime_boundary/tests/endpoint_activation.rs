@@ -761,8 +761,8 @@ fn vm_remote_select_recv_wake_061_rejects_unrepresentable_payload_before_publish
     transition.wakes.push(WakeCommand::queue_waiter_with_result(
         waiter,
         SelectWokenResult::Recv {
-            data: vec![42],
-            slot_types: vec![vo_runtime::SlotType::Value],
+            data: vec![42].into(),
+            slot_types: vec![vo_runtime::SlotType::Value].into(),
             closed: false,
         },
     ));

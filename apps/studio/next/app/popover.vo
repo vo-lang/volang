@@ -1,0 +1,35 @@
+package app
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var popoverPreviewType = ui.Define("studio.PopoverPreview")
+
+func PopoverPreview() ui.View {
+	return ui.Component(popoverPreviewType, func(scope *ui.Scope) ui.View {
+		open := ui.Bool(scope, "open", false)
+		name := ui.String(scope, "name", "Untitled idea")
+		field := kit.Field("popover-name", "Give it a name", "Your changes stay here when this closes.", ui.Element("input").Attr("value", name.Get()).Attr("autofocus", "true").On("input", func(event ui.Event) {
+			name.Set(event.Value)
+		}))
+		reset := kit.Tooltip(kit.TooltipProps{
+			ID: "settings-reset-tip", Text: "Bring this idea back to its original name.",
+		}, kit.Button(kit.ButtonProps{
+			Variant: "secondary",
+			OnPress: func() {
+				name.Set("Untitled idea")
+			},
+		}, ui.Text("Reset name")))
+		return ui.Element("div", kit.Popover(kit.PopoverProps{
+			ID: "idea-popover", Label: "Quick settings", Title: "A few small details", Motion: true,
+			Open: func() bool {
+				return open.Get()
+			},
+			OnOpenChange: func(value bool) {
+				open.Set(value)
+			},
+		}, ui.Element("div", field, reset).Class("studio-field-demo")), ui.Element("p", ui.Text(name.Get())).Attr("data-popover-name", ""))
+	})
+}

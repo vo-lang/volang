@@ -1,0 +1,142 @@
+// Package navigation provides opt-in browser history and native route links.
+package navigation
+
+import (
+	"encoding/json"
+	"net/url"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type Location struct {
+	URL string
+	Path string
+	Query url.Values
+	Fragment string
+	escapedPath string
+}
+
+type Router struct {
+	scope *ui.Scope
+	location *ui.StringState
+	error *ui.StringState
+}
+
+// Use observes location changes after commit. initial must match the server
+// location during hydration. The browser emits its current URL on subscription.
+func Use(scope *ui.Scope, key string, initial string) *Router {
+	location := ui.String(scope, key + ":location", initial)
+	failure := ui.String(scope, key + ":error", "")
+	ui.Watch(scope, key + ":watch", ui.Request{Service: "web.location"}, func(result ui.Result) {
+		failure.Set(result.Error)
+		if result.Error == "" {
+			location.Set(result.Value)
+		}
+	})
+	return &Router{scope: scope, location: location, error: failure}
+}
+
+func (router *Router) Current() Location {
+	location, err := Parse(router.location.Get())
+	if err != nil {
+		panic(err)
+	}
+	return location
+}
+
+// Parse preserves encoded path segment boundaries for route matching.
+func Parse(value string) (Location, error) {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return Location{}, err
+	}
+	path := parsed.Path
+	if path == "" {
+		path = "/"
+	}
+	return Location{
+		URL: value, Path: path, Query: parsed.Query(), Fragment: parsed.Fragment,
+		escapedPath: parsed.EscapedPath(),
+	}, nil
+}
+
+func (router *Router) Error() string {
+	return router.error.Get()
+}
+
+type navigateRequest struct {
+	Href string `json:"href"`
+	Replace bool `json:"replace"`
+	PreserveScroll bool `json:"preserveScroll"`
+	PreserveFocus bool `json:"preserveFocus"`
+}
+
+type NavigateOptions struct {
+	Replace bool
+	PreserveScroll bool
+	// PreserveFocus keeps a still-mounted control focused, including its caret.
+	// Useful when URL-backed filters update while the user is typing.
+	PreserveFocus bool
+}
+
+func (router *Router) NavigateWith(href string, options NavigateOptions) {
+	value, err := json.Marshal(navigateRequest{
+		Href: href, Replace: options.Replace, PreserveScroll: options.PreserveScroll,
+		PreserveFocus: options.PreserveFocus,
+	})
+	if err != nil {
+		panic(err)
+	}
+	ui.Start(router.scope, ui.Request{Service: "web.navigate", Value: string(value)}, func(result ui.Result) {
+		router.error.Set(result.Error)
+	})
+}
+
+type queryRequest struct {
+	Values url.Values `json:"values"`
+	Replace bool `json:"replace"`
+	PreserveScroll bool `json:"preserveScroll"`
+	PreserveFocus bool `json:"preserveFocus"`
+}
+
+// UpdateQuery replaces the named query fields in the browser's current URL.
+// Nil/empty value slices remove a field; other fields, path and hash are kept.
+// Multiple updates compose in task order, including before a location snapshot
+// has returned to Vo. This avoids stale full-URL writes from rapid controls.
+func (router *Router) UpdateQuery(values url.Values, options NavigateOptions) {
+	if len(values) == 0 {
+		return
+	}
+	encoded, err := json.Marshal(queryRequest{
+		Values: values, Replace: options.Replace, PreserveScroll: options.PreserveScroll,
+		PreserveFocus: options.PreserveFocus,
+	})
+	if err != nil {
+		panic(err.Error())
+	}
+	ui.Start(router.scope, ui.Request{Service: "web.query", Value: string(encoded)}, func(result ui.Result) {
+		router.error.Set(result.Error)
+	})
+}
+
+func (router *Router) Navigate(href string) {
+	router.NavigateWith(href, NavigateOptions{})
+}
+
+func (router *Router) Replace(href string) {
+	router.NavigateWith(href, NavigateOptions{Replace: true})
+}
+
+// SetTitle schedules a document title update from a handler or effect.
+func (router *Router) SetTitle(value string) {
+	ui.Start(router.scope, ui.Request{Service: "web.document-title", Value: value}, func(result ui.Result) {
+		if result.Error != "" {
+			router.error.Set(result.Error)
+		}
+	})
+}
+
+// Link preserves the native href, new-tab, download and external-link behavior.
+// The installed browser navigation service intercepts ordinary internal clicks.
+func Link(href string, children ...ui.View) ui.View {
+	return ui.Element("a", children...).Attr("href", href).Attr("data-ui-route", "")
+}

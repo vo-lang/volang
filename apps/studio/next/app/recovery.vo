@@ -1,0 +1,183 @@
+package app
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var recoveryType = ui.Define("studio.Recovery")
+
+func recoverySize(bytes int) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	if bytes < 1024 * 1024 {
+		return fmt.Sprintf("%.1f KiB", float64(bytes) / 1024)
+	}
+	return fmt.Sprintf("%.1f MiB", float64(bytes) / (1024 * 1024))
+}
+
+type recoveryProject struct {
+	Name string
+}
+
+type recoveryResult struct {
+	Version int
+	Kind string
+	Projects []recoveryProject
+	URL string
+	Filename string
+	Bytes int
+	SourceBytes int
+	Files int
+}
+
+// A prepared download belongs to its subscription. Keeping this state opaque
+// also keeps cancelled tasks and expired browser URLs out of reload snapshots.
+type recoveryState struct {
+	task *ui.Task
+	projects []recoveryProject
+	selected string
+	busy bool
+	loaded bool
+	archive recoveryResult
+	message string
+	error string
+}
+
+func (current recoveryState) cancel() recoveryState {
+	current.task.Cancel()
+	current.task = nil
+	current.busy = false
+	current.archive = recoveryResult{}
+	current.message = ""
+	current.error = ""
+	return current
+}
+
+func startRecovery(scope *ui.Scope, state *ui.Store, operation string) {
+	current := state.Get().(recoveryState)
+	if current.busy || (operation == "export" && current.selected == "") {
+		return
+	}
+	current = current.cancel()
+	request, err := json.Marshal(struct {
+		Version int `json:"version"`
+		Operation string `json:"operation"`
+		Project string `json:"project"`
+	}{
+		1, operation, current.selected,
+	})
+	if err != nil {
+		panic(err)
+	}
+	current.busy = true
+	current.message = "Looking for browser projects…"
+	if operation == "export" {
+		current.message = "Preparing your download…"
+	}
+	current.task = ui.Subscribe(scope, ui.Request{Service: "studio.recovery", Value: string(request)}, func(result ui.Result) {
+		state.Update(func(value any) any {
+			next := value.(recoveryState)
+			next.busy = false
+			next.message = ""
+			var decoded recoveryResult
+			problem := result.Error
+			if problem == "" {
+				if err := json.Unmarshal([]byte(result.Value), &decoded); err != nil || decoded.Version != 1 {
+					problem = "The browser returned an invalid recovery response. Please retry."
+				} else if operation == "inspect" && decoded.Kind == "projects" {
+					next.loaded = true
+					next.projects = decoded.Projects
+					next.selected = ""
+					if len(next.projects) > 0 {
+						next.selected = next.projects[0].Name
+					}
+					next.message = fmt.Sprintf("Found %d browser projects.", len(next.projects))
+					if len(next.projects) == 0 {
+						next.message = "No projects found here. Check that you are using the same browser and site address as the previous Studio."
+					}
+				} else if operation == "export" && decoded.Kind == "archive" &&
+					strings.HasPrefix(decoded.URL, "blob:") &&
+					decoded.Filename != "" {
+					next.archive = decoded
+					next.message = "Your download is ready."
+				} else {
+					problem = "The browser returned an unexpected recovery response. Please retry."
+				}
+			}
+			if problem != "" {
+				next = next.cancel()
+				next.error = problem
+			}
+			return next
+		})
+	})
+	state.Update(func(any) any {
+		return current
+	})
+}
+
+func Recovery() ui.View {
+	return ui.Component(recoveryType, func(scope *ui.Scope) ui.View {
+		state := ui.State(scope, "recovery", func() any {
+			return recoveryState{}
+		})
+		current := state.Get().(recoveryState)
+		controls := []ui.View{
+			kit.Button(kit.ButtonProps{
+				Variant: "secondary", Disabled: current.busy,
+				OnPress: func() {
+					startRecovery(scope, state, "inspect")
+				},
+			}, ui.Text("Find browser projects")),
+		}
+		if current.loaded && len(current.projects) > 0 {
+			options := []kit.ChoiceOption{}
+			for _, project := range current.projects {
+				options = append(options, kit.ChoiceOption{Value: project.Name, Label: project.Name})
+			}
+			controls = append(controls, kit.Select(kit.SelectProps{
+				ID: "recovery-project", Label: "Browser project", Options: options, Disabled: current.busy,
+				Value: func() string {
+					return state.Get().(recoveryState).selected
+				},
+				OnChange: func(value string) {
+					state.Update(func(stored any) any {
+						next := stored.(recoveryState).cancel()
+						next.selected = value
+						return next
+					})
+				},
+			}))
+			controls = append(controls, kit.Button(kit.ButtonProps{
+				Disabled: current.busy,
+				OnPress: func() {
+					startRecovery(scope, state, "export")
+				},
+			}, ui.Text("Prepare download")))
+		}
+		if current.busy || current.archive.URL != "" {
+			label := "Cancel"
+			if !current.busy {
+				label = "Release download"
+			}
+			controls = append(controls, kit.Button(kit.ButtonProps{
+				Variant: "quiet",
+				OnPress: func() {
+					state.Update(func(value any) any {
+						return value.(recoveryState).cancel()
+					})
+				},
+			}, ui.Text(label)))
+		}
+		if current.archive.URL != "" {
+			controls = append(controls, ui.Element("div", ui.Element("a", ui.Text("Download " +
+				current.archive.Filename)).Attr("href", current.archive.URL).Attr("download", current.archive.Filename).Class("studio-text-link"), paragraph(fmt.Sprintf("%d files · %s ZIP", current.archive.Files, recoverySize(current.archive.Bytes)))).Class("studio-recovery-download"))
+		}
+		return ui.Element("section", ui.Element("header", ui.Element("p", ui.Text("KEEP WHAT YOU MADE")).Class("studio-eyebrow"), ui.Element("h1", ui.Text("Bring your projects\nwith you.")), paragraph("Download projects saved in the previous browser Studio. Your original files stay in this browser.")).Class("studio-intro"), ui.Element("div", ui.Element("h2", ui.Text("Before you start")), paragraph("Use the same browser and site address, including the port, as the previous Studio. Projects saved on another address will not appear here."), paragraph("Save all changes in the previous Studio, then close its other tabs before preparing a download. Unsaved editor changes cannot be recovered after those tabs close.")).Class("studio-recovery-note"), ui.Element("div", controls...).Class("studio-recovery-controls"), ui.Element("p", ui.Text(current.message)).Attr("role", "status"), ui.Element("p", ui.Text(current.error)).Attr("role", "alert")).Class("studio-recovery")
+	})
+}

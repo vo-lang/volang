@@ -1,0 +1,60 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/web"
+)
+
+var interestsType = ui.Define("workbench.Interests")
+
+func Interests() ui.View {
+	return ui.Component(interestsType, func(scope *ui.Scope) ui.View {
+		disabled := ui.Bool(scope, "disabled", false)
+		focus := ui.Ref(scope, "first-interest")
+		form := forms.Use(scope, "interests", forms.Options{
+			Initial: forms.Values{"interests": []string{"writing"}},
+			Validate: func(data forms.Data) forms.Errors {
+				values := data.Values
+				if len(values["interests"]) == 0 {
+					return forms.Errors{"interests": "Choose at least one interest."}
+				}
+				return nil
+			},
+			FocusInvalid: func(string) {
+				focus.Focus()
+			},
+		})
+		choices := kit.CheckboxGroup(kit.CheckboxGroupProps{
+			ID: "workbench-interests", Label: "What makes you curious?", Name: "interests",
+			Options: []kit.ChoiceOption{
+				{Value: "writing", Label: "Writing"}, {Value: "design", Label: "Design"},
+				{Value: "code", Label: "Code"}, {Value: "later", Label: "Coming soon", Disabled: true},
+			},
+			Value: func() []string {
+				return form.All("interests")
+			},
+			OnChange: func(values []string) {
+				form.ChangeAll("interests", values)
+			},
+			OnBlur: func() {
+				form.Blur("interests")
+			},
+			Disabled: disabled.Get(), InputRef: focus, Hint: "Choose as many as you like.",
+			Error: form.Error("interests"),
+		})
+		controls := ui.Element("div", ui.Element("button", ui.Text("Save interests")).Attr("type", "submit").Attr("data-multiple-save", "").Attr("disabled", fmt.Sprint(form.Pending())), ui.Element("button", ui.Text("Reset interests")).Attr("type", "reset").Attr("data-multiple-reset", ""), ui.Element("button", ui.Text("Toggle availability")).Attr("type", "button").Attr("data-multiple-disable", "").On("click", func(ui.Event) {
+			disabled.Set(!disabled.Get())
+		})).Class("actions")
+		view := form.View(func(data forms.Data) ui.Request {
+			values := data.Values
+			return web.After(180, "Saved " + strings.Join(values["interests"], ", "))
+		}, func(result ui.Result) forms.Outcome {
+			return forms.Outcome{Message: result.Value}
+		}, choices, controls)
+		return ui.Element("section", ui.Element("h2", ui.Text("Follow your curiosity")), view, ui.Element("p", ui.Text(strings.Join(form.All("interests"), ","))).Attr("data-multiple-values", ""), ui.Element("output", ui.Text(form.Message())).Attr("data-multiple-status", "").Attr("aria-live", "polite"), ui.Element("span", ui.Text(fmt.Sprint(form.Dirty()))).Attr("data-multiple-dirty", "").Attr("hidden", "true")).Class("card")
+	})
+}

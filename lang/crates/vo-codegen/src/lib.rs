@@ -10,6 +10,7 @@ mod error;
 mod expr;
 mod func;
 mod lvalue;
+mod optimize;
 mod stmt;
 mod type_info;
 mod type_interner;
@@ -23,7 +24,7 @@ pub use type_interner::{intern_type_key, TypeInterner};
 
 use vo_analysis::objects::{ObjKey, PackageKey};
 use vo_analysis::Project;
-use vo_runtime::bytecode::Module;
+use vo_common_core::bytecode::Module;
 use vo_syntax::ast::{Decl, Expr, ExprId, Visitor};
 
 /// One compiler-owned expression entrypoint requested by a typed adapter.
@@ -117,72 +118,74 @@ pub fn compile_project_with_adapters(
     externalized_locals: &[ExternalizedLocalSpec],
     scoped_calls: &[ScopedCallSpec],
 ) -> Result<(Module, CodegenReport), CodegenError> {
-    if let Some(declared) = project
-        .main_pkg()
-        .name()
-        .as_deref()
-        .filter(|name| *name != "main")
-    {
-        return Err(CodegenError::InvalidEntry(format!(
-            "package must be named `main`, found `{declared}`"
-        )));
-    }
-    let layout_facts = validate_project_type_layouts(project)?;
-    let info = TypeInfoWrapper::for_main_package(project, layout_facts);
-    let pkg_name = project.main_pkg().name().as_deref().unwrap_or("main");
-    let mut ctx = CodegenContext::new(pkg_name);
-    ctx.install_externalized_locals(externalized_locals)?;
-    ctx.install_scoped_calls(scoped_calls)?;
+    vo_common::compiler_phase!(Codegen, {
+        if let Some(declared) = project
+            .main_pkg()
+            .name()
+            .as_deref()
+            .filter(|name| *name != "main")
+        {
+            return Err(CodegenError::InvalidEntry(format!(
+                "package must be named `main`, found `{declared}`"
+            )));
+        }
+        let layout_facts = validate_project_type_layouts(project)?;
+        let info = TypeInfoWrapper::for_main_package(project, layout_facts);
+        let pkg_name = project.main_pkg().name().as_deref().unwrap_or("main");
+        let mut ctx = CodegenContext::new(pkg_name);
+        ctx.install_externalized_locals(externalized_locals)?;
+        ctx.install_scoped_calls(scoped_calls)?;
 
-    // 1. Register types (StructMeta, InterfaceMeta)
-    register_types(project, &mut ctx, &info)?;
-    ctx.check_layout_errors().map_err(CodegenError::Internal)?;
+        // 1. Register types (StructMeta, InterfaceMeta)
+        register_types(project, &mut ctx, &info)?;
+        ctx.check_layout_errors().map_err(CodegenError::Internal)?;
 
-    // 2. Collect declarations (functions, globals, externs)
-    collect_declarations(project, &mut ctx, &info)?;
-    ctx.check_layout_errors().map_err(CodegenError::Internal)?;
+        // 2. Collect declarations (functions, globals, externs)
+        collect_declarations(project, &mut ctx, &info)?;
+        ctx.check_layout_errors().map_err(CodegenError::Internal)?;
 
-    // 3. Compile functions
-    compile_functions(project, &mut ctx, &info)?;
-    ctx.check_layout_errors().map_err(CodegenError::Internal)?;
+        // 3. Compile functions
+        compile_functions(project, &mut ctx, &info)?;
+        ctx.check_layout_errors().map_err(CodegenError::Internal)?;
 
-    // 4. Compile adapter-requested expression entrypoints.
-    compile_expression_evaluators(evaluator_specs, project, &mut ctx, &info)?;
-    ctx.check_layout_errors().map_err(CodegenError::Internal)?;
+        // 4. Compile adapter-requested expression entrypoints.
+        compile_expression_evaluators(evaluator_specs, project, &mut ctx, &info)?;
+        ctx.check_layout_errors().map_err(CodegenError::Internal)?;
 
-    // 5. Generate __init__ and __entry__
-    compile_init_and_entry(project, &mut ctx, &info)?;
-    ctx.check_layout_errors().map_err(CodegenError::Internal)?;
+        // 5. Generate __init__ and __entry__
+        compile_init_and_entry(project, &mut ctx, &info)?;
+        ctx.check_layout_errors().map_err(CodegenError::Internal)?;
 
-    // 6. Collect promoted methods from embedded interfaces
-    // This must happen after compile_functions (direct methods registered)
-    // and before finalize_itabs (itabs need complete method set)
-    collect_promoted_methods(project, &mut ctx, &info);
+        // 6. Collect promoted methods from embedded interfaces
+        // This must happen after compile_functions (direct methods registered)
+        // and before finalize_itabs (itabs need complete method set)
+        collect_promoted_methods(project, &mut ctx, &info);
 
-    // 7. Build all pending itabs (from functions + __init__)
-    ctx.finalize_itabs(&info.project.tc_objs, &info.project.interner);
+        // 7. Build all pending itabs (from functions + __init__)
+        ctx.finalize_itabs(&info.project.tc_objs, &info.project.interner);
 
-    // 8. Build runtime_types after all codegen (all types have been assigned rttid)
-    build_runtime_types(project, &mut ctx, &info);
-    ctx.check_layout_errors().map_err(CodegenError::Internal)?;
+        // 8. Build runtime_types after all codegen (all types have been assigned rttid)
+        build_runtime_types(project, &mut ctx, &info);
+        ctx.check_layout_errors().map_err(CodegenError::Internal)?;
 
-    // 9. Reconcile generated transfer metadata against the final runtime type table.
-    ctx.finalize_transfer_metadata()
-        .map_err(CodegenError::Internal)?;
+        // 9. Reconcile generated transfer metadata against the final runtime type table.
+        ctx.finalize_transfer_metadata()
+            .map_err(CodegenError::Internal)?;
 
-    // 10. Fill WellKnownTypes for fast error creation
-    ctx.fill_well_known_types()
-        .map_err(CodegenError::Internal)?;
+        // 10. Fill WellKnownTypes for fast error creation
+        ctx.fill_well_known_types()
+            .map_err(CodegenError::Internal)?;
 
-    // 11. Finalize debug info (sort entries by PC)
-    ctx.finalize_debug_info().map_err(CodegenError::Internal)?;
+        // 11. Finalize debug info (sort entries by PC)
+        ctx.finalize_debug_info().map_err(CodegenError::Internal)?;
 
-    // 12. Final check: all IDs within 24-bit limit
-    ctx.check_id_limits().map_err(CodegenError::Internal)?;
+        // 12. Final check: all IDs within 24-bit limit
+        ctx.check_id_limits().map_err(CodegenError::Internal)?;
 
-    let report = ctx.report();
-    let module = ctx.finish().map_err(CodegenError::Internal)?;
-    Ok((module, report))
+        let report = ctx.report();
+        let module = ctx.finish().map_err(CodegenError::Internal)?;
+        Ok((module, report))
+    })
 }
 
 fn compile_expression_evaluators(
@@ -200,44 +203,19 @@ fn compile_expression_evaluators(
     for spec in specs {
         by_package.entry(spec.package).or_default().push(spec);
     }
-    for (package_index, package) in project.packages.iter().copied().enumerate() {
-        let Some(package_specs) = by_package.remove(&package) else {
+    for (package_index, package) in project.packages().iter().enumerate() {
+        let Some(package_specs) = by_package.remove(&package.key) else {
             continue;
         };
-        if package == project.main_package {
-            compile_package_expression_evaluators(
-                &package_specs,
-                project.files.as_slice(),
-                project,
-                ctx,
-                main_info,
-                package_index,
-            )?;
-            continue;
-        }
-        let package_path = project.tc_objs.pkgs[package].path();
-        let type_info = project
-            .imported_type_infos
-            .get(package_path)
-            .ok_or_else(|| {
-                CodegenError::Internal(format!(
-                    "expression evaluator package {package_path:?} has no type information"
-                ))
-            })?;
-        let files = project.imported_files.get(package_path).ok_or_else(|| {
-            CodegenError::Internal(format!(
-                "expression evaluator package {package_path:?} has no source files"
-            ))
-        })?;
         let info = TypeInfoWrapper::for_package(
             project,
-            package,
-            type_info,
+            package.key,
+            &package.type_info,
             main_info.shared_layout_facts(),
         );
         compile_package_expression_evaluators(
             &package_specs,
-            files,
+            &package.files,
             project,
             ctx,
             &info,
@@ -308,7 +286,6 @@ fn compile_package_expression_evaluators(
         let name = format!("__adapter_eval_{package_index}_{}", spec.expression.0);
         let placeholder = FuncBuilder::new(&name).build();
         let function_id = ctx.add_function(placeholder);
-        ctx.set_current_func_id(function_id);
 
         let mut builder = FuncBuilder::new(&name);
         let mut escaped_externalized_params = Vec::new();
@@ -329,8 +306,9 @@ fn compile_package_expression_evaluators(
             })?;
             if ctx.externalized_local(*parameter).is_some() {
                 builder
-                    .try_define_param(Some(symbol), 1, &[vo_runtime::SlotType::Value])
+                    .try_define_param(Some(symbol), 1, &[vo_common_core::SlotType::Value])
                     .map_err(CodegenError::Internal)?;
+                builder.bind_local_object(symbol, Some(*parameter))?;
                 if info.closure_captures(expression.id).contains(parameter) {
                     escaped_externalized_params.push(symbol);
                 }
@@ -345,6 +323,7 @@ fn compile_package_expression_evaluators(
             builder
                 .try_define_param(Some(symbol), slots, &slot_types)
                 .map_err(CodegenError::Internal)?;
+            builder.bind_local_object(symbol, Some(*parameter))?;
             builder.add_param_type_key(type_key, ctx, info);
             if info.closure_captures(expression.id).contains(parameter) {
                 escaped_source_params.push((symbol, type_key, slots, slot_types));
@@ -359,7 +338,7 @@ fn compile_package_expression_evaluators(
                 1,
                 false,
                 ctx.opaque_handle_meta(),
-                &[vo_runtime::SlotType::Value],
+                &[vo_common_core::SlotType::Value],
             );
         }
         for (symbol, type_key, slots, slot_types) in escaped_source_params {
@@ -396,7 +375,7 @@ fn compile_package_expression_evaluators(
         builder.set_return_types(vec![result_type]);
         let result = expr::compile_expr(expression, ctx, &mut builder, info)?;
         builder.emit_op(
-            vo_runtime::instruction::Opcode::Return,
+            vo_common_core::instruction::Opcode::Return,
             result,
             result_slots,
             0,
@@ -470,8 +449,8 @@ fn register_types(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     use std::collections::BTreeMap;
-    use vo_runtime::bytecode::{InterfaceMeta, NamedTypeMeta};
-    use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
+    use vo_common_core::bytecode::{InterfaceMeta, NamedTypeMeta};
+    use vo_common_core::{ValueKind, ValueMeta, ValueRttid};
 
     fn register_pkg_types(
         pkg_path: &str,
@@ -481,8 +460,8 @@ fn register_types(
         info: &TypeInfoWrapper,
     ) -> Result<(), CodegenError> {
         use std::collections::BTreeMap;
-        use vo_runtime::bytecode::{InterfaceMeta, NamedTypeMeta, StructMeta};
-        use vo_runtime::ValueMeta;
+        use vo_common_core::bytecode::{InterfaceMeta, NamedTypeMeta, StructMeta};
+        use vo_common_core::ValueMeta;
         use vo_syntax::ast::TypeExprKind;
 
         fn checked_struct_offset(offset: u16, slot_count: u16) -> Result<u16, CodegenError> {
@@ -612,11 +591,11 @@ fn register_types(
                             // Embedded field: name comes from the type
                             let field_name = info.get_type_name(field_type);
                             slot_types.extend(slot_type_list);
-                            fields.push(vo_runtime::bytecode::FieldMeta {
+                            fields.push(vo_common_core::bytecode::FieldMeta {
                                 name: field_name,
                                 offset,
                                 slot_count,
-                                type_info: vo_runtime::ValueRttid::new(field_rttid, field_vk),
+                                type_info: vo_common_core::ValueRttid::new(field_rttid, field_vk),
                                 embedded: true,
                                 tag,
                             });
@@ -632,11 +611,14 @@ fn register_types(
                                     .unwrap_or("?")
                                     .to_string();
                                 slot_types.extend(slot_type_list.clone());
-                                fields.push(vo_runtime::bytecode::FieldMeta {
+                                fields.push(vo_common_core::bytecode::FieldMeta {
                                     name: field_name,
                                     offset,
                                     slot_count,
-                                    type_info: vo_runtime::ValueRttid::new(field_rttid, field_vk),
+                                    type_info: vo_common_core::ValueRttid::new(
+                                        field_rttid,
+                                        field_vk,
+                                    ),
                                     embedded: false,
                                     tag: if i == names_count - 1 {
                                         tag.take()
@@ -651,7 +633,7 @@ fn register_types(
 
                     // Empty struct still needs 1 slot for zero-size type workaround
                     if slot_types.is_empty() {
-                        slot_types.push(vo_runtime::SlotType::Value);
+                        slot_types.push(vo_common_core::SlotType::Value);
                     }
                     let field_index: std::collections::HashMap<String, usize> = fields
                         .iter()
@@ -669,7 +651,7 @@ fn register_types(
                         .map_err(CodegenError::Internal)?;
                     ctx.alias_struct_meta_id(named_key, struct_meta_id)
                         .map_err(CodegenError::Internal)?;
-                    ValueMeta::new(struct_meta_id, vo_runtime::ValueKind::Struct)
+                    ValueMeta::new(struct_meta_id, vo_common_core::ValueKind::Struct)
                 }
                 TypeExprKind::Interface(_) => {
                     // Build InterfaceMeta
@@ -690,7 +672,7 @@ fn register_types(
                             .map(|m| tc_objs.lobjs[*m].id(tc_objs).into_owned())
                             .collect();
 
-                        let metas: Vec<vo_runtime::bytecode::InterfaceMethodMeta> = method_objs
+                        let metas: Vec<vo_common_core::bytecode::InterfaceMethodMeta> = method_objs
                             .iter()
                             .map(|&m| {
                                 let obj = &tc_objs.lobjs[m];
@@ -701,7 +683,7 @@ fn register_types(
                                 let sig =
                                     signature_type_to_runtime_type(sig_type, tc_objs, info, ctx);
                                 let signature_rttid = ctx.intern_rttid(sig);
-                                vo_runtime::bytecode::InterfaceMethodMeta {
+                                vo_common_core::bytecode::InterfaceMethodMeta {
                                     name,
                                     signature_rttid,
                                 }
@@ -721,7 +703,7 @@ fn register_types(
                     let iface_meta_id = ctx
                         .register_interface_meta(underlying_key, meta)
                         .map_err(CodegenError::Internal)?;
-                    ValueMeta::new(iface_meta_id, vo_runtime::ValueKind::Interface)
+                    ValueMeta::new(iface_meta_id, vo_common_core::ValueKind::Interface)
                 }
                 _ => {
                     // Other types (Map, Slice, Chan, etc.): intern underlying type to get rttid
@@ -731,7 +713,7 @@ fn register_types(
                     ValueMeta::new(underlying_rttid, underlying_vk)
                 }
             };
-            let underlying_rttid = vo_runtime::ValueRttid::new(
+            let underlying_rttid = vo_common_core::ValueRttid::new(
                 ctx.intern_type_key(underlying_key, info),
                 info.type_value_kind(underlying_key),
             );
@@ -776,7 +758,7 @@ fn register_types(
                         .map(|m| tc_objs.lobjs[*m].id(tc_objs).into_owned())
                         .collect();
 
-                    let metas: Vec<vo_runtime::bytecode::InterfaceMethodMeta> = method_objs
+                    let metas: Vec<vo_common_core::bytecode::InterfaceMethodMeta> = method_objs
                         .iter()
                         .map(|&m| {
                             let obj = &tc_objs.lobjs[m];
@@ -786,7 +768,7 @@ fn register_types(
                             });
                             let sig = signature_type_to_runtime_type(sig_type, tc_objs, info, ctx);
                             let signature_rttid = ctx.intern_rttid(sig);
-                            vo_runtime::bytecode::InterfaceMethodMeta {
+                            vo_common_core::bytecode::InterfaceMethodMeta {
                                 name,
                                 signature_rttid,
                             }
@@ -835,16 +817,13 @@ fn register_types(
 
     register_pkg_types(
         project.main_pkg().path(),
-        &project.files,
+        &project.main().files,
         project,
         ctx,
         info,
     )?;
 
-    for (pkg_path, pkg, pkg_type_info, files) in project
-        .imported_packages_in_order()
-        .map_err(CodegenError::Internal)?
-    {
+    for (pkg_path, pkg, pkg_type_info, files) in project.imported_packages_in_order() {
         let pkg_info =
             TypeInfoWrapper::for_package(project, pkg, pkg_type_info, info.shared_layout_facts());
         register_pkg_types(pkg_path, files, project, ctx, &pkg_info)?;
@@ -862,8 +841,8 @@ fn register_builtin_protocols(
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    use vo_runtime::bytecode::{InterfaceMeta, InterfaceMethodMeta};
-    use vo_runtime::{RuntimeType, ValueKind, ValueRttid};
+    use vo_common_core::bytecode::{InterfaceMeta, InterfaceMethodMeta};
+    use vo_common_core::{RuntimeType, ValueKind, ValueRttid};
 
     let tc_objs = &project.tc_objs;
 
@@ -979,11 +958,9 @@ fn collect_type_decls(files: &[vo_syntax::ast::File]) -> Vec<vo_syntax::ast::Typ
     }
 
     impl Visitor for Collector {
-        fn visit_decl(&mut self, decl: &Decl) {
-            if let Decl::Type(type_decl) = decl {
-                self.declarations.push(type_decl.clone());
-            }
-            vo_syntax::ast::walk_decl(self, decl);
+        fn visit_type_decl(&mut self, decl: &vo_syntax::ast::TypeDecl) {
+            self.declarations.push(decl.clone());
+            vo_syntax::ast::walk_type_decl(self, decl);
         }
     }
 
@@ -1009,15 +986,12 @@ fn collect_declarations(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     // First collect main package declarations (using main type_info)
-    for file in &project.files {
+    for file in &project.main().files {
         collect_file_declarations(file, project, ctx, info, true)?;
     }
 
     // Then collect imported package declarations in dependency order.
-    for (_, pkg, pkg_type_info, files) in project
-        .imported_packages_in_order()
-        .map_err(CodegenError::Internal)?
-    {
+    for (_, pkg, pkg_type_info, files) in project.imported_packages_in_order() {
         let pkg_info =
             TypeInfoWrapper::for_package(project, pkg, pkg_type_info, info.shared_layout_facts());
         for file in files {
@@ -1096,7 +1070,7 @@ fn collect_file_declarations(
                         // structs use an ordinary typed Ptr allocation.
                         let (slots, slot_types) =
                             if info.is_array(type_key) || info.is_struct(type_key) {
-                                (1, vec![vo_runtime::SlotType::GcBase])
+                                (1, vec![vo_common_core::SlotType::GcBase])
                             } else {
                                 (
                                     info.type_slot_count(type_key),
@@ -1107,7 +1081,7 @@ fn collect_file_declarations(
                         let meta_id = ctx.compute_value_meta_raw(type_key, info) >> 8;
                         ctx.register_global(
                             obj_key,
-                            vo_runtime::bytecode::GlobalDef {
+                            vo_common_core::bytecode::GlobalDef {
                                 name: global_name.to_string(),
                                 slots,
                                 value_kind,
@@ -1138,14 +1112,11 @@ fn compile_functions(
     // This handles forward references (function A calls function B defined later).
 
     // Compile function bodies - main package files first
-    for file in &project.files {
+    for file in &project.main().files {
         compile_file_functions(file, project, ctx, info, &mut method_mappings)?;
     }
     // Then imported package files in dependency order.
-    for (_, pkg, pkg_type_info, files) in project
-        .imported_packages_in_order()
-        .map_err(CodegenError::Internal)?
-    {
+    for (_, pkg, pkg_type_info, files) in project.imported_packages_in_order() {
         let pkg_info =
             TypeInfoWrapper::for_package(project, pkg, pkg_type_info, info.shared_layout_facts());
         for file in files {
@@ -1215,9 +1186,11 @@ fn compile_file_functions(
                         .id(&info.project.tc_objs)
                         .into_owned();
 
-                    // Generate method signature rttid
-                    let signature = generate_method_signature(func_decl, info, ctx);
-                    let signature_rttid = ctx.intern_rttid(signature);
+                    // Use the checked signature, which includes unnamed parameters
+                    // and every grouped result. Reconstructing it from AST names
+                    // loses those slots and disagrees with interface metadata.
+                    let signature = info.obj_type(func_obj_key, "method must have a signature");
+                    let signature_rttid = ctx.intern_type_key(signature, info);
 
                     // For value receiver methods, generate a wrapper that accepts GcRef
                     // and dereferences it before calling the original method
@@ -1487,52 +1460,15 @@ fn collect_embedded_methods(
     }
 }
 
-/// Generate RuntimeType::Func signature for a method (excluding receiver).
-/// Uses Var types directly - type checker already converts variadic T to []T.
-fn generate_method_signature(
-    func_decl: &vo_syntax::ast::FuncDecl,
-    info: &TypeInfoWrapper,
-    ctx: &mut CodegenContext,
-) -> vo_runtime::RuntimeType {
-    use vo_runtime::{RuntimeType, ValueRttid};
-
-    // Collect param ValueRttids from Var objects (not TypeExpr)
-    // Type checker already changed variadic param type from T to []T
-    let mut params = Vec::new();
-    for param in &func_decl.sig.params {
-        for name in &param.names {
-            let obj_key = info.get_def(name);
-            let type_key = info.obj_type(obj_key, "param must have type");
-            let rttid = ctx.intern_type_key(type_key, info);
-            let vk = info.type_value_kind(type_key);
-            params.push(ValueRttid::new(rttid, vk));
-        }
-    }
-
-    let mut results = Vec::new();
-    for r in &func_decl.sig.results {
-        let type_key = info.type_expr_type(r.ty.id);
-        let rttid = ctx.intern_type_key(type_key, info);
-        let vk = info.type_value_kind(type_key);
-        results.push(ValueRttid::new(rttid, vk));
-    }
-
-    RuntimeType::Func {
-        params,
-        results,
-        variadic: func_decl.sig.variadic,
-    }
-}
-
 /// Extract ValueRttids from a tuple type (params or results).
 fn tuple_to_value_rttids(
     tuple_key: vo_analysis::objects::TypeKey,
     tc_objs: &vo_analysis::objects::TCObjects,
     info: &TypeInfoWrapper,
     ctx: &mut CodegenContext,
-) -> Vec<vo_runtime::ValueRttid> {
+) -> Vec<vo_common_core::ValueRttid> {
     use vo_analysis::typ::Type;
-    use vo_runtime::ValueRttid;
+    use vo_common_core::ValueRttid;
     let Type::Tuple(tuple) = &tc_objs.types[tuple_key] else {
         panic!("runtime_value_rttids_from_tuple requires tuple type metadata");
     };
@@ -1556,9 +1492,9 @@ fn signature_type_to_runtime_type(
     tc_objs: &vo_analysis::objects::TCObjects,
     info: &TypeInfoWrapper,
     ctx: &mut CodegenContext,
-) -> vo_runtime::RuntimeType {
+) -> vo_common_core::RuntimeType {
     use vo_analysis::typ::Type;
-    use vo_runtime::RuntimeType;
+    use vo_common_core::RuntimeType;
 
     if let Type::Signature(sig) = &tc_objs.types[sig_type] {
         RuntimeType::Func {
@@ -1578,7 +1514,6 @@ fn compile_func_decl_at(
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    ctx.set_current_func_id(func_id);
     let (func_def, debug_locs) = compile_func_body(func_decl, ctx, info)?;
     ctx.replace_function(func_id, func_def);
     ctx.record_function_debug_locs(func_id, &debug_locs, &info.project.source_map);
@@ -1603,7 +1538,7 @@ fn compile_func_body(
     info: &TypeInfoWrapper,
 ) -> Result<
     (
-        vo_runtime::bytecode::FunctionDef,
+        vo_common_core::bytecode::FunctionDef,
         Vec<(u32, vo_common::span::Span)>,
     ),
     CodegenError,
@@ -1624,7 +1559,7 @@ fn compile_func_body(
     // Define receiver as first parameter (if method)
     if let Some(recv) = &func_decl.receiver {
         let (slots, slot_types) = if recv.is_pointer {
-            (1, vec![vo_runtime::SlotType::GcRef])
+            (1, vec![vo_common_core::SlotType::GcRef])
         } else {
             let type_key = info.obj_type(info.get_use(&recv.ty), "method receiver must have type");
             (
@@ -1642,6 +1577,7 @@ fn compile_func_body(
         // Check if receiver escapes (e.g., captured by closure)
         if let Some(name) = &recv.name {
             let obj_key = info.get_def(name);
+            builder.bind_local_object(name.symbol, Some(obj_key))?;
             let type_key = info.obj_type(obj_key, "receiver must have type");
             if info.needs_boxing(obj_key, type_key) {
                 escaped_params.push((name.symbol, type_key, slots, slot_types.clone()));
@@ -1679,6 +1615,7 @@ fn compile_func_body(
             builder
                 .try_define_param(Some(name.symbol), slots, &slot_types)
                 .map_err(CodegenError::Internal)?;
+            builder.bind_local_object(name.symbol, Some(obj_key))?;
             builder.add_param_type_key(param_type_key, ctx, info);
             if info.needs_boxing(obj_key, type_key) {
                 escaped_params.push((name.symbol, type_key, slots, slot_types.clone()));
@@ -1769,7 +1706,7 @@ fn compile_func_body(
         gcref_slot: u16,
         slots: u16,
         result_type: vo_analysis::objects::TypeKey,
-        slot_types: Vec<vo_runtime::SlotType>,
+        slot_types: Vec<vo_common_core::SlotType>,
         is_array: bool,
     }
     let mut escaped_returns: Vec<EscapedReturn> = Vec::new();
@@ -1825,10 +1762,11 @@ fn compile_func_body(
                 // Zero-initialize non-escaped named return (Go zero-value semantics)
                 // VM no longer does write_bytes, so codegen must handle this
                 for i in 0..slots {
-                    builder.emit_op(vo_runtime::instruction::Opcode::LoadInt, slot + i, 0, 0);
+                    builder.emit_op(vo_common_core::instruction::Opcode::LoadInt, slot + i, 0, 0);
                 }
                 slot
             };
+            builder.bind_local_object(name.symbol, Some(obj_key))?;
             builder.register_named_return(slot, slots, escapes);
         }
     }
@@ -1846,9 +1784,9 @@ fn compile_func_body(
             continue;
         }
         let meta_idx = ctx.get_or_create_value_slots_meta(er.result_type, info);
-        let meta_reg = builder.alloc_slots(&[vo_runtime::SlotType::Value]);
+        let meta_reg = builder.alloc_slots(&[vo_common_core::SlotType::Value]);
         builder.emit_op(
-            vo_runtime::instruction::Opcode::LoadConst,
+            vo_common_core::instruction::Opcode::LoadConst,
             meta_reg,
             meta_idx,
             0,
@@ -1891,8 +1829,7 @@ pub(crate) fn compile_array_expr_to_slots(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    crate::array_value::prepare_expr(expr, array_type, ctx, func, info)?
-        .emit_to_flat(dst, array_type, ctx, func, info)
+    crate::array_value::emit_expr_to_flat(expr, dst, array_type, ctx, func, info)
 }
 
 /// Allocate the stable typed object owned by a package-level struct variable.
@@ -1909,11 +1846,11 @@ pub(crate) fn allocate_global_struct(
         ));
     }
     let slot_types = info.type_slot_types(struct_type);
-    let object = func.alloc_slots(&[vo_runtime::SlotType::GcBase]);
-    let meta = func.alloc_slots(&[vo_runtime::SlotType::Value]);
+    let object = func.alloc_slots(&[vo_common_core::SlotType::GcBase]);
+    let meta = func.alloc_slots(&[vo_common_core::SlotType::Value]);
     let meta_idx = ctx.get_or_create_value_slots_meta(struct_type, info);
     func.emit_op(
-        vo_runtime::instruction::Opcode::LoadConst,
+        vo_common_core::instruction::Opcode::LoadConst,
         meta,
         meta_idx,
         0,
@@ -1935,7 +1872,7 @@ pub(crate) fn compile_global_struct_from_slots(
             "global boxed commit requires a struct type".to_string(),
         ));
     }
-    let object = func.alloc_slots(&[vo_runtime::SlotType::GcBase]);
+    let object = func.alloc_slots(&[vo_common_core::SlotType::GcBase]);
     func.emit_global_get(object, global_idx, 1);
     func.emit_ptr_set_with_slot_types(object, 0, src, &info.type_slot_types(struct_type));
     Ok(())
@@ -2024,7 +1961,7 @@ fn compile_package_globals(
                         continue;
                     };
                     init_builder.emit_op(
-                        vo_runtime::instruction::Opcode::GlobalSet,
+                        vo_common_core::instruction::Opcode::GlobalSet,
                         global_idx,
                         object,
                         0,
@@ -2185,7 +2122,7 @@ fn compile_package_globals(
             })?;
             match prepared {
                 PreparedGlobalInitializer::Array { value, .. } => {
-                    let dst_ref = init_builder.alloc_slots(&[vo_runtime::SlotType::GcBase]);
+                    let dst_ref = init_builder.alloc_slots(&[vo_common_core::SlotType::GcBase]);
                     init_builder.emit_global_get(dst_ref, global_idx, 1);
                     value.copy_into_ref(dst_ref, dst_type, ctx, init_builder, info)?;
                 }
@@ -2224,10 +2161,7 @@ fn compile_init_and_entry(
 
     // Initialize imported packages' global variables in dependency order
     // (dependencies are initialized before dependents)
-    for (_, pkg, pkg_type_info, files) in project
-        .imported_packages_in_order()
-        .map_err(CodegenError::Internal)?
-    {
+    for (_, pkg, pkg_type_info, files) in project.imported_packages_in_order() {
         let pkg_info =
             TypeInfoWrapper::for_package(project, pkg, pkg_type_info, info.shared_layout_facts());
         compile_package_globals(ctx, &mut init_builder, &pkg_info, files)?;
@@ -2237,13 +2171,13 @@ fn compile_init_and_entry(
     }
 
     // Then initialize the main package and run its init functions.
-    compile_package_globals(ctx, &mut init_builder, info, &project.files)?;
-    for user_init_id in ctx.init_functions_for_package(project.main_package) {
+    compile_package_globals(ctx, &mut init_builder, info, &project.main().files)?;
+    for user_init_id in ctx.init_functions_for_package(project.main().key) {
         emit_entry_static_call(&mut init_builder, ctx, user_init_id)?;
     }
 
     // Add return
-    init_builder.emit_op(vo_runtime::instruction::Opcode::Return, 0, 0, 0);
+    init_builder.emit_op(vo_common_core::instruction::Opcode::Return, 0, 0, 0);
     let init_func_id =
         ctx.add_function_from_builder_with_debug_locs(init_builder, &project.source_map);
     // Note: __init__ is NOT registered as a user init function - it's handled separately
@@ -2259,7 +2193,7 @@ fn compile_init_and_entry(
     // 3. Generate __island_init__ function (init only, no main - for island VMs)
     let mut island_init_builder = FuncBuilder::new("__island_init__");
     emit_entry_static_call(&mut island_init_builder, ctx, init_func_id)?;
-    island_init_builder.emit_op(vo_runtime::instruction::Opcode::Return, 0, 0, 0);
+    island_init_builder.emit_op(vo_common_core::instruction::Opcode::Return, 0, 0, 0);
     let island_init_func_id =
         ctx.add_function_from_builder_with_debug_locs(island_init_builder, &project.source_map);
     ctx.set_island_init_func(island_init_func_id);
@@ -2276,7 +2210,7 @@ fn compile_init_and_entry(
     }
 
     // Return
-    entry_builder.emit_op(vo_runtime::instruction::Opcode::Return, 0, 0, 0);
+    entry_builder.emit_op(vo_common_core::instruction::Opcode::Return, 0, 0, 0);
 
     let entry_func_id =
         ctx.add_function_from_builder_with_debug_locs(entry_builder, &project.source_map);
@@ -2364,18 +2298,19 @@ mod tests {
             objects.new_t_map(first, int);
             objects.new_t_map(second, int);
             let main_package = objects.new_package("main".to_string(), "main".to_string());
-            let project = Project {
-                tc_objs: objects,
-                interner: vo_common::SymbolInterner::new(),
-                packages: vec![main_package],
-                main_package,
-                type_info: Default::default(),
-                files: Vec::new(),
-                imported_files: BTreeMap::new(),
-                imported_type_infos: BTreeMap::new(),
-                source_map: vo_common::SourceMap::new(),
-                extensions: Vec::new(),
-            };
+            let project = Project::from_packages(
+                objects,
+                vo_common::SymbolInterner::new(),
+                vec![vo_analysis::AnalyzedPackage {
+                    key: main_package,
+                    files: Vec::new(),
+                    type_info: Default::default(),
+                }],
+                vo_common::SourceMap::new(),
+                vo_common::diagnostics::DiagnosticSink::new(),
+                Vec::new(),
+            )
+            .unwrap();
 
             let error = validate_project_type_layouts(&project)
                 .expect_err("both map key layouts exceed the VM slot domain");

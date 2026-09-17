@@ -1,0 +1,37 @@
+package main
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+func elementScroll() {
+	var ref *ui.ElementRef
+	var visible *ui.BoolState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		ref = ui.Ref(scope, "row")
+		visible = ui.Bool(scope, "visible", false)
+		if visible.Get() {
+			return ui.Element("div", ui.Text("Target")).Ref(ref)
+		}
+		return ui.Text("Hidden")
+	}))
+	flush(root)
+	visible.Set(true)
+	require(ref.ScrollIntoView() && root.Pending(), "scroll could not be requested before mount")
+	batch := flush(root)
+	require(focusTarget(batch) == 0 && batch.Mutations[len(batch.Mutations) - 1].Op == "scroll", "scroll did not resolve after mount without focus")
+	visible.Set(false)
+	ref.ScrollIntoView()
+	for _, mutation := range flush(root).Mutations {
+		require(mutation.Op != "scroll", "removed target emitted a scroll")
+	}
+	root.Close()
+	require(!ref.ScrollIntoView(), "disposed ref accepted scroll")
+	expectPanic(func() {
+		invalid := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+			ui.Ref(scope, "bad").ScrollIntoView()
+			return ui.Text("")
+		}))
+		invalid.Flush()
+	}, "handler or post-commit effect")
+}

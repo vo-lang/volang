@@ -16,15 +16,18 @@ pub extern "C" fn jit_gc_safepoint(ctx: *mut JitContext) -> JitResult {
     }
 
     let native_frame = unsafe { (*ctx).native_frame };
-    if let Err(error) = unsafe { vm.gc_step_while_native(fiber, native_frame, ctx) } {
-        return set_jit_infra_error_with_message(
-            ctx,
-            JIT_CALLBACK_GC_SAFEPOINT,
-            1,
-            error.to_string(),
-        );
+    match unsafe { vm.gc_step_while_native(fiber, native_frame, ctx) } {
+        Ok(true) => JitResult::Ok,
+        Ok(false) => {
+            let context = unsafe { &*ctx };
+            fiber.gc_allocation_permit =
+                Some((context.current_func_id, context.call_resume_pc as usize));
+            JitResult::RuntimeTransition
+        }
+        Err(error) => {
+            set_jit_infra_error_with_message(ctx, JIT_CALLBACK_GC_SAFEPOINT, 1, error.to_string())
+        }
     }
-    JitResult::Ok
 }
 
 #[cfg(test)]

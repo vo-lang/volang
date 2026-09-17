@@ -11,7 +11,7 @@ semantic input with different startup, throughput, host, and packaging goals.
 | VM | `vo run app.vo --mode=vm` | shortest development startup, embedding | in-process execution |
 | JIT | `vo run app.vo --mode=jit` | long native development sessions | in-process native code |
 | Native AOT | `vo build .` | native release | executable or object |
-| Core Wasm AOT | `vo build . --kind=wasm` | Web and sandboxed release | `.wasm` image |
+| Wasm VM | `vo build . --kind=bytecode --target=wasm32-unknown-unknown` | browser execution | `.vob` plus Wasm VM runtime |
 | Bytecode | `vo build . --kind=bytecode` | storage and VM embedding | `.vob` module |
 
 ## VM
@@ -51,19 +51,20 @@ The target runtime archive and extension archives must match the target and ABI
 declared by the artifact. Release verification should exercise the final linked
 binary on every supported operating system and architecture.
 
-## Core Wasm AOT
+## Wasm VM
 
-Core Wasm AOT contains executable lowered Volang functions and no bytecode
-interpreter. The image imports the versioned Volang host ABI for memory,
-scheduling, output, and declared capabilities.
+The browser runtime compiles the shared VM and portable providers to WebAssembly.
+It executes verified bytecode and owns the same scheduler, object model and GC
+contracts as the native VM.
 
 ```sh
-vo build . --kind=wasm -o app.wasm
+vo build . --kind=bytecode --target=wasm32-unknown-unknown -o app.vob
 ```
 
-Browser UI builds package this image with the official DOM/WebGPU adapter and
-application assets. Node or embedded hosts can implement the same ABI without
-adopting the UI layer.
+UI builds package the bytecode, runtime and browser adapter with application assets.
+The former Wasm VM compiler and host have been removed. Rebuild existing Web
+projects to migrate; the `wasm` and `web` build kinds return a migration diagnostic.
+Native JIT and Native AOT remain available.
 
 ## Semantic parity
 
@@ -81,8 +82,8 @@ language claims.
 - Use VM for short feedback loops and deterministic debugging.
 - Add JIT runs for long-lived native behavior and hot-path validation.
 - Publish Native AOT for standalone desktop/server executables.
-- Publish Core Wasm AOT for browser and sandboxed WebAssembly hosts.
-- Keep bytecode only when a VM embedder is part of the product architecture.
+- Publish bytecode with the Wasm VM for browser hosts.
+- Use verified bytecode for native or Web VM embedding.
 
 The detailed AOT ABI, cache, target, extension, and release contract lives in
 `docs/aot.md`. Runtime internals live in `lang/docs/spec` and `lang/docs/dev`.

@@ -1,0 +1,17 @@
+package ui
+
+import (
+	"github.com/vo-lang/ui/next/wire"
+)
+
+const wireVersion = wire.Version
+
+type Event = wire.Event
+
+type PointerData = wire.PointerData
+
+type Mutation = wire.Mutation
+
+type Batch = wire.Batch
+
+type Command = wire.Command

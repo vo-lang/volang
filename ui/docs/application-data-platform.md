@@ -29,7 +29,7 @@ state remain under the single UI writer.
 The data-application showcase composes these packages without a JavaScript
 application graph. Its 16-step VM and JIT business flows produce a byte-exact
 snapshot, the logical 100,000-row table stays bounded, and the same source runs
-as a real-browser Web Wasm AOT application and a packaged Native AOT window on
+as a real-browser Web Wasm VM application and a packaged Native AOT window on
 Linux, macOS, and Windows. The flow covers selection, filtering, sorting,
 pagination, optimistic commit, offline resources, a modal Ctrl+K command
 palette, typed routing, accessible validation, async submission, and return

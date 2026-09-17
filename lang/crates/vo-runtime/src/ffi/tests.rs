@@ -1501,6 +1501,32 @@ extern "C" fn mismatched_gc_allocation_kind_extension(ctx: *mut ExtAbiContextV10
 }
 
 #[cfg(feature = "std")]
+extern "C" fn obsolete_string_descriptor_extension(ctx: *mut ExtAbiContextV10) -> u32 {
+    let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
+        return ext_abi::RESULT_ABI_ERROR;
+    };
+    let value = call.gc().alloc(ValueMeta::new(0, ValueKind::String), 10);
+    if value.is_null() {
+        ext_abi::RESULT_OK
+    } else {
+        ext_abi::RESULT_ABI_ERROR
+    }
+}
+
+#[cfg(feature = "std")]
+extern "C" fn obsolete_slice_descriptor_extension(ctx: *mut ExtAbiContextV10) -> u32 {
+    let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
+        return ext_abi::RESULT_ABI_ERROR;
+    };
+    let value = call.gc().alloc(ValueMeta::new(0, ValueKind::Slice), 10);
+    if value.is_null() {
+        ext_abi::RESULT_OK
+    } else {
+        ext_abi::RESULT_ABI_ERROR
+    }
+}
+
+#[cfg(feature = "std")]
 extern "C" fn zero_width_array_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
@@ -2343,6 +2369,13 @@ fn extension_v10_gc_proxy_allocates_string_in_host_collector() {
     let value = stack[0] as GcRef;
     assert_eq!(gc.canonicalize_ref(value), Some(value));
     assert_eq!(
+        unsafe { Gc::header(value) }.slots,
+        crate::objects::string::DATA_SLOTS
+    );
+    let owner = unsafe { crate::objects::string::owner_ref(value) };
+    assert_eq!(gc.canonicalize_ref(owner), Some(owner));
+    assert_eq!(unsafe { Gc::header(owner) }.kind(), ValueKind::Array);
+    assert_eq!(
         unsafe { crate::objects::string::to_bytes(value) },
         b"host-owned"
     );
@@ -2407,6 +2440,9 @@ fn extension_v10_gc_proxy_allocates_byte_slice_in_host_collector() {
     let owner = unsafe { crate::objects::slice::owner_ref(value) };
     assert_eq!(gc.canonicalize_ref(owner), Some(owner));
     assert_eq!(unsafe { Gc::header(value) }.kind(), ValueKind::Slice);
+    assert!(crate::objects::slice::has_valid_descriptor_shape(
+        &gc, value
+    ));
     assert_eq!(unsafe { Gc::header(owner) }.kind(), ValueKind::Array);
     assert_eq!(unsafe { crate::objects::slice::len(value) }, 5);
     assert_eq!(unsafe { crate::objects::slice::cap(value) }, 5);
@@ -2477,10 +2513,148 @@ fn extension_v10_gc_proxy_rejects_kind_and_metadata_mismatch() {
 
 #[cfg(feature = "std")]
 #[test]
+fn extension_v10_gc_proxy_rejects_obsolete_string_descriptor_width() {
+    let error = call_registered_extension(obsolete_string_descriptor_extension)
+        .expect_err("String allocation must use the compact descriptor contract");
+    assert!(error.message().contains("descriptor width 3"));
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn extension_v10_gc_proxy_rejects_obsolete_slice_descriptor_width() {
+    let error = call_registered_extension(obsolete_slice_descriptor_extension)
+        .expect_err("Slice allocation must use a current descriptor shape");
+    assert!(error.message().contains("descriptor width 7"));
+}
+
+#[cfg(feature = "std")]
+#[test]
 fn extension_v10_gc_proxy_rejects_zero_width_canonical_arrays() {
     let error = call_registered_extension(zero_width_array_extension)
         .expect_err("canonical arrays must contain their descriptor header");
     assert!(error.message().contains("smaller than its 2-slot header"));
+}
+
+#[cfg(feature = "std")]
+extern "C" fn gc_proxy_clone_runtime_reference_extension(ctx: *mut ExtAbiContextV10) -> u32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
+            return ext_abi::RESULT_ABI_ERROR;
+        };
+        let target = call.arg_ref(0);
+        let meta = ValueMeta::from_raw(call.arg_u64(1) as u32);
+        let source = call.gc().alloc_value_slots(meta, 1);
+        if source.is_null() {
+            return ext_abi::RESULT_ABI_ERROR;
+        }
+        unsafe { Gc::write_slot(source, 0, target as u64) };
+        let cloned = unsafe { call.gc().ptr_clone(source) };
+        if cloned.is_null() {
+            return ext_abi::RESULT_ABI_ERROR;
+        }
+        call.ret_ref(0, cloned);
+        ext_abi::RESULT_OK
+    }))
+    .unwrap_or(ext_abi::RESULT_ABI_ERROR)
+}
+
+#[cfg(feature = "std")]
+fn clone_runtime_reference_through_extension(gc: &mut Gc, kind: ValueKind, target: GcRef) -> GcRef {
+    let mut stack = [target as u64, ValueMeta::new(0, kind).to_raw() as u64, 0];
+    let invoke = ExternInvoke {
+        extern_id: 0,
+        bp: 0,
+        arg_start: 0,
+        arg_slots: 2,
+        ret_start: 2,
+        ret_slots: 1,
+    };
+    let mut output = None;
+    let outcome = call_extension_with_state(
+        gc_proxy_clone_runtime_reference_extension,
+        &mut stack,
+        invoke,
+        gc,
+        fiber_inputs(None, None),
+        &mut output,
+    );
+    assert!(
+        matches!(outcome, Ok(ExternResult::Ok)),
+        "{kind:?}: {outcome:?}"
+    );
+    let cloned = stack[2] as GcRef;
+    assert_eq!(gc.canonicalize_ref(cloned), Some(cloned));
+    let header = unsafe { Gc::header(cloned) };
+    assert!(header.is_value_slots_object());
+    assert_eq!(header.kind(), kind);
+    assert_eq!(unsafe { Gc::read_slot(cloned, 0) }, target as u64);
+    cloned
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn extension_v10_clones_boxed_runtime_reference_kinds() {
+    for kind in [
+        ValueKind::Map,
+        ValueKind::Channel,
+        ValueKind::Port,
+        ValueKind::Island,
+    ] {
+        let mut gc = Gc::new();
+        clone_runtime_reference_through_extension(&mut gc, kind, core::ptr::null_mut());
+    }
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn extension_v10_cloned_map_box_retains_and_reclaims_its_managed_graph() {
+    fn complete_cycle(gc: &mut Gc, root: Option<GcRef>) {
+        gc.gc_request_cycle();
+        for _ in 0..128 {
+            unsafe {
+                gc.step(
+                    |gc| {
+                        if let Some(root) = root {
+                            gc.mark_gray(root);
+                        }
+                    },
+                    |gc, object| {
+                        crate::test_support::scan_object(gc, object, &[], &|_| {
+                            crate::gc_types::ClosureScanLayout::default()
+                        })
+                    },
+                    |object| crate::gc_types::finalize_object(object),
+                );
+            }
+            if gc.state() == crate::gc::GcState::Pause {
+                return;
+            }
+        }
+        panic!("boxed map GC cycle did not converge");
+    }
+    let mut gc = Gc::new();
+    let meta = ValueMeta::new(0, ValueKind::Int64);
+    let map = crate::objects::map::create(&mut gc, meta, meta, 1, 1, 0);
+    unsafe { crate::objects::map::set_checked(&mut gc, map, &[7], &[42], None) }.unwrap();
+    let backing = unsafe { crate::objects::map::backing_ref(map) };
+    let cloned = clone_runtime_reference_through_extension(&mut gc, ValueKind::Map, map);
+    complete_cycle(&mut gc, Some(cloned));
+    for object in [cloned, map, backing] {
+        assert_eq!(gc.canonicalize_ref(object), Some(object));
+    }
+    assert_eq!(
+        unsafe { crate::objects::map::get_checked(map, &[7], None) }
+            .unwrap()
+            .as_deref(),
+        Some(&[42][..])
+    );
+    complete_cycle(&mut gc, None);
+    for object in [cloned, map, backing] {
+        assert_eq!(gc.canonicalize_ref(object), None);
+    }
+    assert_eq!(gc.object_count(), 0);
+    assert_eq!(gc.total_bytes(), 0);
+    assert_eq!(gc.memory_stats().runtime_backing_bytes, 0);
 }
 
 #[cfg(feature = "std")]

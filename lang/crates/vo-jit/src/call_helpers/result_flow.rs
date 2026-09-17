@@ -14,9 +14,9 @@ use super::{
 };
 
 // JitResult constants for readability in lowering code.
-pub const JIT_RESULT_OK: i32 = 0;
-pub const JIT_RESULT_CALL: i32 = 2;
-pub const JIT_RESULT_REPLAY: i32 = 5;
+pub const JIT_RESULT_OK: i32 = JitResult::Ok as i32;
+pub const JIT_RESULT_CALL: i32 = JitResult::Call as i32;
+pub const JIT_RESULT_REPLAY: i32 = JitResult::Replay as i32;
 
 /// Emit a helper/callback wrapper that returns `JitResult`, and route every
 /// non-Ok result back to the VM before local execution can continue.

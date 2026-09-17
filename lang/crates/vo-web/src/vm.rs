@@ -4,9 +4,6 @@ use vo_vm::vm::SchedulingOutcome;
 
 use crate::js_types::RunResult;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::{Arc, Mutex, MutexGuard};
-
 #[cfg(any(all(target_arch = "wasm32", feature = "compiler"), test))]
 const VOPLAY_PERF_REPORT_MARKER: &str = "__VOPLAY_PERF_REPORT__";
 #[cfg(all(target_arch = "wasm32", feature = "compiler"))]
@@ -145,13 +142,28 @@ fn admit_current_wasm_memory(
 
 // ── Extern registration ─────────────────────────────────────────────────────
 
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn register_wasm_runtime_module_externs(
     reg: &mut ExternRegistry,
     module: &vo_runtime::bytecode::Module,
 ) -> Result<(), ExternContractError> {
     register_wasm_platform_externs(reg, &module.externs)?;
-    vo_ui_vm::register_module(reg, module)?;
+    register_ui_module(reg, module)?;
     Ok(())
+}
+
+fn register_ui_module(
+    registry: &mut ExternRegistry,
+    module: &Module,
+) -> Result<(), ExternContractError> {
+    #[cfg(feature = "legacy-ui")]
+    {
+        vo_ui_vm::register_module(registry, module)
+    }
+    #[cfg(not(feature = "legacy-ui"))]
+    {
+        vo_ui_bridge::register_externs(registry, &module.externs)
+    }
 }
 
 fn register_wasm_platform_externs(
@@ -279,13 +291,14 @@ pub fn create_loaded_vm_from_module_with_memory(
     register_externs: ExternRegistrar,
     admission: WasmMemoryAdmission,
 ) -> Result<Vm, String> {
-    create_loaded_vm_from_module_with_ui_mode(module, register_externs, admission, false)
+    create_loaded_vm_from_module_with_ui(module, register_externs, admission, register_ui_module)
         .map(|(vm, _)| vm)
 }
 
 /// Builds and verifies a replacement UI VM without mutating the currently
 /// mounted UI arena. The caller starts a transactional arena checkpoint only
 /// after this function succeeds.
+#[cfg(feature = "legacy-ui")]
 pub(crate) fn create_loaded_ui_reload_vm(
     bytecode: &[u8],
 ) -> Result<(Vm, vo_ui_vm::PreparedReloadModule), String> {
@@ -297,23 +310,20 @@ pub(crate) fn create_loaded_ui_reload_vm(
     }
 
     let module = decode_bytecode_module(bytecode)?;
-    let (vm, prepared) = create_loaded_vm_from_module_with_ui_mode(
+    create_loaded_vm_from_module_with_ui(
         module,
         no_extra_externs,
         WasmMemoryAdmission::default(),
-        true,
-    )?;
-    let prepared = prepared
-        .ok_or_else(|| "UI reload preparation completed without a prepared module".to_string())?;
-    Ok((vm, prepared))
+        vo_ui_vm::prepare_reload_module,
+    )
 }
 
-fn create_loaded_vm_from_module_with_ui_mode(
+fn create_loaded_vm_from_module_with_ui<T>(
     module: Module,
     register_externs: ExternRegistrar,
     admission: WasmMemoryAdmission,
-    prepare_ui_reload: bool,
-) -> Result<(Vm, Option<vo_ui_vm::PreparedReloadModule>), String> {
+    register_ui: impl FnOnce(&mut ExternRegistry, &Module) -> Result<T, ExternContractError>,
+) -> Result<(Vm, T), String> {
     init_output();
 
     let report = admit_current_wasm_memory(admission)?;
@@ -345,16 +355,8 @@ fn create_loaded_vm_from_module_with_ui_mode(
         .map_err(|error| format!("Failed to configure VM externs: {error:?}"))?;
     register_wasm_platform_externs(reg, &module.externs)
         .map_err(|error| format!("Failed to register WASM platform externs: {error}"))?;
-    let reload_component = if prepare_ui_reload {
-        Some(
-            vo_ui_vm::prepare_reload_module(reg, &module)
-                .map_err(|error| format!("Failed to prepare UI reload externs: {error}"))?,
-        )
-    } else {
-        vo_ui_vm::register_module(reg, &module)
-            .map_err(|error| format!("Failed to register UI externs: {error}"))?;
-        None
-    };
+    let prepared_ui = register_ui(reg, &module)
+        .map_err(|error| format!("Failed to configure UI providers: {error}"))?;
 
     // caller
     register_externs(reg, exts)
@@ -362,7 +364,7 @@ fn create_loaded_vm_from_module_with_ui_mode(
 
     vm.load_with_embedder_externs(module)
         .map_err(|e| format!("{:?}", e))?;
-    Ok((vm, reload_component))
+    Ok((vm, prepared_ui))
 }
 
 // ── VM interaction ──────────────────────────────────────────────────────────
@@ -388,85 +390,13 @@ pub fn take_output() -> String {
 /// Keep the exported host runner independent of that feature choice by owning
 /// its capture sink per invocation. Browser builds retain the WASM global sink,
 /// which also drives the immediate console hook.
-#[cfg(not(target_arch = "wasm32"))]
-struct NativeRunOutput(Mutex<Vec<u8>>);
-
-#[cfg(not(target_arch = "wasm32"))]
-impl NativeRunOutput {
-    fn new() -> Arc<Self> {
-        Arc::new(Self(Mutex::new(Vec::new())))
-    }
-
-    fn buffer(&self) -> MutexGuard<'_, Vec<u8>> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn take(&self) -> String {
-        let bytes = std::mem::take(&mut *self.buffer());
-        render_native_output_text(&bytes)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn render_native_output_text(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    let mut rendered = String::new();
-    let mut remaining = bytes;
-    while !remaining.is_empty() {
-        match std::str::from_utf8(remaining) {
-            Ok(text) => {
-                rendered.push_str(text);
-                break;
-            }
-            Err(error) => {
-                let valid = error.valid_up_to();
-                if valid > 0 {
-                    rendered.push_str(
-                        std::str::from_utf8(&remaining[..valid])
-                            .expect("valid_up_to ends on a UTF-8 boundary"),
-                    );
-                }
-                let invalid = remaining[valid];
-                let _ = write!(rendered, "\\x{invalid:02x}");
-                remaining = &remaining[valid + 1..];
-            }
-        }
-    }
-    rendered
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl vo_runtime::output::OutputSink for NativeRunOutput {
-    fn write_bytes(&self, bytes: &[u8]) {
-        self.buffer().extend_from_slice(bytes);
-    }
-
-    fn writeln_bytes(&self, bytes: &[u8]) {
-        let mut output = self.buffer();
-        output.extend_from_slice(bytes);
-        output.push(b'\n');
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn run_with_host_output(bytecode: &[u8]) -> (Result<Vm, String>, String) {
-    let output = NativeRunOutput::new();
+    let output = vo_runtime::output::CaptureSink::new();
     let result = create_loaded_vm(bytecode, |_, _| Ok(())).and_then(|mut vm| {
         vm.set_output_sink(output.clone());
         run_loaded_vm(vm)
     });
-    let stdout = output.take();
-    (result, stdout)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn run_with_host_output(bytecode: &[u8]) -> (Result<Vm, String>, String) {
-    let result = create_vm(bytecode, |_, _| Ok(()));
-    let stdout = vo_runtime::output::take_output();
-    (result, stdout)
+    (result, output.take())
 }
 
 fn host_run_result(result: Result<Vm, String>, stdout: String) -> RunResult {
@@ -596,17 +526,25 @@ mod tests {
                 param_kinds: Vec::new(),
             })
             .collect::<Vec<_>>();
-        let ui_mount =
-            vo_common_core::extern_key::ExternKeyRef::new(vo_ui_vm::UI_MODULE_PATH, "Mount")
+        let ui_providers = [
+            (vo_ui_bridge::PACKAGE, "Exchange"),
+            #[cfg(feature = "legacy-ui")]
+            (vo_ui_vm::UI_MODULE_PATH, "Mount"),
+        ];
+        let names = ui_providers.map(|(package, function)| {
+            vo_common_core::extern_key::ExternKeyRef::new(package, function)
                 .encode()
-                .unwrap();
-        externs.push(super::ExternDef::new(
-            ui_mount.clone(),
-            vo_runtime::bytecode::ParamShape::CallSiteVariadic,
-            vo_runtime::bytecode::ReturnShape::slots(0),
-            vo_runtime::bytecode::ExternEffects::UNKNOWN_CONTROL,
-            Vec::new(),
-        ));
+                .unwrap()
+        });
+        for name in &names {
+            externs.push(super::ExternDef::new(
+                name.clone(),
+                vo_runtime::bytecode::ParamShape::CallSiteVariadic,
+                vo_runtime::bytecode::ReturnShape::slots(0),
+                vo_runtime::bytecode::ExternEffects::UNKNOWN_CONTROL,
+                Vec::new(),
+            ));
+        }
         let mut registry = super::ExternRegistry::new();
         let mut module = vo_runtime::bytecode::Module::new("web-provider-test".to_string());
         module.externs = externs;
@@ -624,10 +562,12 @@ mod tests {
                 "missing combined WASM provider for {name}"
             );
         }
-        assert!(
-            registry.registered_by_name(&ui_mount).is_some(),
-            "missing official UI provider in the browser VM"
-        );
+        for name in names {
+            assert!(
+                registry.registered_by_name(&name).is_some(),
+                "missing UI provider: {name}"
+            );
+        }
     }
 
     #[test]

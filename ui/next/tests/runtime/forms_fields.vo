@@ -1,0 +1,78 @@
+package main
+
+import (
+	"strconv"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+)
+
+func fieldSubscriptionContracts() {
+	var form *forms.Form
+	ownerRenders, fieldRenders, validations := 0, 0, 0
+	values := make(forms.Values)
+	validators := make(map[string]func([]string) string)
+	for index := 0; index < 100; index++ {
+		name := strconv.Itoa(index)
+		values[name] = []string{"initial"}
+		validators[name] = func(values []string) string {
+			validations++
+			if len(values) == 0 || values[0] == "" {
+				return "Required"
+			}
+			return ""
+		}
+	}
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		ownerRenders++
+		form = forms.Use(scope, "form", forms.Options{Initial: values, FieldValidators: validators})
+		children := []ui.View{}
+		for index := 0; index < 100; index++ {
+			children = append(children, countedField(form, strconv.Itoa(index), func() {
+				fieldRenders++
+			}))
+		}
+		return ui.Element("form", children...)
+	}))
+	flush(root)
+	require(ownerRenders == 1 && fieldRenders == 100, "field initial render")
+	form.Change("42", "changed")
+	batch := flush(root)
+	require(ownerRenders == 1 && fieldRenders == 101 && validations == 1, "one field edit rerendered or validated unrelated fields")
+	require(len(batch.Mutations) == 1 && batch.Mutations[0].Name == "value", "one field edit emitted unrelated mutations")
+	form.Blur("42")
+	flush(root)
+	before := validations
+	form.Change("42", "")
+	require(changedText(flush(root), "Required") && validations == before + 1, "independent field validation did not publish its visible error")
+	form.Reset()
+	flush(root)
+	require(form.Value("42") == "initial" && form.Error("42") == "" && ownerRenders == 1, "field reset lost baseline or subscribed owner to all values")
+	root.Close()
+	// Whole-form rules keep their cross-field semantics and publish the affected
+	// sibling, even though only one value was edited.
+	root = ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		form = forms.Use(scope, "cross", forms.Options{
+			Initial: forms.Values{"a": []string{"x"}, "b": []string{"x"}},
+			Validate: func(data forms.Data) forms.Errors {
+				if data.Values.Get("a") != data.Values.Get("b") {
+					return forms.Errors{"b": "Mismatch"}
+				}
+				return nil
+			},
+		})
+		return ui.Fragment(countedField(form, "a", func() {}), countedField(form, "b", func() {}))
+	}))
+	flush(root)
+	form.Blur("b")
+	flush(root)
+	form.Change("a", "different")
+	require(changedText(flush(root), "Mismatch"), "cross-field error did not invalidate its sibling")
+	root.Close()
+}
+
+func countedField(form *forms.Form, name string, rendered func()) ui.View {
+	return form.Field(name, func(current *forms.Form) ui.View {
+		rendered()
+		return ui.Element("label", current.Input(name, ui.Element("input")), ui.Text(current.Error(name)))
+	})
+}

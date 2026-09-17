@@ -1,0 +1,162 @@
+// Package inspect supplies optional development diagnostics for UI roots.
+package inspect
+
+import (
+	"time"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type Options struct {
+	// Nanosecond clock for render attempts and task observations. Nil uses time.Now.
+	Now func() int64
+}
+
+type Cause struct {
+	Kind string `json:"kind"`
+	State ui.StateIdentity `json:"state"`
+}
+
+type Render struct {
+	Component ui.ComponentInspection `json:"component"`
+	Causes []Cause `json:"causes"`
+	Nanoseconds int64 `json:"nanoseconds"`
+}
+
+type Snapshot struct {
+	Root ui.RootInspection `json:"root"`
+	Renders []Render `json:"renders"`
+	Tasks []TaskRecord `json:"tasks"`
+	Props []ComponentProps `json:"props"`
+	Truncated bool `json:"truncated"`
+}
+
+type Session struct {
+	root *ui.Root
+	clock func() int64
+	detach func()
+	pending map[int][]Cause
+	renders []Render
+	activeTasks map[int]taskSpan
+	finishedTasks []TaskRecord
+	props map[int][]PropValue
+	propCount int
+	truncated bool
+	closed bool
+	service *ui.Task
+}
+
+// New attaches one session to an idle root, preferably before its first render.
+// Only this package retains timings and causes. Applications that do not import
+// it do not link the collector, clock, presentation or transport integration.
+func New(root *ui.Root, options Options) *Session {
+	if root == nil {
+		panic("inspect: a root is required")
+	}
+	clock := options.Now
+	if clock == nil {
+		clock = func() int64 {
+			return time.Now().UnixNano()
+		}
+	}
+	session := &Session{root: root, clock: clock, pending: make(map[int][]Cause)}
+	session.detach = root.Observe(session)
+	session.seedTasks()
+	return session
+}
+
+func (session *Session) Invalidate(scope *ui.Scope, signal *ui.Signal) {
+	id := scope.InspectMetadata().ID
+	if len(session.pending) == 512 && session.pending[id] == nil {
+		session.truncated = true
+		return
+	}
+	cause := Cause{Kind: "state", State: signal.InspectIdentity()}
+	session.truncated = session.truncated || cause.State.Truncated
+	causes := session.pending[id]
+	for _, previous := range causes {
+		if previous == cause {
+			return
+		}
+	}
+	if len(causes) == 16 {
+		session.truncated = true
+		return
+	}
+	session.pending[id] = append(causes, cause)
+}
+
+func (session *Session) Render(scope *ui.Scope) func() {
+	component := scope.InspectMetadata()
+	session.clearProps(component.ID)
+	session.truncated = session.truncated || component.Truncated
+	causes := session.pending[component.ID]
+	delete(session.pending, component.ID)
+	kind := "parent"
+	if component.Renders == 0 {
+		kind = "mount"
+	} else if component.Dirty {
+		kind = "invalidated"
+	}
+	if component.Failed {
+		kind = "fallback"
+	}
+	if len(causes) == 0 {
+		causes = []Cause{{Kind: kind}}
+	}
+	started := session.clock()
+	return func() {
+		elapsed, clipped := observedElapsed(started, session.clock())
+		session.truncated = session.truncated || clipped
+		if len(session.renders) == 64 {
+			copy(session.renders, session.renders[1:])
+			session.renders = session.renders[:63]
+			session.truncated = true
+		}
+		session.renders = append(session.renders, Render{
+			Component: scope.InspectMetadata(), Causes: causes, Nanoseconds: elapsed,
+		})
+	}
+}
+
+func (session *Session) Dispose(scope *ui.Scope) {
+	id := scope.InspectMetadata().ID
+	delete(session.pending, id)
+	session.clearProps(id)
+}
+
+// Snapshot never consumes history or evaluates application state. Times include
+// descendant rendering/reconciliation and must not be added across a tree.
+func (session *Session) Snapshot() Snapshot {
+	if session.closed {
+		panic("inspect: the session is closed")
+	}
+	result := Snapshot{Root: session.root.Inspect(), Truncated: session.truncated}
+	tasks, clipped := session.taskSnapshots()
+	result.Tasks = tasks
+	result.Props = session.propSnapshots(result.Root.Components)
+	result.Truncated = result.Truncated || clipped
+	for _, render := range session.renders {
+		render.Causes = append([]Cause{}, render.Causes...)
+		result.Renders = append(result.Renders, render)
+	}
+	return result
+}
+
+func (session *Session) Close() {
+	if session.closed {
+		return
+	}
+	session.closed = true
+	session.service.Cancel()
+	session.service = nil
+	session.detach()
+	session.detach = nil
+	session.root = nil
+	session.pending = nil
+	session.renders = nil
+	session.activeTasks = nil
+	session.finishedTasks = nil
+	session.props = nil
+	session.propCount = 0
+	session.clock = nil
+}

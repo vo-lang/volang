@@ -1,0 +1,57 @@
+package ui
+
+import (
+	"strings"
+)
+
+type htmlSelection struct {
+	value string
+	selected bool
+	multiple map[string]bool
+}
+
+func attributeValue(view View, name string) (string, bool) {
+	for _, attr := range view.attrs {
+		if attr.name == name {
+			return attr.value, true
+		}
+	}
+	return "", false
+}
+
+func optionText(out *strings.Builder, node *mounted) {
+	if node.view.kind == "#text" {
+		out.WriteString(node.view.text)
+		return
+	}
+	for _, child := range node.children {
+		optionText(out, child)
+	}
+}
+
+// Option values without an explicit value strip and collapse ASCII whitespace.
+func optionValue(node *mounted) string {
+	if value, exists := attributeValue(node.view, "value"); exists {
+		return value
+	}
+	var raw strings.Builder
+	optionText(&raw, node)
+	text := raw.String()
+	var out strings.Builder
+	space := false
+	written := false
+	for index := 0; index < len(text); index++ {
+		ch := text[index]
+		if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' {
+			space = written
+			continue
+		}
+		if space {
+			out.WriteByte(' ')
+			space = false
+		}
+		out.WriteByte(ch)
+		written = true
+	}
+	return out.String()
+}

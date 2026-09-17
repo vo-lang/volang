@@ -1,0 +1,56 @@
+type Measurement struct {
+	Phase string
+	FlushMS float64
+	EncodeMS float64
+	CommitMS float64
+	Bytes int
+	Mutations int
+}
+
+func measure(root *ui.Root, name string) (ui.Batch, Measurement) {
+	started := time.Now()
+	batch := root.Flush()
+	flushed := time.Now()
+	encoded, err := wire.EncodeBatch(batch)
+	encodedAt := time.Now()
+	if err != nil { panic(err) }
+	root.Commit(batch.Revision)
+	committed := time.Now()
+	return batch, Measurement{Phase: name, FlushMS: float64(flushed.Sub(started)) / 1e6,
+		EncodeMS: float64(encodedAt.Sub(flushed)) / 1e6, CommitMS: float64(committed.Sub(encodedAt)) / 1e6,
+		Bytes: len(encoded), Mutations: len(batch.Mutations)}
+}
+
+func main() {
+	root := ui.NewRoot(ui.Component(appType, App))
+	initial, mounted := measure(root, "mount1000")
+	measurements := []Measurement{mounted}
+	reverseID := 0
+	filterID := 0
+	for _, mutation := range initial.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "id" {
+			if mutation.Value == "reverse" { reverseID = mutation.ID }
+			if mutation.Value == "filter" { filterID = mutation.ID }
+		}
+	}
+	if reverseID == 0 || filterID == 0 { panic("missing benchmark controls") }
+	sequence := 0
+	for i := 0; i < 5; i++ {
+		sequence++
+		root.Dispatch(ui.Event{Target: reverseID, Kind: "click", Sequence: sequence})
+		_, reversed := measure(root, "reverse1000")
+		measurements = append(measurements, reversed)
+		sequence++
+		root.Dispatch(ui.Event{Target: filterID, Kind: "input", Value: "99", Sequence: sequence})
+		_, filtered := measure(root, "filter1000to19")
+		measurements = append(measurements, filtered)
+		sequence++
+		root.Dispatch(ui.Event{Target: filterID, Kind: "input", Value: "", Sequence: sequence})
+		_, restored := measure(root, "restore19to1000")
+		measurements = append(measurements, restored)
+	}
+	root.Close()
+	bytes, err := json.Marshal(measurements)
+	if err != nil { panic(err) }
+	fmt.Print(string(bytes))
+}

@@ -120,6 +120,8 @@ provider 函数本身可以共享，调用上下文始终由目标 Island 现场
 
 对象请求大小包含 header 和 data。cell 与 large span 在分配时清零。canonical object identity 与精确申请长度都由 block 目录回答，因此 header layout 漂移即使仍落在同一个 size class 内也能 fail closed。
 
+宿主中的 `Gc` 状态保持 16 字节对齐，嵌入 VM 或扩展 facade 时也遵守这一约束。该最小布局约束用于稳定分配热路径：同一可执行文件曾因启动路径长度改变而出现显著耗时差异，固定对齐后收敛；实验与取舍见[全链路实施记录](toolchain-optimization-progress-20260909.md)。collector 元数据仍属于宿主资源域，managed 对象继续采用上面的 SpanHeap 大小类与精确请求记账。
+
 ### 增长与预留
 
 `memory_reserve(bytes)` 以 block 为单位向 Island 增加已提交容量。自动增长使用逐步增大的 segment，单次增长最多 256 blocks。
@@ -136,6 +138,7 @@ provider 函数本身可以共享，调用上下文始终由目标 Island 现场
 
 - small object 死亡后 cell 回到 free chain；
 - small block 全空后回到 Island free-block pool；
+- 每个 size class 最多保留一份已脱离托管块的 small-block metadata；12 类的请求存储连同固定目录不超过 20 KiB/Island（不含 allocator 开销）。位图在分配复用时清零，托管块立即可复用，GC step 不承担整份清零工作；
 - mark phase 从未触达、全部为 young 且没有 native finalizer 的 small block 可在 sweep 中聚合回收；
 - 含 survivor、old object 或 native finalizer 的 block 继续逐对象 sweep，保持资源释放与分代语义；
 - large span 先 O(1) 标记为 pending reclaim；
@@ -216,6 +219,31 @@ Interpreter mutation、JIT lowering、map/queue/slice/struct helper 和 FFI host
 
 常量布局的 `PtrNew` 在 safepoint poll 后优先从 runtime-owned small-object lane 分配。lane 只覆盖同一个 allocation-bitmap word，生成代码同时提交 bitmap、header 和 GC counters。任意普通 runtime 分配、collector step 或 allocation policy 收紧都会先归还未消费的 tail；每个 Island 同时只有一个活动 admission，避免 `max_objects` 与 mark-work capacity 超订。lane 缺失或耗尽时调用统一 helper，null 结果仍会在解引用和后续 guest 副作用前退出当前 fiber。
 
+## 局部固定数组表示
+
+无需逃逸身份的固定数组局部值可直接构造在精确类型化的帧槽位中。初始化器先生成独立快照，所有同组右值求值完成后才发布新绑定；新变量可接管这段独立存储，减少中间堆数组和第二次复制。普通借用槽位继续执行值复制，不能冒充独占初始化区间。
+
+该规则由规范 `runtime-memory.md` §3.4 定义。统计记录实际托管分配，纯局部值可在禁用托管分配时执行；sticky 内存错误、帧容量和 GC 进展约束继续生效。捕获、地址逃逸、切片及全局存储仍建立稳定的 canonical 数组，并保留元素求值前的必要分配准入和失败顺序。此规则没有授权消除动态视图或一般堆对象的分配。
+
+## 不可变字面量复用
+
+每个 `Gc` 为当前已加载模块维护最多 256 项的直接映射弱缓存。条目使用完整常量 ID、
+模块身份以及完成的 minor/major 次数验证；仅在 collector 处于 Pause 且无 sticky error
+时允许命中。活动 GC 绕过缓存，完成任意一轮收集后旧条目全部失效；计数饱和后停止
+复用。缓存不加入根集合，不扫描对象，也不在 GC step 中清理整张表，因此不会延长
+对象的托管生命期或增大单步工作量。安装模块前会清空条目，子 Island 独立拥有缓存。
+VM 仍保持每实例一次模块加载的现有规则；失败的首次加载允许重试。
+
+缓存按需使用有限的 host metadata；当前 64 位条目存储上限为 8 KiB/Island，另外保留
+固定的 owner 字段。`literal_cache_metadata_bytes()` 单独报告缓存 backing 容量，
+不计入 managed hard limit 或 provider external bytes。新 cache backing 只在允许
+增长时尝试准入；失败后该模块生命周期内使用普通构造，避免反复尝试和新增 guest
+内存错误。已经准入的空间可以在 no-growth 模式下复用。
+
+字面量命中不分配托管内存，可在 allocation-disabled 模式下成功；未命中沿用现有
+准入、失败和记账路径。字符串的动态构造、非空视图及可变字节转换的独立性保持现有
+契约。所有生成代码仍保留保守的分配前 poll 与失败检查。详见 runtime-memory §3.3。
+
 ## Runtime container 与 native 内存
 
 Map 的 open-addressed bucket backing 由 managed runtime-backing object 保存，GC 精确扫描 key/value slot。扩容产生的新 backing 计入 Island managed heap，旧 backing由普通 sweep 回收。
@@ -238,7 +266,14 @@ Native JIT 为每个 Island family 设置独立的可执行页上限，默认 64
 
 函数分析另有默认 64MiB retained budget，单个编译任务另有 256MiB work budget。full JIT 与全部 OSR loop 共用一份 `FunctionAnalysis`；VM manager 不保存第二份 loop catalogue，使闲置分析可以按最近访问顺序回收。loop 的 memory-only 下界通过一次嵌套区间扫描计算，不再为每个函数创建线段树。
 
-VM 原生 Fiber 存储由 `VmResourceLimits` 约束：调度 Fiber 数量、单 Fiber stack slots、单 Fiber call frames，以及 family 内 Fiber stack/frame 的聚合字节数都有明确上限。批量 runtime transition 会先预留全部 Fiber identity、栈和 frame 容量，再开始发布 wake、spawn 等可见效果；任一资源失败都会拒绝整批 transition。完成 Fiber 的异常高水位栈和 frame 缓存会在空闲边界释放。
+VM 原生 Fiber 存储由 `VmResourceLimits` 约束：调度 Fiber 数量、单 Fiber stack slots、单 Fiber call frames，以及单个 Island 内 Fiber stack/frame 的聚合字节数都有明确上限。子 Island 继承限制配置并独立记账。批量 runtime transition 会先预留全部 Fiber identity、栈和 frame 容量，再开始发布 wake、spawn 等可见效果；任一资源失败都会拒绝整批 transition。完成 Fiber 的异常高水位栈和 frame 缓存会在空闲边界释放。
+
+Fiber 的辅助存储另由 `max_total_fiber_auxiliary_bytes` 限制，默认 256MiB，通过 `fiber_auxiliary_storage_bytes()` 观察当前占用。defer、unwind、closure replay、select、map scratch 和原生调用恢复缓冲区共用容量记账；容量增长先检查预算和宿主分配结果，缓冲区移动保留原记账，释放容量时归还预算。defer 参数布局引用已加载模块的不可变元数据；select 描述、等待列表和接收快照共享所有权，避免事务回滚复制整个消息。单项辅助缓存超过 64KiB 时，在 Fiber 退役后释放。队列等待者、transport、provider 与 JIT 代码仍属于各自的资源域。
+
+调度器在每个执行量子投递有限批次的就绪 I/O 和 Island 命令。子 Island 通过 `run_scheduled_with_budget` 返回外层 transport 循环；预算为零不执行 guest，预算耗尽时根据真实就绪、阻塞和完成状态返回结果。Wasm 异步执行器通过 `run_with_budget` 启动、通过有预算恢复入口继续执行，并在可运行 Fiber 持续存在时让 JavaScript 事件循环处理 timer 和 Fetch。解释器在有分配效果的指令之前检查 GC 请求，使用精确的函数与 PC 记录一次恢复许可，避免重放已经提交的指令效果。
+
+全局根槽在模块加载时预计算，整数槽不占用根扫描预算。自动收集发现尚未完成的根遍历时，先用多个有界调度轮次完成该遍历，再继续改变根集合；每轮仍检查中断和宿主执行预算。原生 GC 回调同时限制 native 根验证与整个 VM/collector 的累计工作量。总预算耗尽时，生成代码发布可恢复的 VM 帧，结束机器栈游标的生命周期，随后由调度器继续收集。
+
 
 ## 宿主 API
 
@@ -387,6 +422,18 @@ Voplay 的 stage 执行由 `GameEngine` 持有并复用：
 -以微秒数作为跨平台 GC 正确性合同。
 
 这些能力会显著增加语言表面、同步协议或后端差异。当前需求已经由稳定地址 span heap、可恢复 GC、直接宿主控制和领域缓冲区覆盖。
+
+## Wasm VM 的当前边界
+
+Wasm VM 使用生成的 Wasm 执行代码和独立的 JavaScript 内存实现，声明
+`island-span-heap` 能力。每个 Island 拥有独立 span、根、collector 游标、准入策略、
+统计和终止错误；共享线性内存只承担物理页提供者职责。所有 GC 阶段按工作单元推进，
+活动栈帧按 Island 登记，避免递归增长导致反复重扫整条帧链。
+
+宿主通过 creation options 和 `onMemory` 控制容量与 GC，通过显式 lease 保持跨调用引用。
+异步返回值整组发布，失败 Island 按预算清理并归还空闲页，健康 Island 保持独立运行。
+JavaScript 和 provider 元数据属于外部统计域；managed hard limit 覆盖 span committed bytes。
+具体 ABI、原始视图借用期限和宿主接口见 `docs/aot.md`。
 
 ## 已实现边界与已知限制
 

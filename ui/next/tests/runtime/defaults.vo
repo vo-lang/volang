@@ -1,0 +1,86 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func nativeDefaults() {
+	var changed *ui.BoolState
+	var removed *ui.BoolState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		changed = ui.Bool(scope, "changed", false)
+		removed = ui.Bool(scope, "removed", false)
+		value := "Original"
+		if changed.Get() {
+			value = "Updated"
+		}
+		input := ui.Element("input").Attr("data-name", "default-input")
+		check := ui.Element("input").Attr("type", "checkbox").Attr("data-name", "default-check")
+		if !removed.Get() {
+			input = input.DefaultValue(value)
+			check = check.DefaultChecked(!changed.Get())
+		}
+		return ui.Fragment(input, check, ui.Element("textarea").DefaultValue("\n中文 & <notes>"))
+	}))
+	first := flush(root)
+	input, check := target(first, "default-input"), target(first, "default-check")
+	html := root.HTML()
+	require(strings.Count(html, "data-vo-default-value") == 2 &&
+		strings.Contains(html, `value="Original"`), "default values are missing from SSR")
+	require(strings.Contains(html, "\n\n中文 &amp; &lt;notes&gt;") &&
+		!strings.Contains(html, "data-vo-controlled"), "textarea default lost newlines or became controlled")
+	require(strings.Contains(html, `checked=""`) && !strings.Contains(html, "data-vo-checked"), "default checkedness became controlled")
+	changed.Set(true)
+	batch := flush(root)
+	require(len(batch.Mutations) == 2 && batch.Mutations[0].Op == "default" &&
+		batch.Mutations[0].ID == input &&
+		batch.Mutations[0].Value == "Updated", "changing a default remounted the input")
+	require(batch.Mutations[1].ID == check && batch.Mutations[1].Value == "false", "checked reset baseline was not updated")
+	removed.Set(true)
+	batch = flush(root)
+	require(len(batch.Mutations) == 2 && batch.Mutations[0].Value == "" &&
+		batch.Mutations[1].Value == "false", "removing defaults did not clear native baselines")
+	root.Close()
+	base := ui.Element("input").DefaultValue("original")
+	root = ui.NewRoot(ui.Fragment(base, base.DefaultValue("other")))
+	flush(root)
+	require(strings.Contains(root.HTML(), `value="original"`) &&
+		strings.Contains(root.HTML(), `value="other"`), "default builder mutated an existing view")
+	root.Close()
+	expectPanic(func() {
+		ui.Element("input").DefaultValue("x").Attr("VaLuE", "y")
+	}, "cannot be combined")
+	expectPanic(func() {
+		ui.Element("input").Attr("VALUE", "y").DefaultValue("x")
+	}, "cannot be combined")
+	expectPanic(func() {
+		ui.Element("input").DefaultChecked(true).Attr("CHECKED", "false")
+	}, "cannot be combined")
+	expectPanic(func() {
+		ui.Element("input").Attr("checked", "true").DefaultChecked(false)
+	}, "cannot be combined")
+	expectPanic(func() {
+		ui.Element("div").DefaultValue("x")
+	}, "input or textarea")
+	expectPanic(func() {
+		invalid := ui.NewRoot(ui.Element("svg", ui.Element("input").DefaultValue("x")))
+		invalid.Flush()
+	}, "require HTML controls")
+	expectPanic(func() {
+		invalid := ui.NewRoot(ui.Element("input").DefaultValue("unavailable.txt").Attr("type", "file"))
+		invalid.Flush()
+	}, "nonempty default value")
+	expectPanic(func() {
+		ui.Element("dialog").Modal(true).Attr("OPEN", "false")
+	}, "Modal owns")
+	expectPanic(func() {
+		ui.Element("dialog").Attr("Open", "true").Modal(true)
+	}, "Modal owns")
+	expectPanic(func() {
+		ui.Element("div").Popover(ui.PopoverOptions{Anchor: &ui.ElementRef{}}).Attr("POPOVER", "manual")
+	}, "Popover owns")
+	expectPanic(func() {
+		ui.Element("div").Attr("Popover", "auto").Popover(ui.PopoverOptions{Anchor: &ui.ElementRef{}})
+	}, "Popover owns")
+}

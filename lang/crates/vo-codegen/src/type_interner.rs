@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_analysis::typ::Type;
-use vo_runtime::bytecode::{InterfaceMeta, InterfaceMethodMeta, StructMeta};
-use vo_runtime::{
+use vo_common_core::bytecode::{InterfaceMeta, InterfaceMethodMeta, StructMeta};
+use vo_common_core::{
     ChanDir, InterfaceMethod, RuntimeType, StructField, ValueKind, ValueRttid, INVALID_META_ID,
 };
 
@@ -295,13 +295,13 @@ fn type_key_to_runtime_type(
                     ctx.named_type_metas
                         .push(vo_common_core::bytecode::NamedTypeMeta {
                             name: String::new(),
-                            underlying_meta: vo_runtime::ValueMeta::new(
+                            underlying_meta: vo_common_core::ValueMeta::new(
                                 0,
-                                vo_runtime::ValueKind::Void,
+                                vo_common_core::ValueKind::Void,
                             ),
-                            underlying_rttid: vo_runtime::ValueRttid::new(
+                            underlying_rttid: vo_common_core::ValueRttid::new(
                                 0,
-                                vo_runtime::ValueKind::Void,
+                                vo_common_core::ValueKind::Void,
                             ),
                             methods: std::collections::BTreeMap::new(),
                         });
@@ -496,7 +496,7 @@ fn type_key_to_runtime_type(
             } else {
                 // Register anonymous struct
                 if slot_types.is_empty() {
-                    slot_types.push(vo_runtime::SlotType::Value);
+                    slot_types.push(vo_common_core::SlotType::Value);
                 }
                 let field_index: HashMap<String, usize> = field_metas
                     .iter()

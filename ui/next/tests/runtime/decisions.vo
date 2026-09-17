@@ -1,0 +1,114 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/host"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+func decisionContracts() {
+	var open, busy *ui.BoolState
+	confirmations, dismissals := 0, 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		open = ui.Bool(scope, "open", true)
+		busy = ui.Bool(scope, "busy", false)
+		trigger := ui.Ref(scope, "trigger")
+		return ui.Fragment(ui.Element("button").Ref(trigger).Attr("data-name", "trigger"), kit.AlertDialog(kit.AlertDialogProps{
+			ID: "decision", Title: "Replace the name?", Description: "Your other details will be kept.",
+			Open: func() bool {
+				return open.Get()
+			},
+			Busy: func() bool {
+				return busy.Get()
+			},
+			ConfirmLabel: "Replace", CancelLabel: "Keep editing", ReturnFocus: trigger,
+			OnOpenChange: func(value bool) {
+				dismissals++
+				open.Set(value)
+			},
+			OnConfirm: func() {
+				confirmations++
+				busy.Set(true)
+			},
+		}))
+	}))
+	first := flush(root)
+	confirm, cancel, dialog := 0, 0, 0
+	for _, mutation := range first.Mutations {
+		if mutation.Op == "modal" {
+			dialog = mutation.ID
+		}
+		if mutation.Op == "attr" && mutation.Name == "class" {
+			if strings.Contains(mutation.Value, "vui-alertdialog-confirm") {
+				confirm = mutation.ID
+			}
+			if strings.Contains(mutation.Value, "vui-alertdialog-cancel") {
+				cancel = mutation.ID
+			}
+		}
+	}
+	require(confirm > 0 && cancel > 0 && dialog > 0, "alert dialog lost its actions")
+	html := root.HTML()
+	require(strings.Contains(html, `role="alertdialog"`) &&
+		strings.Contains(html, `aria-describedby="decision-description"`) &&
+		strings.Contains(html, `autofocus`) &&
+		!strings.Contains(html, "Close dialog"), "alert dialog lost its semantics or least-destructive initial action")
+	sequence := 0
+	send := func(target int, kind string) {
+		sequence++
+		root.Dispatch(ui.Event{Target: target, Kind: kind, Sequence: sequence})
+	}
+	send(confirm, "click")
+	send(confirm, "click")
+	send(cancel, "click")
+	send(dialog, "cancel")
+	require(confirmations == 1 && dismissals == 0 && open.Get(), "decision burst ignored live busy state")
+	flush(root)
+	require(strings.Contains(root.HTML(), `aria-busy="true"`), "pending confirmation was not exposed")
+	// An unsuccessful operation leaves the owner open for a later retry.
+	busy.Set(false)
+	flush(root)
+	send(confirm, "click")
+	require(confirmations == 2 && busy.Get(), "confirmation could not be retried")
+	busy.Set(false)
+	flush(root)
+	send(cancel, "click")
+	send(dialog, "cancel")
+	send(confirm, "click")
+	send(dialog, "close")
+	require(dismissals == 1 && confirmations == 2 && !open.Get(), "closed decision accepted stale actions in one batch")
+	batch := flush(root)
+	focuses := 0
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "focus" {
+			focuses++
+		}
+	}
+	require(focuses == 1 && focusTarget(batch) == target(first, "trigger"), "decision dismissal did not return focus exactly once")
+	open.Set(true)
+	busy.Set(true)
+	flush(root)
+	send(dialog, "close")
+	require(!open.Get() && dismissals == 2, "native closure did not synchronize a busy decision")
+	root.Close()
+	markup := host.HTML(kit.Breadcrumb(kit.BreadcrumbProps{
+		Items: []kit.BreadcrumbItem{
+			{Key: "home", Label: "Home", Href: "/home?a=1&b=2"}, {Key: "current", Label: "Chapter <one>"},
+		},
+	}))
+	require(strings.Contains(markup, `<nav`) && strings.Contains(markup, `<ol`) &&
+		strings.Contains(markup, `href="/home?a=1&amp;b=2"`) &&
+		strings.Count(markup, `aria-current="page"`) == 1 &&
+		strings.Contains(markup, `Chapter &lt;one&gt;`), "breadcrumb lost native links, order or current-page semantics")
+	expectPanic(func() {
+		kit.Breadcrumb(kit.BreadcrumbProps{
+			Items: []kit.BreadcrumbItem{
+				{Key: "same", Label: "Home", Href: "/"}, {Key: "same", Label: "Chapter"},
+			},
+		})
+	}, "unique keys")
+	expectPanic(func() {
+		kit.Breadcrumb(kit.BreadcrumbProps{})
+	}, "between 1 and 64")
+}

@@ -423,7 +423,7 @@ impl<'a> Parser<'a> {
                     .map(|typ| self.type_expr_binary_depth(typ))
                     .unwrap_or(0);
                 for elem in &literal.elems {
-                    if let Some(CompositeLitKey::Expr(key)) = &elem.key {
+                    if let Some(key) = &elem.key {
                         depth = depth.max(self.expr_binary_depth(key));
                     }
                     depth = depth.max(self.expr_binary_depth(&elem.value));
@@ -506,7 +506,7 @@ impl<'a> Parser<'a> {
                     .map(|typ| self.type_expr_depth(typ))
                     .unwrap_or(0);
                 for elem in &literal.elems {
-                    if let Some(CompositeLitKey::Expr(key)) = &elem.key {
+                    if let Some(key) = &elem.key {
                         depth = depth.max(self.expr_depth(key));
                     }
                     depth = depth.max(self.expr_depth(&elem.value));
@@ -747,7 +747,7 @@ impl<'a> Parser<'a> {
                             }
                             include_expr!(&stmt.expr);
                             for case in &stmt.cases {
-                                for typ in case.types.iter().flatten() {
+                                for typ in case.types.iter().filter_map(TypeCase::type_expr) {
                                     include_type!(typ);
                                 }
                                 tasks.extend(case.body.iter().map(Task::Stmt));
@@ -937,7 +937,7 @@ impl<'a> Parser<'a> {
                             }
                             include_expr!(&stmt.expr);
                             for case in &stmt.cases {
-                                for typ in case.types.iter().flatten() {
+                                for typ in case.types.iter().filter_map(TypeCase::type_expr) {
                                     include_type!(typ);
                                 }
                                 tasks.extend(
@@ -997,22 +997,7 @@ impl<'a> Parser<'a> {
     pub fn parse_file(&mut self) -> ParseResult<File> {
         let start = self.current.span.start;
 
-        // Parse package clause
-        let package = if self.at(TokenKind::Package) {
-            self.advance();
-            let name = self.parse_ident()?;
-            self.expect_semi();
-            Some(name)
-        } else {
-            None
-        };
-
-        // Parse imports
-        let mut imports = Vec::new();
-        while self.at(TokenKind::Import) {
-            let parsed = self.parse_import_or_group()?;
-            imports.extend(parsed);
-        }
+        let (package, imports) = self.parse_file_header()?;
 
         // Parse top-level declarations
         let mut decls = Vec::new();
@@ -1037,6 +1022,29 @@ impl<'a> Parser<'a> {
             decls,
             span: Span::new(start, end),
         })
+    }
+
+    /// Shared package/import grammar for full parsing and dependency discovery.
+    /// A malformed header discards its partial imports in both entry points.
+    fn parse_file_header(&mut self) -> ParseResult<(Option<Ident>, Vec<ImportDecl>)> {
+        // Parse package clause
+        let package = if self.at(TokenKind::Package) {
+            self.advance();
+            let name = self.parse_ident()?;
+            self.expect_semi();
+            Some(name)
+        } else {
+            None
+        };
+
+        // Parse imports
+        let mut imports = Vec::new();
+        while self.at(TokenKind::Import) {
+            let parsed = self.parse_import_or_group()?;
+            imports.extend(parsed);
+        }
+
+        Ok((package, imports))
     }
 
     /// Parse import or grouped imports: `import "path"` or `import ( ... )`
@@ -1270,6 +1278,21 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Retain a selector's receiver when the member is still being typed. The
+    /// emitted diagnostic keeps the recovered tree out of normal compilation.
+    fn parse_selector_ident(&mut self, start: vo_common::span::BytePos) -> ParseResult<Ident> {
+        if self.at_eof() || self.at_any(&[TokenKind::RBrace, TokenKind::Semicolon]) {
+            self.error_expected("identifier");
+            Ok(Ident {
+                id: self.alloc_ident_id(),
+                symbol: self.interner.intern(""),
+                span: Span::new(start, start),
+            })
+        } else {
+            self.parse_ident()
+        }
+    }
+
     pub(crate) fn parse_ident_list(&mut self) -> ParseResult<Vec<Ident>> {
         let mut idents = vec![self.parse_ident()?];
         while self.eat(TokenKind::Comma) {
@@ -1326,10 +1349,17 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let end_token = self.expect(TokenKind::RBrace)?;
+        let end = if self.at_eof() {
+            // Preserve the recovered body, including local scopes, at an
+            // unfinished editor buffer. The missing brace remains an error.
+            self.error_expected("}");
+            self.current.span.end
+        } else {
+            self.expect(TokenKind::RBrace)?.span.end
+        };
         Ok(Block {
             stmts,
-            span: Span::new(start, end_token.span.end),
+            span: Span::new(start, end),
         })
     }
 }
@@ -1431,6 +1461,24 @@ fn parse_escape_char(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option
         }
         _ => None, // Unknown escape
     }
+}
+
+/// Recover import paths using the same package/import grammar as [`parse`].
+///
+/// Only the file header is parsed; declaration bodies and their syntax
+/// diagnostics are left to the full frontend. The result matches the import
+/// paths recovered by `parse`, including an empty list for a malformed header.
+/// This entry point is for dependency discovery, not source validation.
+pub fn parse_import_paths(source: &str) -> Vec<String> {
+    Parser::new(source, 0)
+        .parse_file_header()
+        .map(|(_, imports)| {
+            imports
+                .into_iter()
+                .map(|import| import.path.value)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Parses source code and returns the AST.

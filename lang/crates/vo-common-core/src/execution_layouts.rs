@@ -6,9 +6,9 @@
 //! vector-shape, and width validation in every container operation.
 
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 #[cfg(feature = "std")]
-use std::vec::Vec;
+use std::{collections::BTreeMap, sync::Arc, vec::Vec};
 
 use crate::bytecode::{ElemLayout, Module};
 use crate::exact_bases::{ExactBaseMaps, WriteBarrierBaseProvenance};
@@ -147,13 +147,34 @@ impl FunctionPointerLayouts {
     }
 }
 
-/// Pointer execution facts bound to the exact loaded module image.
+/// The interpreter's immutable layout facts for one verified function.
+/// A frame transition selects one record; pointer and container instructions
+/// retain direct access without repeated function-table lookups.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PointerLayoutMaps {
-    functions: Vec<FunctionPointerLayouts>,
+pub struct FunctionExecutionLayouts {
+    pointers: FunctionPointerLayouts,
+    elements: FunctionElementLayouts,
 }
 
-impl PointerLayoutMaps {
+impl FunctionExecutionLayouts {
+    #[inline(always)]
+    pub fn pointers(&self) -> &FunctionPointerLayouts {
+        &self.pointers
+    }
+
+    #[inline(always)]
+    pub fn elements(&self) -> &FunctionElementLayouts {
+        &self.elements
+    }
+}
+
+/// Function-indexed facts derived together from one immutable module image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionLayoutMaps {
+    functions: Arc<[FunctionExecutionLayouts]>,
+}
+
+impl ExecutionLayoutMaps {
     pub(crate) fn build(module: &Module, exact_bases: &ExactBaseMaps) -> Self {
         let functions = module
             .functions
@@ -163,23 +184,27 @@ impl PointerLayoutMaps {
                 let bases = exact_bases
                     .function(func_id as u32)
                     .expect("exact-base facts cover every module function");
-                FunctionPointerLayouts {
-                    entries: function
-                        .instruction_metadata
-                        .iter()
-                        .enumerate()
-                        .map(|(pc, metadata)| {
-                            metadata
-                                .ptr_value_layout()
-                                .map(|layout| {
-                                    CompactPointerLayout::from_layout(
-                                        layout,
-                                        bases.write_barrier(pc),
-                                    )
-                                })
-                                .unwrap_or_default()
-                        })
-                        .collect(),
+                let mut pointers = Vec::with_capacity(function.instruction_metadata.len());
+                let mut elements = Vec::with_capacity(function.instruction_metadata.len());
+                for (pc, metadata) in function.instruction_metadata.iter().enumerate() {
+                    pointers.push(
+                        metadata
+                            .ptr_value_layout()
+                            .map(|layout| {
+                                CompactPointerLayout::from_layout(layout, bases.write_barrier(pc))
+                            })
+                            .unwrap_or_default(),
+                    );
+                    elements.push(
+                        metadata
+                            .elem_layout()
+                            .map(CompactElementLayout::from_layout)
+                            .unwrap_or_default(),
+                    );
+                }
+                FunctionExecutionLayouts {
+                    pointers: FunctionPointerLayouts { entries: pointers },
+                    elements: FunctionElementLayouts { entries: elements },
                 }
             })
             .collect();
@@ -187,43 +212,75 @@ impl PointerLayoutMaps {
     }
 
     #[inline]
-    pub fn function(&self, func_id: u32) -> Option<&FunctionPointerLayouts> {
+    pub fn function(&self, func_id: u32) -> Option<&FunctionExecutionLayouts> {
         self.functions.get(func_id as usize)
+    }
+
+    pub(crate) fn pointer_maps(&self) -> PointerLayoutMaps {
+        PointerLayoutMaps {
+            layouts: self.clone(),
+        }
+    }
+
+    pub(crate) fn element_maps(&self) -> ElementLayoutMaps {
+        ElementLayoutMaps {
+            layouts: self.clone(),
+        }
     }
 }
 
-/// Element-layout execution facts bound to the exact loaded module image.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Compatible pointer-only view of the shared immutable function records.
+#[derive(Debug, Clone)]
+pub struct PointerLayoutMaps {
+    layouts: ExecutionLayoutMaps,
+}
+
+impl PointerLayoutMaps {
+    #[inline]
+    pub fn function(&self, func_id: u32) -> Option<&FunctionPointerLayouts> {
+        self.layouts
+            .function(func_id)
+            .map(FunctionExecutionLayouts::pointers)
+    }
+}
+
+impl PartialEq for PointerLayoutMaps {
+    fn eq(&self, other: &Self) -> bool {
+        self.layouts.functions.iter().map(|f| &f.pointers).eq(other
+            .layouts
+            .functions
+            .iter()
+            .map(|f| &f.pointers))
+    }
+}
+impl Eq for PointerLayoutMaps {}
+
+/// Compatible element-only view of the same records; cloning a view does not
+/// copy its facts or create a second source of layout authority.
+#[derive(Debug, Clone)]
 pub struct ElementLayoutMaps {
-    functions: Vec<FunctionElementLayouts>,
+    layouts: ExecutionLayoutMaps,
 }
 
 impl ElementLayoutMaps {
-    pub(crate) fn build(module: &Module) -> Self {
-        let functions = module
-            .functions
-            .iter()
-            .map(|function| FunctionElementLayouts {
-                entries: function
-                    .instruction_metadata
-                    .iter()
-                    .map(|metadata| {
-                        metadata
-                            .elem_layout()
-                            .map(CompactElementLayout::from_layout)
-                            .unwrap_or_default()
-                    })
-                    .collect(),
-            })
-            .collect();
-        Self { functions }
-    }
-
     #[inline]
     pub fn function(&self, func_id: u32) -> Option<&FunctionElementLayouts> {
-        self.functions.get(func_id as usize)
+        self.layouts
+            .function(func_id)
+            .map(FunctionExecutionLayouts::elements)
     }
 }
+
+impl PartialEq for ElementLayoutMaps {
+    fn eq(&self, other: &Self) -> bool {
+        self.layouts.functions.iter().map(|f| &f.elements).eq(other
+            .layouts
+            .functions
+            .iter()
+            .map(|f| &f.elements))
+    }
+}
+impl Eq for ElementLayoutMaps {}
 
 #[cfg(test)]
 mod tests {
@@ -274,8 +331,11 @@ mod tests {
         };
         module.functions.push(function);
 
-        let maps = ElementLayoutMaps::build(&module);
-        let layouts = maps.function(0).expect("function layouts");
+        let exact_bases = ExactBaseMaps::conservative(&module);
+        let maps = ExecutionLayoutMaps::build(&module, &exact_bases);
+        let layouts = maps.function(0).expect("function layouts").elements();
+        assert!(maps.function(1).is_none());
+        assert_eq!(layouts.get(4), None);
         assert_eq!(
             layouts.get(0),
             Some(ElemLayout {
@@ -287,9 +347,18 @@ mod tests {
         assert_eq!(layouts.get(1), None);
         assert_eq!(layouts.get(2), None);
 
-        let exact_bases = ExactBaseMaps::conservative(&module);
-        let pointer_maps = PointerLayoutMaps::build(&module, &exact_bases);
-        let pointer_layouts = pointer_maps.function(0).expect("pointer layouts");
+        let pointer_layouts = maps.function(0).expect("function layouts").pointers();
+        assert_eq!(pointer_layouts.get(0), None);
+        assert_eq!(pointer_layouts.get(4), None);
+        let pointer_view = maps.pointer_maps();
+        let element_view = maps.element_maps();
+        assert!(core::ptr::eq(
+            pointer_view.function(0).unwrap(),
+            pointer_layouts
+        ));
+        assert!(core::ptr::eq(element_view.function(0).unwrap(), layouts));
+        assert!(pointer_view.function(1).is_none());
+        assert!(element_view.function(1).is_none());
         assert_eq!(
             pointer_layouts.get(3),
             Some(PointerExecutionLayout {
@@ -299,5 +368,68 @@ mod tests {
                 base_provenance: WriteBarrierBaseProvenance::UNKNOWN,
             })
         );
+        module.functions[0].instruction_metadata[0] = InstructionMetadata::None;
+        let other = ExecutionLayoutMaps::build(&module, &exact_bases);
+        assert_eq!(pointer_view, other.pointer_maps());
+        assert_ne!(element_view, other.element_maps());
+        drop(maps);
+        assert_eq!(
+            pointer_view
+                .function(0)
+                .unwrap()
+                .get(3)
+                .unwrap()
+                .value_slots,
+            1
+        );
+        assert_eq!(element_view.function(0).unwrap().get(0).unwrap().bytes, 8);
+    }
+}
+
+/// Immutable, interned select payload layouts. Waiting snapshots can clone an
+/// Arc without copying or charging module metadata to every Fiber execution.
+#[derive(Debug)]
+pub struct SelectLayoutMaps {
+    functions: Vec<Vec<(u32, Arc<Vec<SlotType>>)>>,
+}
+
+impl SelectLayoutMaps {
+    pub(crate) fn build(module: &Module) -> Self {
+        let mut interned = BTreeMap::<Vec<u8>, Arc<Vec<SlotType>>>::new();
+        let functions = module
+            .functions
+            .iter()
+            .map(|function| {
+                function
+                    .code
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(pc, instruction)| {
+                        if !matches!(
+                            instruction.opcode(),
+                            crate::instruction::Opcode::SelectSend
+                                | crate::instruction::Opcode::SelectRecv
+                        ) {
+                            return None;
+                        }
+                        let layout = function.instruction_metadata.get(pc)?.queue_elem_layout()?;
+                        let key = layout.iter().map(|ty| *ty as u8).collect::<Vec<_>>();
+                        let shared = interned
+                            .entry(key)
+                            .or_insert_with(|| Arc::new(layout.to_vec()))
+                            .clone();
+                        Some((pc as u32, shared))
+                    })
+                    .collect()
+            })
+            .collect();
+        Self { functions }
+    }
+
+    #[inline]
+    pub fn get(&self, function: u32, pc: u32) -> Option<&Arc<Vec<SlotType>>> {
+        let entries = self.functions.get(function as usize)?;
+        let index = entries.binary_search_by_key(&pc, |entry| entry.0).ok()?;
+        Some(&entries[index].1)
     }
 }

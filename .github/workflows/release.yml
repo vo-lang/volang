@@ -219,7 +219,7 @@ jobs:
     name: Build shared Web runtime
     needs: preflight
     runs-on: ubuntu-22.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     permissions:
       contents: read
     steps:
@@ -265,7 +265,8 @@ jobs:
           path: |
             lang/crates/vo-web/dist
             lang/crates/vo-web/pkg
-            lang/crates/vo-web/aot-support
+            target/ui-next/wasm-runtime
+          include-hidden-files: true
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
@@ -291,6 +292,23 @@ jobs:
       - name: Setup release toolchain
         uses: ./.github/actions/setup-volang
 
+      - name: Setup Node for installed Web project tools
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            eng/ui-next/package-lock.json
+            ui/editors/vscode/package-lock.json
+            eng/browser/package-lock.json
+
+      - name: Install locked Web project dependencies
+        run: |
+          npm ci --ignore-scripts --prefix eng/ui-next
+          npm ci --ignore-scripts --prefix ui/editors/vscode
+          npm ci --ignore-scripts --prefix eng/browser
+          node eng/browser/node_modules/playwright/cli.js install --with-deps chromium
+
       - name: Install Linux window smoke dependencies
         if: runner.os == 'Linux'
         run: |
@@ -301,7 +319,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-web-runtime-${{ needs.preflight.outputs.commit }}
-          path: lang/crates/vo-web
+          path: .
 
       - name: Download release certification input
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -368,9 +386,9 @@ jobs:
           esac
           "$packaged_vo" ui build ui/examples/settings \
             -o "./target/${{ matrix.target }}/release/ui-web-smoke"
-          test -f "./target/${{ matrix.target }}/release/ui-web-smoke/app.wasm"
+          test -f "./target/${{ matrix.target }}/release/ui-web-smoke/app.vob"
+          test -f "./target/${{ matrix.target }}/release/ui-web-smoke/runtime/pkg/vo_web_bg.wasm"
           test -f "./target/${{ matrix.target }}/release/ui-web-smoke/runtime/dist/index.js"
-          test -f "./target/${{ matrix.target }}/release/ui-web-smoke/runtime/aot-support/vo_aot_support_wasm_bg.wasm"
           starter="$RUNNER_TEMP/vo-ui-release-starter"
           export VO_MOD_CACHE="$RUNNER_TEMP/vo-ui-module-cache"
           "$packaged_vo" ui new "$starter"
@@ -382,6 +400,12 @@ jobs:
             -o "$ui_native"
           test -f "$ui_native"
           ./target/debug/vo-dev release probe-native-ui "${{ matrix.target }}"
+          # Resolve tools from the extracted installation, without checkout overrides.
+          unset VO_UI_TOOLCHAIN VO_UI_NODE
+          "$packaged_vo" ui verify
+          web_starter="$RUNNER_TEMP/vo-ui-web-release-starter"
+          "$packaged_vo" ui create "$web_starter"
+          UI_NEXT_BROWSER=chromium "$packaged_vo" ui test --project "$web_starter"
 
       - name: Upload package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

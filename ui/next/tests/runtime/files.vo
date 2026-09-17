@@ -1,0 +1,222 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/files"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/forms/schema"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/web"
+	"github.com/vo-lang/ui/next/web/upload"
+)
+
+func filePayload(revision int, token string, failure string) string {
+	entries := "[]"
+	if token != "" {
+		entries = fmt.Sprintf(`[{"token":%q,"name":"中文.txt","size":7,"mediaType":"text/plain","lastModified":123}]`, token)
+	}
+	return fmt.Sprintf(`{"version":1,"owner":"native-owner","revision":%d,"files":%s,"error":%q}`, revision, entries, failure)
+}
+
+func fileContracts() {
+	var form *forms.Form
+	var active *ui.BoolState
+	var async *ui.BoolState
+	decoded := 0
+	view := func() ui.View {
+		return ui.Component(reloadPageType, func(scope *ui.Scope) ui.View {
+			active = ui.Bool(scope, "file-active", true)
+			async = ui.Bool(scope, "file-async", false)
+			fields := []string{"title", "people"}
+			if active.Get() {
+				fields = append(fields, "attachment")
+			}
+			options := forms.Options{
+				Initial: forms.WithArray(forms.Values{"title": []string{"Draft"}}, "people", []forms.Values{
+					{"name": []string{"Ada"}},
+				}),
+				Arrays: []string{"people"}, Files: []string{"attachment"}, Fields: fields,
+				Validate: func(data forms.Data) forms.Errors {
+					data.Values.Set("title", "validator copy")
+					delete(data.Files, "attachment")
+					return nil
+				},
+			}
+			if async.Get() {
+				options.ValidateAsync = func(data forms.Data) ui.Request {
+					return ui.Request{Service: "file-validation"}
+				}
+				options.DecodeValidation = func(ui.Result) forms.Errors {
+					decoded++
+					return nil
+				}
+			}
+			form = forms.Use(scope, "files", options)
+			if !active.Get() {
+				return ui.Text("no file control")
+			}
+			field := kit.FormField(kit.FieldProps{
+				ID: "attachment", Label: "Attachment", Error: form.Error("attachment"),
+			}, ui.Element("input").Attr("type", "file").Attr("name", "attachment"))
+			return form.FileInput("attachment", field, files.Options{ID: "attachment"})
+		})
+	}
+	root := ui.NewRoot(view())
+	batch := flush(root)
+	widget := 0
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "widget" {
+			widget = mutation.ID
+		}
+	}
+	require(widget > 0 && strings.Contains(root.HTML(), `type="file"`) &&
+		strings.Contains(root.HTML(), `for="attachment"`), "file field lost native SSR/label")
+	sequence := 0
+	deliver := func(revision int, token string, failure string) {
+		sequence++
+		require(root.Dispatch(ui.Event{
+			Kind: "@widget", Target: widget, Sequence: sequence,
+			Value: filePayload(revision, token, failure),
+		}), "file selection dispatch rejected")
+	}
+	deliver(1, "file-first", "")
+	selection := form.Selection("attachment")
+	metadata := selection.Files()
+	require(selection.Len() == 1 && metadata[0].Name == "中文.txt" && metadata[0].Size == 7 &&
+		metadata[0].LastModified == 123 &&
+		form.Dirty(), "typed file metadata was lost")
+	metadata[0].Name = "caller mutation"
+	require(selection.Files()[0].Name == "中文.txt", "file metadata slice escaped snapshot ownership")
+	data := form.Data()
+	delete(data.Files, "attachment")
+	data.Values.Set("title", "caller")
+	require(form.Selection("attachment").Len() == 1 && form.Value("title") == "Draft", "form Data escaped snapshot ownership")
+	_, fake := form.Values()["attachment"]
+	require(!fake, "opaque files leaked into text Values")
+	multipart := upload.Multipart("./upload", form.Data(), web.HTTPOptions{
+		Headers: map[string]string{"Accept": "application/json"},
+	}).WithTimeout(500)
+	require(multipart.Service == "web.multipart" && multipart.TimeoutMilliseconds == 500 &&
+		strings.Contains(multipart.Value, `"token":"file-first"`) &&
+		!strings.Contains(multipart.Value, "中文.txt"), "multipart did not use the native file token and shared task policy")
+	expectPanic(func() {
+		upload.Multipart("/upload", form.Data(), web.HTTPOptions{
+			Headers: map[string]string{"Content-Type": "multipart/form-data"},
+		})
+	}, "boundary")
+	expectPanic(func() {
+		upload.Multipart("/upload", form.Data(), web.HTTPOptions{Method: "GET"})
+	}, "POST")
+	expectPanic(func() {
+		form.Change("attachment", "fake-path")
+	}, "ChangeFiles")
+	request := files.ReadText(selection.Files()[0])
+	require(request.Service == "ui.files.text" &&
+		strings.Contains(request.Value, `"token":"file-first"`), "text read did not carry opaque identity")
+	request = files.ReadBytes(selection.Files()[0], 2, 3)
+	require(request.Service == "ui.files.bytes" && strings.Contains(request.Value, `"length":3`), "byte read bounds lost")
+	bytes, err := files.DecodeBytes(ui.Result{Value: "AAH/"})
+	require(err == nil && len(bytes) == 3 && bytes[2] == 255, "binary result was not decoded")
+	_, err = files.DecodeBytes(ui.Result{Value: "invalid"})
+	require(err != nil, "malformed byte result accepted")
+	expectPanic(func() {
+		files.ReadText(files.File{})
+	}, "live file reference")
+	expectPanic(func() {
+		files.ReadBytes(selection.Files()[0], 0, files.MaxReadBytes + 1)
+	}, "256 KiB")
+	resolver := schema.From(form.Data())
+	name, err := resolver.Resolve(schema.Field("attachment"))
+	require(err == nil && name == "attachment", "schema adapter lost file field identity")
+	_, err = resolver.Resolve(schema.Field("attachment").Value(0))
+	require(err != nil, "schema treated a file as a string value")
+	form.Array("people").Append(forms.Values{"name": []string{"Grace"}})
+	require(form.Touched("attachment") && form.Selection("attachment").Len() == 1, "unrelated array edit discarded file state")
+	flush(root)
+	requestBuilder := func(data forms.Data) ui.Request {
+		require(data.Files["attachment"].Len() > 0, "submission omitted typed files")
+		delete(data.Files, "attachment")
+		return ui.Request{Service: "upload"}
+	}
+	decode := func(ui.Result) forms.Outcome {
+		return forms.Outcome{Message: "Uploaded"}
+	}
+	form.Submit(requestBuilder, decode)
+	old := startCommand(flush(root))
+	deliver(2, "file-newer", "")
+	sequence++
+	root.Dispatch(ui.Event{Kind: "@task", Target: old, Sequence: sequence})
+	require(form.Selection("attachment").Files()[0].Token() == "file-newer" && form.Dirty(), "successful upload cleared a newer selection")
+	form.Submit(requestBuilder, func(ui.Result) forms.Outcome {
+		return forms.Outcome{Errors: forms.Errors{"attachment": "Rejected by server"}}
+	})
+	old = startCommand(flush(root))
+	sequence++
+	root.Dispatch(ui.Event{Kind: "@task", Target: old, Sequence: sequence})
+	require(form.Error("attachment") == "Rejected by server", "server file error was not associated")
+	form.Change("title", "New title")
+	require(form.Error("attachment") == "Rejected by server", "text change lost file response error")
+	deliver(3, "file-final", "")
+	require(form.Error("attachment") == "", "new selection retained old file error")
+	form.Submit(requestBuilder, decode)
+	old = startCommand(flush(root))
+	sequence++
+	root.Dispatch(ui.Event{Kind: "@task", Target: old, Sequence: sequence})
+	require(form.Selection("attachment").Len() == 0 && !form.Dirty(), "successful upload did not clear submitted files and advance text baseline")
+	batch = flush(root)
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "widget" {
+			require(strings.Contains(mutation.Value, `"revision":3`) &&
+				strings.Contains(mutation.Value, `"tokens":[]`), "successful clear lost native revision")
+		}
+	}
+	deliver(4, "", "Too many files")
+	require(form.Error("attachment") == "Too many files" && form.Dirty(), "native selection failure disappeared")
+	form.Submit(requestBuilder, decode)
+	require(!form.Pending(), "rejected native files reached upload request")
+	form.Reset()
+	require(form.Selection("attachment").Error() == "" && !form.Dirty(), "reset retained file error")
+	deliver(5, "file-reload", "")
+	form.Change("title", "Reloaded text")
+	flush(root)
+	encoded, err := root.SaveReload()
+	require(err == nil && !strings.Contains(encoded, "file-reload") &&
+		!strings.Contains(encoded, "native-owner"), "reload serialized a native file reference")
+	fresh := ui.NewRoot(view())
+	_, err = fresh.RestoreReload(encoded)
+	require(err == nil, "file form reload preparation failed")
+	flush(fresh)
+	require(form.Selection("attachment").Len() == 0 && form.Value("title") == "Reloaded text", "reload lost text or resurrected files")
+	fresh.Close()
+	root.Close()
+	// A file edit cancels its pending async validation; excluded files never
+	// enter validation or submission and late widget results are ignored.
+	root = ui.NewRoot(view())
+	batch = flush(root)
+	sequence = 0
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "widget" {
+			widget = mutation.ID
+		}
+	}
+	deliver(1, "file-validation", "")
+	async.Set(true)
+	flush(root)
+	form.Blur("attachment")
+	old = startCommand(flush(root))
+	deliver(2, "file-validation-new", "")
+	sequence++
+	require(!root.Dispatch(ui.Event{Kind: "@task", Target: old, Sequence: sequence}) && decoded == 0 &&
+		!form.Pending(), "old file validation survived a selection change")
+	active.Set(false)
+	flush(root)
+	_, included := form.Data().Files["attachment"]
+	require(!included && !form.Dirty(), "excluded file remained in participating Data")
+	sequence++
+	require(!root.Dispatch(ui.Event{
+		Kind: "@widget", Target: widget, Sequence: sequence, Value: filePayload(3, "late-file", ""),
+	}), "removed file widget accepted late input")
+	root.Close()
+}

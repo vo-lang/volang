@@ -1,6 +1,5 @@
 //! Shared image validation and VM construction for native AOT process entries.
 
-#[cfg(not(test))]
 use std::ffi::{c_char, CStr};
 #[cfg(not(test))]
 use std::sync::Arc;
@@ -10,7 +9,7 @@ use vo_jit::{decode_native_aot_metadata, NativeJitFunc};
 #[cfg(not(test))]
 use vo_vm::vm::Vm;
 #[cfg(not(test))]
-use vo_vm::{AotFunctionEntry, JitConfig};
+use vo_vm::vm::{AotContinuationEntry, AotFunctionEntry};
 
 #[cfg(not(test))]
 unsafe extern "C" {
@@ -19,6 +18,7 @@ unsafe extern "C" {
     static vo_aot_metadata_bytes: u8;
     static vo_aot_metadata_len: u64;
     static vo_aot_function_table: usize;
+    static vo_aot_continuation_table: usize;
     static vo_aot_function_count: u64;
 }
 
@@ -47,14 +47,13 @@ unsafe fn embedded_slice(
     Ok(unsafe { std::slice::from_raw_parts(data, len) })
 }
 
-#[cfg(not(test))]
 unsafe fn program_args(argc: i32, argv: *const *const c_char) -> Result<Vec<Vec<u8>>, String> {
     let argc = usize::try_from(argc).map_err(|_| "negative process argc".to_string())?;
     if argc != 0 && argv.is_null() {
         return Err("process argv is null".to_string());
     }
-    let mut args = Vec::with_capacity(argc.saturating_sub(1));
-    for index in 1..argc {
+    let mut args = Vec::with_capacity(argc);
+    for index in 0..argc {
         let value = unsafe { *argv.add(index) };
         if value.is_null() {
             return Err(format!("process argv[{index}] is null"));
@@ -141,7 +140,17 @@ where
         unsafe { std::slice::from_raw_parts(&raw const vo_aot_function_table, function_count) }
     };
     let mut entries = Vec::with_capacity(function_count);
-    for (function, raw_entry) in metadata.functions.into_iter().zip(table.iter().copied()) {
+    let continuation_table = if function_count == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(&raw const vo_aot_continuation_table, function_count) }
+    };
+    for (index, (function, raw_entry)) in metadata
+        .functions
+        .into_iter()
+        .zip(table.iter().copied())
+        .enumerate()
+    {
         if raw_entry == 0 {
             return Err(format!(
                 "AOT function {} has a null native entry",
@@ -149,21 +158,38 @@ where
             ));
         }
         let native: NativeJitFunc = unsafe { std::mem::transmute(raw_entry) };
+        let continuation = match (function.continuation, continuation_table[index]) {
+            (None, 0) => None,
+            (Some(continuation), raw) if raw != 0 => {
+                let code = &loaded.functions[index].code;
+                if continuation.pcs.iter().any(|&pc| pc as usize >= code.len()) {
+                    return Err(format!(
+                        "AOT continuation for function {index} has an invalid PC"
+                    ));
+                }
+                Some(AotContinuationEntry {
+                    native: unsafe { std::mem::transmute::<usize, NativeJitFunc>(raw) },
+                    pcs: continuation.pcs,
+                    metadata: continuation.metadata,
+                })
+            }
+            _ => {
+                return Err(format!(
+                    "AOT continuation table and metadata disagree for function {index}"
+                ))
+            }
+        };
         entries.push(AotFunctionEntry {
             func_id: function.func_id,
             native,
             metadata: function.metadata,
             entry_eligibility: function.entry_eligibility,
+            continuation,
         });
     }
 
-    let config = JitConfig {
-        call_threshold: u32::MAX,
-        optimizing_threshold: u64::MAX,
-        ..JitConfig::default()
-    };
-    let mut vm = Vm::try_with_jit_config(config)
-        .map_err(|error| format!("failed to initialize AOT runtime: {error}"))?;
+    let mut vm =
+        Vm::try_for_aot().map_err(|error| format!("failed to initialize AOT runtime: {error}"))?;
     vm.set_program_args_bytes(unsafe { program_args(argc, argv) }?);
     configure(&mut vm, loaded.as_ref())?;
     vm.load_verified(loaded)
@@ -171,4 +197,53 @@ where
     vm.install_aot_functions(entries)
         .map_err(|error| format!("failed to publish AOT functions: {error:?}"))?;
     Ok(vm)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::program_args;
+    use std::ffi::{c_char, CString};
+    use std::ptr;
+
+    #[test]
+    fn program_arguments_include_name_and_preserve_bytes() {
+        let values = [
+            CString::new(b"program\xff".as_slice()).unwrap(),
+            CString::new(b"--first=\xfe".as_slice()).unwrap(),
+            CString::new("").unwrap(),
+        ];
+        let pointers: Vec<*const c_char> = values.iter().map(|value| value.as_ptr()).collect();
+        assert_eq!(
+            unsafe { program_args(3, pointers.as_ptr()) }.unwrap(),
+            vec![
+                b"program\xff".to_vec(),
+                b"--first=\xfe".to_vec(),
+                Vec::new()
+            ]
+        );
+        assert_eq!(
+            unsafe { program_args(1, pointers.as_ptr()) }.unwrap(),
+            vec![b"program\xff".to_vec()]
+        );
+    }
+
+    #[test]
+    fn program_arguments_accept_empty_process_vector() {
+        assert!(unsafe { program_args(0, ptr::null()) }.unwrap().is_empty());
+    }
+
+    #[test]
+    fn program_arguments_reject_invalid_counts_and_null_entries() {
+        assert!(unsafe { program_args(-1, ptr::null()) }.is_err());
+        assert!(unsafe { program_args(1, ptr::null()) }.is_err());
+        assert_eq!(
+            unsafe { program_args(1, [ptr::null()].as_ptr()) }.unwrap_err(),
+            "process argv[0] is null"
+        );
+        let name = CString::new("program").unwrap();
+        assert_eq!(
+            unsafe { program_args(2, [name.as_ptr(), ptr::null()].as_ptr()) }.unwrap_err(),
+            "process argv[1] is null"
+        );
+    }
 }

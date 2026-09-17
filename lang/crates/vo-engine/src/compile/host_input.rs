@@ -310,6 +310,23 @@ pub(super) fn validate_stable_directory_path(path: &Path) -> io::Result<HostMeta
     Ok(generation)
 }
 
+/// Finish a capability-relative tree read only while the selected directory
+/// still names the generation that supplied its initial entry list. Validating
+/// once per directory allows files to carry that pinned parent's identity.
+pub(super) fn validate_captured_directory_path(
+    path: &Path,
+    expected: &HostMetadataGeneration,
+) -> io::Result<()> {
+    // The captured generation is already the first authenticated observation.
+    // One live-path reopen supplies the final observation; acquiring another
+    // pair here would duplicate the directory snapshot's initial validation.
+    let current = open_path_no_follow(path, OpenedKind::Directory)?;
+    if metadata_generation(&current)? != *expected {
+        return Err(generation_changed(path));
+    }
+    Ok(())
+}
+
 /// Confirm that an already-open regular-file handle still names the exact
 /// object reachable through `path` without following links or reparse points.
 /// Lock users call this after acquisition and again before destructive work,

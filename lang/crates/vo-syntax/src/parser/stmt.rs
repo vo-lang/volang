@@ -573,14 +573,14 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_type_list(&mut self) -> ParseResult<Vec<Option<TypeExpr>>> {
+    fn parse_type_list(&mut self) -> ParseResult<Vec<TypeCase>> {
         let mut types = Vec::new();
         loop {
             if self.at(TokenKind::Ident) && self.span_text(self.current.span) == "nil" {
+                types.push(TypeCase::Nil(self.current.span));
                 self.advance();
-                types.push(None);
             } else {
-                types.push(Some(self.parse_type()?));
+                types.push(TypeCase::Type(self.parse_type()?));
             }
             if !self.eat(TokenKind::Comma) {
                 break;

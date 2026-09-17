@@ -151,16 +151,21 @@ func testFuncInComposite() {
 	type Handler struct {
 		fn func(int) int
 	}
-	h := Handler{fn: func(x int) int {
-		return x * 2
-	}}
+	h := Handler{
+		fn: func(x int) int {
+			return x * 2
+		},
+	}
 	assert(h.fn(21) == 42, "func in composite")
 	// Slice of functions
-	fns := []func(int) int{func(x int) int {
-		return x + 1
-	}, func(x int) int {
-		return x * 2
-	}}
+	fns := []func(int) int{
+		func(x int) int {
+			return x + 1
+		},
+		func(x int) int {
+			return x * 2
+		},
+	}
 	assert(fns[0](10) == 11 && fns[1](10) == 20, "slice of funcs")
 }
 

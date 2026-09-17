@@ -8,12 +8,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+mod diagnostics;
+mod evidence;
+
 const DEFAULT_BENCH_WARMUP: u64 = 1;
 const DEFAULT_BENCH_RUNS: u64 = 3;
 const NATIVE_BENCH_PROFILE: &str = "release-native";
-const WASM_AOT_SERIES_NAME: &str = "Vo-WASM-AOT(Node)";
+const WASM_VM_SERIES_NAME: &str = "Vo-WASM-VM(Node)";
+const NOSTD_SERIES_NAME: &str = "Vo-no_std";
+const OSR_SERIES_NAME: &str = "Vo-OSR(call=1000,loop=1)";
 
 pub(crate) fn cmd_bench(root: &Path, args: Vec<String>) -> Result<()> {
+    if args.first().map(String::as_str) == Some("diagnostics") {
+        return diagnostics::command(root, &args[1..]);
+    }
     let mut target = "all".to_string();
     let mut all_langs = false;
     let mut arch = "64".to_string();
@@ -138,8 +146,12 @@ impl BenchRunner<'_> {
             return self.calculate_scores(None, &[]);
         }
         self.check_deps()?;
+        fs::create_dir_all(&self.results_dir)?;
+        let sources = evidence::source_identity(self.root)?;
+        evidence::write_json(&self.results_dir.join("sources.json"), &sources)?;
         self.build_vo()?;
-        self.build_wasm_aot_host()?;
+        self.build_wasm_vm_host()?;
+        self.write_build_identity()?;
         let run_info = if self.target == "all" {
             self.run_all_benchmarks()?
         } else if self.benchmark_exists(&self.target)? {
@@ -151,6 +163,9 @@ impl BenchRunner<'_> {
             bail!("unknown benchmark");
         };
         let scope: Vec<_> = run_info.iter().map(|info| info.name.clone()).collect();
+        if sources != evidence::source_identity(self.root)? {
+            bail!("benchmark sources changed during the run; results retain their initial identity and must not be compared as a stable build");
+        }
         self.calculate_scores(Some(&scope), &run_info)?;
         if let Some(run_id) = &self.run_id {
             record_latest_benchmark_run(self.root, run_id)?;
@@ -169,6 +184,9 @@ impl BenchRunner<'_> {
         if !command_exists("node") {
             missing.push("node");
         }
+        if !command_exists("wasm-pack") {
+            missing.push("wasm-pack");
+        }
         if !missing.is_empty() {
             bail!(
                 "missing benchmark dependencies: {}; install the host tools (Homebrew: brew install hyperfine go node)",
@@ -180,10 +198,14 @@ impl BenchRunner<'_> {
 
     fn build_vo(&self) -> Result<()> {
         let mut cmd = Command::new("cargo");
-        cmd.args(["build", "--profile", NATIVE_BENCH_PROFILE, "-p", "vo"]);
-        if self.arch != "32" {
-            cmd.args(["-p", "vo-aot-runtime"]);
-        }
+        cmd.args([
+            "build",
+            "--locked",
+            "--profile",
+            NATIVE_BENCH_PROFILE,
+            "-p",
+            "vo",
+        ]);
         if self.arch == "32" {
             cmd.args(["--target", TARGET_32, "--no-default-features"]);
         }
@@ -194,21 +216,96 @@ impl BenchRunner<'_> {
         if !status.success() {
             bail!("cargo build --profile {NATIVE_BENCH_PROFILE} -p vo failed");
         }
+        if self.arch != "32" {
+            let status = Command::new("cargo")
+                .args([
+                    "build",
+                    "--locked",
+                    "--profile",
+                    NATIVE_BENCH_PROFILE,
+                    "-p",
+                    "vo-aot-runtime",
+                ])
+                .current_dir(self.root)
+                .status()
+                .context("could not build AOT runtime")?;
+            if !status.success() {
+                bail!("AOT runtime build failed");
+            }
+        }
+        // Keep this build separate: selecting native CLI and embed packages
+        // together would unify runtime features and invalidate no_std coverage.
+        let mut embed = Command::new("cargo");
+        embed.args([
+            "build",
+            "--locked",
+            "--profile",
+            NATIVE_BENCH_PROFILE,
+            "-p",
+            "vo-embed",
+        ]);
+        if self.arch == "32" {
+            embed.args(["--target", TARGET_32]);
+        }
+        if !embed.current_dir(self.root).status()?.success() {
+            bail!("no_std benchmark runner build failed");
+        }
         Ok(())
     }
 
-    fn build_wasm_aot_host(&self) -> Result<()> {
-        for script in ["build:aot-support", "build:js"] {
+    fn build_wasm_vm_host(&self) -> Result<()> {
+        for script in ["build:wasm:release", "build:js"] {
             let status = Command::new("npm")
                 .args(["--prefix", "lang/crates/vo-web", "run", script])
                 .current_dir(self.root)
                 .status()
-                .with_context(|| format!("could not run Core Wasm AOT host step {script}"))?;
+                .with_context(|| format!("could not run Wasm VM host step {script}"))?;
             if !status.success() {
                 bail!("npm --prefix lang/crates/vo-web run {script} failed");
             }
         }
         Ok(())
+    }
+
+    fn write_build_identity(&self) -> Result<()> {
+        let mut artifacts = BTreeMap::new();
+        for path in [
+            self.vo_bench_bin(),
+            self.embed_bench_bin(),
+            self.root.join("lang/crates/vo-web/pkg"),
+            self.root.join("lang/crates/vo-web/dist"),
+            self.wasm_vm_runner(),
+        ] {
+            evidence::add_artifact(self.root, &path, &mut artifacts)?;
+        }
+        if self.arch != "32" {
+            evidence::add_artifact(self.root, &self.aot_runtime_archive(), &mut artifacts)?;
+        }
+        let environment = [
+            "VOWORK",
+            "RUSTFLAGS",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "VO_JIT_CALL_THRESHOLD",
+            "VO_JIT_LOOP_THRESHOLD",
+        ]
+        .into_iter()
+        .map(|name| (name, std::env::var(name).ok()))
+        .collect::<BTreeMap<_, _>>();
+        evidence::write_json(
+            &self.results_dir.join("build.json"),
+            &serde_json::json!({
+                "schema": "volang.benchmark.build.v1",
+                "profile": NATIVE_BENCH_PROFILE,
+                "arch": self.arch,
+                "tools": collect_tool_versions(),
+                "artifacts_sha256": artifacts,
+                "driver": {
+                    "path": std::env::current_exe()?,
+                    "sha256": crate::release_config::sha256_file(&std::env::current_exe()?)?,
+                },
+                "environment": environment,
+            }),
+        )
     }
 
     fn list_benchmarks(&self) -> Result<()> {
@@ -252,7 +349,7 @@ impl BenchRunner<'_> {
         let mut commands = Vec::new();
         let mut names = Vec::new();
         let mut aot_artifact = None;
-        let mut wasm_aot_artifact = None;
+        let mut bytecode_artifact = None;
         let vo_bin = shell_quote(&self.vo_bench_bin());
         if let Some(vo_file) = vo_file {
             let vo_file_command = shell_quote(&vo_file);
@@ -265,6 +362,8 @@ impl BenchRunner<'_> {
                     .to_string();
                 names.push(self.jit_series_name());
                 commands.push(jit);
+                names.push(OSR_SERIES_NAME.to_string());
+                commands.push(format!("VO_JIT_CALL_THRESHOLD=1000 VO_JIT_LOOP_THRESHOLD=1 {vo_bin} run {vo_file_command} --mode=jit"));
             }
             if self.arch != "32" {
                 let aot_bin = artifact_dir.join("vo_aot_bench");
@@ -272,11 +371,19 @@ impl BenchRunner<'_> {
                 commands.push(shell_quote(&aot_bin));
                 names.push("Vo-AOT".to_string());
             }
-            let wasm_aot_image = artifact_dir.join("vo_wasm_aot_bench.wasm");
-            wasm_aot_artifact =
-                Some(self.build_wasm_aot_benchmark(name, &vo_file, &wasm_aot_image)?);
-            commands.push(self.wasm_aot_command(&wasm_aot_image));
-            names.push(WASM_AOT_SERIES_NAME.to_string());
+            let bytecode = artifact_dir.join("vo_bench.vob");
+            bytecode_artifact = Some(self.build_bytecode_benchmark(name, &vo_file, &bytecode)?);
+            commands.push(format!(
+                "{} --raw-output {}",
+                shell_quote(&self.embed_bench_bin()),
+                shell_quote(&bytecode)
+            ));
+            names.push(NOSTD_SERIES_NAME.to_string());
+            commands.push(format!(
+                "node {} {vo_file_command}",
+                shell_quote(&self.wasm_vm_runner())
+            ));
+            names.push(WASM_VM_SERIES_NAME.to_string());
         }
 
         if !self.vo_only {
@@ -372,11 +479,34 @@ impl BenchRunner<'_> {
                 warning_count: 0,
                 correctness: BenchmarkCorrectness::default(),
                 aot_artifact,
-                wasm_aot_artifact,
+                bytecode_artifact,
             });
         }
 
-        let correctness = validate_benchmark_outputs(self.root, name, &names, &commands)?;
+        let evidence_dir = self.results_dir.join("preflight").join(name);
+        let diagnostic_commands = names
+            .iter()
+            .zip(&commands)
+            .map(|(series, command)| {
+                if is_vo_jit_series(series) || series == OSR_SERIES_NAME {
+                    format!(
+                        "{command} --jit-stats-json={}",
+                        shell_quote(&evidence_dir.join(format!("{series}.jit.json")))
+                    )
+                } else if series == "Vo-AOT" {
+                    format!("VO_AOT_STATS=1 {command}")
+                } else {
+                    command.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let correctness = validate_benchmark_outputs(
+            self.root,
+            name,
+            &names,
+            &diagnostic_commands,
+            Some(&evidence_dir),
+        )?;
 
         let results_dir = self.bench_results_dir();
         fs::create_dir_all(&results_dir)?;
@@ -384,6 +514,9 @@ impl BenchRunner<'_> {
         let export_md = results_dir.join(format!("{name}.md"));
 
         let mut hf = Command::new("hyperfine");
+        // Diagnostic collection is explicit in the preflight commands. Ambient
+        // flags must not silently instrument the timed child processes.
+        hf.env_remove("VO_AOT_STATS").env_remove("VO_BENCH_METRICS");
         hf.args([
             "--warmup",
             &self.warmup.to_string(),
@@ -399,6 +532,8 @@ impl BenchRunner<'_> {
             .arg(export_md)
             .current_dir(self.root);
         let output = hf.output().context("could not run hyperfine")?;
+        fs::write(results_dir.join(format!("{name}.stdout")), &output.stdout)?;
+        fs::write(results_dir.join(format!("{name}.stderr")), &output.stderr)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         print!("{stdout}");
@@ -413,7 +548,7 @@ impl BenchRunner<'_> {
             warning_count,
             correctness,
             aot_artifact,
-            wasm_aot_artifact,
+            bytecode_artifact,
         })
     }
 
@@ -422,7 +557,7 @@ impl BenchRunner<'_> {
         benchmark: &str,
         vo_file: &Path,
         output: &Path,
-    ) -> Result<AotBenchmarkArtifact> {
+    ) -> Result<CompiledBenchmarkArtifact> {
         let runtime = self.aot_runtime_archive();
         let started = Instant::now();
         let result = Command::new(self.vo_bench_bin())
@@ -451,56 +586,41 @@ impl BenchRunner<'_> {
             "AOT artifact: {} ({size_bytes} bytes, compiled in {compile_time_sec:.3}s)",
             path_display(self.root, output)
         );
-        Ok(AotBenchmarkArtifact {
+        Ok(CompiledBenchmarkArtifact {
             path: path_display(self.root, output),
             compile_time_sec,
             size_bytes,
             cache_disabled: true,
+            sha256: crate::release_config::sha256_file(output)?,
         })
     }
 
-    fn build_wasm_aot_benchmark(
+    fn build_bytecode_benchmark(
         &self,
         benchmark: &str,
-        vo_file: &Path,
+        source: &Path,
         output: &Path,
-    ) -> Result<AotBenchmarkArtifact> {
+    ) -> Result<CompiledBenchmarkArtifact> {
         let started = Instant::now();
         let result = Command::new(self.vo_bench_bin())
             .arg("build")
-            .arg(vo_file)
-            .args([
-                "--kind=wasm",
-                "--target=wasm32-unknown-unknown",
-                "--no-cache",
-                "-o",
-            ])
+            .arg(source)
+            .args(["--kind=bytecode", "--no-cache", "-o"])
             .arg(output)
             .current_dir(self.root)
-            .output()
-            .with_context(|| format!("could not Wasm-AOT-compile benchmark {benchmark}"))?;
-        let compile_time_sec = started.elapsed().as_secs_f64();
+            .output()?;
         if !result.status.success() {
-            let stdout = String::from_utf8_lossy(&result.stdout);
-            let stderr = String::from_utf8_lossy(&result.stderr);
             bail!(
-                "Wasm AOT compilation failed for {benchmark}: {}{}",
-                stdout.trim(),
-                stderr.trim()
+                "bytecode compilation failed for {benchmark}: {}",
+                String::from_utf8_lossy(&result.stderr)
             );
         }
-        let size_bytes = fs::metadata(output)
-            .with_context(|| format!("Wasm AOT output is missing for {benchmark}"))?
-            .len();
-        println!(
-            "Wasm AOT artifact: {} ({size_bytes} bytes, compiled in {compile_time_sec:.3}s)",
-            path_display(self.root, output)
-        );
-        Ok(AotBenchmarkArtifact {
+        Ok(CompiledBenchmarkArtifact {
             path: path_display(self.root, output),
-            compile_time_sec,
-            size_bytes,
+            compile_time_sec: started.elapsed().as_secs_f64(),
+            size_bytes: fs::metadata(output)?.len(),
             cache_disabled: true,
+            sha256: crate::release_config::sha256_file(output)?,
         })
     }
 
@@ -521,7 +641,7 @@ impl BenchRunner<'_> {
                     continue;
                 }
                 let stem = path.file_stem().unwrap().to_string_lossy();
-                if stem == "summary" {
+                if matches!(stem.as_ref(), "summary" | "sources" | "build") {
                     continue;
                 }
                 if selected
@@ -684,7 +804,7 @@ impl BenchRunner<'_> {
         let results_dir = self.bench_results_dir();
         fs::create_dir_all(&results_dir)?;
         let summary = BenchmarkSummary {
-            schema: "volang.benchmark.summary.v5",
+            schema: "volang.benchmark.summary.v6",
             run_id: self.run_id.clone(),
             generated_at_unix_sec: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -708,15 +828,12 @@ impl BenchRunner<'_> {
                 vo_binary: path_display(self.root, &self.vo_bench_bin()),
                 aot_runtime_archive: (self.arch != "32")
                     .then(|| path_display(self.root, &self.aot_runtime_archive())),
-                wasm_aot_runner: path_display(self.root, &self.wasm_aot_runner()),
-                wasm_aot_runtime: "vo-web Core Wasm AOT ABI v5 production host".to_string(),
                 score_mode: "global_common_scope_ranking_with_target_pairwise_geomean_ratios"
                     .to_string(),
             },
             tools: collect_tool_versions(),
             runs: run_info.to_vec(),
             aot: summarize_aot_artifacts(run_info),
-            wasm_aot: summarize_wasm_aot_artifacts(run_info),
             ranking: ranking
                 .iter()
                 .enumerate()
@@ -742,18 +859,13 @@ impl BenchRunner<'_> {
     }
 
     fn jit_env_prefix(&self) -> String {
-        let mut parts = Vec::new();
-        if let Some(value) = self.jit_call_threshold {
-            parts.push(format!("VO_JIT_CALL_THRESHOLD={value}"));
-        } else if self.jit_hot {
-            parts.push("VO_JIT_CALL_THRESHOLD=1".to_string());
-        }
-        if let Some(value) = self.jit_loop_threshold {
-            parts.push(format!("VO_JIT_LOOP_THRESHOLD={value}"));
-        } else if self.jit_hot {
-            parts.push("VO_JIT_LOOP_THRESHOLD=1".to_string());
-        }
-        parts.join(" ")
+        let call = self
+            .jit_call_threshold
+            .unwrap_or(if self.jit_hot { 1 } else { 100 });
+        let loop_threshold = self
+            .jit_loop_threshold
+            .unwrap_or(if self.jit_hot { 1 } else { 50 });
+        format!("VO_JIT_CALL_THRESHOLD={call} VO_JIT_LOOP_THRESHOLD={loop_threshold}")
     }
 
     fn jit_series_name(&self) -> String {
@@ -792,12 +904,21 @@ impl BenchRunner<'_> {
             })
     }
 
+    fn embed_bench_bin(&self) -> PathBuf {
+        self.vo_bench_bin().with_file_name("vo-embed")
+    }
+
     fn bench_results_dir(&self) -> PathBuf {
         self.results_dir.clone()
     }
 
     fn bench_artifacts_dir(&self) -> PathBuf {
-        self.root.join("target/bench/artifacts")
+        // Retain the exact executables used by this run; a later run cannot
+        // overwrite artifacts linked from an earlier performance report.
+        self.results_dir
+            .parent()
+            .expect("run results have a parent")
+            .join("artifacts")
     }
 
     fn bench_artifact_dir(&self, name: &str) -> PathBuf {
@@ -808,17 +929,8 @@ impl BenchRunner<'_> {
         self.root.join("target/bench/go-cache")
     }
 
-    fn wasm_aot_runner(&self) -> PathBuf {
-        self.root.join("cmd/vo-dev/src/bench_wasm_aot_runner.mjs")
-    }
-
-    fn wasm_aot_command(&self, image: &Path) -> String {
-        [
-            "node".to_string(),
-            shell_quote(&self.wasm_aot_runner()),
-            shell_quote(image),
-        ]
-        .join(" ")
+    fn wasm_vm_runner(&self) -> PathBuf {
+        self.root.join("cmd/vo-dev/src/bench_wasm_vm_runner.mjs")
     }
 }
 
@@ -827,16 +939,17 @@ struct BenchmarkRunInfo {
     name: String,
     warning_count: usize,
     correctness: BenchmarkCorrectness,
-    aot_artifact: Option<AotBenchmarkArtifact>,
-    wasm_aot_artifact: Option<AotBenchmarkArtifact>,
+    aot_artifact: Option<CompiledBenchmarkArtifact>,
+    bytecode_artifact: Option<CompiledBenchmarkArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct AotBenchmarkArtifact {
+struct CompiledBenchmarkArtifact {
     path: String,
     compile_time_sec: f64,
     size_bytes: u64,
     cache_disabled: bool,
+    sha256: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -852,7 +965,6 @@ struct AotBenchmarkSummary {
 struct BenchmarkCorrectness {
     vo_vm_jit_match: Option<bool>,
     vo_vm_aot_match: Option<bool>,
-    vo_vm_wasm_aot_match: Option<bool>,
     vo_backends_match: Option<bool>,
     cross_language_mismatches: usize,
     outputs: Vec<BenchmarkOutputCheck>,
@@ -878,7 +990,6 @@ struct BenchmarkSummary {
     tools: Vec<ToolVersion>,
     runs: Vec<BenchmarkRunInfo>,
     aot: Option<AotBenchmarkSummary>,
-    wasm_aot: Option<AotBenchmarkSummary>,
     ranking: Vec<BenchmarkRankingEntry>,
     pairwise_comparisons: Vec<BenchmarkPairwiseComparison>,
 }
@@ -899,8 +1010,6 @@ struct BenchmarkSummaryConfig {
     go_cache_dir: String,
     vo_binary: String,
     aot_runtime_archive: Option<String>,
-    wasm_aot_runner: String,
-    wasm_aot_runtime: String,
     score_mode: String,
 }
 
@@ -1050,18 +1159,36 @@ fn validate_benchmark_outputs(
     benchmark: &str,
     names: &[String],
     commands: &[String],
+    evidence_dir: Option<&Path>,
 ) -> Result<BenchmarkCorrectness> {
     debug_assert_eq!(names.len(), commands.len());
     let mut outputs = Vec::with_capacity(commands.len());
     let mut preflight_times = Vec::with_capacity(commands.len());
-    for (name, command) in names.iter().zip(commands) {
+    if let Some(dir) = evidence_dir {
+        fs::create_dir_all(dir)?;
+    }
+    for (index, (name, command)) in names.iter().zip(commands).enumerate() {
         println!("Correctness preflight: {benchmark}/{name} ...");
         let started = Instant::now();
         let output = Command::new("sh")
             .args(["-c", command])
+            .env_remove("VO_AOT_STATS")
+            .env_remove("VO_BENCH_METRICS")
             .current_dir(root)
             .output()
             .with_context(|| format!("could not preflight {benchmark}/{name}"))?;
+        let elapsed = started.elapsed().as_secs_f64();
+        if let Some(dir) = evidence_dir {
+            fs::write(dir.join(format!("{index}.stdout")), &output.stdout)?;
+            fs::write(dir.join(format!("{index}.stderr")), &output.stderr)?;
+            evidence::write_json(
+                &dir.join(format!("{index}.json")),
+                &serde_json::json!({
+                    "series": name, "command": command, "elapsed_sec": elapsed,
+                    "exit_code": output.status.code(), "success": output.status.success(),
+                }),
+            )?;
+        }
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!(
@@ -1069,7 +1196,6 @@ fn validate_benchmark_outputs(
                 stderr.trim()
             );
         }
-        let elapsed = started.elapsed().as_secs_f64();
         println!("Correctness preflight: {benchmark}/{name} passed in {elapsed:.3}s");
         outputs.push(normalize_benchmark_output(&output.stdout));
         preflight_times.push(elapsed);
@@ -1118,18 +1244,6 @@ fn validate_benchmark_outputs(
                 .all(|index| outputs[*index] == outputs[vm_index])
         })
     });
-    let wasm_aot_indices: Vec<_> = names
-        .iter()
-        .enumerate()
-        .filter_map(|(index, name)| (name == WASM_AOT_SERIES_NAME).then_some(index))
-        .collect();
-    let vo_vm_wasm_aot_match = vo_vm_index.and_then(|vm_index| {
-        (!wasm_aot_indices.is_empty()).then(|| {
-            wasm_aot_indices
-                .iter()
-                .all(|index| outputs[*index] == outputs[vm_index])
-        })
-    });
     let vo_backend_indices: Vec<_> = names
         .iter()
         .enumerate()
@@ -1165,7 +1279,6 @@ fn validate_benchmark_outputs(
     Ok(BenchmarkCorrectness {
         vo_vm_jit_match,
         vo_vm_aot_match,
-        vo_vm_wasm_aot_match,
         vo_backends_match,
         cross_language_mismatches,
         outputs: checks,
@@ -1241,22 +1354,6 @@ fn target_pairwise_comparisons(
             }
         }
     }
-    if scores.contains_key(WASM_AOT_SERIES_NAME) {
-        for right in std::iter::once("Vo-VM")
-            .chain(std::iter::once("Vo-AOT"))
-            .chain(
-                scores
-                    .keys()
-                    .filter(|name| is_vo_jit_series(name))
-                    .map(String::as_str),
-            )
-            .chain(["Node", "Go", "C"])
-        {
-            if let Some(comparison) = pairwise_comparison(scores, WASM_AOT_SERIES_NAME, right) {
-                pairs.push(comparison);
-            }
-        }
-    }
     if let Some(comparison) = pairwise_comparison(scores, "Vo-VM", "Lua") {
         pairs.push(comparison);
     }
@@ -1274,31 +1371,6 @@ fn summarize_aot_artifacts(run_info: &[BenchmarkRunInfo]) -> Option<AotBenchmark
     let artifacts = run_info
         .iter()
         .filter_map(|info| info.aot_artifact.as_ref())
-        .collect::<Vec<_>>();
-    if artifacts.is_empty() {
-        return None;
-    }
-    let total_compile_time_sec = artifacts
-        .iter()
-        .map(|artifact| artifact.compile_time_sec)
-        .sum::<f64>();
-    let total_size_bytes = artifacts
-        .iter()
-        .map(|artifact| artifact.size_bytes)
-        .sum::<u64>();
-    Some(AotBenchmarkSummary {
-        artifact_count: artifacts.len(),
-        total_compile_time_sec,
-        mean_compile_time_sec: total_compile_time_sec / artifacts.len() as f64,
-        total_size_bytes,
-        mean_size_bytes: total_size_bytes / artifacts.len() as u64,
-    })
-}
-
-fn summarize_wasm_aot_artifacts(run_info: &[BenchmarkRunInfo]) -> Option<AotBenchmarkSummary> {
-    let artifacts = run_info
-        .iter()
-        .filter_map(|info| info.wasm_aot_artifact.as_ref())
         .collect::<Vec<_>>();
     if artifacts.is_empty() {
         return None;
@@ -1354,7 +1426,10 @@ fn is_vo_jit_series(name: &str) -> bool {
 }
 
 fn is_vo_backend_series(name: &str) -> bool {
-    name == "Vo-VM" || name == "Vo-AOT" || name == WASM_AOT_SERIES_NAME || is_vo_jit_series(name)
+    matches!(
+        name,
+        "Vo-VM" | "Vo-AOT" | WASM_VM_SERIES_NAME | NOSTD_SERIES_NAME | OSR_SERIES_NAME
+    ) || is_vo_jit_series(name)
 }
 
 fn parse_positive_u64_arg(name: &str, value: Option<&String>) -> Result<u64> {
@@ -1550,77 +1625,79 @@ mod tests {
     }
 
     #[test]
-    fn target_pairwise_scores_report_wasm_aot_separately() {
-        let one = BTreeMap::from([("numeric".to_string(), 1.0)]);
-        let scores = BTreeMap::from([
-            ("Vo-VM".to_string(), one.clone()),
-            (
-                "Vo-AOT".to_string(),
-                BTreeMap::from([("numeric".to_string(), 0.1)]),
-            ),
-            (
-                "Vo-JIT(call=100,loop=50)".to_string(),
-                BTreeMap::from([("numeric".to_string(), 0.2)]),
-            ),
-            (
-                WASM_AOT_SERIES_NAME.to_string(),
-                BTreeMap::from([("numeric".to_string(), 2.0)]),
-            ),
-            ("Node".to_string(), one),
-        ]);
-
-        let pairwise = target_pairwise_comparisons(&scores);
-        let wasm_pairs = pairwise
-            .iter()
-            .filter(|comparison| comparison.left == WASM_AOT_SERIES_NAME)
-            .collect::<Vec<_>>();
-        assert_eq!(wasm_pairs.len(), 4);
-        assert!(wasm_pairs
-            .iter()
-            .any(|comparison| comparison.right == "Vo-AOT"));
-        assert!(wasm_pairs
-            .iter()
-            .any(|comparison| comparison.right == "Node"));
-    }
-
-    #[test]
     fn benchmark_preflight_requires_vm_and_jit_to_match() {
         let names = vec!["Vo-VM".to_string(), "Vo-JIT(call=100,loop=50)".to_string()];
         let matching = vec![
             "printf 'same\\n'".to_string(),
             "printf 'same\\r\\n'".to_string(),
         ];
-        let check = validate_benchmark_outputs(Path::new("."), "test", &names, &matching)
+        let check = validate_benchmark_outputs(Path::new("."), "test", &names, &matching, None)
             .expect("normalized outputs match");
         assert_eq!(check.vo_vm_jit_match, Some(true));
 
         let mismatching = vec!["printf vm".to_string(), "printf jit".to_string()];
-        assert!(validate_benchmark_outputs(Path::new("."), "test", &names, &mismatching).is_err());
+        assert!(
+            validate_benchmark_outputs(Path::new("."), "test", &names, &mismatching, None).is_err()
+        );
     }
 
     #[test]
     fn benchmark_preflight_requires_aot_to_match_vm() {
         let names = vec!["Vo-VM".to_string(), "Vo-AOT".to_string()];
         let commands = vec!["printf same".to_string(), "printf same".to_string()];
-        let check = validate_benchmark_outputs(Path::new("."), "test", &names, &commands)
+        let check = validate_benchmark_outputs(Path::new("."), "test", &names, &commands, None)
             .expect("AOT output matches VM");
         assert_eq!(check.vo_vm_aot_match, Some(true));
         assert_eq!(check.vo_backends_match, Some(true));
 
         let mismatching = vec!["printf vm".to_string(), "printf aot".to_string()];
-        assert!(validate_benchmark_outputs(Path::new("."), "test", &names, &mismatching).is_err());
+        assert!(
+            validate_benchmark_outputs(Path::new("."), "test", &names, &mismatching, None).is_err()
+        );
     }
 
     #[test]
-    fn benchmark_preflight_requires_wasm_aot_to_match_vm() {
-        let names = vec!["Vo-VM".to_string(), WASM_AOT_SERIES_NAME.to_string()];
-        let commands = vec!["printf same".to_string(), "printf same".to_string()];
-        let check = validate_benchmark_outputs(Path::new("."), "test", &names, &commands)
-            .expect("Wasm AOT output matches VM");
-        assert_eq!(check.vo_vm_wasm_aot_match, Some(true));
-        assert_eq!(check.vo_backends_match, Some(true));
-
-        let mismatching = vec!["printf vm".to_string(), "printf wasm".to_string()];
-        assert!(validate_benchmark_outputs(Path::new("."), "test", &names, &mismatching).is_err());
+    fn benchmark_preflight_checks_every_vo_engine_and_retains_failures() {
+        let names = [
+            "Vo-VM",
+            "Vo-JIT(call=100,loop=50)",
+            OSR_SERIES_NAME,
+            "Vo-AOT",
+            WASM_VM_SERIES_NAME,
+            NOSTD_SERIES_NAME,
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let mut commands = vec!["printf same".to_string(); names.len()];
+        assert_eq!(
+            validate_benchmark_outputs(Path::new("."), "seven", &names, &commands, None)
+                .unwrap()
+                .vo_backends_match,
+            Some(true)
+        );
+        for index in 1..names.len() {
+            commands[index] = "printf wrong".to_string();
+            assert!(
+                validate_benchmark_outputs(Path::new("."), "seven", &names, &commands, None)
+                    .is_err()
+            );
+            commands[index] = "printf same".to_string();
+        }
+        let dir = std::env::temp_dir().join(new_benchmark_run_id());
+        let result = validate_benchmark_outputs(
+            Path::new("."),
+            "failure",
+            &[NOSTD_SERIES_NAME.to_string()],
+            &["printf partial; printf failure >&2; exit 7".to_string()],
+            Some(&dir),
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(dir.join("0.stdout")).unwrap(), b"partial");
+        assert_eq!(fs::read(dir.join("0.stderr")).unwrap(), b"failure");
+        let evidence: Value =
+            serde_json::from_slice(&fs::read(dir.join("0.json")).unwrap()).unwrap();
+        assert_eq!(evidence["exit_code"], 7);
+        assert_eq!(evidence["success"], false);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -1,0 +1,43 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func htmlAttributeNames() {
+	var lower *ui.BoolState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		lower = ui.Bool(scope, "lower", false)
+		name := "VaLuE"
+		if lower.Get() {
+			name = "value"
+		}
+		return ui.Fragment(ui.Element("input").Attr("DISABLED", "false").Attr(name, "kept"), ui.Element("textarea").Attr("VALUE", "\nKept notes"), ui.Element("svg", ui.Fragment(ui.Element("linearGradient").Attr("viewBox", "0 0 10 10").Attr("viewbox", "distinct")), ui.Element("foreignObject", ui.Fragment(ui.Element("input").Attr("CHECKED", "false"))).Attr("viewBox", "0 0 20 20")))
+	}))
+	first := flush(root)
+	html := root.HTML()
+	require(!strings.Contains(html, "DISABLED=") && !strings.Contains(html, "disabled="), "HTML false boolean casing changed native meaning")
+	require(strings.Contains(html, `value="kept"`) &&
+		strings.Contains(html, "\n\nKept notes</textarea>"), "HTML mixed-case controls lost value semantics")
+	require(strings.Contains(html, `viewBox="0 0 10 10"`) &&
+		strings.Contains(html, `viewbox="distinct"`), "SVG attribute names lost case sensitivity")
+	require(strings.Contains(html, `data-vo-checked=""`) && !strings.Contains(html, "CHECKED="), "HTML namespace was lost through a fragment inside foreignObject")
+	for _, mutation := range first.Mutations {
+		require(mutation.Name != "VaLuE" && mutation.Name != "VALUE" && mutation.Name != "DISABLED", "HTML mutation did not use canonical names")
+	}
+	lower.Set(true)
+	require(len(flush(root).Mutations) == 0, "changing only HTML attribute case produced conflicting set/remove operations")
+	root.Close()
+	root = ui.NewRoot(ui.Element("input").Attr("VaLuE", "first").Attr("value", "second").Attr("VaLuE", "last"))
+	first = flush(root)
+	count := 0
+	for _, mutation := range first.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "value" {
+			count++
+			require(mutation.Value == "last", "HTML case aliases did not use the last value")
+		}
+	}
+	require(count == 1, "HTML case aliases produced duplicate attributes")
+	root.Close()
+}

@@ -15,7 +15,6 @@ use crate::check::sendable::check_sendable;
 use crate::check::type_info::TypeInfo;
 use crate::objects::TCObjects;
 use crate::selection::SelectionKind;
-use crate::typ::{self, Type};
 
 use super::errors::TypeError;
 
@@ -63,6 +62,7 @@ impl<'a> Visitor for GoIslandCollector<'a> {
 
 impl<'a> GoIslandCollector<'a> {
     fn check_go_island_call(&mut self, call_expr: &Expr) {
+        let call_expr = Self::strip_parens(call_expr);
         let ExprKind::Call(call) = &call_expr.kind else {
             return; // Not a call — stmt.rs already reports this
         };
@@ -70,95 +70,22 @@ impl<'a> GoIslandCollector<'a> {
         // Explicit arguments are serialized using their post-assignment parameter
         // shape. This matters for capability attenuation: a local `port T` may be
         // passed to a `port<- T` parameter without transferring its receive side.
-        self.check_call_arguments(call);
+        self.check_call_arguments(call_expr, call);
 
         self.check_callee(&call.func);
     }
 
-    fn check_call_arguments(&mut self, call: &vo_syntax::ast::CallExpr) {
-        let callee = Self::strip_parens(&call.func);
-        let Some(callee_tv) = self.result.types.get(&callee.id) else {
+    fn check_call_arguments(&mut self, expression: &Expr, call: &vo_syntax::ast::CallExpr) {
+        let Some(checked) = self.result.call(expression) else {
             return;
         };
-        let signature_key = typ::deep_underlying_type(callee_tv.typ, self.tc_objs);
-        let Some(signature) = self.tc_objs.types[signature_key].try_as_signature() else {
-            return;
-        };
-        let variadic = signature.variadic();
-        let params_key = signature.params();
-        let Some(params) = self.tc_objs.types[params_key].try_as_tuple() else {
-            // The primary checker reports malformed signature metadata. This
-            // post-pass must remain best-effort so invalid source cannot turn
-            // a type-checking failure into a compiler panic.
-            return;
-        };
-        let param_types: Vec<_> = params
-            .vars()
-            .iter()
-            .filter_map(|&param| self.tc_objs.lobjs[param].typ())
-            .collect();
-
-        let mut arguments = Vec::new();
-        if call.args.len() == 1 && !call.spread {
-            let arg = &call.args[0];
-            if let Some(tv) = self.result.types.get(&arg.id) {
-                let actual_key = typ::deep_underlying_type(tv.typ, self.tc_objs);
-                if let Type::Tuple(tuple) = &self.tc_objs.types[actual_key] {
-                    for &value in tuple.vars() {
-                        if let Some(value_type) = self.tc_objs.lobjs[value].typ() {
-                            arguments.push((arg, value_type));
-                        }
-                    }
-                } else {
-                    arguments.push((arg, tv.typ));
-                }
-            }
-        } else {
-            arguments.extend(
-                call.args
-                    .iter()
-                    .filter_map(|arg| self.result.types.get(&arg.id).map(|tv| (arg, tv.typ))),
+        for argument in &checked.arguments {
+            self.check_type_sendability(
+                argument.parameter_type,
+                &call.args[argument.source_index],
+                "argument",
             );
         }
-
-        let argument_count = arguments.len();
-        for (index, (argument, actual_type)) in arguments.into_iter().enumerate() {
-            let formal_type = Self::formal_argument_type(
-                index,
-                argument_count,
-                call.spread,
-                variadic,
-                &param_types,
-                self.tc_objs,
-            );
-            let transfer_type = formal_type.unwrap_or(actual_type);
-            self.check_type_sendability(transfer_type, argument, "argument");
-        }
-    }
-
-    fn formal_argument_type(
-        index: usize,
-        argument_count: usize,
-        spread: bool,
-        variadic: bool,
-        param_types: &[crate::objects::TypeKey],
-        tc_objs: &TCObjects,
-    ) -> Option<crate::objects::TypeKey> {
-        if !variadic {
-            return param_types.get(index).copied();
-        }
-        let last_index = param_types.len().checked_sub(1)?;
-        if index < last_index {
-            return param_types.get(index).copied();
-        }
-        let variadic_type = *param_types.get(last_index)?;
-        if spread && index + 1 == argument_count {
-            return Some(variadic_type);
-        }
-        let underlying = typ::deep_underlying_type(variadic_type, tc_objs);
-        tc_objs.types[underlying]
-            .try_as_slice()
-            .map(|slice| slice.elem())
     }
 
     fn check_callee(&mut self, callee: &Expr) {

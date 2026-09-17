@@ -22,40 +22,40 @@
       "import": "./dist/ui_system.js",
       "types": "./dist/ui_system.d.ts"
     },
-    "./ui/aot": {
-      "import": "./dist/ui_aot.js",
-      "types": "./dist/ui_aot.d.ts"
-    },
     "./wasm": {
       "import": "./pkg/vo_web.js",
       "types": "./pkg/vo_web.d.ts"
+    },
+    "./ui/next": {
+      "types": "./dist/ui_next/index.d.ts",
+      "import": "./dist/ui_next/index.js"
     }
   },
   "files": [
     "dist",
     "pkg",
-    "aot-support"
+    "ui-next.md"
   ],
   "scripts": {
+    "prepack": "node prepare-package.mjs",
     "build:wasm": "wasm-pack build --target web --out-dir pkg",
     "build:wasm:release": "wasm-pack build --target web --release --out-dir pkg --locked",
-    "build:aot-support": "wasm-pack build ../vo-aot-support-wasm --target web --release --out-dir ../vo-web/aot-support --locked",
-    "build:js": "tsc",
+    "build:js": "node build-js.mjs",
     "test:vfs": "npm run build:js && node --test tests/vfs.test.mjs",
     "test:ui": "npm run build:js && node --test tests/ui_protocol.test.mjs",
     "test:runner": "node --test tests/test_runner.test.mjs",
     "test:ui-browser": "node ../../../eng/run-browser-smoke.mjs --project . --global __volangUiBrowserSmoke --output ../../../target/ci/results/ui/volang-ui-browser-conformance.json",
-    "test:ui-component-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/ui-nested-component-aot --component-state-smoke --output ../../../target/ci/results/ui/volang-ui-aot-component-browser.json",
-    "test:uikit-gallery-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/ui-component-gallery-aot --uikit-gallery-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-uikit-gallery-browser.json",
-    "test:data-application-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/data-application-aot --data-application-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-data-application-browser.json",
-    "test:content-site-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/content-site-aot --content-site-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-content-site-browser.json",
-    "test:media-application-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/media-application-aot --media-application-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-media-application-browser.json",
-    "test:studio-workbench-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/studio-workbench-aot --studio-workbench-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-studio-workbench-browser.json",
-    "test:studio-aot-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/ci/artifacts/site --studio-aot-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-studio-aot-browser.json",
-    "test:aot": "node --test tests/aot.test.mjs",
-    "build": "npm run build:wasm && npm run build:aot-support && npm run build:js",
-    "build:release": "npm run build:wasm:release && npm run build:aot-support && npm run build:js",
-    "clean": "rm -rf dist pkg aot-support"
+    "test:ui-component-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/ui-nested-component-vm --component-state-smoke --output ../../../target/ci/results/ui/volang-ui-vm-component-browser.json",
+    "test:uikit-gallery-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/ui-component-gallery-vm --uikit-gallery-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-uikit-gallery-browser.json",
+    "test:data-application-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/data-application-vm --data-application-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-data-application-browser.json",
+    "test:content-site-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/content-site-vm --content-site-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-content-site-browser.json",
+    "test:media-application-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/media-application-vm --media-application-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-media-application-browser.json",
+    "test:studio-workbench-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/studio-workbench-vm --studio-workbench-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-studio-workbench-browser.json",
+    "test:studio-vm-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/ci/artifacts/site --studio-vm-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-studio-vm-browser.json",
+    "build": "npm run build:wasm && npm run build:js",
+    "build:release": "npm run build:wasm:release && npm run build:js",
+    "clean": "rm -rf dist pkg",
+    "test:runtime": "node --test tests/host_scheduler.test.mjs tests/vm_contracts.test.mjs"
   },
   "devDependencies": {
     "typescript": "^5.0.0"

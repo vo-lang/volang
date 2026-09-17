@@ -12,9 +12,9 @@ publish = false
 
 [dependencies]
 vo-common-core = { workspace = true, features = ["std"] }
-vo-jit = { path = "../vo-jit" }
+vo-jit = { path = "../vo-jit", default-features = false }
 vo-target.workspace = true
-vo-vm = { path = "../vo-vm", features = ["jit"] }
+vo-vm = { path = "../vo-vm", features = ["native"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -145,7 +145,10 @@ export class VirtualFS {
   private initialized = false;
   private opfsAvailable = false;
 
-  constructor() {
+  constructor(private readonly options: { readonly persistence?: 'browser' | 'memory' } = {}) {
+    if (options.persistence !== undefined && options.persistence !== 'browser' && options.persistence !== 'memory') {
+      throw new Error('VFS persistence must be browser or memory');
+    }
     this.root = this.createDir(0o755);
     this.resetAccounting();
     this.ensurePlatformDirectories();
@@ -174,7 +177,8 @@ export class VirtualFS {
     // immutable snapshots and stay memory-only so they cannot race the page's
     // OPFS checkpoint or delete application-owned files.
     this.opfsAvailable =
-      typeof window !== 'undefined'
+      this.options.persistence !== 'memory'
+      && typeof window !== 'undefined'
       && typeof navigator !== 'undefined'
       && Boolean(navigator.storage?.getDirectory);
 
@@ -206,7 +210,7 @@ export class VirtualFS {
 
     this.initialized = true;
 
-    if (typeof window !== 'undefined') {
+    if (this.opfsAvailable && typeof window !== 'undefined') {
       window.addEventListener('beforeunload', () => {
         // Browsers do not wait for asynchronous work during unload. Keep the
         // attempt best-effort and suppress a rejected Promise at this boundary.
@@ -215,7 +219,7 @@ export class VirtualFS {
         });
       });
     }
-    if (typeof document !== 'undefined') {
+    if (this.opfsAvailable && typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) {
           void this.forceFlush().catch((error) => {

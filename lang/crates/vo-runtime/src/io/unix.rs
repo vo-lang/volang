@@ -17,6 +17,7 @@ type ReadyBatch = (Vec<ReadyFd>, Vec<IoToken>);
 /// Tracks pending operations for a single fd.
 #[derive(Debug, Default)]
 struct FdState {
+    scan_index: usize,
     read: Option<PendingOp>,
     write: Option<PendingOp>,
 }
@@ -33,8 +34,12 @@ struct TimerState {
 #[derive(Debug)]
 pub struct UnixDriver {
     fd_states: HashMap<i32, FdState>,
+    scan_fds: Vec<i32>,
+    scan_cursor: usize,
     /// Pending timers (token -> TimerState)
     timers: HashMap<IoToken, TimerState>,
+    #[cfg(target_os = "linux")]
+    timerfd_to_token: HashMap<i32, IoToken>,
     /// Registration failures discovered while rearming an existing fd are
     /// delivered on the next poll instead of leaving their fibers suspended.
     queued_completions: Vec<Completion>,
@@ -66,7 +71,11 @@ impl UnixDriver {
             }
             Ok(Self {
                 fd_states: HashMap::new(),
+                scan_fds: Vec::new(),
+                scan_cursor: 0,
                 timers: HashMap::new(),
+                #[cfg(target_os = "linux")]
+                timerfd_to_token: HashMap::new(),
                 queued_completions: Vec::new(),
                 #[cfg(test)]
                 fail_next_registration: None,
@@ -89,7 +98,11 @@ impl UnixDriver {
             }
             Ok(Self {
                 fd_states: HashMap::new(),
+                scan_fds: Vec::new(),
+                scan_cursor: 0,
                 timers: HashMap::new(),
+                #[cfg(target_os = "linux")]
+                timerfd_to_token: HashMap::new(),
                 queued_completions: Vec::new(),
                 #[cfg(test)]
                 fail_next_registration: None,
@@ -180,7 +193,14 @@ impl UnixDriver {
 
         // Store the operation and register with poller
         let op_token = op.token;
-        let state = self.fd_states.entry(fd).or_default();
+        let state = self.fd_states.entry(fd).or_insert_with(|| {
+            let scan_index = self.scan_fds.len();
+            self.scan_fds.push(fd);
+            FdState {
+                scan_index,
+                ..FdState::default()
+            }
+        });
         if is_read {
             state.read = Some(op);
         } else {
@@ -277,6 +297,7 @@ impl UnixDriver {
                 });
             }
 
+            self.timerfd_to_token.insert(timerfd.as_raw_fd(), token);
             self.timers.insert(token, TimerState { token, timerfd });
             SubmitResult::Pending
         }
@@ -338,7 +359,19 @@ impl UnixDriver {
     /// Poll for completed operations. Returns completions.
     pub fn poll(&mut self) -> Vec<Completion> {
         let mut completed = std::mem::take(&mut self.queued_completions);
-        completed.extend(self.take_matching_operations(PendingOp::is_cancelled));
+        // Maintenance visits a rotating dense batch, independent of the total
+        // number of pending descriptors. Closed/cancelled handles still make
+        // progress when other fibers remain runnable.
+        let count = self.scan_fds.len().min(64);
+        let mut maintenance = Vec::with_capacity(count);
+        for _ in 0..count {
+            if self.scan_cursor >= self.scan_fds.len() {
+                self.scan_cursor = 0;
+            }
+            maintenance.push(self.scan_fds[self.scan_cursor]);
+            self.scan_cursor += 1;
+        }
+        completed.extend(self.take_matching_operations_on(&maintenance, PendingOp::is_cancelled));
         let (ready_fds, ready_timers) = match self.poll_ready() {
             Ok(ready) => ready,
             Err(error) => {
@@ -352,6 +385,8 @@ impl UnixDriver {
         // Handle timer completions
         for token in ready_timers {
             if let Some(timer) = self.timers.remove(&token) {
+                #[cfg(target_os = "linux")]
+                self.timerfd_to_token.remove(&timer.timerfd.as_raw_fd());
                 #[cfg(target_os = "linux")]
                 {
                     // Read to clear the timer, then close the fd
@@ -432,16 +467,15 @@ impl UnixDriver {
             }
         }
         for fd in fds_to_remove {
-            self.fd_states.remove(&fd);
+            self.remove_fd_state(fd);
             self.unregister_fd(fd);
         }
 
         // Check for closed fds (important for handling Close() on listeners)
-        let fds: Vec<i32> = self.fd_states.keys().copied().collect();
-        for fd in fds {
+        for fd in maintenance {
             let ret = unsafe { libc::fcntl(fd, libc::F_GETFD) };
             if ret == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EBADF) {
-                if let Some(state) = self.fd_states.remove(&fd) {
+                if let Some(state) = self.remove_fd_state(fd) {
                     if let Some(op) = state.read {
                         completed.push(Completion {
                             token: op.token,
@@ -481,24 +515,53 @@ impl UnixDriver {
         self.fail_next_timer = Some(error);
     }
 
+    fn remove_fd_state(&mut self, fd: i32) -> Option<FdState> {
+        let state = self.fd_states.remove(&fd)?;
+        self.scan_fds.swap_remove(state.scan_index);
+        if let Some(&moved) = self.scan_fds.get(state.scan_index) {
+            self.fd_states
+                .get_mut(&moved)
+                .expect("dense fd index")
+                .scan_index = state.scan_index;
+        }
+        // Revisit a swapped-in descriptor instead of skipping it this round.
+        if state.scan_index < self.scan_cursor {
+            self.scan_cursor = state.scan_index;
+        }
+        Some(state)
+    }
+
     fn take_matching_operations(
         &mut self,
+        matches: impl FnMut(&PendingOp) -> bool,
+    ) -> Vec<Completion> {
+        let fds = self.scan_fds.clone();
+        self.take_matching_operations_on(&fds, matches)
+    }
+
+    fn take_matching_operations_on(
+        &mut self,
+        fds: &[i32],
         mut matches: impl FnMut(&PendingOp) -> bool,
     ) -> Vec<Completion> {
-        let fds = self.fd_states.keys().copied().collect::<Vec<_>>();
         let mut completed = Vec::new();
         let mut remove = Vec::new();
         let mut update = Vec::new();
 
-        for fd in fds {
+        for &fd in fds {
             let Some(state) = self.fd_states.get_mut(&fd) else {
                 continue;
             };
-            if state.read.as_ref().is_some_and(&mut matches) {
+            let cancel_read = state.read.as_ref().is_some_and(&mut matches);
+            let cancel_write = state.write.as_ref().is_some_and(&mut matches);
+            if !cancel_read && !cancel_write {
+                continue;
+            }
+            if cancel_read {
                 let op = state.read.take().expect("checked pending read");
                 completed.push(cancelled_completion(op.token));
             }
-            if state.write.as_ref().is_some_and(&mut matches) {
+            if cancel_write {
                 let op = state.write.take().expect("checked pending write");
                 completed.push(cancelled_completion(op.token));
             }
@@ -515,14 +578,14 @@ impl UnixDriver {
             }
         }
         for fd in remove {
-            self.fd_states.remove(&fd);
+            self.remove_fd_state(fd);
             self.unregister_fd(fd);
         }
         completed
     }
 
     fn fail_fd(&mut self, fd: i32, error: &io::Error) -> Vec<Completion> {
-        let Some(state) = self.fd_states.remove(&fd) else {
+        let Some(state) = self.remove_fd_state(fd) else {
             return Vec::new();
         };
         self.unregister_fd(fd);
@@ -538,6 +601,8 @@ impl UnixDriver {
     }
 
     fn fail_all(&mut self, error: &io::Error) -> Vec<Completion> {
+        #[cfg(target_os = "linux")]
+        self.timerfd_to_token.clear();
         let fds = self.fd_states.keys().copied().collect::<Vec<_>>();
         let mut completed = Vec::new();
         for fd in fds {
@@ -560,13 +625,6 @@ impl UnixDriver {
 
         #[cfg(target_os = "linux")]
         {
-            // Build timerfd -> token map for lookup
-            let timerfd_to_token: HashMap<i32, IoToken> = self
-                .timers
-                .iter()
-                .map(|(token, state)| (state.timerfd.as_raw_fd(), *token))
-                .collect();
-
             let mut events: [libc::epoll_event; 64] = unsafe { std::mem::zeroed() };
             let n =
                 unsafe { libc::epoll_wait(self.epoll_fd.as_raw_fd(), events.as_mut_ptr(), 64, 0) };
@@ -580,7 +638,7 @@ impl UnixDriver {
                 for event in events.iter().take(n as usize) {
                     let fd = event.u64 as i32;
                     // Check if this is a timer fd
-                    if let Some(&token) = timerfd_to_token.get(&fd) {
+                    if let Some(&token) = self.timerfd_to_token.get(&fd) {
                         ready_timers.push(token);
                     } else {
                         let ev = event.events;

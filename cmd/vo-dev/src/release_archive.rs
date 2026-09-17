@@ -14,10 +14,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tar::{Builder, Header};
 
-const BUILD_RECEIPT_SCHEMA: u32 = 7;
-const PROVENANCE_SCHEMA: u32 = 7;
+#[cfg(test)]
+mod installation;
+pub(crate) mod toolchain;
+
+const BUILD_RECEIPT_SCHEMA: u32 = 8;
+const PROVENANCE_SCHEMA: u32 = 8;
 const MAX_RELEASE_BINARY_SIZE: u64 = 512 * 1024 * 1024;
-const MAX_RELEASE_ARCHIVE_SIZE: u64 = MAX_RELEASE_BINARY_SIZE * 4 + 8 * 1024 * 1024;
+const MAX_RELEASE_ARCHIVE_SIZE: u64 = MAX_RELEASE_BINARY_SIZE * 5 + 8 * 1024 * 1024;
 const MAX_RELEASE_EVIDENCE_SIZE: u64 = 1024 * 1024;
 const MAX_UI_WEB_RUNTIME_FILES: usize = 512;
 const UI_WEB_RUNTIME_ARCHIVE_ROOT: &str = "share/volang/ui-web";
@@ -34,6 +38,7 @@ struct ReleaseBuildReceipt {
     aot_runtime: BinaryRecord,
     ui_aot_runtime: BinaryRecord,
     ui_web_runtime: Vec<BinaryRecord>,
+    ui_web_toolchain: Vec<toolchain::Record>,
     ui_product: UiProductEvidence,
 }
 
@@ -49,6 +54,7 @@ struct ReleaseProvenance {
     aot_runtime: BinaryRecord,
     ui_aot_runtime: BinaryRecord,
     ui_web_runtime: Vec<BinaryRecord>,
+    ui_web_toolchain: Vec<toolchain::Record>,
     ui_product: UiProductEvidence,
 }
 
@@ -178,6 +184,7 @@ pub(crate) fn record_release_build(
     let ui_runtime_path = release_binary_path(root, target, ui_runtime_name);
     let ui_aot_runtime = binary_record(&ui_runtime_path, ui_runtime_name)?;
     let ui_web_runtime = ui_web_runtime_records(root)?;
+    let ui_web_toolchain = toolchain::records(root, target, &binary)?;
     let ui_product = ui_product_evidence(root, identity)?;
     let receipt = ReleaseBuildReceipt {
         schema: BUILD_RECEIPT_SCHEMA,
@@ -188,6 +195,7 @@ pub(crate) fn record_release_build(
         aot_runtime,
         ui_aot_runtime,
         ui_web_runtime,
+        ui_web_toolchain,
         ui_product,
     };
     write_json_atomic(&build_receipt_path(root, target), &receipt)
@@ -239,8 +247,12 @@ pub(crate) fn package_release_binary(
         bail!("UI AOT runtime changed after its verified build receipt was written");
     }
     let ui_web_runtime = ui_web_runtime_records(root)?;
+    let ui_web_toolchain = toolchain::records(root, target, &binary)?;
     if receipt.ui_web_runtime != ui_web_runtime {
         bail!("UI Web runtime changed after its verified build receipt was written");
+    }
+    if receipt.ui_web_toolchain != ui_web_toolchain {
+        bail!("UI Web toolchain changed after its verified build receipt was written");
     }
     let ui_product = ui_product_evidence(root, identity)?;
     if receipt.ui_product != ui_product {
@@ -269,6 +281,10 @@ pub(crate) fn package_release_binary(
             root,
             records: &ui_web_runtime,
         },
+        toolchain::Input {
+            directory: &toolchain::directory(root, target),
+            records: &ui_web_toolchain,
+        },
         identity.source_date_epoch,
     )?;
     verify_deterministic_tarball(
@@ -277,6 +293,7 @@ pub(crate) fn package_release_binary(
         &aot_runtime,
         &ui_aot_runtime,
         &ui_web_runtime,
+        &ui_web_toolchain,
         identity.source_date_epoch,
     )?;
 
@@ -284,7 +301,7 @@ pub(crate) fn package_release_binary(
         path: tarball_name.clone(),
         sha256: sha256_file(&tarball_path)?,
         size: regular_file_size(&tarball_path)?,
-        format: "tar+gzip-v4".to_string(),
+        format: "tar+gzip-v5".to_string(),
     };
     let provenance = ReleaseProvenance {
         schema: PROVENANCE_SCHEMA,
@@ -296,6 +313,7 @@ pub(crate) fn package_release_binary(
         aot_runtime,
         ui_aot_runtime,
         ui_web_runtime,
+        ui_web_toolchain,
         ui_product,
     };
     write_json_atomic(
@@ -361,7 +379,7 @@ fn validate_release_artifact(
             provenance.archive.path
         );
     }
-    if provenance.archive.format != "tar+gzip-v4" {
+    if provenance.archive.format != "tar+gzip-v5" {
         bail!(
             "unsupported release archive format {}",
             provenance.archive.format
@@ -413,6 +431,7 @@ fn validate_release_artifact(
     }
     validate_binary_record(&provenance.ui_aot_runtime)?;
     validate_ui_web_runtime_records(&provenance.ui_web_runtime)?;
+    toolchain::validate(&provenance.ui_web_toolchain, &provenance.binary)?;
     let expected_ui_product = ui_product_evidence(root, identity)?;
     validate_ui_product_evidence(&provenance.ui_product, identity)?;
     if provenance.ui_product != expected_ui_product {
@@ -424,6 +443,7 @@ fn validate_release_artifact(
         &provenance.aot_runtime,
         &provenance.ui_aot_runtime,
         &provenance.ui_web_runtime,
+        &provenance.ui_web_toolchain,
         identity.source_date_epoch,
     )
 }
@@ -565,6 +585,7 @@ fn create_deterministic_tarball(
     runtime: ArchiveBinaryInput<'_>,
     ui_runtime: ArchiveBinaryInput<'_>,
     ui_web_runtime: UiWebRuntimeInput<'_>,
+    ui_web_toolchain: toolchain::Input<'_>,
     source_date_epoch: u64,
 ) -> Result<()> {
     if source_date_epoch > u32::MAX as u64 {
@@ -574,6 +595,10 @@ fn create_deterministic_tarball(
     validate_release_binary_size(regular_file_size(runtime.path)?)?;
     validate_release_binary_size(regular_file_size(ui_runtime.path)?)?;
     validate_ui_web_runtime_records(ui_web_runtime.records)?;
+    toolchain::validate(
+        ui_web_toolchain.records,
+        &binary_record(binary.path, binary.name)?,
+    )?;
     reject_existing_non_file(output_path)?;
     let (temp_path, output) = create_temp_file(output_path)?;
     let result = (|| {
@@ -617,6 +642,7 @@ fn create_deterministic_tarball(
                 .append(&header, &mut file)
                 .with_context(|| format!("could not append UI Web runtime {}", asset.path))?;
         }
+        toolchain::append(&mut builder, ui_web_toolchain, source_date_epoch)?;
         let encoder = builder
             .into_inner()
             .context("could not finalize deterministic tar stream")?;
@@ -643,6 +669,7 @@ fn verify_deterministic_tarball(
     aot_runtime: &BinaryRecord,
     ui_aot_runtime: &BinaryRecord,
     ui_web_runtime: &[BinaryRecord],
+    ui_web_toolchain: &[toolchain::Record],
     source_date_epoch: u64,
 ) -> Result<()> {
     let archive_size = regular_file_size(archive_path)?;
@@ -656,6 +683,7 @@ fn verify_deterministic_tarball(
     validate_binary_record(aot_runtime)?;
     validate_binary_record(ui_aot_runtime)?;
     validate_ui_web_runtime_records(ui_web_runtime)?;
+    toolchain::validate(ui_web_toolchain, binary)?;
 
     let mut gzip_prefix = [0_u8; 10];
     File::open(archive_path)
@@ -696,6 +724,7 @@ fn verify_deterministic_tarball(
             "UI Web runtime",
         )?;
     }
+    toolchain::verify(&mut decoder, ui_web_toolchain, source_date_epoch)?;
     require_zero_bytes(&mut decoder, 1024, "release archive terminator")?;
     let mut extra = [0_u8; 1];
     if decoder
@@ -806,7 +835,7 @@ fn deterministic_tar_header_with_mode(
 fn ui_web_runtime_records(root: &Path) -> Result<Vec<BinaryRecord>> {
     let runtime_root = root.join("lang/crates/vo-web");
     let mut files = Vec::new();
-    for relative in ["dist", "pkg", "aot-support"] {
+    for relative in ["dist", "pkg"] {
         collect_ui_web_runtime_files(&runtime_root.join(relative), &mut files)?;
     }
     files.sort();
@@ -928,8 +957,6 @@ fn validate_ui_web_runtime_records(records: &[BinaryRecord]) -> Result<()> {
         "dist/ui_system.js",
         "pkg/vo_web.js",
         "pkg/vo_web_bg.wasm",
-        "aot-support/vo_aot_support_wasm.js",
-        "aot-support/vo_aot_support_wasm_bg.wasm",
     ] {
         let expected = format!("{UI_WEB_RUNTIME_ARCHIVE_ROOT}/{required}");
         if records
@@ -1186,6 +1213,8 @@ mod tests {
         fs::write(&ui_runtime_path, b"deterministic UI AOT runtime").unwrap();
         let ui_runtime = binary_record(&ui_runtime_path, "libvo_ui_aot_runtime_native.a").unwrap();
         let ui_web_runtime = write_ui_web_runtime_fixture(&root);
+        let kit_directory = root.join("kit");
+        let ui_web_toolchain = toolchain::fixture(&kit_directory, &binary, &binary_path);
         let first = root.join("first.tar.gz");
         let second = root.join("second.tar.gz");
         create_deterministic_tarball(
@@ -1205,6 +1234,10 @@ mod tests {
             UiWebRuntimeInput {
                 root: &root,
                 records: &ui_web_runtime,
+            },
+            toolchain::Input {
+                directory: &kit_directory,
+                records: &ui_web_toolchain,
             },
             1_700_000_000,
         )
@@ -1227,6 +1260,10 @@ mod tests {
                 root: &root,
                 records: &ui_web_runtime,
             },
+            toolchain::Input {
+                directory: &kit_directory,
+                records: &ui_web_toolchain,
+            },
             1_700_000_000,
         )
         .unwrap();
@@ -1236,6 +1273,7 @@ mod tests {
             &runtime,
             &ui_runtime,
             &ui_web_runtime,
+            &ui_web_toolchain,
             1_700_000_000,
         )
         .unwrap();
@@ -1257,6 +1295,8 @@ mod tests {
         fs::write(&ui_runtime_path, b"strict UI AOT runtime").unwrap();
         let ui_runtime = binary_record(&ui_runtime_path, "libvo_ui_aot_runtime_native.a").unwrap();
         let ui_web_runtime = write_ui_web_runtime_fixture(&root);
+        let kit_directory = root.join("kit");
+        let ui_web_toolchain = toolchain::fixture(&kit_directory, &binary, &binary_path);
 
         let bad_header = root.join("bad-header.tar.gz");
         create_deterministic_tarball(
@@ -1277,6 +1317,10 @@ mod tests {
                 root: &root,
                 records: &ui_web_runtime,
             },
+            toolchain::Input {
+                directory: &kit_directory,
+                records: &ui_web_toolchain,
+            },
             1_700_000_000,
         )
         .unwrap();
@@ -1289,6 +1333,7 @@ mod tests {
             &runtime,
             &ui_runtime,
             &ui_web_runtime,
+            &ui_web_toolchain,
             1_700_000_000,
         )
         .is_err());
@@ -1312,6 +1357,10 @@ mod tests {
                 root: &root,
                 records: &ui_web_runtime,
             },
+            toolchain::Input {
+                directory: &kit_directory,
+                records: &ui_web_toolchain,
+            },
             1_700_000_000,
         )
         .unwrap();
@@ -1327,6 +1376,7 @@ mod tests {
             &runtime,
             &ui_runtime,
             &ui_web_runtime,
+            &ui_web_toolchain,
             1_700_000_000,
         )
         .is_err());
@@ -1410,6 +1460,12 @@ mod tests {
         write_ui_web_runtime_fixture(&root);
         let release = sample_release(target);
 
+        let binary = binary_record(&binary_dir.join("vo"), "vo").unwrap();
+        toolchain::fixture(
+            &toolchain::directory(&root, target),
+            &binary,
+            &binary_dir.join("vo"),
+        );
         let verified_binary = sha256_file(&binary_dir.join("vo")).unwrap();
         assert!(record_release_build(&root, &release, target, &identity, &"0".repeat(64)).is_err());
         record_release_build(&root, &release, target, &identity, &verified_binary).unwrap();
@@ -1419,6 +1475,15 @@ mod tests {
         assert_eq!(first, fs::read(root.join(&tarball)).unwrap());
         assert!(root.join(format!("{tarball}.sha256")).is_file());
         assert!(root.join(format!("{tarball}.provenance.json")).is_file());
+
+        let kit_entry = toolchain::directory(&root, target).join("ui.mjs");
+        let original_entry = fs::read(&kit_entry).unwrap();
+        fs::write(&kit_entry, "changed project tools").unwrap();
+        assert!(package_release_binary(&root, &release, target, &identity)
+            .unwrap_err()
+            .to_string()
+            .contains("UI Web toolchain changed"));
+        fs::write(&kit_entry, original_entry).unwrap();
 
         let mut candidate = identity.clone();
         candidate.purpose = ReleasePurpose::Candidate;
@@ -1568,8 +1633,6 @@ mod tests {
             "pkg/vo_web.js",
             "pkg/vo_web_bg.wasm",
             "pkg/snippets/runtime/inline0.js",
-            "aot-support/vo_aot_support_wasm.js",
-            "aot-support/vo_aot_support_wasm_bg.wasm",
         ] {
             let path = runtime.join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1578,7 +1641,7 @@ mod tests {
         ui_web_runtime_records(root).unwrap()
     }
 
-    fn unique_test_dir(name: &str) -> PathBuf {
+    pub(super) fn unique_test_dir(name: &str) -> PathBuf {
         let mut path = env::temp_dir();
         path.push(format!(
             "{name}-{}-{}",

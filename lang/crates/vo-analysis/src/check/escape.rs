@@ -10,8 +10,7 @@ use crate::typ;
 use std::collections::{HashMap, HashSet};
 use vo_syntax::ast::ExprId;
 use vo_syntax::ast::{
-    AssignOp, Block, CompositeLitKey, Decl, Expr, ExprKind, File, FuncDecl, Ident, Stmt, StmtKind,
-    UnaryOp,
+    AssignOp, Block, Decl, Expr, ExprKind, File, FuncDecl, Ident, Stmt, StmtKind, UnaryOp, Visitor,
 };
 
 /// Escape analysis result.
@@ -66,6 +65,26 @@ struct EscapeAnalyzer<'a> {
     loop_depth: u32,
     /// Stack of function contexts for tracking named returns
     func_context_stack: Vec<FuncContext>,
+}
+
+// Keep structural traversal in the shared AST visitor. Only scope transitions
+// and constructs with escape semantics need custom handling here.
+impl Visitor for EscapeAnalyzer<'_> {
+    fn visit_decl(&mut self, decl: &Decl) {
+        if let Decl::Func(func) = decl {
+            self.visit_func_decl(func);
+        } else {
+            vo_syntax::ast::walk_decl(self, decl);
+        }
+    }
+
+    fn visit_stmt(&mut self, stmt: &Stmt) {
+        self.analyze_stmt(stmt);
+    }
+
+    fn visit_expr(&mut self, expr: &Expr) {
+        self.analyze_expr(expr);
+    }
 }
 
 impl<'a> EscapeAnalyzer<'a> {
@@ -136,34 +155,8 @@ impl<'a> EscapeAnalyzer<'a> {
         }
     }
 
-    fn visit_file(&mut self, file: &File) {
-        for decl in &file.decls {
-            self.visit_decl(decl);
-        }
-    }
-
-    fn visit_decl(&mut self, decl: &Decl) {
-        match decl {
-            Decl::Func(fdecl) => self.visit_func_decl(fdecl),
-            Decl::Var(vdecl) => {
-                for spec in &vdecl.specs {
-                    for value in &spec.values {
-                        self.visit_expr(value);
-                    }
-                }
-            }
-            Decl::Const(cdecl) => {
-                for spec in &cdecl.specs {
-                    for value in &spec.values {
-                        self.visit_expr(value);
-                    }
-                }
-            }
-            Decl::Type(_) => {}
-        }
-    }
-
     fn visit_func_decl(&mut self, fdecl: &FuncDecl) {
+        self.visit_func_sig(&fdecl.sig);
         if let Some(body) = &fdecl.body {
             let func_scope = self.type_info.scopes.get(&fdecl.sig.span).copied();
             let saved = self.func_scope;
@@ -192,12 +185,13 @@ impl<'a> EscapeAnalyzer<'a> {
         }
     }
 
-    fn visit_stmt(&mut self, stmt: &Stmt) {
+    fn analyze_stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
-            StmtKind::Empty => {}
-            StmtKind::Block(block) => self.visit_block(block),
             StmtKind::Var(vdecl) => {
                 for spec in &vdecl.specs {
+                    if let Some(ty) = &spec.ty {
+                        self.visit_type_expr(ty);
+                    }
                     // Check if var type is interface
                     let is_interface_type = spec
                         .ty
@@ -228,20 +222,6 @@ impl<'a> EscapeAnalyzer<'a> {
                     }
                 }
             }
-            StmtKind::Const(cdecl) => {
-                for spec in &cdecl.specs {
-                    for value in &spec.values {
-                        self.visit_expr(value);
-                    }
-                }
-            }
-            StmtKind::Type(_) => {}
-            StmtKind::ShortVar(svd) => {
-                for value in &svd.values {
-                    self.visit_expr(value);
-                }
-            }
-            StmtKind::Expr(expr) => self.visit_expr(expr),
             StmtKind::Assign(assign) => {
                 for l in &assign.lhs {
                     self.visit_expr(l);
@@ -274,22 +254,6 @@ impl<'a> EscapeAnalyzer<'a> {
                             }
                         }
                     }
-                }
-            }
-            StmtKind::IncDec(id) => self.visit_expr(&id.expr),
-            StmtKind::Return(ret) => {
-                for expr in &ret.values {
-                    self.visit_expr(expr);
-                }
-            }
-            StmtKind::If(ifs) => {
-                if let Some(init) = &ifs.init {
-                    self.visit_stmt(init);
-                }
-                self.visit_expr(&ifs.cond);
-                self.visit_block(&ifs.then);
-                if let Some(else_) = &ifs.else_ {
-                    self.visit_stmt(else_);
                 }
             }
             StmtKind::For(fs) => {
@@ -348,33 +312,6 @@ impl<'a> EscapeAnalyzer<'a> {
 
                 self.loop_depth -= 1;
             }
-            StmtKind::Switch(ss) => {
-                if let Some(init) = &ss.init {
-                    self.visit_stmt(init);
-                }
-                if let Some(tag) = &ss.tag {
-                    self.visit_expr(tag);
-                }
-                for case in &ss.cases {
-                    for e in &case.exprs {
-                        self.visit_expr(e);
-                    }
-                    for s in &case.body {
-                        self.visit_stmt(s);
-                    }
-                }
-            }
-            StmtKind::TypeSwitch(tss) => {
-                if let Some(init) = &tss.init {
-                    self.visit_stmt(init);
-                }
-                self.visit_expr(&tss.expr);
-                for case in &tss.cases {
-                    for s in &case.body {
-                        self.visit_stmt(s);
-                    }
-                }
-            }
             StmtKind::Select(ss) => {
                 for case in &ss.cases {
                     if let Some(comm) = &case.comm {
@@ -396,12 +333,6 @@ impl<'a> EscapeAnalyzer<'a> {
                     }
                 }
             }
-            StmtKind::Go(g) => {
-                if let Some(island) = &g.target_island {
-                    self.visit_expr(island);
-                }
-                self.visit_expr(&g.call);
-            }
             StmtKind::Defer(d) => {
                 // Named returns must escape for correct panic/recover semantics
                 self.mark_named_returns_escaped();
@@ -411,20 +342,11 @@ impl<'a> EscapeAnalyzer<'a> {
                 self.mark_named_returns_escaped();
                 self.visit_expr(&d.call);
             }
-            StmtKind::Fail(f) => self.visit_expr(&f.error),
-            StmtKind::Send(s) => {
-                self.visit_expr(&s.chan);
-                self.visit_expr(&s.value);
-            }
-            StmtKind::Break(_)
-            | StmtKind::Continue(_)
-            | StmtKind::Goto(_)
-            | StmtKind::Fallthrough => {}
-            StmtKind::Labeled(l) => self.visit_stmt(&l.stmt),
+            _ => vo_syntax::ast::walk_stmt(self, stmt),
         }
     }
 
-    fn visit_expr(&mut self, expr: &Expr) {
+    fn analyze_expr(&mut self, expr: &Expr) {
         match &expr.kind {
             // 1. Address taken → root variable escapes
             ExprKind::Unary(unary) if unary.op == UnaryOp::Addr => {
@@ -463,6 +385,7 @@ impl<'a> EscapeAnalyzer<'a> {
 
             // 3. FuncLit → enter new func_scope, track captures
             ExprKind::FuncLit(func) => {
+                self.visit_func_sig(&func.sig);
                 let closure_scope = self.type_info.scopes.get(&func.sig.span).copied();
                 let saved_scope = self.func_scope;
 
@@ -495,77 +418,32 @@ impl<'a> EscapeAnalyzer<'a> {
                 self.visit_ident_use(ident);
             }
 
-            // Recurse into other expressions
-            ExprKind::Binary(b) => {
-                self.visit_expr(&b.left);
-                self.visit_expr(&b.right);
-            }
-            ExprKind::Unary(u) => self.visit_expr(&u.operand),
-            ExprKind::Call(c) => {
-                // Method call with pointer receiver on value type → receiver escapes
-                if let ExprKind::Selector(sel) = &c.func.kind {
-                    self.check_ptr_recv_method_escape(c.func.id, &sel.expr);
-                }
-                self.visit_expr(&c.func);
-                for arg in &c.args {
-                    self.visit_expr(arg);
-                }
-            }
-            ExprKind::Index(i) => {
-                self.visit_expr(&i.expr);
-                self.visit_expr(&i.index);
-            }
             ExprKind::Selector(s) => {
                 // Method value with pointer receiver → receiver escapes
                 self.check_ptr_recv_method_escape(expr.id, &s.expr);
                 self.visit_expr(&s.expr);
             }
-            ExprKind::TypeAssert(t) => self.visit_expr(&t.expr),
             ExprKind::CompositeLit(c) => {
+                if let Some(ty) = &c.ty {
+                    self.visit_type_expr(ty);
+                }
                 for elem in &c.elems {
                     if let Some(key) = &elem.key {
-                        match key {
-                            CompositeLitKey::Expr(expr) => self.visit_expr(expr),
-                            CompositeLitKey::Ident(ident)
-                                if self.type_info.uses.contains_key(&ident.id) =>
-                            {
-                                self.visit_ident_use(ident);
-                            }
-                            CompositeLitKey::Ident(_) => {}
-                        }
+                        self.visit_expr(key);
                     }
                     self.visit_expr(&elem.value);
                 }
             }
-            ExprKind::Conversion(c) => self.visit_expr(&c.expr),
-            ExprKind::Receive(e) => self.visit_expr(e),
-            ExprKind::Paren(e) => self.visit_expr(e),
-            ExprKind::TryUnwrap(e) => self.visit_expr(e),
-            ExprKind::DynAccess(d) => {
-                self.visit_expr(&d.base);
-                match &d.op {
-                    vo_syntax::ast::DynAccessOp::Field(_) => {}
-                    vo_syntax::ast::DynAccessOp::Index(idx) => self.visit_expr(idx),
-                    vo_syntax::ast::DynAccessOp::Call { args, .. }
-                    | vo_syntax::ast::DynAccessOp::MethodCall { args, .. } => {
-                        for arg in args {
-                            self.visit_expr(arg)
-                        }
-                    }
-                }
-            }
-            ExprKind::IntLit(_)
-            | ExprKind::FloatLit(_)
-            | ExprKind::RuneLit(_)
-            | ExprKind::StringLit(_)
-            | ExprKind::TypeAsExpr(_)
-            | ExprKind::Ellipsis => {}
+            _ => vo_syntax::ast::walk_expr(self, expr),
         }
     }
 
     /// Check if variable is captured by closure.
     /// A variable is captured if it's declared outside the current function scope.
     fn is_captured(&self, obj: ObjKey, func_scope: ScopeKey) -> bool {
+        if !self.tc_objs.lobjs[obj].entity_type().is_var() {
+            return false;
+        }
         let var_scope = match self.tc_objs.lobjs[obj].parent() {
             Some(s) => s,
             None => return false, // package-level var, not captured

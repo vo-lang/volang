@@ -117,7 +117,7 @@ pub fn format_text(module: &Module) -> String {
     // Functions
     out.push_str("## Functions\n\n");
     for (i, f) in module.functions.iter().enumerate() {
-        out.push_str(&format_function(i as u32, f));
+        out.push_str(&format_function(i as u32, f, module));
         out.push('\n');
     }
 
@@ -141,7 +141,7 @@ fn format_param_shape(shape: &ParamShape) -> String {
     }
 }
 
-fn format_function(func_id: u32, f: &FunctionDef) -> String {
+fn format_function(func_id: u32, f: &FunctionDef, module: &Module) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "func_{} {}(params={}, param_slots={}, locals={}, ret={}):\n",
@@ -158,6 +158,35 @@ fn format_function(func_id: u32, f: &FunctionDef) -> String {
     }
 
     for (pc, instr) in f.code.iter().enumerate() {
+        if module
+            .debug_info
+            .inline_sources
+            .frame_at(func_id, pc as u32)
+            .is_some()
+        {
+            out.push_str("  # inline ");
+            for (index, frame) in module
+                .debug_info
+                .logical_frames(func_id, pc as u32)
+                .enumerate()
+            {
+                if index != 0 {
+                    out.push_str(" <- ");
+                }
+                if let Some(function) = module.functions.get(frame.function_id as usize) {
+                    out.push_str(&function.name);
+                } else {
+                    out.push_str(&format!("func_{}", frame.function_id));
+                }
+                if let Some(location) = frame
+                    .span
+                    .and_then(|span| module.debug_info.resolve_span(span))
+                {
+                    out.push_str(&format!(" at {location}"));
+                }
+            }
+            out.push('\n');
+        }
         out.push_str(&format!(
             "  {:04}: {}\n",
             pc,
@@ -305,10 +334,15 @@ fn format_instruction(instr: &Instruction, metadata: Option<&InstructionMetadata
 
         // ARITH Float
         Opcode::AddF => format!("AddF          r{}, r{}, r{}", a, b, c),
+        Opcode::AddF32 => format!("AddF32        r{}, r{}, r{}", a, b, c),
         Opcode::SubF => format!("SubF          r{}, r{}, r{}", a, b, c),
+        Opcode::SubF32 => format!("SubF32        r{}, r{}, r{}", a, b, c),
         Opcode::MulF => format!("MulF          r{}, r{}, r{}", a, b, c),
+        Opcode::MulF32 => format!("MulF32        r{}, r{}, r{}", a, b, c),
         Opcode::DivF => format!("DivF          r{}, r{}, r{}", a, b, c),
+        Opcode::DivF32 => format!("DivF32        r{}, r{}, r{}", a, b, c),
         Opcode::NegF => format!("NegF          r{}, r{}", a, b),
+        Opcode::NegF32 => format!("NegF32        r{}, r{}", a, b),
 
         // CMP Integer (signed)
         Opcode::EqI => format!("EqI           r{}, r{}, r{}", a, b, c),
@@ -326,11 +360,17 @@ fn format_instruction(instr: &Instruction, metadata: Option<&InstructionMetadata
 
         // CMP Float
         Opcode::EqF => format!("EqF           r{}, r{}, r{}", a, b, c),
+        Opcode::EqF32 => format!("EqF32         r{}, r{}, r{}", a, b, c),
         Opcode::NeF => format!("NeF           r{}, r{}, r{}", a, b, c),
+        Opcode::NeF32 => format!("NeF32         r{}, r{}, r{}", a, b, c),
         Opcode::LtF => format!("LtF           r{}, r{}, r{}", a, b, c),
+        Opcode::LtF32 => format!("LtF32         r{}, r{}, r{}", a, b, c),
         Opcode::LeF => format!("LeF           r{}, r{}, r{}", a, b, c),
+        Opcode::LeF32 => format!("LeF32         r{}, r{}, r{}", a, b, c),
         Opcode::GtF => format!("GtF           r{}, r{}, r{}", a, b, c),
+        Opcode::GtF32 => format!("GtF32         r{}, r{}, r{}", a, b, c),
         Opcode::GeF => format!("GeF           r{}, r{}, r{}", a, b, c),
+        Opcode::GeF32 => format!("GeF32         r{}, r{}, r{}", a, b, c),
 
         // BIT
         Opcode::And => format!("And           r{}, r{}, r{}", a, b, c),
@@ -622,6 +662,21 @@ fn format_instruction(instr: &Instruction, metadata: Option<&InstructionMetadata
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disassembly_reports_the_complete_inline_source_chain() {
+        let compiled = crate::compile_string(
+            "package main\nfunc leaf(x int) int { return x*3 }\nfunc wrap(x int) int { return leaf(x) }\nfunc main() { for i := 0; i < 3; i++ { println(wrap(i)) } }\n",
+        ).expect("source chain fixture compiles");
+        let formatted = format_text(&compiled.module);
+        assert!(
+            formatted.lines().any(|line| line.contains("# inline ")
+                && line.contains("leaf at ")
+                && line.contains("wrap at ")
+                && line.contains("main at ")),
+            "{formatted}"
+        );
+    }
 
     #[test]
     fn dynamic_call_format_exposes_the_instruction_owned_cache_identity() {

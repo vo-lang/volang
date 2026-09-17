@@ -187,7 +187,7 @@ same verified semantics:
 - VM for short startup and embedding;
 - Cranelift JIT for longer native development sessions;
 - Native AOT for standalone executables or objects;
-- Core Wasm AOT for browser and sandboxed Wasm hosts.
+- Wasm VM for browser and sandboxed Wasm hosts.
 
 Use `vo check`, `vo test --mode=vm`, and `vo test --mode=jit` during a port.
 Publish with `vo build` or the official UI release commands after backend

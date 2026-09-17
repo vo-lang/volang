@@ -1,0 +1,107 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+func presenceContracts() {
+	var visible, attached *ui.BoolState
+	var edits *ui.IntState
+	starts, cleanups := 0, 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		visible = ui.Bool(scope, "visible", false)
+		attached = ui.Bool(scope, "attached", true)
+		trigger := ui.Ref(scope, "trigger")
+		content := ui.Fragment()
+		if attached.Get() {
+			content = kit.Presence(kit.PresenceProps{
+				ID: "motion",
+				Visible: func() bool {
+					return visible.Get()
+				},
+				ReturnFocus: trigger, TimeoutMilliseconds: 1234,
+			}, ui.Component(counterType, func(child *ui.Scope) ui.View {
+				edits = ui.Int(child, "edits", 0)
+				ui.Effect(child, "lifetime", func() func() {
+					starts++
+					return func() {
+						cleanups++
+					}
+				})
+				return ui.Element("input").Attr("data-name", "editor")
+			}))
+		}
+		return ui.Fragment(ui.Element("button").Ref(trigger).Attr("data-name", "trigger"), content)
+	}))
+	initial := drainUi(root)
+	require(starts == 0 && len(initial.Commands) == 0, "hidden presence mounted content or requested motion")
+	visible.Set(true)
+	opened := drainUi(root)
+	editor := target(opened, "editor")
+	wrapper := 0
+	for _, mutation := range opened.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "id" && mutation.Value == "motion" {
+			wrapper = mutation.ID
+		}
+	}
+	require(starts == 1 && wrapper > 0, "presence did not open its child")
+	edits.Set(7)
+	drainUi(root)
+	sequence := 0
+	send := func(target int, kind string, failure string) bool {
+		sequence++
+		return root.Dispatch(ui.Event{Target: target, Kind: kind, Error: failure, Sequence: sequence})
+	}
+	send(wrapper, "focusin", "")
+	visible.Set(false)
+	exit := drainUi(root)
+	work := startCommand(exit)
+	require(exit.Commands[0].Name == "web.motion-finished" && exit.Commands[0].Value == "motion" &&
+		exit.Commands[0].TimeoutMilliseconds == 1234, "presence lost its bounded motion request")
+	require(strings.Contains(root.HTML(), `inert="true"`) &&
+		strings.Contains(root.HTML(), `data-state="closed"`) &&
+		cleanups == 0 &&
+		edits.Get() == 7, "exit removed live state or left content interactive")
+	require(focusTarget(exit) == target(initial, "trigger"), "focused exit did not return to its logical target")
+	visible.Set(true)
+	reopened := drainUi(root)
+	cancelled := false
+	for _, command := range reopened.Commands {
+		if command.Op == "cancel" && command.ID == work {
+			cancelled = true
+		}
+	}
+	require(cancelled && !send(work, "@task", ""), "reopening retained an obsolete exit completion")
+	require(edits.Get() == 7 && starts == 1 && cleanups == 0 && focusTarget(reopened) == 0, "interrupted exit replaced state or moved focus")
+	visible.Set(false)
+	exit = drainUi(root)
+	work = startCommand(exit)
+	require(focusTarget(exit) == 0, "unfocused exit stole focus")
+	require(send(work, "@task", ""), "current motion result was rejected")
+	drainUi(root)
+	require(cleanups == 1 && !strings.Contains(root.HTML(), `id="motion"`), "finished exit retained its subtree")
+	visible.Set(true)
+	reopened = drainUi(root)
+	require(starts == 2 && edits.Get() == 0 && target(reopened, "editor") != editor, "completed exit did not reset child identity")
+	visible.Set(false)
+	work = startCommand(drainUi(root))
+	send(work, "@task", "Request timed out")
+	drainUi(root)
+	require(cleanups == 2 && !strings.Contains(root.HTML(), `id="motion"`), "timed-out exit leaked its subtree")
+	visible.Set(true)
+	drainUi(root)
+	visible.Set(false)
+	work = startCommand(drainUi(root))
+	attached.Set(false)
+	removed := drainUi(root)
+	cancelled = false
+	for _, command := range removed.Commands {
+		if command.Op == "cancel" && command.ID == work {
+			cancelled = true
+		}
+	}
+	require(cancelled && cleanups == 3 && !send(work, "@task", ""), "unmounted presence retained work")
+	root.Close()
+}

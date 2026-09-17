@@ -68,3 +68,10 @@ path = "eng/browser"
 lockfile = "eng/browser/package-lock.json"
 audit = "current"
 audit_level = "high"
+
+[[node_workspace]]
+name = "ui-rewrite-lab"
+path = "eng/ui-next"
+lockfile = "eng/ui-next/package-lock.json"
+audit = "current"
+audit_level = "high"

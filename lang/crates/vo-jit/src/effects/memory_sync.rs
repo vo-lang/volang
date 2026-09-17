@@ -2,11 +2,7 @@ use vo_runtime::instruction::Instruction;
 
 use super::{EffectError, EffectFacts, SlotRangeError};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemorySyncEffect {
-    None,
-    AliasedRange { start: u16, count: u16 },
-}
+pub use vo_common_core::instruction_effects::FrameMemoryEffect as MemorySyncEffect;
 
 pub fn try_memory_sync_effect(
     inst: &Instruction,
@@ -16,13 +12,7 @@ pub fn try_memory_sync_effect(
         inst,
         facts.instruction(),
     ) {
-        Ok(vo_common_core::instruction_effects::FrameMemoryEffect::None) => {
-            Ok(MemorySyncEffect::None)
-        }
-        Ok(vo_common_core::instruction_effects::FrameMemoryEffect::AliasedRange {
-            start,
-            count,
-        }) => Ok(MemorySyncEffect::AliasedRange { start, count }),
+        Ok(effect) => Ok(effect),
         Err(vo_common_core::instruction_effects::InstructionReadError::SlotRangeOverflow {
             start,
             count,

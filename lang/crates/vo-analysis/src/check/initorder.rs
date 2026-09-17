@@ -3,9 +3,7 @@
 //! This module computes the order in which package-level variables
 //! must be initialized, detecting and reporting initialization cycles.
 
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::objects::{DeclInfoKey, ObjKey};
 
@@ -18,15 +16,15 @@ use super::type_info::Initializer;
 #[derive(Debug)]
 struct GraphEdges {
     /// Predecessors - objects that depend on this object.
-    pred: Rc<RefCell<HashSet<DeclInfoKey>>>,
+    pred: HashSet<DeclInfoKey>,
     /// Successors - objects this object depends on.
-    succ: Rc<RefCell<HashSet<DeclInfoKey>>>,
+    succ: HashSet<DeclInfoKey>,
 }
 
 impl GraphEdges {
-    fn new(succ: Rc<RefCell<HashSet<DeclInfoKey>>>) -> GraphEdges {
+    fn new(succ: HashSet<DeclInfoKey>) -> GraphEdges {
         GraphEdges {
-            pred: Rc::new(RefCell::new(HashSet::new())),
+            pred: HashSet::new(),
             succ,
         }
     }
@@ -53,69 +51,48 @@ impl Checker {
             .iter()
             .map(|(&decl, &obj)| (decl, self.lobj(obj).order()))
             .collect();
-        nodes.sort_by_key(|node| (node.ndeps, self.lobj(node.obj).order()));
-        let len = nodes.len();
-        let mut nodes = &mut nodes[0..len];
-        let mut order: Vec<DeclInfoKey> = vec![];
-
-        loop {
-            if nodes.is_empty() {
-                break;
-            }
-            let mut first_dependant = nodes
-                .iter()
-                .enumerate()
-                .find(|(_, n)| n.ndeps > 0)
-                .map_or(nodes.len(), |(i, _)| i);
-
-            if first_dependant == 0 {
-                // we have a cycle with the first node
-                let visited = &mut HashSet::new();
-                let decl = nodes[0].decl;
-                // If decl is not part of the cycle (e.g., a->b->c->d->c),
-                // cycle will be None. Don't report anything in that case since
-                // the cycle is reported when the algorithm gets to an object
-                // in the cycle.
-                // Furthermore, once an object in the cycle is encountered,
-                // the cycle will be broken (dependency count will be reduced
-                // below), and so the remaining nodes in the cycle don't trigger
-                // another error (unless they are part of multiple cycles).
-                if let Some(cycle) = find_path(&edges, &source_order, decl, decl, visited) {
-                    let objects: Vec<ObjKey> = cycle
-                        .into_iter()
-                        .filter_map(|key| representatives.get(&key).copied())
-                        .collect();
+        nodes.sort_by_key(|node| self.lobj(node.obj).order());
+        let indices: HashMap<_, _> = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.decl, index))
+            .collect();
+        // Indices follow source order. Reconsider the earliest ready declaration
+        // after *each* initializer, including declarations made ready by it.
+        let mut ready: BTreeSet<usize> = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| (node.ndeps == 0).then_some(index))
+            .collect();
+        let mut remaining: BTreeSet<usize> = (0..nodes.len()).collect();
+        let mut order = Vec::with_capacity(nodes.len());
+        while !remaining.is_empty() {
+            let index = ready.pop_first().unwrap_or_else(|| {
+                // Continue deterministic error recovery through cyclic graphs.
+                // A node outside the cycle can be removed without a diagnostic;
+                // a cycle member will subsequently report the cycle itself.
+                let index = *remaining.first().unwrap();
+                let decl = nodes[index].decl;
+                if let Some(cycle) =
+                    find_path(&edges, &source_order, decl, decl, &mut HashSet::new())
+                {
+                    let objects: Vec<_> = cycle.iter().map(|key| representatives[key]).collect();
                     self.report_cycle(&objects);
                 }
-                // Ok to continue, but the variable initialization order
-                // will be incorrect at this point since it assumes no
-                // cycle errors.
-                // set first_dependant to 1 to remove the first node,
-                first_dependant = 1;
+                index
+            });
+            remaining.remove(&index);
+            let decl = nodes[index].decl;
+            order.push(decl);
+            for dependent in edges[&decl].pred.iter() {
+                let index = indices[dependent];
+                if remaining.contains(&index) {
+                    nodes[index].ndeps -= 1;
+                    if nodes[index].ndeps == 0 {
+                        ready.insert(index);
+                    }
+                }
             }
-
-            let mut indep: Vec<&GraphNode> = nodes[0..first_dependant].iter().collect();
-            indep.sort_by_key(|node| self.lobj(node.obj).order());
-            let mut indep: Vec<DeclInfoKey> = indep.into_iter().map(|node| node.decl).collect();
-            order.append(&mut indep);
-
-            // reduce dependency count of all dependent nodes
-            let to_sub: HashMap<DeclInfoKey, usize> =
-                nodes[0..first_dependant]
-                    .iter()
-                    .fold(HashMap::new(), |mut init, x| {
-                        for p in edges[&x.decl].pred.borrow().iter() {
-                            *init.entry(*p).or_insert(0) += 1;
-                        }
-                        init
-                    });
-            // remove resolved nodes
-            nodes = &mut nodes[first_dependant..];
-            for n in nodes.iter_mut() {
-                n.ndeps -= *to_sub.get(&n.decl).unwrap_or(&0);
-            }
-            // sort nodes, should be fast as it's almost sorted
-            nodes.sort_by_key(|node| (node.ndeps, self.lobj(node.obj).order()));
         }
 
         // record the init order for variables with initializers only
@@ -182,27 +159,30 @@ impl Checker {
             .filter_map(|(&decl, &obj)| self.lobj(obj).entity_type().is_func().then_some(decl))
             .collect();
 
-        // Collapse every function-only path into direct declaration edges. A
-        // function SCC may be reached through any member, so resolving each
-        // non-function declaration against the immutable direct graph makes
-        // the result independent of HashMap iteration and function order.
+        // Resolve shared function paths once, including mutually recursive
+        // groups, before projecting them onto each variable declaration.
+        let functions = FunctionDependencies::new(&direct_dependencies, &function_decls);
         let map: HashMap<DeclInfoKey, GraphEdges> = representatives
             .keys()
             .copied()
             .filter(|decl| !function_decls.contains(decl))
             .map(|decl| {
                 let deps =
-                    resolve_non_function_dependencies(&direct_dependencies, &function_decls, decl);
-                (decl, GraphEdges::new(Rc::new(RefCell::new(deps))))
+                    resolve_non_function_dependencies(&direct_dependencies, &functions, decl);
+                (decl, GraphEdges::new(deps))
             })
             .collect();
 
-        // add the edges for the other direction
-        for (decl, node) in map.iter() {
-            for s in node.succ.borrow().iter() {
-                if let Some(edge) = map.get(s) {
-                    edge.pred.borrow_mut().insert(*decl);
-                }
+        // Build reverse edges separately so graph construction needs no shared
+        // interior mutability and every set has one owner.
+        let reverse: Vec<_> = map
+            .iter()
+            .flat_map(|(&decl, node)| node.succ.iter().map(move |&dependency| (dependency, decl)))
+            .collect();
+        let mut map = map;
+        for (dependency, dependent) in reverse {
+            if let Some(edge) = map.get_mut(&dependency) {
+                edge.pred.insert(dependent);
             }
         }
 
@@ -215,7 +195,7 @@ impl Checker {
                 GraphNode {
                     decl: *decl,
                     obj,
-                    ndeps: node.succ.borrow().len(),
+                    ndeps: node.succ.len(),
                     pos: self.lobj(obj).pos(),
                 }
             })
@@ -259,35 +239,130 @@ impl Checker {
     }
 }
 
-/// Resolve the direct dependencies of a constant/variable declaration through
-/// any number of function declarations. Traversal stops at the next
-/// constant/variable so ordinary graph edges retain their topological meaning.
+/// Cached non-function dependencies for each function strongly connected
+/// component. Every entry member of a recursive group shares the same result.
+struct FunctionDependencies {
+    components: HashMap<DeclInfoKey, usize>,
+    resolved: Vec<HashSet<DeclInfoKey>>,
+}
+
+impl FunctionDependencies {
+    fn new(
+        direct: &HashMap<DeclInfoKey, HashSet<DeclInfoKey>>,
+        functions: &HashSet<DeclInfoKey>,
+    ) -> Self {
+        let mut declarations: Vec<_> = functions.iter().copied().collect();
+        declarations.sort_by_key(|decl| decl.raw());
+        let indices: HashMap<_, _> = declarations
+            .iter()
+            .enumerate()
+            .map(|(index, &decl)| (decl, index))
+            .collect();
+        let count = declarations.len();
+        let mut edges = vec![Vec::new(); count];
+        let mut reverse = vec![Vec::new(); count];
+        for (index, decl) in declarations.iter().enumerate() {
+            for dependency in direct.get(decl).into_iter().flatten() {
+                if let Some(&target) = indices.get(dependency) {
+                    edges[index].push(target);
+                    reverse[target].push(index);
+                }
+            }
+            edges[index].sort_unstable();
+        }
+
+        // Iterative Kosaraju: deep function chains must not consume Rust stack.
+        let mut visited = vec![false; count];
+        let mut finished = Vec::with_capacity(count);
+        for root in 0..count {
+            if std::mem::replace(&mut visited[root], true) {
+                continue;
+            }
+            let mut stack = vec![(root, 0)];
+            while let Some((node, next)) = stack.last_mut() {
+                if let Some(&target) = edges[*node].get(*next) {
+                    *next += 1;
+                    if !std::mem::replace(&mut visited[target], true) {
+                        stack.push((target, 0));
+                    }
+                } else {
+                    finished.push(*node);
+                    stack.pop();
+                }
+            }
+        }
+
+        let mut component_of = vec![usize::MAX; count];
+        let mut component_count = 0;
+        for root in finished.into_iter().rev() {
+            if component_of[root] != usize::MAX {
+                continue;
+            }
+            component_of[root] = component_count;
+            let mut stack = vec![root];
+            while let Some(node) = stack.pop() {
+                for &target in &reverse[node] {
+                    if component_of[target] == usize::MAX {
+                        component_of[target] = component_count;
+                        stack.push(target);
+                    }
+                }
+            }
+            component_count += 1;
+        }
+
+        let mut component_edges = vec![HashSet::new(); component_count];
+        let mut resolved = vec![HashSet::new(); component_count];
+        for (index, decl) in declarations.iter().enumerate() {
+            let component = component_of[index];
+            for &dependency in direct.get(decl).into_iter().flatten() {
+                if let Some(&target) = indices.get(&dependency) {
+                    let target = component_of[target];
+                    if target != component {
+                        // Kosaraju enumerates components from sources to sinks.
+                        debug_assert!(target > component);
+                        component_edges[component].insert(target);
+                    }
+                } else {
+                    resolved[component].insert(dependency);
+                }
+            }
+        }
+        // Dependencies are already resolved when their dependents are visited.
+        for component in (0..component_count).rev() {
+            let inherited: HashSet<_> = component_edges[component]
+                .iter()
+                .flat_map(|&target| resolved[target].iter().copied())
+                .collect();
+            resolved[component].extend(inherited);
+        }
+        let components = declarations
+            .into_iter()
+            .enumerate()
+            .map(|(index, decl)| (decl, component_of[index]))
+            .collect();
+        Self {
+            components,
+            resolved,
+        }
+    }
+}
+
+/// Stop at the next constant/variable to preserve ordinary topological edges.
+/// Shared function subgraphs are read from the component cache, never retraced.
 fn resolve_non_function_dependencies(
-    direct_dependencies: &HashMap<DeclInfoKey, HashSet<DeclInfoKey>>,
-    function_decls: &HashSet<DeclInfoKey>,
+    direct: &HashMap<DeclInfoKey, HashSet<DeclInfoKey>>,
+    functions: &FunctionDependencies,
     from: DeclInfoKey,
 ) -> HashSet<DeclInfoKey> {
     let mut resolved = HashSet::new();
-    let mut visited_functions = HashSet::new();
-    let mut pending: Vec<DeclInfoKey> = direct_dependencies
-        .get(&from)
-        .into_iter()
-        .flat_map(|deps| deps.iter().copied())
-        .collect();
-
-    while let Some(decl) = pending.pop() {
-        if !function_decls.contains(&decl) {
-            resolved.insert(decl);
-            continue;
-        }
-        if !visited_functions.insert(decl) {
-            continue;
-        }
-        if let Some(deps) = direct_dependencies.get(&decl) {
-            pending.extend(deps.iter().copied());
+    for &dependency in direct.get(&from).into_iter().flatten() {
+        if let Some(&component) = functions.components.get(&dependency) {
+            resolved.extend(functions.resolved[component].iter().copied());
+        } else {
+            resolved.insert(dependency);
         }
     }
-
     resolved
 }
 
@@ -311,8 +386,7 @@ fn find_path(
     }
 
     let ordered_successors = |decl: DeclInfoKey| -> Option<Vec<DeclInfoKey>> {
-        let mut successors: Vec<DeclInfoKey> =
-            edges.get(&decl)?.succ.borrow().iter().copied().collect();
+        let mut successors: Vec<DeclInfoKey> = edges.get(&decl)?.succ.iter().copied().collect();
         successors.sort_by_key(|successor| {
             (
                 source_order.get(successor).copied().unwrap_or(u32::MAX),
@@ -376,9 +450,7 @@ mod tests {
             .map(|(index, successors)| {
                 (
                     key(index),
-                    GraphEdges::new(Rc::new(RefCell::new(
-                        successors.into_iter().map(key).collect(),
-                    ))),
+                    GraphEdges::new(successors.into_iter().map(key).collect()),
                 )
             })
             .collect()
@@ -401,14 +473,15 @@ mod tests {
             (global_b, HashSet::new()),
         ]);
         let function_decls = HashSet::from([function_a, function_b]);
+        let functions = FunctionDependencies::new(&direct_dependencies, &function_decls);
         let expected = HashSet::from([global_a, global_b]);
 
         assert_eq!(
-            resolve_non_function_dependencies(&direct_dependencies, &function_decls, via_a),
+            resolve_non_function_dependencies(&direct_dependencies, &functions, via_a),
             expected
         );
         assert_eq!(
-            resolve_non_function_dependencies(&direct_dependencies, &function_decls, via_b),
+            resolve_non_function_dependencies(&direct_dependencies, &functions, via_b),
             expected
         );
     }
@@ -507,6 +580,65 @@ func makePair() (int, int) { return late, independent }
                 })
                 .collect();
             assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn cached_function_components_match_reachability_for_all_three_node_graphs() {
+        // Exhaust all function edges, including self/mutual recursion. Compare
+        // against a direct walk that does not use SCCs or memoization.
+        let functions = HashSet::from([key(0), key(1), key(2)]);
+        for mask in 0u16..512 {
+            let mut direct = HashMap::new();
+            for node in 0..3 {
+                let mut deps = HashSet::from([key(3 + node)]);
+                for target in 0..3 {
+                    if mask & (1 << (node * 3 + target)) != 0 {
+                        deps.insert(key(target));
+                    }
+                }
+                direct.insert(key(node), deps);
+                direct.insert(key(6 + node), HashSet::from([key(node)]));
+            }
+            let cached = FunctionDependencies::new(&direct, &functions);
+            for entry in 0..3 {
+                let mut expected = HashSet::new();
+                let mut visited = HashSet::new();
+                let mut pending = vec![key(entry)];
+                while let Some(node) = pending.pop() {
+                    if functions.contains(&node) {
+                        if visited.insert(node) {
+                            pending.extend(direct[&node].iter().copied());
+                        }
+                    } else {
+                        expected.insert(node);
+                    }
+                }
+                assert_eq!(
+                    resolve_non_function_dependencies(&direct, &cached, key(6 + entry)),
+                    expected,
+                    "graph {mask}, entry {entry}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shared_deep_function_chain_is_resolved_without_recursion() {
+        const COUNT: usize = 20_000;
+        let functions = (0..COUNT).map(key).collect();
+        let mut direct: HashMap<_, _> = (0..COUNT)
+            .map(|index| (key(index), HashSet::from([key(index + 1)])))
+            .collect();
+        let cached = FunctionDependencies::new(&direct, &functions);
+        for index in 0..COUNT {
+            direct.insert(key(COUNT + index + 1), HashSet::from([key(0)]));
+        }
+        for index in 0..COUNT {
+            assert_eq!(
+                resolve_non_function_dependencies(&direct, &cached, key(COUNT + index + 1)),
+                HashSet::from([key(COUNT)])
+            );
         }
     }
 }

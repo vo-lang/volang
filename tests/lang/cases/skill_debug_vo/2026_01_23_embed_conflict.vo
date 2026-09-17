@@ -202,9 +202,13 @@ func testAnonStructEmbed() {
 			x int
 		}
 	}
-	o := Outer{Inner: struct {
-		x int
-	}{x: 99}}
+	o := Outer{
+		Inner: struct {
+			x int
+		}{
+			x: 99,
+		},
+	}
 	assert(o.Inner.x == 99, "test12: anon struct field")
 }
 

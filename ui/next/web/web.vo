@@ -1,0 +1,38 @@
+// Package web provides typed requests backed by the managed browser host.
+package web
+
+import (
+	"encoding/json"
+	ui "github.com/vo-lang/ui/next"
+)
+
+func GetText(scope *ui.Scope, key string, url string) *ui.ResourceState {
+	return ui.Resource(scope, key, FetchText(url))
+}
+
+// FetchText describes a request. Compose WithTimeout before declaring a Resource
+// or starting the request from a handler/effect with ui.Start.
+func FetchText(url string) ui.Request {
+	return ui.Request{Service: "web.fetch-text", Value: url}
+}
+
+type DelayRequest struct {
+	Milliseconds int `json:"milliseconds"`
+	Value string `json:"value"`
+}
+
+func Delay(scope *ui.Scope, key string, milliseconds int, value string) *ui.ResourceState {
+	return ui.Resource(scope, key, After(milliseconds, value))
+}
+
+// After describes a cancellable delay returning value through the UI writer.
+func After(milliseconds int, value string) ui.Request {
+	if milliseconds < 0 || milliseconds > 2147483647 {
+		panic("web: delay must be between 0 and 2147483647 ms")
+	}
+	encoded, err := json.Marshal(DelayRequest{Milliseconds: milliseconds, Value: value})
+	if err != nil {
+		panic(err)
+	}
+	return ui.Request{Service: "web.delay", Value: string(encoded)}
+}

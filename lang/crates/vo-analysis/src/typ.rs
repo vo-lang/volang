@@ -662,8 +662,14 @@ impl SignatureDetail {
         self.variadic
     }
 
+    /// Number of parameters declared in the signature, including a variadic one.
+    pub fn declared_param_count(&self, objs: &TCObjects) -> usize {
+        objs.types[self.params].try_as_tuple().unwrap().vars().len()
+    }
+
+    /// Minimum argument count at a call site.
     pub fn params_count(&self, objs: &TCObjects) -> usize {
-        let l = objs.types[self.params].try_as_tuple().unwrap().vars().len();
+        let l = self.declared_param_count(objs);
         if self.variadic {
             l - 1
         } else {

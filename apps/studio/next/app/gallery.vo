@@ -1,0 +1,116 @@
+package app
+
+import (
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+	"github.com/vo-lang/ui/next/navigation"
+)
+
+var galleryType = ui.Define("studio.Gallery")
+
+var buttonsType = ui.Define("studio.Buttons")
+
+var fieldsType = ui.Define("studio.Fields")
+
+func Preview(title string, subtitle string, example ui.View, code string) ui.View {
+	return ui.Element("article", ui.Element("div", ui.Element("h2", ui.Text(title)), ui.Element("p", ui.Text(subtitle))).Attr("class", "studio-card-heading"), ui.Element("div", example).Attr("class", "studio-preview"), ui.Element("details", ui.Element("summary", ui.Text("View code")), ui.Element("pre", ui.Element("code", ui.Text(code)))).Attr("class", "studio-code")).Attr("class", "studio-card")
+}
+
+func ButtonPreview() ui.View {
+	return ui.Component(buttonsType, func(scope *ui.Scope) ui.View {
+		count := ui.Int(scope, "count", 0)
+		action := kit.Button(kit.ButtonProps{
+			OnPress: func() {
+				count.Set(count.Get() + 1)
+			},
+		}, ui.Text("Make it happen")).DescribedBy("gallery-action-help")
+		action = kit.Tooltip(kit.TooltipProps{
+			ID: "gallery-action-tip", Text: "Each press adds one little step.",
+		}, action)
+		return ui.Element("div", ui.Element("div", action, kit.Button(kit.ButtonProps{
+			Variant: "secondary",
+			OnPress: func() {
+				count.Set(0)
+			},
+		}, ui.Text("Start again")), kit.Button(kit.ButtonProps{Disabled: true}, ui.Text("Unavailable"))).Attr("class", "studio-actions"), ui.Element("output", ui.Text(fmt.Sprint(count.Get(), " little steps forward"))).Attr("id", "gallery-action-help").Attr("aria-live", "polite").Attr("data-demo-count", ""))
+	}).Memo()
+}
+
+func FieldPreview() ui.View {
+	return ui.Component(fieldsType, func(scope *ui.Scope) ui.View {
+		name := ui.String(scope, "name", "")
+		updates := ui.Bool(scope, "updates", true)
+		return ui.Element("div", kit.Field("gallery-name", "What should we call you?", "A little personal touch goes a long way.", ui.Element("input").Attr("placeholder", "Your name").Attr("value", name.Get()).On("input", func(event ui.Event) {
+			name.Set(event.Value)
+		})), kit.Switch(kit.SwitchProps{
+			ID: "gallery-updates", Label: "Keep me in the loop",
+			Checked: func() bool {
+				return updates.Get()
+			},
+			OnChange: func(value bool) {
+				updates.Set(value)
+			},
+		})).Attr("class", "studio-field-demo")
+	}).Memo()
+}
+
+func Gallery() ui.View {
+	return ui.Component(galleryType, func(scope *ui.Scope) ui.View {
+		query := ui.String(scope, "filter", "")
+		filter := strings.ToLower(strings.TrimSpace(query.Get()))
+		cards := []ui.View{}
+		if strings.Contains("buttons actions interaction tooltip hint", filter) {
+			cards = append(cards, Preview("A good place to start", "Actions with clear intent and a little room to breathe.", ButtonPreview(), "kit.Button(kit.ButtonProps{\n    OnPress: func() { count.Set(count.Get() + 1) },\n}, ui.Text(\"Make it happen\"))").Key("buttons"))
+		}
+		if strings.Contains("fields input switch form", filter) {
+			cards = append(cards, Preview("The little details", "Native inputs, useful labels, and familiar keyboard behavior.", FieldPreview(), "kit.Field(\"name\", \"Your name\", \"A personal touch.\",\n    ui.Element(\"input\").Attr(\"value\", name.Get()).\n        On(\"input\", func(e ui.Event) { name.Set(e.Value) }))").Key("fields"))
+		}
+		if strings.Contains("status feedback progress spinner alert slider range", filter) {
+			cards = append(cards, Preview("Every state has a story", "Quiet feedback that keeps people in the picture.", FeedbackPreview(), "kit.Progress(kit.ProgressProps{\n    ID: \"progress\", Label: \"A little progress\",\n    Max: 100, Value: 35, Indeterminate: busy.Get(),\n})").Key("status"))
+		}
+		if strings.Contains("dialog modal focus overlay", filter) {
+			cards = append(cards, Preview("A moment of focus", "Native modal layers, keyboard navigation, and a graceful way back.", DialogPreview(), "kit.Dialog(kit.DialogProps{\n    ID: \"idea\", Title: \"A new idea\", Open: readOpen,\n    OnOpenChange: func(value bool) { open.Set(value) },\n}, content)").Key("dialog"))
+		}
+		if strings.Contains("toast notifications feedback message", filter) {
+			cards = append(cards, Preview("Little things worth knowing", "A timely note, with a little space to read and respond.", ToastPreview(), "notes := kit.NewToasts(scope, \"notes\", kit.ToastOptions{})\nshow := func() {\n    notes.Show(kit.ToastMessage{Key: \"saved\", Title: \"Your idea is saved\"})\n}\nkit.ToastRegion(kit.ToastRegionProps{\n    ID: \"notes\", Queue: notes, ReturnFocus: trigger,\n})").Key("notifications"))
+		}
+		if strings.Contains("tabs keyboard navigation panels", filter) {
+			cards = append(cards, Preview("A different perspective", "Related views, with a clear path between them.", TabsPreview(), "kit.Tabs(kit.TabsProps{\n    ID: \"idea\", Label: \"Your idea\", Value: readSelected,\n    Items: items, OnChange: func(key string) { selected.Set(key) },\n})").Key("tabs"))
+		}
+		if strings.Contains("presence animation motion transition enter exit", filter) {
+			cards = append(cards, Preview("A gentle change of pace", "A little movement, with time to change your mind.", PresencePreview(), "kit.Presence(kit.PresenceProps{\n    ID: \"thought\", Visible: readVisible, ReturnFocus: trigger,\n}, content)").Key("presence"))
+		}
+		if strings.Contains("form validation submission async reset", filter) {
+			cards = append(cards, Preview("Room for your next idea", "Clear feedback, thoughtful defaults, and a safe place for unfinished thoughts.", FormPreview(), "form := forms.Use(scope, \"idea\", forms.Options{\n    Initial: forms.Values{\"title\": []string{\"\"}},\n    Validate: validateIdea,\n})\nfield := form.Input(\"title\", ui.Element(\"input\"))").Key("form"))
+		}
+		if strings.Contains("accordion disclosure sections headings", filter) {
+			cards = append(cards, Preview("A little room to unfold", "Useful details, ready when you need them.", AccordionPreview(), "kit.Accordion(kit.AccordionProps{\n    ID: \"ideas\", Items: items, Expanded: readExpanded,\n    Multiple: true, OnChange: updateExpanded,\n})").Key("accordion"))
+		}
+		if strings.Contains("popover floating settings details", filter) {
+			cards = append(cards, Preview("Keep the details close", "A little space beside the action, with a familiar way back.", PopoverPreview(), "kit.Popover(kit.PopoverProps{\n    ID: \"settings\", Label: \"Quick settings\",\n    Open: readOpen, OnOpenChange: setOpen,\n}, content)").Key("popover"))
+		}
+		if strings.Contains("menu actions keyboard dropdown", filter) {
+			cards = append(cards, Preview("A few good next steps", "Familiar actions, one small menu away.", MenuPreview(), "kit.Menu(kit.MenuProps{\n    ID: \"actions\", Label: \"Idea actions\", Items: items,\n    Open: readOpen, OnOpenChange: setOpen,\n    OnAction: handleAction,\n})").Key("menu"))
+		}
+		if strings.Contains("combobox autocomplete suggestions select search form", filter) {
+			cards = append(cards, Preview("Follow your curiosity", "Find a familiar place, or leave room for a new one.", ComboboxPreview(), "kit.Combobox(kit.ComboboxProps{\n    ID: \"place\", Label: \"Your next stop\", Options: places,\n    Value: readPlace, OnChange: setPlace,\n})").Key("combobox"))
+		}
+		if strings.Contains("checkbox radio select native choices preferences form", filter) {
+			cards = append(cards, Preview("Make yourself at home", "Familiar choices, with room for your own preferences.", ChoicesPreview(), "kit.Select(kit.SelectProps{\n    ID: \"language\", Name: \"language\", Label: \"Language\",\n    Placeholder: \"Choose a language\", Options: languages,\n})").Key("choices"))
+		}
+		if strings.Contains("listbox collection virtual library selection list", filter) {
+			cards = append(cards, Preview("So much to discover", "A thousand small thoughts, with a comfortable place to browse.", LibraryPreview(), "kit.Listbox(kit.ListboxProps{\n    ID: \"library\", Label: \"Your library\", Items: library,\n    Selected: readSelected, OnSelectionChange: setSelected,\n    Virtual: true, RowHeight: 40, Height: 208,\n})").Key("library"))
+		}
+		if strings.Contains("table sort pagination data columns rows", filter) {
+			cards = append(cards, Preview("A little more organized", "A few ideas to sort through, with space for your notes.", TablePreview(), "kit.Table(kit.TableProps{\n    Caption: \"Ideas for your day\", Columns: columns, Rows: rows,\n    Sort: readSort, OnSortChange: sortItems,\n})\nkit.Pagination(kit.PaginationProps{\n    Page: readPage, PageCount: pages, OnChange: setPage,\n})").Key("table"))
+		}
+		if len(cards) == 0 {
+			cards = append(cards, ui.Element("p", ui.Text("No examples found. Try “buttons” or “form”.")).Attr("class", "studio-empty").Attr("role", "status"))
+		}
+		return ui.Element("section", ui.Element("header", ui.Element("p", ui.Text("THE COMPONENT GALLERY")).Attr("class", "studio-eyebrow"), ui.Element("h1", ui.Text("Good interfaces,\npiece by piece.")), ui.Element("p", ui.Text("A collection of useful little things. Try them, change the theme, and take a look at the Volang behind them.")).Attr("class", "studio-lead"), navigation.Link("/studio/docs", ui.Text("Get to know the framework →")).Attr("class", "studio-text-link")).Attr("class", "studio-intro"), ui.Element("div", ui.Element("h2", ui.Text("Explore the essentials")), kit.Field("gallery-search", "Find a component", "", ui.Element("input").Attr("type", "search").Attr("placeholder", "Buttons, fields, feedback…").Attr("value", query.Get()).On("input", func(event ui.Event) {
+			query.Set(event.Value)
+		}))).Attr("class", "studio-section-bar"), ui.Element("div", cards...).Attr("class", "studio-grid"))
+	}).Memo()
+}

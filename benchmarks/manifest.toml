@@ -1,6 +1,24 @@
 version = 1
 
 [[benchmark]]
+id = "allocator-shapes"
+path = "allocator-shapes"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "append-growth"
+path = "append-growth"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "codegen-storage"
+path = "codegen-storage"
+owner = "codegen"
+languages = ["vo"]
+
+[[benchmark]]
 id = "binary-trees"
 path = "binary-trees"
 owner = "runtime"
@@ -125,3 +143,237 @@ id = "task-queue"
 path = "task-queue"
 owner = "runtime"
 languages = ["vo", "go", "lua", "js", "py", "rb", "java", "c"]
+
+[[benchmark]]
+id = "string-views"
+path = "string-views"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "string-constants"
+path = "string-constants"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "slice-views"
+path = "slice-views"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "map-hit-miss"
+path = "map-hit-miss"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "map-churn"
+path = "map-churn"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "map-string-keys"
+path = "map-string-keys"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "map-interface-keys"
+path = "map-interface-keys"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "map-wide-keys"
+path = "map-wide-keys"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "map-lifecycle"
+path = "map-lifecycle"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "float32-chain"
+path = "float32-chain"
+owner = "codegen"
+languages = ["vo"]
+
+[[benchmark]]
+id = "float32-vector"
+path = "float32-vector"
+owner = "codegen"
+languages = ["vo"]
+
+[[benchmark]]
+id = "scalar-chain-1"
+path = "scalar-chain-1"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "scalar-chain-4"
+path = "scalar-chain-4"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "scalar-chain-8"
+path = "scalar-chain-8"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "closure-leaf-mono"
+path = "closure-leaf-mono"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "closure-leaf-poly2"
+path = "closure-leaf-poly2"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "closure-leaf-poly4"
+path = "closure-leaf-poly4"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "closure-leaf-poly8"
+path = "closure-leaf-poly8"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "closure-leaf-phase8"
+path = "closure-leaf-phase8"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "closure-wrapped-mono"
+path = "closure-wrapped-mono"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "closure-wrapped-poly2"
+path = "closure-wrapped-poly2"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "closure-wrapped-poly4"
+path = "closure-wrapped-poly4"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "closure-wrapped-poly8"
+path = "closure-wrapped-poly8"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "closure-wrapped-phase8"
+path = "closure-wrapped-phase8"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "interface-leaf-mono"
+path = "interface-leaf-mono"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "interface-leaf-poly2"
+path = "interface-leaf-poly2"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "interface-leaf-poly4"
+path = "interface-leaf-poly4"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "interface-leaf-poly8"
+path = "interface-leaf-poly8"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "interface-leaf-phase8"
+path = "interface-leaf-phase8"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "interface-wrapped-mono"
+path = "interface-wrapped-mono"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "interface-wrapped-poly2"
+path = "interface-wrapped-poly2"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "interface-wrapped-poly4"
+path = "interface-wrapped-poly4"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "interface-wrapped-poly8"
+path = "interface-wrapped-poly8"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "interface-wrapped-phase8"
+path = "interface-wrapped-phase8"
+owner = "jit"
+languages = ["vo"]
+
+[[benchmark]]
+id = "string-constants-poly16"
+path = "string-constants-poly16"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "string-constants-poly512"
+path = "string-constants-poly512"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "string-constants-gc"
+path = "string-constants-gc"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "map-float32-distribution"
+path = "map-float32-distribution"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "map-float64-distribution"
+path = "map-float64-distribution"
+owner = "runtime"
+languages = ["vo"]

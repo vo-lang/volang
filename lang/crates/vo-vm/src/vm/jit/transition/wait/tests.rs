@@ -44,7 +44,7 @@ fn side_exit_count(vm: &Vm, reason: JitSideExitReason) -> u64 {
 
 #[test]
 fn vm_jit_extern_exit_does_not_materialize_frames_and_clears_the_payload() {
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     let module = empty_module();
     vm.finish_load(module.clone());
     let mut fiber = Fiber::new(0);
@@ -59,7 +59,7 @@ fn vm_jit_extern_exit_does_not_materialize_frames_and_clears_the_payload() {
 
 #[test]
 fn vm_jit_waitqueue_materialize_006_cleans_simple_and_remote_wait_state_on_failure() {
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     let module = empty_module();
     vm.finish_load(module.clone());
     let mut fiber = Fiber::new(0);
@@ -99,7 +99,7 @@ fn vm_jit_waitqueue_materialize_006_cleans_simple_and_remote_wait_state_on_failu
 
 #[test]
 fn vm_jit_waitqueue_materialize_006_cleans_select_waiters_on_failure() {
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     let module = empty_module();
     vm.finish_load(module.clone());
     let mut fiber = Fiber::new(0);
@@ -113,7 +113,7 @@ fn vm_jit_waitqueue_materialize_006_cleans_select_waiters_on_failure() {
             .unwrap(),
     );
     fiber.select_state = Some(SelectState {
-        cases: Vec::new(),
+        cases: Default::default(),
         expected_cases: 0,
         has_default: false,
         woken_index: None,
@@ -123,7 +123,8 @@ fn vm_jit_waitqueue_materialize_006_cleans_select_waiters_on_failure() {
             case_index: 0,
             queue: ch,
             kind: SelectCaseKind::Recv,
-        }],
+        }]
+        .into(),
     });
     let before_wait_queue_side_exits = side_exit_count(&vm, JitSideExitReason::WaitQueue);
     let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit ctx");
@@ -145,7 +146,7 @@ fn vm_jit_waitqueue_materialize_006_cleans_select_waiters_on_failure() {
 
 #[test]
 fn vm_jit_waitqueue_pending_endpoint_cleanup_007_drops_unpaired_response_obligation_on_failure() {
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     let module = empty_module();
     vm.finish_load(module.clone());
     let mut fiber = Fiber::new(0);
@@ -209,7 +210,7 @@ fn vm_jit_waitqueue_pending_endpoint_cleanup_007_drops_unpaired_response_obligat
 
 #[test]
 fn vm_jit_extern_suspend_materialize_007_does_not_publish_wait_io_token_on_failure() {
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     let module = empty_module();
     let mut fiber = Fiber::new(0);
     fiber.push_frame(0, 0, 0, 0);
@@ -248,7 +249,7 @@ fn vm_jit_extern_suspend_materialize_007_does_not_publish_wait_io_token_on_failu
 
 #[test]
 fn vm_jit_extern_suspend_callclosure_058_records_replay_only_after_setup_success() {
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     let module = module_with_entry();
     let mut fiber = Fiber::new(0);
     fiber.push_frame(0, 9, 0, 0);
@@ -283,7 +284,7 @@ fn vm_jit_extern_suspend_callclosure_058_records_replay_only_after_setup_success
 
 #[test]
 fn vm_jit_extern_suspend_hostwait_062_records_hostevent_not_replay() {
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     let module = module_with_entry();
     let mut fiber = Fiber::new(0);
     fiber.push_frame(0, 9, 0, 0);
@@ -320,7 +321,7 @@ fn vm_jit_extern_suspend_hostwait_062_records_hostevent_not_replay() {
 
 #[test]
 fn vm_jit_extern_suspend_hostreplay_062_preserves_replay_side_exit() {
-    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let mut vm = Vm::try_native_for_test(JitConfig::default()).expect("jit vm");
     let module = module_with_entry();
     let mut fiber = Fiber::new(0);
     fiber.push_frame(0, 9, 0, 0);

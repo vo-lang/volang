@@ -1,0 +1,75 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/forms"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+func restoredFormSubmission() {
+	var form *forms.Form
+	seed := &forms.Submission{
+		Values: forms.Values{"name": {"Rejected 中文"}},
+		Errors: forms.Errors{"name": "Already used", "removed": "Another field needs attention"},
+	}
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		form = forms.Use(scope, "form", forms.Options{
+			Initial: forms.Values{"name": {"Saved name"}, "topic": {"Design"}}, Submission: seed,
+		})
+		return kit.FormField(kit.FieldProps{ID: "restored-name", Label: "Name", Error: form.Error("name")}, form.Input("name", ui.Element("input")))
+	}))
+	flush(root)
+	require(form.Value("name") == "Rejected 中文" && form.Value("topic") == "Design" && form.Dirty(), "server submission lost its saved baseline or unchanged fields")
+	require(form.Error("") == "Another field needs attention" &&
+		strings.Contains(root.HTML(), "Already used") &&
+		strings.Contains(root.HTML(), "aria-invalid=\"true\""), "server errors were hidden in initial HTML")
+	seed.Values["name"][0] = "Caller mutation"
+	seed.Errors["name"] = "Caller error"
+	require(form.Value("name") == "Rejected 中文" && form.Error("name") == "Already used", "restored submission retained caller aliases")
+	form.Change("topic", "Writing")
+	require(form.Error("name") == "Already used", "editing another field discarded a server error")
+	form.Blur("topic")
+	require(form.Error("name") == "Already used", "blurring another field discarded a server error")
+	form.Change("name", "Early edit")
+	flush(root)
+	require(form.Value("name") == "Early edit" && form.Error("name") == "", "normal input reapplied the server submission")
+	form.Revert()
+	require(form.Value("name") == "Saved name" && !form.Dirty(), "revert did not restore the saved baseline")
+	form.Submit(func(forms.Data) ui.Request {
+		return ui.Request{Service: "save"}
+	}, func(ui.Result) forms.Outcome {
+		return forms.Outcome{Errors: forms.Errors{"name": "Returned field error"}}
+	})
+	returned := startCommand(flush(root))
+	require(root.Dispatch(ui.Event{Kind: "@task", Target: returned, Sequence: 1}), "returned error was not dispatched")
+	form.Change("topic", "Research")
+	form.Blur("topic")
+	require(form.Error("name") == "Returned field error", "unrelated input discarded a live submission error")
+	form.Change("name", "New saved name")
+	form.Submit(func(data forms.Data) ui.Request {
+		values := data.Values
+		return ui.Request{Service: "save", Value: values.Get("name")}
+	}, func(ui.Result) forms.Outcome {
+		return forms.Outcome{Message: "Saved"}
+	})
+	id := startCommand(flush(root))
+	require(root.Dispatch(ui.Event{Kind: "@task", Target: id, Sequence: 2}), "successful submission was not dispatched")
+	form.Change("name", "Discard me")
+	form.Revert()
+	require(form.Value("name") == "New saved name" && !form.Dirty() && form.Message() == "", "revert forgot the latest successful submission")
+	form.Reset()
+	require(form.Value("name") == "Saved name", "reset lost the original native-form baseline")
+	root.Close()
+	invalid := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		forms.Use(scope, "form", forms.Options{
+			Initial: forms.Values{"name": {"value"}},
+			Submission: &forms.Submission{Values: forms.Values{"unknown": {"bad"}}},
+		})
+		return ui.Fragment()
+	}))
+	expectPanic(func() {
+		invalid.Flush()
+	}, "declared fields")
+	invalid.Close()
+}

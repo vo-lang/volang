@@ -118,6 +118,100 @@ fn jit_closure_new_fails_safely_when_header_slot_would_overflow() {
 }
 
 #[test]
+fn jit_interface_accepts_large_canonical_arrays_and_rejects_header_drift() {
+    use crate::objects::{array, interface};
+
+    let mut module = Module::new("large-array-interface".into());
+    module
+        .runtime_types
+        .push(RuntimeType::Basic(ValueKind::Int64));
+    module.runtime_types.push(RuntimeType::Array {
+        len: 65_536,
+        elem: ValueRttid::new(0, ValueKind::Int64),
+    });
+    let array_type = ValueRttid::new(1, ValueKind::Array);
+    assert!(module.slot_layout_for_value_rttid(array_type).is_none());
+    let slot0 = interface::pack_slot0(0, 1, ValueKind::Array);
+    let mut gc = Gc::new();
+    for (len, width, expected) in [(65_536, 8, true), (65_535, 8, false), (65_536, 4, false)] {
+        let array = array::create(&mut gc, ValueMeta::new(0, ValueKind::Int64), width, len);
+        assert_eq!(
+            validate_jit_interface_value(&gc, &module, slot0, array as u64),
+            expected.then_some(array_type),
+            "len={len}, width={width}",
+        );
+    }
+}
+
+#[test]
+fn jit_interface_checks_each_sequence_descriptor_layout() {
+    use crate::objects::{interface, slice, string};
+
+    let mut module = Module::new("sequence-interface".into());
+    module
+        .runtime_types
+        .push(RuntimeType::Basic(ValueKind::String));
+    module
+        .runtime_types
+        .push(RuntimeType::Basic(ValueKind::Uint8));
+    module
+        .runtime_types
+        .push(RuntimeType::Slice(ValueRttid::new(1, ValueKind::Uint8)));
+    let mut gc = Gc::new();
+    let string_type = ValueRttid::new(0, ValueKind::String);
+    let string_slot0 = interface::pack_slot0(0, 0, ValueKind::String);
+    for slots in [
+        string::DATA_SLOTS,
+        slice::DATA_SLOTS,
+        slice::EXTENDED_DATA_SLOTS,
+        string::DATA_SLOTS - 1,
+        string::DATA_SLOTS + 1,
+    ] {
+        let value = gc.alloc(ValueMeta::new(0, ValueKind::String), slots);
+        assert_eq!(
+            validate_jit_interface_value(&gc, &module, string_slot0, value as u64),
+            (slots == string::DATA_SLOTS).then_some(string_type)
+        );
+    }
+    let slice_type = ValueRttid::new(2, ValueKind::Slice);
+    let slice_slot0 = interface::pack_slot0(0, 2, ValueKind::Slice);
+    let meta = ValueMeta::new(0, ValueKind::Uint8);
+    let compact = slice::create(&mut gc, meta, 1, 2, 4);
+    let owner = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 4);
+    let extended =
+        unsafe { slice::inline_array_slice(&mut gc, owner, owner.cast(), meta, 1, 8, 4, 0, 2) }
+            .unwrap();
+    for value in [compact, extended] {
+        assert_eq!(
+            validate_jit_interface_value(&gc, &module, slice_slot0, value as u64),
+            Some(slice_type)
+        );
+    }
+    for slots in [
+        string::DATA_SLOTS,
+        slice::DATA_SLOTS - 1,
+        slice::DATA_SLOTS + 1,
+        slice::EXTENDED_DATA_SLOTS,
+        slice::EXTENDED_DATA_SLOTS + 1,
+    ] {
+        let value = gc.alloc(ValueMeta::new(0, ValueKind::Slice), slots);
+        assert_eq!(
+            validate_jit_interface_value(&gc, &module, slice_slot0, value as u64),
+            None
+        );
+    }
+    // A valid allocation width cannot make an incompatible layout tag valid.
+    unsafe { slice::SliceData::as_mut(compact) }.layout = slice::LAYOUT_EXTENDED_FLAT;
+    unsafe { slice::SliceData::as_mut(extended) }.layout = slice::LAYOUT_CANONICAL_ARRAY;
+    for value in [compact, extended] {
+        assert_eq!(
+            validate_jit_interface_value(&gc, &module, slice_slot0, value as u64),
+            None
+        );
+    }
+}
+
+#[test]
 fn jit_iface_assert_zero_sized_materialization_writes_no_value_slots() {
     for value_kind in [ValueKind::Array, ValueKind::Struct] {
         let slot0 = crate::objects::interface::pack_slot0(0, 0, value_kind);
@@ -269,6 +363,7 @@ fn vm_jit_iface_assert_layout_abi_061_rejects_width_drift_before_out_write() {
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: 0,
+        runtime_trap_origin: 0,
         current_func_id: 0,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),
@@ -288,6 +383,7 @@ fn vm_jit_iface_assert_layout_abi_061_rejects_width_drift_before_out_write() {
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -298,6 +394,7 @@ fn vm_jit_iface_assert_layout_abi_061_rejects_width_drift_before_out_write() {
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,
@@ -388,6 +485,7 @@ fn vm_jit_iface_assert_flags_width_abi_061_rejects_flags_drift_before_out_write(
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: 0,
+        runtime_trap_origin: 0,
         current_func_id: 0,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),
@@ -407,6 +505,7 @@ fn vm_jit_iface_assert_flags_width_abi_061_rejects_flags_drift_before_out_write(
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -417,6 +516,7 @@ fn vm_jit_iface_assert_flags_width_abi_061_rejects_flags_drift_before_out_write(
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,
@@ -518,6 +618,7 @@ fn vm_jit_iface_assert_has_ok_does_not_write_ok_before_success_materialization_0
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: 0,
+        runtime_trap_origin: 0,
         current_func_id: 0,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),
@@ -537,6 +638,7 @@ fn vm_jit_iface_assert_has_ok_does_not_write_ok_before_success_materialization_0
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -547,6 +649,7 @@ fn vm_jit_iface_assert_has_ok_does_not_write_ok_before_success_materialization_0
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,
@@ -735,6 +838,7 @@ fn vm_jit_map_get_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: 0,
+        runtime_trap_origin: 0,
         current_func_id: 0,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),
@@ -754,6 +858,7 @@ fn vm_jit_map_get_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -764,6 +869,7 @@ fn vm_jit_map_get_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,
@@ -850,6 +956,7 @@ fn vm_jit_map_iter_next_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: 0,
+        runtime_trap_origin: 0,
         current_func_id: 0,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),
@@ -869,6 +976,7 @@ fn vm_jit_map_iter_next_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -879,6 +987,7 @@ fn vm_jit_map_iter_next_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,
@@ -1050,6 +1159,7 @@ fn typed_write_barrier_helper_reports_invalid_struct_meta_as_jit_error() {
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: u32::MAX,
+        runtime_trap_origin: 0,
         current_func_id: u32::MAX,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),
@@ -1069,6 +1179,7 @@ fn typed_write_barrier_helper_reports_invalid_struct_meta_as_jit_error() {
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -1079,6 +1190,7 @@ fn typed_write_barrier_helper_reports_invalid_struct_meta_as_jit_error() {
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,
@@ -1149,6 +1261,7 @@ fn slice_append_metadata_drift_returns_sentinel_instead_of_panicking() {
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: u32::MAX,
+        runtime_trap_origin: 0,
         current_func_id: u32::MAX,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),
@@ -1168,6 +1281,7 @@ fn slice_append_metadata_drift_returns_sentinel_instead_of_panicking() {
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -1178,6 +1292,7 @@ fn slice_append_metadata_drift_returns_sentinel_instead_of_panicking() {
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,
@@ -1349,6 +1464,7 @@ fn dyn_call_ic_061_allocates_exact_zeroed_dense_table() {
     assert_eq!(table.len(), 3);
     assert!(table
         .iter()
+        .flat_map(|cache| &cache.entries)
         .all(|entry| entry.valid == 0 && entry.jit_func_ptr == 0 && entry.dispatch_key == 0));
 }
 
@@ -1372,6 +1488,7 @@ fn jit_missing_callbacks_and_invalid_call_requests_fail_without_publishing() {
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: u32::MAX,
+        runtime_trap_origin: 0,
         current_func_id: u32::MAX,
         infra_error_message: core::ptr::null_mut(),
         callback_state: core::ptr::null_mut(),
@@ -1391,6 +1508,7 @@ fn jit_missing_callbacks_and_invalid_call_requests_fail_without_publishing() {
         call_func_id: 0,
         call_arg_start: 0,
         call_resume_pc: 0,
+        call_callee_bp: 0,
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
@@ -1401,6 +1519,7 @@ fn jit_missing_callbacks_and_invalid_call_requests_fail_without_publishing() {
         stack_limit: 0,
         call_depth: 0,
         call_depth_limit: 0,
+        native_stack_floor: 0,
         jit_bp: 0,
         fiber_sp: 0,
         push_frame_fn: None,

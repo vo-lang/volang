@@ -4,14 +4,13 @@ use std::sync::Arc;
 
 use vo_runtime::output::CaptureSink;
 use vo_stdlib::toolchain::{
-    install_toolchain_host, is_toolchain_host_installed, ToolchainHost, ToolchainModule,
-    ToolchainRunMode,
+    install_toolchain_host_if_absent, ToolchainHost, ToolchainModule, ToolchainRunMode,
 };
 use vo_syntax::parser;
 
-use crate::{compile_string, format_text, run, run_with_output, Module, RunMode};
+use crate::{format_text, Engine, Module, RunMode};
 
-struct EngineToolchainHost;
+struct EngineToolchainHost(Engine);
 
 fn run_mode(mode: ToolchainRunMode) -> RunMode {
     match mode {
@@ -89,19 +88,21 @@ fn init_file_impl(file_path: &Path) -> Result<(), String> {
 
 impl ToolchainHost for EngineToolchainHost {
     fn compile_file(&self, path: &Path) -> Result<ToolchainModule, String> {
-        crate::compile::compile_path(path).map_err(|e| e.to_string())
+        self.0.compile_path(path).map_err(|e| e.to_string())
     }
 
     fn compile_dir(&self, path: &Path) -> Result<ToolchainModule, String> {
-        crate::compile::compile_path(path).map_err(|e| e.to_string())
+        self.0.compile_path(path).map_err(|e| e.to_string())
     }
 
     fn compile_string(&self, code: &str) -> Result<ToolchainModule, String> {
-        compile_string(code).map_err(|e| e.to_string())
+        self.0.compile_string(code).map_err(|e| e.to_string())
     }
 
     fn run(&self, module: &ToolchainModule, mode: ToolchainRunMode) -> Result<(), String> {
-        run(module.clone(), run_mode(mode), Vec::new()).map_err(|e| e.to_string())
+        self.0
+            .run(module.clone(), run_mode(mode), Vec::new())
+            .map_err(|e| e.to_string())
     }
 
     fn run_capture(
@@ -110,7 +111,9 @@ impl ToolchainHost for EngineToolchainHost {
         mode: ToolchainRunMode,
     ) -> Result<Vec<u8>, String> {
         let sink = CaptureSink::new();
-        let result = run_with_output(module.clone(), run_mode(mode), Vec::new(), sink.clone());
+        let result =
+            self.0
+                .run_with_output(module.clone(), run_mode(mode), Vec::new(), sink.clone());
         let output = sink.take_bytes();
         match result {
             Ok(()) => Ok(output),
@@ -171,11 +174,24 @@ impl ToolchainHost for EngineToolchainHost {
     }
 }
 
+/// Install the plain language host if the application has not supplied one.
 pub fn ensure_toolchain_host_installed() {
-    if is_toolchain_host_installed() {
-        return;
+    Engine::default().ensure_toolchain_host_installed();
+}
+
+impl Engine {
+    /// Construct a toolchain host that retains this engine's compiler and
+    /// execution policy, including nested `toolchain` calls.
+    pub fn toolchain_host(&self) -> Arc<dyn ToolchainHost> {
+        Arc::new(EngineToolchainHost(*self))
     }
-    install_toolchain_host(Arc::new(EngineToolchainHost));
+
+    /// Supply the process's default toolchain host without replacing an
+    /// application-installed host. Applications needing a specific global host
+    /// should install `toolchain_host()` explicitly at startup.
+    pub fn ensure_toolchain_host_installed(&self) {
+        install_toolchain_host_if_absent(self.toolchain_host());
+    }
 }
 
 #[cfg(test)]

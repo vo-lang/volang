@@ -1,0 +1,47 @@
+package app
+
+import (
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var accordionPreviewType = ui.Define("studio.AccordionPreview")
+
+var accordionNoteType = ui.Define("studio.AccordionNote")
+
+func AccordionNote() ui.View {
+	return ui.Component(accordionNoteType, func(scope *ui.Scope) ui.View {
+		note := ui.String(scope, "note", "")
+		return kit.Field("accordion-note", "A detail worth keeping", "Close this section and come back to it.", ui.Element("input").Attr("value", note.Get()).On("input", func(event ui.Event) {
+			note.Set(event.Value)
+		}))
+	})
+}
+
+func AccordionPreview() ui.View {
+	return ui.Component(accordionPreviewType, func(scope *ui.Scope) ui.View {
+		expanded := ui.State(scope, "expanded", func() any {
+			return []string{"start"}
+		})
+		return kit.Accordion(kit.AccordionProps{
+			ID: "gallery-accordion",
+			Expanded: func() []string {
+				return expanded.Get().([]string)
+			},
+			Multiple: true, Regions: true,
+			OnChange: func(keys []string) {
+				expanded.Update(func(any) any {
+					return keys
+				})
+			},
+			Items: []kit.AccordionItem{
+				{
+					Key: "start", Label: "Where do I begin?",
+					Content: paragraph("Start with one useful detail. You can leave a few sections open while you find your way."),
+				},
+				{Key: "note", Label: "Can I keep a thought here?", Content: AccordionNote()},
+				{Key: "later", Label: "More ideas, coming later", Disabled: true, Content: ui.Text("")},
+			},
+		})
+	})
+}

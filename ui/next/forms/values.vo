@@ -1,0 +1,23 @@
+package forms
+
+import (
+	"slices"
+)
+
+	// Internal snapshots share immutable value lists. Copy only the map when
+	// replacing one field; values crossing an application boundary are deep copies.
+func copyValueMap(source Values) Values {
+	result := make(Values)
+	for name, values := range source {
+		result[name] = values
+	}
+	return result
+}
+
+func cloneValues(source Values) Values {
+	result := make(Values)
+	for name, values := range source {
+		result[name] = slices.CloneString(values)
+	}
+	return result
+}

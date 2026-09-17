@@ -1,0 +1,111 @@
+package forms
+
+import (
+	"encoding/json"
+	"fmt"
+	"slices"
+)
+
+// Reload keeps form data and the saved baseline. Validation state and owned
+// tasks are rebuilt using the new declaration; a prior save is never replayed.
+type reloadSnapshot struct {
+	Version int `json:"version"`
+	Values Values `json:"values"`
+	Baseline Values `json:"baseline"`
+	Arrays []string `json:"arrays,omitempty"`
+	Schemas map[string]string `json:"schemas,omitempty"`
+	NextRow int `json:"nextRow,omitempty"`
+}
+
+func (value snapshot) ReloadSchema() string {
+	return "vo.ui.forms/1"
+}
+
+func (value snapshot) SaveReload() (string, error) {
+	schemas := make(map[string]string)
+	for _, name := range value.arrays {
+		schemas[name] = arraySchema(value.initial, name)
+	}
+	bytes, err := json.Marshal(reloadSnapshot{
+		Version: 2, Values: value.values, Baseline: value.baseline, Arrays: value.arrays,
+		Schemas: schemas, NextRow: value.nextRow,
+	})
+	return string(bytes), err
+}
+
+func (value snapshot) RestoreReload(encoded string) (any, error) {
+	var previous reloadSnapshot
+	if err := json.Unmarshal([]byte(encoded), &previous); err != nil {
+		return nil, err
+	}
+	if previous.Version != 1 && previous.Version != 2 || previous.Values == nil ||
+		previous.Baseline == nil {
+		return nil, fmt.Errorf("forms: invalid reload snapshot")
+	}
+	if previous.Version == 1 {
+		if len(previous.Arrays) != 0 || previous.NextRow != 0 || len(previous.Schemas) != 0 {
+			return nil, fmt.Errorf("forms: invalid legacy reload snapshot")
+		}
+		previous.NextRow = 1
+	} else {
+		if previous.NextRow < 1 || previous.NextRow > 2147483647 ||
+			len(previous.Schemas) != len(previous.Arrays) {
+			return nil, fmt.Errorf("forms: invalid array reload metadata")
+		}
+		for _, name := range previous.Arrays {
+			if previous.Schemas[name] == "" {
+				return nil, fmt.Errorf("forms: missing array reload schema")
+			}
+		}
+		for _, source := range []Values{previous.Values, previous.Baseline} {
+			if err := validateArrays(source, previous.Arrays); err != nil {
+				return nil, err
+			}
+			if arrayNextRow(source, previous.Arrays) > previous.NextRow {
+				return nil, fmt.Errorf("forms: invalid array reload identity counter")
+			}
+		}
+	}
+	values, baseline := cloneValues(value.initial), cloneValues(value.initial)
+	for name := range value.initial {
+		if arrayOwned(value.arrays, name) || arrayOwned(previous.Arrays, name) {
+			continue
+		}
+		before, exists := previous.Values[name]
+		saved, hasBaseline := previous.Baseline[name]
+		if exists != hasBaseline {
+			return nil, fmt.Errorf("forms: incomplete reload field")
+		}
+		if exists {
+			values[name] = append([]string{}, before...)
+			baseline[name] = append([]string{}, saved...)
+		}
+	}
+	for _, name := range value.arrays {
+		if !slices.ContainsString(previous.Arrays, name) ||
+			previous.Schemas[name] != arraySchema(value.initial, name) {
+			continue
+		}
+		for field := range values {
+			if field == name || arrayDescendant(name, field) {
+				delete(values, field)
+				delete(baseline, field)
+			}
+		}
+		for field, entries := range previous.Values {
+			if field == name || arrayDescendant(name, field) {
+				values[field] = slices.CloneString(entries)
+			}
+		}
+		for field, entries := range previous.Baseline {
+			if field == name || arrayDescendant(name, field) {
+				baseline[field] = slices.CloneString(entries)
+			}
+		}
+	}
+	value.values, value.baseline = values, baseline
+	if previous.NextRow > value.nextRow {
+		value.nextRow = previous.NextRow
+	}
+	return value, nil
+}

@@ -1,0 +1,15 @@
+package main
+var holders []island
+var parked = make(chan int)
+var state int = 7
+func main() { <-parked; println("POLL_DONE") }
+func Configure(count int) {
+    holders = make([]island, count)
+    for i := 0; i < count; i++ { holders[i] = make(island) }
+    println("POLL_READY")
+}
+func PollProbe() {
+    for i := 0; i < 64; i++ { state = (state * 1664525 + 1013904223) & 2147483647 }
+}
+func Validate(expected int) { assert(state == expected); println("POLL_OK") }
+func Release() { parked <- 1 }

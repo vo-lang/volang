@@ -44,6 +44,9 @@ impl ShapePlan {
                     .expect("shape analysis traverses a verified IR block");
                 let instruction = typed.source();
                 let opcode = instruction.opcode();
+                if let Some(range) = typed.frame_write_range() {
+                    aliases.retain(|&slot, _| !range.contains(&usize::from(slot)));
+                }
 
                 match opcode {
                     Opcode::PtrNew => {

@@ -1,0 +1,499 @@
+// Package forms owns form snapshots, validation and scoped submissions.
+package forms
+
+import (
+	"net/url"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/files"
+)
+
+// Values uses the standard ordered multi-value representation. Get reads the
+// first value; indexing reads every value of a field in an independent snapshot.
+type Values = url.Values
+
+type Errors = map[string]string
+
+// Submission restores a completed server submission while Initial remains the
+// saved baseline. Values override declared fields; errors are visible on the
+// first render. The form copies this seed once when its scope is created.
+type Submission struct {
+	Values Values
+	Errors Errors
+}
+
+type Options struct {
+	// Initial declares scalar fields and initial array rows, including fields
+	// conditionally displayed. FieldArray operations add/remove owned row fields.
+	// It is copied once when the form scope is created.
+	Initial Values
+	Submission *Submission
+	// Arrays declares the top-level array order fields in Initial. Descendants
+	// use stable row paths; nested arrays belong to the same declaration.
+	Arrays []string
+	// Files declares initially empty native selections, separate from Initial.
+	// Declarations are fixed for this scope and cannot belong to an array group.
+	Files []string
+	// Fields selects participating scalar fields and complete array groups.
+	// Nil includes all current fields, including dynamic row descendants.
+	// Hidden fields retain their values and are excluded from validation/submission.
+	Fields []string
+	Validate func(Data) Errors
+	// FieldValidators are independent text-field checks. Each edit runs only its
+	// own check; submission validates all participating fields. Use Validate for
+	// cross-field rules. Callbacks receive a detached value list.
+	FieldValidators map[string]func([]string) string
+	ValidateAsync func(Data) ui.Request
+	DecodeValidation func(ui.Result) Errors
+	// FocusInvalid can focus the first invalid field after a submit attempt.
+	FocusInvalid func(string)
+}
+
+type Outcome struct {
+	// An empty key holds a form-level error; other keys identify fields.
+	Errors Errors
+	Message string
+}
+
+type snapshot struct {
+	initial Values
+	baseline Values
+	values Values
+	files map[string]files.Selection
+	fileFields []string
+	arrays []string
+	nextRow int
+	touched map[string]bool
+	errors Errors
+	serverErrors Errors
+	submitted bool
+	validating bool
+	submitting bool
+	submitRequested bool
+	message string
+	work *ownedWork
+}
+
+// Task handles are lifecycle metadata and can be cancelled after state disposal.
+type ownedWork struct {
+	validation *ui.Task
+	submission *ui.Task
+	active bool
+	generation int
+}
+
+func (work *ownedWork) cancel() {
+	work.validation.Cancel()
+	work.submission.Cancel()
+	work.validation, work.submission = nil, nil
+}
+
+type Form struct {
+	scope *ui.Scope
+	state *ui.Store
+	options Options
+	fields []string
+	allFields bool
+	arrays []string
+	fileFields []string
+	arrayFields map[string]bool
+	generation int
+}
+
+func Use(scope *ui.Scope, key string, options Options) *Form {
+	if (options.ValidateAsync == nil) != (options.DecodeValidation == nil) {
+		panic("forms: async validation requires a request and a decoder")
+	}
+	state := ui.State(scope, key, func() any {
+		initial := cloneValues(options.Initial)
+		for name := range initial {
+			if name == "" {
+				panic("forms: field names must not be empty")
+			}
+		}
+		arrays := slices.CloneString(options.Arrays)
+		if err := validateArrays(initial, arrays); err != nil {
+			panic(err.Error())
+		}
+		current := snapshot{
+			initial: initial, baseline: initial, values: initial, touched: make(map[string]bool),
+			arrays: arrays, nextRow: 1, work: &ownedWork{},
+		}
+		current.files = make(map[string]files.Selection)
+		current.fileFields = slices.CloneString(options.Files)
+		for _, name := range options.Files {
+			_, duplicate := current.files[name]
+			_, text := initial[name]
+			if name == "" || duplicate || text || arrayOwned(arrays, name) {
+				panic("forms: file declarations must be unique names outside text fields and array groups")
+			}
+			current.files[name] = files.Selection{}
+		}
+		if options.Submission != nil {
+			current.values = cloneValues(initial)
+			for _, array := range arrays {
+				if _, provided := options.Submission.Values[array]; provided {
+					for name := range current.values {
+						if arrayDescendant(array, name) {
+							delete(current.values, name)
+						}
+					}
+				}
+			}
+			for name, values := range options.Submission.Values {
+				_, exists := initial[name]
+				if !exists && !arrayOwned(arrays, name) {
+					panic("forms: a restored submission must use declared fields")
+				}
+				current.values[name] = slices.CloneString(values)
+			}
+			if err := validateArrays(current.values, arrays); err != nil {
+				panic(err.Error())
+			}
+			current.serverErrors = normalizeErrors(options.Submission.Errors, func(name string) bool {
+				_, file := current.files[name]
+				return file && (options.Fields == nil || slices.ContainsString(options.Fields, name)) ||
+					selectedField(current.values, name, options.Fields, options.Fields == nil, arrays)
+			})
+			current.errors = current.serverErrors
+			current.submitted = true
+		}
+		current.nextRow = arrayNextRow(initial, arrays)
+		if next := arrayNextRow(current.values, arrays); next > current.nextRow {
+			current.nextRow = next
+		}
+		return current
+	})
+	current := state.SelectEqual(func(value any) any {
+		return value
+	}, sameDeclaration).(snapshot)
+	if !slices.EqualString(current.arrays, options.Arrays) {
+		panic("forms: array declarations require a fresh form scope")
+	}
+	if !slices.EqualString(current.fileFields, options.Files) {
+		panic("forms: file declarations require a fresh form scope")
+	}
+	fields := append([]string{}, options.Fields...)
+	if options.Fields == nil {
+		for name := range current.values {
+			fields = append(fields, name)
+		}
+		for name := range current.files {
+			fields = append(fields, name)
+		}
+		sort.Strings(fields)
+	}
+	seen := make(map[string]bool)
+	identity := []string{"selected:"}
+	if options.Fields == nil {
+		identity = []string{"all:"}
+	}
+	for _, name := range fields {
+		_, exists := current.values[name]
+		_, file := current.files[name]
+		if !exists && !file || seen[name] {
+			panic("forms: active fields must be unique declared names")
+		}
+		if options.Fields != nil {
+			for _, array := range current.arrays {
+				if arrayDescendant(array, name) && !slices.ContainsString(fields, array) {
+					panic("forms: select the owning array to participate in form submissions")
+				}
+			}
+		}
+		seen[name] = true
+		if options.Fields != nil {
+			identity = append(identity, strconv.Itoa(len(name)) + ":" + name)
+		}
+	}
+	form := &Form{
+		scope: scope, state: state, options: options, fields: fields, allFields: options.Fields == nil,
+		generation: current.work.generation, arrays: current.arrays, fileFields: current.fileFields,
+	}
+	// Changing the participation declaration invalidates pending work after commit.
+	// Array edits cancel work immediately. Expanding "all" with a newly inserted
+	// row must not cancel a new submission started later in that same event turn.
+	// Scope disposal already cancels its tasks before this cleanup runs.
+	ui.Effect(scope, "forms:" + key, func() func() {
+		form.cancelWork()
+		current.work.active = true
+		current.work.generation++
+		form.generation = current.work.generation
+		return func() {
+			current.work.active = false
+			current.work.cancel()
+		}
+	}, strings.Join(identity, ""))
+	return form
+}
+
+func (form *Form) read() snapshot {
+	return form.state.Get().(snapshot)
+}
+
+func (form *Form) write(value snapshot) {
+	form.state.Update(func(any) any {
+		return value
+	})
+}
+
+func (form *Form) requireLive() {
+	work := form.read().work
+	if !work.active || work.generation != form.generation {
+		panic("forms: mutation requires the current committed form declaration")
+	}
+}
+
+func (form *Form) has(name string) bool {
+	return form.field(name).active
+}
+
+func (form *Form) requireField(name string) {
+	if !form.has(name) {
+		panic("forms: field is not active: " + name)
+	}
+}
+
+func (form *Form) values(source Values) Values {
+	values := make(Values)
+	for _, name := range form.fieldNames(source) {
+		if entries, exists := source[name]; exists {
+			values[name] = slices.CloneString(entries)
+		}
+	}
+	return values
+}
+
+// Values returns an independent snapshot of the participating fields.
+func (form *Form) Values() Values {
+	return form.values(form.read().values)
+}
+
+func (form *Form) Value(name string) string {
+	form.requireText(name)
+	return firstValue(form.field(name).values)
+}
+
+// All returns an independent copy of one field's ordered values.
+func (form *Form) All(name string) []string {
+	form.requireText(name)
+	return slices.CloneString(form.field(name).values)
+}
+
+func (form *Form) Dirty() bool {
+	return form.state.Select(func(value any) any {
+		current := value.(snapshot)
+		for name, selection := range current.files {
+			if (form.allFields || slices.ContainsString(form.fields, name)) &&
+				(selection.Len() != 0 || selection.Error() != "") {
+				return true
+			}
+		}
+		for _, name := range form.fieldNames(current.values) {
+			if !slices.EqualString(current.values[name], current.baseline[name]) {
+				return true
+			}
+		}
+		return false
+	}).(bool)
+}
+
+func (form *Form) Touched(name string) bool {
+	form.requireField(name)
+	return form.field(name).touched
+}
+
+func (form *Form) Error(name string) string {
+	if name == "" {
+		return form.state.Select(func(value any) any {
+			return value.(snapshot).errors[""]
+		}).(string)
+	}
+	form.requireField(name)
+	return form.field(name).error
+}
+
+func (form *Form) Pending() bool {
+	return form.state.Select(func(value any) any {
+		current := value.(snapshot)
+		return current.validating || current.submitting
+	}).(bool)
+}
+
+func (form *Form) Validating() bool {
+	return form.state.Select(func(value any) any {
+		return value.(snapshot).validating
+	}).(bool)
+}
+
+func (form *Form) Submitting() bool {
+	return form.state.Select(func(value any) any {
+		return value.(snapshot).submitting
+	}).(bool)
+}
+
+func (form *Form) Message() string {
+	return form.state.Select(func(value any) any {
+		return value.(snapshot).message
+	}).(string)
+}
+
+func (form *Form) normalize(errors Errors) Errors {
+	return normalizeErrors(errors, form.has)
+}
+
+func normalizeErrors(errors Errors, has func(string) bool) Errors {
+	clean := make(Errors)
+	names := []string{}
+	for name := range errors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		message := errors[name]
+		if message == "" {
+			continue
+		}
+		if name == "" || has(name) {
+			clean[name] = message
+		} else {
+			if clean[""] != "" {
+				clean[""] += "\n"
+			}
+			clean[""] += message
+		}
+	}
+	return clean
+}
+
+func (form *Form) check(data Data) Errors {
+	errors := make(Errors)
+	if form.options.Validate != nil {
+		errors = normalizeErrors(form.options.Validate(cloneData(data)), data.has)
+	}
+	for name, validate := range form.options.FieldValidators {
+		if values, exists := data.Values[name]; exists && validate != nil {
+			if message := validate(slices.CloneString(values)); message != "" {
+				errors[name] = message
+			}
+		}
+	}
+	for name, selection := range data.Files {
+		if selection.Error() != "" {
+			errors[name] = selection.Error()
+		}
+	}
+	return errors
+}
+
+// Local validation returns a fresh map. Returned field errors belong to their
+// submitted values until that field changes or another submission retries it.
+func includeServerErrors(local Errors, returned Errors) Errors {
+	for name, message := range returned {
+		local[name] = message
+	}
+	return local
+}
+
+func (form *Form) Change(name string, value string) {
+	form.ChangeAll(name, []string{value})
+}
+
+// ChangeAll replaces one field's complete ordered value list. Nil and an empty
+// list both represent no values; a single empty string remains a distinct value.
+func (form *Form) ChangeAll(name string, values []string) {
+	form.requireLive()
+	form.requireText(name)
+	current := form.read()
+	if form.arrayFields[name] || slices.ContainsString(current.arrays, name) {
+		panic("forms: change array order through its FieldArray operations")
+	}
+	if slices.EqualString(current.values[name], values) {
+		return
+	}
+	form.state.Update(func(old any) any {
+		next := old.(snapshot)
+		next.work.validation.Cancel()
+		next.work.validation = nil
+		next.validating = false
+		next.submitRequested = false
+		next.values = copyValueMap(next.values)
+		next.values[name] = slices.CloneString(values)
+		remaining := editedErrors(next.serverErrors, name)
+		next.serverErrors = remaining
+		next.errors = includeServerErrors(form.checkEdit(next, name), remaining)
+		next.message = ""
+		return next
+	})
+}
+
+func (form *Form) Blur(name string) {
+	form.requireLive()
+	form.requireField(name)
+	current := form.read()
+	current.touched = cloneTouched(current.touched)
+	current.touched[name] = true
+	form.write(current)
+	if !current.submitting && !current.submitRequested {
+		form.validate(nil)
+	}
+}
+
+func cloneTouched(source map[string]bool) map[string]bool {
+	result := make(map[string]bool)
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+
+func (form *Form) cancelWork() {
+	current := form.read()
+	if !current.validating && !current.submitting && !current.submitRequested {
+		return
+	}
+	form.state.Update(func(old any) any {
+		next := old.(snapshot)
+		next.work.cancel()
+		next.validating, next.submitting = false, false
+		next.submitRequested = false
+		return next
+	})
+}
+
+// Cancel retires pending work. It cannot undo a server-side write already made.
+func (form *Form) Cancel() {
+	form.requireLive()
+	form.cancelWork()
+}
+
+// Reset restores the original values and clears interaction/validation state.
+func (form *Form) Reset() {
+	form.reset(true)
+}
+
+// Revert discards unsaved edits using the latest successful submission baseline.
+// Reset retains its native-form meaning of returning to the original values.
+func (form *Form) Revert() {
+	form.reset(false)
+}
+
+func (form *Form) reset(original bool) {
+	form.requireLive()
+	form.state.Update(func(old any) any {
+		current := old.(snapshot)
+		current.work.cancel()
+		values := current.baseline
+		if original {
+			values = current.initial
+		}
+		return snapshot{
+			initial: current.initial, baseline: values, values: values, touched: make(map[string]bool),
+			arrays: current.arrays, nextRow: current.nextRow, work: current.work,
+			files: clearFiles(current.files), fileFields: current.fileFields,
+		}
+	})
+}

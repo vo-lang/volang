@@ -111,8 +111,8 @@ func main() {
     timeoutMilliseconds,
   );
   await activate("main.vo");
-  await activate("Wasm AOT release");
-  await statusIncludes("Target changed to Wasm AOT release");
+  await activate("Wasm VM release");
+  await statusIncludes("Target changed to Wasm VM release");
   await activate("Run project");
   checkpoints.run = await pollEvaluation(contract,
     `({
@@ -121,7 +121,7 @@ func main() {
       graphics: document.querySelectorAll('[data-volang-graphics]').length,
     })`,
     (value) => Array.isArray(value?.status)
-      && value.status.some((item) => item.includes("Run 1 completed with Wasm AOT release"))
+      && value.status.some((item) => item.includes("Run 1 completed with Wasm VM release"))
       && value.status.some((item) => item.includes("Preview synchronized after run 1"))
       && value?.canvas === true && value?.graphics >= 1,
     timeoutMilliseconds,
@@ -130,7 +130,7 @@ func main() {
   checkpoints.console = await pollEvaluation(contract,
     `document.body.textContent ?? ''`,
     (value) => typeof value === "string"
-      && value.includes("Run 1 completed with Wasm AOT release")
+      && value.includes("Run 1 completed with Wasm VM release")
       && value.includes("0 PROBLEMS"),
     timeoutMilliseconds,
   );

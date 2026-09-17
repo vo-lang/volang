@@ -1,0 +1,33 @@
+package app
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var appType = ui.Define("starter.App")
+
+func App(scope *ui.Scope, initial string) ui.View {
+	ui.InspectProp(scope, "initial", initial)
+	count := ui.Int(scope, "count", 0)
+	name := ui.String(scope, "name", initial)
+	greeting := "A small idea, ready to grow."
+	if name.Get() != "" {
+		greeting = "Make something good, " + name.Get() + "."
+	}
+	return ui.Element("main", ui.Element("p", ui.Text("VOLANG UI")).Class("eyebrow"), ui.Element("h1", ui.Text(greeting)), ui.Element("p", ui.Text("Your first component is live. Give it a name, try a little interaction, and make it your own.")).Class("intro"), ui.Element("section", kit.Field("name", "What should we call you?", "Everything here stays in this page.", ui.Element("input").Attr("value", name.Get()).Attr("autocomplete", "given-name").Attr("placeholder", "Your name")).On("input", func(event ui.Event) {
+		name.Set(event.Value)
+	}), ui.Element("div", kit.Button(kit.ButtonProps{
+		OnPress: func() {
+			count.Set(count.Get() + 1)
+		},
+	}, ui.Text("Make it happen")), ui.Element("output", ui.Text(fmt.Sprint(count.Get()) +
+		" little steps")).Attr("aria-live", "polite").Attr("data-count", "")).Class("actions")).Class("vui-card")).Class("vui", "starter").StyleScope("starter-app")
+}
+
+func View(initial string) ui.View {
+	return ui.Component(appType, func(scope *ui.Scope) ui.View {
+		return App(scope, initial)
+	})
+}

@@ -1,0 +1,78 @@
+package ui
+
+import (
+	"encoding/json"
+	"math"
+)
+
+// Measurement is a snapshot of an element's bounding rectangle in CSS pixels,
+// relative to its own document's viewport, including CSS transforms. Missing
+// elements return Found=false; hidden elements can have a zero-sized rectangle.
+type Measurement struct {
+	Found bool
+	X float64
+	Y float64
+	Width float64
+	Height float64
+	Error string
+}
+
+type measurementPayload struct {
+	Found any `json:"found"`
+	X any `json:"x"`
+	Y any `json:"y"`
+	Width any `json:"width"`
+	Height any `json:"height"`
+}
+
+func decodeMeasurement(result Result) Measurement {
+	if result.Error != "" {
+		return Measurement{Error: result.Error}
+	}
+	invalid := Measurement{Error: "ui: invalid element measurement"}
+	if len(result.Value) > 2048 {
+		return invalid
+	}
+	var payload measurementPayload
+	if json.Unmarshal([]byte(result.Value), &payload) != nil {
+		return invalid
+	}
+	found, validFound := payload.Found.(bool)
+	x, validX := payload.X.(float64)
+	y, validY := payload.Y.(float64)
+	width, validWidth := payload.Width.(float64)
+	height, validHeight := payload.Height.(float64)
+	if !validFound || !validX || !validY || !validWidth || !validHeight {
+		return invalid
+	}
+	for _, value := range []float64{x, y, width, height} {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return invalid
+		}
+	}
+	if width < 0 || height < 0 || (!found && (x != 0 || y != 0 || width != 0 || height != 0)) {
+		return invalid
+	}
+	return Measurement{Found: found, X: x, Y: y, Width: width, Height: height}
+}
+
+// Measure resolves this ref after the next commit and delivers a snapshot
+// through the owning scope's task queue. It can be requested in the same handler
+// that shows or replaces the element. Cancel the returned task to discard its
+// result; scope disposal also cancels it. Nil/disposed refs return nil.
+func (ref *ElementRef) Measure(receive func(Measurement)) *Task {
+	if !ref.live() {
+		return nil
+	}
+	if receive == nil {
+		panic("ui: element measurement requires a receiver")
+	}
+	task := Start(ref.scope, Request{Service: "ui.measure"}, func(result Result) {
+		receive(decodeMeasurement(result))
+	})
+	root := ref.scope.root
+	root.elementRequests = append(root.elementRequests, elementRequest{
+		ref: ref, op: "measure", command: len(root.commands) - 1,
+	})
+	return task
+}

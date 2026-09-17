@@ -2251,10 +2251,8 @@ fn check_import_covered_by_edges(
             "workspace dependency coverage requires an external import: {import_path}"
         )));
     }
-    if let Some(importer_github) = importer_module.as_public() {
-        if importer_github.owns_import(import_path).is_some() {
-            return Ok(());
-        }
+    if importer_module.owns_import(import_path).is_some() {
+        return Ok(());
     }
     if crate::identity::find_owning_module(import_path, allowed_edges).is_some() {
         return Ok(());
@@ -2505,13 +2503,10 @@ fn scan_external_imports_file_in<F: FileSystem>(
         vo_common::vfs::MAX_TEXT_FILE_BYTES,
         "workspace source file",
     )?;
-    // Import authorization is a pre-analysis guard. Preserve the parser's
-    // recovered import list even when another part of the file is malformed;
-    // the normal frontend remains responsible for syntax diagnostics. Any
-    // source that compiles successfully has an exact recovered import list.
-    let (file, _diagnostics, _) = vo_syntax::parse(&content, 0);
-    for import in &file.imports {
-        let import_path = import.path.value.clone();
+    // Dependency discovery uses the frontend's shared header grammar. Full
+    // declarations and syntax diagnostics are handled by normal compilation;
+    // malformed headers retain the same recovered-import behavior as parse.
+    for import_path in vo_syntax::parse_import_paths(&content) {
         if classify_import(&import_path)? == ImportClass::External {
             imports.insert(import_path);
         }
@@ -3040,14 +3035,21 @@ mod tests {
 
     #[test]
     fn test_check_import_covered_by_its_own_module() {
-        let importer: ModIdentity = ModulePath::parse("github.com/acme/app").unwrap().into();
-        assert!(check_import_covered_by_edges(
-            "github.com/acme/app",
-            "github.com/acme/app/util",
-            &importer,
-            &[],
-        )
-        .is_ok());
+        for module in ["github.com/acme/app", "local/app"] {
+            let importer = ModIdentity::parse(module).unwrap();
+            for import in [module.to_string(), format!("{module}/util/nested")] {
+                assert!(check_import_covered_by_edges(module, &import, &importer, &[]).is_ok());
+            }
+            for import in [
+                format!("{module}-other/util"),
+                "local/other/util".to_string(),
+            ] {
+                assert!(matches!(
+                    check_import_covered_by_edges(module, &import, &importer, &[]),
+                    Err(Error::WorkspaceSourceOutsideGraph { .. })
+                ));
+            }
+        }
     }
 
     #[test]
@@ -4197,5 +4199,23 @@ mod tests {
         .unwrap();
         assert_eq!(members.len(), 2);
         assert_eq!(members[1].module.as_str(), "local/scratch");
+    }
+
+    #[test]
+    fn project_import_scan_uses_header_recovery_and_ignores_body_literals() {
+        use vo_common::vfs::MemoryFs;
+        let mut fs = MemoryFs::new();
+        fs.add_file(
+            "root/main.vo",
+            "package main\nimport \"example.com/dep/pkg\"\nfunc broken( {\n",
+        );
+        fs.add_file(
+            "root/other.vo",
+            "package main\nvar text = `import example.com/ignored/pkg`\n",
+        );
+        assert_eq!(
+            scan_external_imports_in(&fs, Path::new("root")).unwrap(),
+            BTreeSet::from([String::from("example.com/dep/pkg")])
+        );
     }
 }

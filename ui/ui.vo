@@ -370,7 +370,7 @@ func LayoutChange(handler func(LayoutEvent)) func(Event) {
 // Mount starts one application root. Volang owns component and handler
 // execution, while the platform owns frame presentation and event delivery.
 // Keeping closure calls on the language side gives VM, JIT, Native AOT, and
-// Core Wasm AOT one lifecycle contract without a host-to-guest callback ABI.
+// Wasm VM one lifecycle contract without a host-to-guest callback ABI.
 func Mount(root func() View) error {
 	initial := true
 	for {

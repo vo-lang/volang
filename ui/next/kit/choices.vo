@@ -1,0 +1,191 @@
+package kit
+
+import (
+	"fmt"
+	ui "github.com/vo-lang/ui/next"
+)
+
+type ChoiceOption struct {
+	Value string
+	Label string
+	Disabled bool
+}
+
+func choiceValues(options []ChoiceOption, empty bool) map[string]ChoiceOption {
+	values := make(map[string]ChoiceOption)
+	for _, option := range options {
+		_, exists := values[option.Value]
+		if exists || option.Label == "" || !empty && option.Value == "" {
+			panic("kit: choices require unique values and nonempty labels; radio values must not be empty")
+		}
+		values[option.Value] = option
+	}
+	return values
+}
+
+type RadioGroupProps struct {
+	ID string
+	Label string
+	Name string
+	Form string
+	Options []ChoiceOption
+	Value func() string
+	DefaultValue string
+	OnChange func(string)
+	OnBlur func()
+	Disabled bool
+	Required bool
+	Hint string
+	Error string
+	Class string
+	InputClass string
+	// InputRef binds the enabled initial/current controlled choice, or the first
+	// enabled option when there is no selection. It is suitable for error focus.
+	InputRef *ui.ElementRef
+	Option func(ChoiceOption) ui.View
+}
+
+func RadioGroup(props RadioGroupProps) ui.View {
+	if props.ID == "" || props.Label == "" {
+		panic("kit: radio groups require an ID and label")
+	}
+	if props.Value != nil && props.DefaultValue != "" {
+		panic("kit: value readers and defaults cannot be combined")
+	}
+	values := choiceValues(props.Options, false)
+	value := props.DefaultValue
+	if props.Value != nil {
+		value = props.Value()
+	}
+	if _, found := values[value]; value != "" && !found {
+		panic("kit: radio value must identify an option")
+	}
+	name := props.Name
+	if name == "" {
+		name = props.ID
+	}
+	focus := ""
+	for _, option := range props.Options {
+		if !option.Disabled && (focus == "" || option.Value == value) {
+			focus = option.Value
+		}
+	}
+	children := []ui.View{ui.Element("legend", ui.Text(props.Label))}
+	for index, option := range props.Options {
+		id := props.ID + "-option-" + fmt.Sprint(index)
+		input := ui.Element("input").Attr("type", "radio").Attr("id", id).Attr("name", name).Attr("value", option.Value)
+		input = input.Attr("disabled", fmt.Sprint(option.Disabled)).Attr("required", fmt.Sprint(props.Required))
+		if props.Form != "" {
+			input = input.Attr("form", props.Form)
+		}
+		if option.Value == focus {
+			input = input.Ref(props.InputRef)
+		}
+		if props.Value == nil {
+			input = input.DefaultChecked(value == option.Value)
+		} else {
+			input = input.Attr("checked", fmt.Sprint(value == option.Value))
+		}
+		input = describeField(input, props.ID, props.Hint, props.Error).Class("vui-check-input").Class(props.InputClass)
+		if props.OnChange != nil {
+			input = input.On("change", func(event ui.Event) {
+				if event.Checked && !option.Disabled && !props.Disabled {
+					props.OnChange(option.Value)
+				}
+			})
+		}
+		if props.OnBlur != nil {
+			input = input.On("blur", func(ui.Event) {
+				props.OnBlur()
+			})
+		}
+		content := ui.Text(option.Label)
+		if props.Option != nil {
+			content = props.Option(option)
+			input = input.Attr("aria-label", option.Label)
+		}
+		children = append(children, ui.Element("label", input, ui.Element("span", content)).Key("option:" +
+			option.Value).Attr("for", id).Class("vui-check"))
+	}
+	children = append(children, fieldMessages(props.ID, props.Hint, props.Error)...)
+	return ui.Element("fieldset", children...).Attr("id", props.ID).Attr("disabled", fmt.Sprint(props.Disabled)).Class("vui-radio-group").Class(props.Class)
+}
+
+type SelectProps struct {
+	ID string
+	Label string
+	Name string
+	Form string
+	Options []ChoiceOption
+	Value func() string
+	DefaultValue string
+	Placeholder string
+	OnChange func(string)
+	OnBlur func()
+	Disabled bool
+	Required bool
+	Hint string
+	Error string
+	Class string
+	InputClass string
+	InputRef *ui.ElementRef
+}
+
+func Select(props SelectProps) ui.View {
+	if props.ID == "" || props.Label == "" {
+		panic("kit: selects require an ID and label")
+	}
+	if props.Value != nil && props.DefaultValue != "" {
+		panic("kit: value readers and defaults cannot be combined")
+	}
+	values := choiceValues(props.Options, true)
+	if props.Placeholder != "" {
+		if _, found := values[""]; found {
+			panic("kit: a select placeholder conflicts with an empty option value")
+		}
+		values[""] = ChoiceOption{Label: props.Placeholder, Disabled: true}
+	}
+	value := props.DefaultValue
+	if props.Value != nil {
+		value = props.Value()
+	}
+	if _, found := values[value]; !found && (props.Value != nil || value != "") {
+		panic("kit: select value must identify an option or placeholder")
+	}
+	children := []ui.View{}
+	if props.Placeholder != "" {
+		placeholder := ui.Element("option", ui.Text(props.Placeholder)).Key("placeholder").Attr("value", "").Attr("disabled", "true")
+		if props.Value == nil {
+			placeholder = placeholder.Attr("selected", fmt.Sprint(value == ""))
+		}
+		children = append(children, placeholder)
+	}
+	for _, option := range props.Options {
+		child := ui.Element("option", ui.Text(option.Label)).Key("option:" + option.Value).Attr("value", option.Value).Attr("disabled", fmt.Sprint(option.Disabled))
+		if props.Value == nil {
+			child = child.Attr("selected", fmt.Sprint(value == option.Value))
+		}
+		children = append(children, child)
+	}
+	input := ui.Element("select", children...).Attr("name", props.Name).Ref(props.InputRef).Class(props.InputClass)
+	input = input.Attr("disabled", fmt.Sprint(props.Disabled)).Attr("required", fmt.Sprint(props.Required))
+	if props.Form != "" {
+		input = input.Attr("form", props.Form)
+	}
+	if props.Value != nil {
+		input = input.Attr("value", value)
+	}
+	if props.OnChange != nil {
+		input = input.On("change", func(event ui.Event) {
+			if option, found := values[event.Value]; found && !option.Disabled && !props.Disabled {
+				props.OnChange(event.Value)
+			}
+		})
+	}
+	if props.OnBlur != nil {
+		input = input.On("blur", func(ui.Event) {
+			props.OnBlur()
+		})
+	}
+	return FormField(FieldProps{ID: props.ID, Label: props.Label, Hint: props.Hint, Error: props.Error}, input).Class(props.Class)
+}

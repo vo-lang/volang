@@ -1726,3 +1726,68 @@ fn full_parse_retains_one_bounded_syntax_diagnostic_stream() {
     );
     assert!(sentinel.message.contains("further diagnostics suppressed"));
 }
+
+#[test]
+fn import_header_preserves_aliases_raw_paths_escapes_and_duplicates() {
+    let source = r#"/* leading comment */
+package main
+import (
+    named "example.com/a\u002fb"
+    . `example.com/raw`
+    _ "example.com/blank"
+    "example.com/raw"
+)
+func main() { println("import example.com/ignored") }
+"#;
+    assert_eq!(
+        parse_import_paths(source),
+        [
+            "example.com/a/b",
+            "example.com/raw",
+            "example.com/blank",
+            "example.com/raw",
+        ]
+    );
+    let (full, diagnostics, _) = parse(source, 0);
+    assert!(!diagnostics.has_errors());
+    assert_eq!(
+        parse_import_paths(source),
+        full.imports
+            .into_iter()
+            .map(|import| import.path.value)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn import_header_matches_full_parser_recovery_without_body_validation() {
+    let cases = [
+        "",
+        "package main",
+        "package 123\nimport \"example.com/a\"",
+        "import \"example.com/a\"\nfunc broken( {",
+        "import @\"example.com/a\"\nvar x = 1",
+        "import \"example.com/a\"\nimport (\"example.com/b\"",
+        "import \"example.com/a\"\nimport broken",
+        "import (\"example.com/a\"; . `example.com/b`)\nvar x = 1",
+        "package main\n; import \"example.com/late\"",
+        "package main\nvar x = `import example.com/ignored`\nimport \"example.com/late\"",
+        "import \"example.com/a\"\nfunc main() { /* unfinished",
+        "/*vo:mod\nmodule example.com/root\n*/\nimport \"example.com/a\"\nvar x = 1",
+        "import \"example.com/a\\q\"\nvar x = 1",
+    ];
+    for source in cases {
+        let (full, _, _) = parse(source, 0);
+        let expected = full
+            .imports
+            .into_iter()
+            .map(|import| import.path.value)
+            .collect::<Vec<_>>();
+        assert_eq!(parse_import_paths(source), expected, "{source:?}");
+    }
+    assert_eq!(
+        parse_import_paths("import \"example.com/a\"\nfunc broken( {"),
+        ["example.com/a"]
+    );
+    assert!(parse_import_paths("import \"example.com/a\"\nimport broken").is_empty());
+}

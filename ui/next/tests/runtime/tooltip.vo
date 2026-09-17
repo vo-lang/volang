@@ -1,0 +1,98 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+func tooltipContracts() {
+	var visible *ui.BoolState
+	var triggerRef *ui.ElementRef
+	clicks := 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		visible = ui.Bool(scope, "visible", true)
+		triggerRef = ui.Ref(scope, "trigger")
+		if !visible.Get() {
+			return ui.Text("Removed")
+		}
+		trigger := ui.Element("button", ui.Text("Help")).Ref(triggerRef).Attr("data-name", "trigger").DescribedBy("existing-help").On("click", func(ui.Event) {
+			clicks++
+		})
+		return kit.Tooltip(kit.TooltipProps{
+			ID: "hint", Text: "A helpful description", Delay: &kit.TooltipDelay{Open: 10, Close: 10},
+		}, trigger)
+	}))
+	first := flush(root)
+	tip, anchor := 0, 0
+	for _, mutation := range first.Mutations {
+		if mutation.Op == "popover" {
+			tip, anchor = mutation.ID, mutation.Parent
+		}
+	}
+	trigger := target(first, "trigger")
+	require(tip > 0 && anchor > 0 && strings.Contains(root.HTML(), `popover="hint"`) &&
+		strings.Contains(root.HTML(), `aria-describedby="existing-help hint"`), "tooltip lost hint presentation or trigger descriptions")
+	sequence := 0
+	send := func(target int, kind string, value string, pointer string) bool {
+		sequence++
+		return root.Dispatch(ui.Event{
+			Target: target, Kind: kind, Value: value, PointerType: pointer, Sequence: sequence,
+		})
+	}
+	presents := func(batch ui.Batch, open string) bool {
+		for _, mutation := range batch.Mutations {
+			if mutation.Op == "popover" && mutation.ID == tip && mutation.Value == open {
+				return true
+			}
+		}
+		return false
+	}
+	command := func(batch ui.Batch, op string) int {
+		for _, command := range batch.Commands {
+			if command.Op == op {
+				return command.ID
+			}
+		}
+		return 0
+	}
+	send(anchor, "focusin", "", "")
+	require(presents(flush(root), "true"), "focus did not open the tooltip immediately")
+	send(trigger, "click", "", "mouse")
+	require(clicks == 1, "tooltip replaced the trigger's own listener")
+	triggerRef.Focus()
+	require(focusTarget(flush(root)) == trigger, "tooltip replaced the trigger's ref")
+	send(tip, "toggle", "closed", "")
+	require(presents(flush(root), "false"), "native dismissal did not close tooltip state")
+	send(anchor, "focusout", "", "")
+	flush(root)
+	flush(root)
+	send(anchor, "pointerenter", "", "touch")
+	batch := flush(root)
+	require(len(batch.Commands) == 0 && !presents(batch, "true"), "touch hover scheduled a tooltip")
+	send(anchor, "pointerenter", "", "mouse")
+	flush(root)
+	pending := command(flush(root), "start")
+	require(pending > 0, "hover did not schedule its owned delay")
+	send(anchor, "pointerleave", "", "mouse")
+	flush(root)
+	require(command(flush(root), "cancel") == pending, "leaving before open retained the delay")
+	require(!send(pending, "@task", "visibility", ""), "canceled hover accepted a late result")
+	send(anchor, "pointerenter", "", "pen")
+	flush(root)
+	pending = command(flush(root), "start")
+	require(send(pending, "@task", "visibility", ""), "pen hover did not accept its live delay")
+	require(presents(flush(root), "true"), "hover delay did not open the tooltip")
+	send(anchor, "pointerleave", "", "pen")
+	send(tip, "pointerenter", "", "pen")
+	flush(root)
+	require(command(flush(root), "start") == 0, "pointer transfer into tooltip scheduled dismissal")
+	send(tip, "pointerleave", "", "pen")
+	flush(root)
+	pending = command(flush(root), "start")
+	require(pending > 0, "leaving tooltip did not schedule closure")
+	visible.Set(false)
+	require(command(flush(root), "cancel") == pending, "tooltip unmount retained a timer")
+	require(!send(pending, "@task", "visibility", ""), "removed tooltip accepted a late timer")
+	root.Close()
+}

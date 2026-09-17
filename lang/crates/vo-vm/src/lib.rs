@@ -32,6 +32,7 @@ extern crate alloc;
 
 pub(crate) mod exec;
 pub mod fiber;
+pub mod fiber_storage;
 mod frame_call;
 mod gc_roots;
 pub mod runtime_boundary;
@@ -51,11 +52,11 @@ pub use vo_runtime::serialize;
 
 // Re-export semantic JIT observation types for all builds.
 pub use fiber::VmResourceLimits;
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 pub use vm::AotFunctionEntry;
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 pub use vm::JitConfig;
 pub use vm::VmResourceError;
 pub use vm::{JitExecutionStats, JitSideExitReason, JitSideExitReasonStats};
-#[cfg(feature = "jit")]
+#[cfg(feature = "native")]
 pub use vo_jit::{JitCodeMemoryStats, JitFailureKind};

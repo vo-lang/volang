@@ -1,0 +1,35 @@
+package ui
+
+import (
+	"encoding/json"
+	"math"
+)
+
+// Viewport describes an element's native client box and scroll offsets in CSS
+// pixels. Left/Top retain fractional and negative native offsets (RTL/overscroll).
+type Viewport struct {
+	Width int `json:"width"`
+	Height int `json:"height"`
+	Top float64 `json:"top"`
+	Left float64 `json:"left"`
+}
+
+// OnViewport observes initial layout, client-size changes and scrolling. Browser
+// reads are coalesced per animation frame and delivered through the UI writer.
+// The subscription follows element identity; removal cancels pending delivery.
+func (view View) OnViewport(handler func(Viewport)) View {
+	if handler == nil {
+		panic("ui: viewport requires a handler")
+	}
+	return view.On("viewport", func(event Event) {
+		var viewport Viewport
+		err := json.Unmarshal([]byte(event.Value), &viewport)
+		if err != nil || viewport.Width < 0 || viewport.Height < 0 || math.IsNaN(viewport.Top) ||
+			math.IsInf(viewport.Top, 0) ||
+			math.IsNaN(viewport.Left) ||
+			math.IsInf(viewport.Left, 0) {
+			panic("ui: invalid viewport geometry")
+		}
+		handler(viewport)
+	})
+}

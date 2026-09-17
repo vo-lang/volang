@@ -1,0 +1,163 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var accordionContentType = ui.Define("contract.AccordionContent")
+
+func accordionContracts() {
+	accordionLifetimeContracts()
+	var expanded *ui.Store
+	var multiple *ui.BoolState
+	var required *ui.BoolState
+	var reversed *ui.BoolState
+	var note *ui.StringState
+	changes := 0
+	content := ui.Component(accordionContentType, func(scope *ui.Scope) ui.View {
+		note = ui.String(scope, "note", "retained")
+		return ui.Text(note.Get())
+	})
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		expanded = ui.State(scope, "expanded", func() any {
+			return []string{"a"}
+		})
+		multiple = ui.Bool(scope, "multiple", false)
+		required = ui.Bool(scope, "required", false)
+		reversed = ui.Bool(scope, "reversed", false)
+		items := []kit.AccordionItem{
+			{Key: "a", Label: "A", Content: content}, {Key: "b", Label: "B", Content: ui.Text("B content")},
+			{Key: "c", Label: "Unavailable", Disabled: true, Content: ui.Text("")},
+		}
+		if reversed.Get() {
+			items[0], items[1] = items[1], items[0]
+		}
+		return kit.Accordion(kit.AccordionProps{
+			ID: "contract-accordion", Items: items, Multiple: multiple.Get(), Required: required.Get(),
+			Regions: true,
+			Expanded: func() []string {
+				return expanded.Get().([]string)
+			},
+			Title: func(heading kit.AccordionHeading) ui.View {
+				return ui.Element("span", ui.Text("Custom " + heading.Label))
+			},
+			OnChange: func(keys []string) {
+				changes++
+				expanded.Update(func(any) any {
+					return keys
+				})
+			},
+		})
+	}))
+	initial := flush(root)
+	ids := make(map[string]int)
+	for _, mutation := range initial.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "id" {
+			ids[mutation.Value] = mutation.ID
+		}
+	}
+	a, b, disabled := ids["contract-accordion-trigger-0"], ids["contract-accordion-trigger-1"], ids["contract-accordion-trigger-2"]
+	require(a > 0 && b > 0 && disabled > 0, "accordion heading IDs missing")
+	require(strings.Contains(root.HTML(), "Custom A") && strings.Contains(root.HTML(), `role="region"`), "custom heading or panel relationship missing")
+	sequence := 0
+	click := func(id int) {
+		sequence++
+		root.Dispatch(ui.Event{Target: id, Kind: "click", Sequence: sequence})
+	}
+	value := func() string {
+		return strings.Join(expanded.Get().([]string), ",")
+	}
+	click(b)
+	require(value() == "b", "single expansion did not replace the previous key")
+	require(focusTarget(flush(root)) == b, "accordion activation did not focus its heading")
+	click(b)
+	click(b)
+	require(value() == "b", "batched double activation read stale expanded props")
+	flush(root)
+	before := changes
+	click(disabled)
+	require(value() == "b" && changes == before, "disabled item changed expansion")
+	flush(root)
+	required.Set(true)
+	flush(root)
+	click(b)
+	require(value() == "b" && changes == before, "required accordion collapsed its only panel")
+	flush(root)
+	multiple.Set(true)
+	flush(root)
+	click(a)
+	require(value() == "b,a", "multiple expansion lost the open item")
+	flush(root)
+	click(b)
+	require(value() == "a", "multiple collapse removed the wrong key")
+	flush(root)
+	note.Set("kept through collapse")
+	click(b)
+	click(a)
+	flush(root)
+	reversed.Set(true)
+	batch := flush(root)
+	for _, mutation := range batch.Mutations {
+		require(mutation.Op != "create", "accordion reorder remounted content")
+	}
+	require(note.Get() == "kept through collapse", "collapsed content lost its local state")
+	root.Close()
+	expectPanic(func() {
+		invalid := ui.NewRoot(kit.Accordion(kit.AccordionProps{
+			ID: "invalid", Items: []kit.AccordionItem{{Key: "a", Label: "A"}},
+			Expanded: func() []string {
+				return []string{"missing"}
+			},
+			OnChange: func([]string) {},
+		}))
+		invalid.Flush()
+	}, "expanded keys must be unique existing items")
+}
+
+func accordionLifetimeContracts() {
+	var version *ui.IntState
+	var visible *ui.BoolState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		version = ui.Int(scope, "version", 0)
+		visible = ui.Bool(scope, "visible", true)
+		items := []kit.AccordionItem{}
+		if visible.Get() {
+			for index := 0; index < 8; index++ {
+				key := fmt.Sprint(version.Get(), ":", index)
+				items = append(items, kit.AccordionItem{Key: key, Label: key, Content: ui.Text(key)})
+			}
+		}
+		return kit.Accordion(kit.AccordionProps{
+			ID: "lifetimes", Items: items,
+			Expanded: func() []string {
+				return []string{}
+			},
+			OnChange: func([]string) {},
+		})
+	}))
+	count := func() int {
+		total := 0
+		snapshot := root.Inspect()
+		require(!snapshot.Truncated, "accordion lifecycle inspection truncated")
+		for _, component := range snapshot.Components {
+			if strings.HasPrefix(component.Frame.Name, "kit.Accordion") {
+				total += len(component.States)
+			}
+		}
+		return total
+	}
+	flush(root)
+	initial := count()
+	for index := 1; index <= 100; index++ {
+		version.Set(index)
+		flush(root)
+	}
+	require(count() == initial, "removed accordion items retained their default refs")
+	visible.Set(false)
+	flush(root)
+	require(count() == 0, "empty accordion retained removed item state")
+	root.Close()
+}

@@ -1,0 +1,20 @@
+package main
+
+func label() string {
+	return "abcdefghijklmnopqrstuvwxyz012345"
+}
+
+func main() {
+	sum := 0
+	var retained string
+	for i := 0; i < 200000; i++ {
+		s := label()
+		sum += int(s[i & 31])
+		if i & 8191 == 0 {
+			retained = s
+		}
+	}
+	sum += len(retained)
+	assert(sum == 19687532)
+	println(sum)
+}

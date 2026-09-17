@@ -1,11 +1,12 @@
+use crate::translator::NativeScratchKind;
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, StackSlotData, StackSlotKind};
+use cranelift_codegen::ir::{types, InstBuilder};
 use vo_runtime::bytecode::{Constant, IFACE_ASSIGN_NO_ITAB};
 use vo_runtime::instruction::Instruction;
-use vo_runtime::jit_api::{JitResult, JitRuntimeTrapKind, JIT_HELPER_U64_ERROR};
+use vo_runtime::jit_api::JitRuntimeTrapKind;
 
 use crate::call_helpers::emit_checked_jit_result_helper_call;
-use crate::translate::{emit_runtime_trap_if, mark_runtime_trap_pc};
+use crate::translate::{emit_return_if_u64_jit_error, emit_runtime_trap_if, mark_runtime_trap_pc};
 use crate::translator::{emit_runtime_helper_call, HelperKind, RuntimeOpsEmitter};
 use crate::JitError;
 
@@ -73,35 +74,6 @@ pub(in crate::translate) fn iface_assign<'a>(
     Ok(())
 }
 
-fn emit_return_if_u64_jit_error<'a>(
-    e: &mut impl RuntimeOpsEmitter<'a>,
-    result: cranelift_codegen::ir::Value,
-) {
-    let sentinel = e
-        .builder()
-        .ins()
-        .iconst(types::I64, JIT_HELPER_U64_ERROR as i64);
-    let is_error = e.builder().ins().icmp(IntCC::Equal, result, sentinel);
-    let error_block = crate::compile_common::cold_block(e.builder());
-    let ok_block = e.builder().create_block();
-    e.builder()
-        .ins()
-        .brif(is_error, error_block, &[], ok_block, &[]);
-
-    e.builder().switch_to_block(error_block);
-    e.builder().seal_block(error_block);
-    // A helper sentinel is terminal and cannot resume bytecode execution.
-    // Context diagnostics are already published by the helper.
-    let jit_error = e
-        .builder()
-        .ins()
-        .iconst(types::I32, JitResult::JitError as i64);
-    e.builder().ins().return_(&[jit_error]);
-
-    e.builder().switch_to_block(ok_block);
-    e.builder().seal_block(ok_block);
-}
-
 fn iface_assign_metadata_constant<'a>(
     e: &impl RuntimeOpsEmitter<'a>,
     inst: &Instruction,
@@ -130,13 +102,11 @@ pub(in crate::translate) fn iface_assert<'a>(
     let slot1 = e.read_var(inst.b + 1);
     let flags_i16 = e.builder().ins().iconst(types::I16, inst.flags as i64);
     let has_ok = (inst.flags & vo_common_core::instruction::IFACE_ASSERT_HAS_OK_FLAG) != 0;
-    let layout = e
-        .iface_assert_layout(inst)
-        .ok_or(JitError::MissingJitLayout {
-            pc: e.current_pc(),
-            opcode: inst.opcode(),
-            layout: "IfaceAssertLayout",
-        })?;
+    let layout = e.iface_assert_layout().ok_or(JitError::MissingJitLayout {
+        pc: e.current_pc(),
+        opcode: inst.opcode(),
+        layout: "IfaceAssertLayout",
+    })?;
     let target_id_i32 = e
         .builder()
         .ins()
@@ -147,11 +117,10 @@ pub(in crate::translate) fn iface_assert<'a>(
     // single-result assertion has no logical result slots, so reserve one
     // physical scratch slot without publishing it to the VM register file.
     let scratch_slots = result_slots.max(1);
-    let result_slot = e.builder().create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        (scratch_slots * 8) as u32,
-        8,
-    ));
+    let result_slot = e.native_scratch_slot(
+        NativeScratchKind::CollectionValue,
+        ((scratch_slots * 8) as u32) as usize,
+    );
     let dst_ptr = e.builder().ins().stack_addr(types::I64, result_slot, 0);
     mark_runtime_trap_pc(e);
     emit_checked_jit_result_helper_call(

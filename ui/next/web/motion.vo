@@ -1,0 +1,18 @@
+package web
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+	// MotionFinished waits for current finite animations on one element in this
+	// root. CSS is evaluated after the declaring commit. Missing elements and no
+	// motion complete immediately. Cancellation only stops observation; CSS owns
+	// the animation. A timeout keeps application cleanup bounded.
+func MotionFinished(id string, timeoutMilliseconds int) ui.Request {
+	if id == "" || len(id) > 1024 || timeoutMilliseconds < 1 || timeoutMilliseconds > 60000 {
+		panic("web: motion requires an ID and a timeout within 1..60000 milliseconds")
+	}
+	return ui.Request{
+		Service: "web.motion-finished", Value: id, TimeoutMilliseconds: timeoutMilliseconds,
+	}
+}

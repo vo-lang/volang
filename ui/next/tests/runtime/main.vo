@@ -1,0 +1,547 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+)
+
+var counterType = ui.Define("contract.Counter")
+
+var listType = ui.Define("contract.List")
+
+var branchType = ui.Define("contract.Branch")
+
+var leftRenders int
+
+var rightRenders int
+
+func counter(name string) ui.View {
+	return ui.Component(counterType, func(scope *ui.Scope) ui.View {
+		count := ui.Int(scope, "count", 0)
+		if name == "left" {
+			leftRenders++
+		} else {
+			rightRenders++
+		}
+		return ui.Element("button", ui.Text(fmt.Sprint(count.Get()))).Attr("data-name", name).On("click", func(event ui.Event) {
+			count.Set(count.Get() + 1)
+		})
+	}).Key(name)
+}
+
+func flush(root *ui.Root) ui.Batch {
+	batch := root.Flush()
+	root.Commit(batch.Revision)
+	return batch
+}
+
+func require(ok bool, message string) {
+	if !ok {
+		panic(message)
+	}
+}
+
+func target(batch ui.Batch, name string) int {
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "data-name" && mutation.Value == name {
+			return mutation.ID
+		}
+	}
+	panic("missing target " + name)
+}
+
+func changedText(batch ui.Batch, value string) bool {
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "text" && mutation.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+func identityAndUpdates() {
+	root := ui.NewRoot(ui.Component(listType, func(scope *ui.Scope) ui.View {
+		reverse := ui.Bool(scope, "reverse", false)
+		visible := ui.Bool(scope, "visible", true)
+		items := []ui.View{counter("left")}
+		if visible.Get() {
+			items = append(items, counter("right"))
+		}
+		if reverse.Get() && len(items) == 2 {
+			items[0], items[1] = items[1], items[0]
+		}
+		return ui.Element("section", ui.Element("button", ui.Text("reverse")).Attr("data-name", "reverse").On("click", func(event ui.Event) {
+			reverse.Set(!reverse.Get())
+		}), ui.Element("button", ui.Text("visibility")).Attr("data-name", "visibility").On("click", func(event ui.Event) {
+			visible.Set(!visible.Get())
+		}), ui.Element("div", items...))
+	}))
+	initial := flush(root)
+	left := target(initial, "left")
+	right := target(initial, "right")
+	reverse := target(initial, "reverse")
+	visibility := target(initial, "visibility")
+	require(leftRenders == 1 && rightRenders == 1, "initial render count")
+	for sequence := 1; sequence <= 3; sequence++ {
+		require(root.Dispatch(ui.Event{Target: left, Kind: "click", Sequence: sequence}), "live event rejected")
+	}
+	update := flush(root)
+	require(changedText(update, "3"), "batched state value")
+	require(leftRenders == 2 && rightRenders == 1, "unrelated component rerendered")
+	require(len(update.Mutations) == 1, "local update must only change one text node")
+	require(!root.Dispatch(ui.Event{Target: left, Kind: "click", Sequence: 3}), "duplicate event accepted")
+	require(root.Dispatch(ui.Event{Target: reverse, Kind: "click", Sequence: 4}), "reverse event")
+	move := flush(root)
+	for _, mutation := range move.Mutations {
+		require(mutation.Op != "create" && mutation.Op != "remove", "keyed move replaced identity")
+	}
+	require(root.Dispatch(ui.Event{Target: left, Kind: "click", Sequence: 5}), "queued event became stale after unrelated commit")
+	require(changedText(flush(root), "4"), "keyed state was reset")
+	root.Dispatch(ui.Event{Target: visibility, Kind: "click", Sequence: 6})
+	flush(root)
+	require(!root.Dispatch(ui.Event{Target: right, Kind: "click", Sequence: 7}), "disposed target accepted event")
+	root.Dispatch(ui.Event{Target: visibility, Kind: "click", Sequence: 8})
+	remount := flush(root)
+	require(target(remount, "right") != right, "disposed identity reused")
+	root.Close()
+	require(!root.Dispatch(ui.Event{Target: left, Kind: "click", Sequence: 9}), "closed root accepted event")
+}
+
+func dependenciesAndIsolation() {
+	var a *ui.IntState
+	var b *ui.IntState
+	var choose *ui.BoolState
+	renders := 0
+	view := ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		a = ui.Int(scope, "a", 1)
+		b = ui.Int(scope, "b", 10)
+		choose = ui.Bool(scope, "choose", true)
+		renders++
+		value := 0
+		if choose.Get() {
+			value = a.Get()
+		} else {
+			value = b.Get()
+		}
+		return ui.Text(fmt.Sprint(value))
+	})
+	first := ui.NewRoot(view)
+	flush(first)
+	firstA := a
+	firstB := b
+	firstChoose := choose
+	second := ui.NewRoot(view)
+	flush(second)
+	require(firstA != a, "roots share state")
+	firstB.Set(11)
+	require(len(flush(first).Mutations) == 0 && renders == 2, "inactive dependency rendered")
+	firstChoose.Set(false)
+	require(changedText(flush(first), "11"), "dynamic dependency not adopted")
+	firstA.Set(2)
+	require(len(flush(first).Mutations) == 0 && renders == 3, "old dependency retained")
+	firstB.Set(12)
+	require(changedText(flush(first), "12"), "active dependency ignored")
+	require(len(flush(second).Mutations) == 0, "another root invalidated")
+	first.Close()
+	second.Close()
+}
+
+func immutableViews() {
+	base := ui.Element("input").Attr("class", "base")
+	left := base.Attr("class", "left")
+	right := base.Attr("class", "right")
+	root := ui.NewRoot(ui.Fragment(base, left, right))
+	batch := flush(root)
+	classes := ""
+	for _, mutation := range batch.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "class" {
+			classes += mutation.Value + ";"
+		}
+	}
+	require(classes == "base;left;right;", "view builder mutated an existing view")
+	encoded, err := json.Marshal(batch)
+	require(err == nil && len(encoded) > 0, "batch cannot cross host boundary")
+	root.Close()
+}
+
+type modelNode struct {
+	parent int
+	children []int
+	text string
+}
+
+// A small protocol oracle observes final order without using keyed matching.
+func applyModel(nodes map[int]*modelNode, batch ui.Batch) {
+	for _, mutation := range batch.Mutations {
+		switch mutation.Op {
+			case "create":
+				nodes[mutation.ID] = &modelNode{parent: -1, text: mutation.Value}
+			case "insert":
+				node := nodes[mutation.ID]
+				if node.parent >= 0 {
+					parent := nodes[node.parent]
+					for i, id := range parent.children {
+						if id == mutation.ID {
+							parent.children = append(parent.children[:i], parent.children[i + 1:]...)
+							break
+						}
+					}
+				}
+				parent := nodes[mutation.Parent]
+				index := len(parent.children)
+				if mutation.Before != 0 {
+					index = -1
+					for i, id := range parent.children {
+						if id == mutation.Before {
+							index = i
+							break
+						}
+					}
+					require(index >= 0, "missing insertion anchor")
+				}
+				children := append([]int{}, parent.children[:index]...)
+				children = append(children, mutation.ID)
+				parent.children = append(children, parent.children[index:]...)
+				node.parent = mutation.Parent
+			case "text":
+				nodes[mutation.ID].text = mutation.Value
+			case "remove":
+				node := nodes[mutation.ID]
+				parent := nodes[node.parent]
+				for i, id := range parent.children {
+					if id == mutation.ID {
+						parent.children = append(parent.children[:i], parent.children[i + 1:]...)
+						break
+					}
+				}
+				node.parent = -1
+		}
+	}
+}
+
+func modelText(nodes map[int]*modelNode, id int) string {
+	text := nodes[id].text
+	for _, child := range nodes[id].children {
+		text += modelText(nodes, child)
+	}
+	return text
+}
+
+func permutations(prefix string, rest string, check func(string)) {
+	if rest == "" {
+		check(prefix)
+		return
+	}
+	for i := 0; i < len(rest); i++ {
+		permutations(prefix + rest[i:i + 1], rest[:i] + rest[i + 1:], check)
+	}
+}
+
+func keyedOrders() {
+	var order *ui.StringState
+	root := ui.NewRoot(ui.Component(listType, func(scope *ui.Scope) ui.View {
+		order = ui.String(scope, "order", "ABCDE")
+		value := order.Get()
+		views := []ui.View{}
+		for i := 0; i < len(value); i++ {
+			key := value[i:i + 1]
+			views = append(views, ui.Element("span", ui.Text(key)).Key(key))
+		}
+		return ui.Fragment(views...)
+	}))
+	nodes := map[int]*modelNode{0: &modelNode{parent: -1}}
+	applyModel(nodes, flush(root))
+	permutations("", "ABCDE", func(value string) {
+		order.Set(value)
+		batch := flush(root)
+		for _, mutation := range batch.Mutations {
+			require(mutation.Op != "create" && mutation.Op != "remove", "permutation replaced nodes")
+		}
+		applyModel(nodes, batch)
+		require(modelText(nodes, 0) == value, "keyed permutation has wrong order: " + value)
+	})
+	for _, value := range []string{"ACE", "EAC", "XYZAE", "", "AB", "CBA", "ACB", "BA"} {
+		order.Set(value)
+		applyModel(nodes, flush(root))
+		require(modelText(nodes, 0) == value, "insert/remove order is wrong: " + value)
+	}
+	root.Close()
+}
+
+func expectPanic(action func(), message string) {
+	caught := false
+	func() {
+		defer func() {
+			if value := recover(); value != nil {
+				require(strings.Contains(fmt.Sprint(value), message), "unexpected panic")
+				caught = true
+			}
+		}()
+		action()
+	}()
+	require(caught, "expected panic: " + message)
+}
+
+func invalidRenders() {
+	root := ui.NewRoot(ui.Fragment(ui.Text("a").Key("same"), ui.Text("b").Key("same")))
+	expectPanic(func() {
+		flush(root)
+	}, "duplicate sibling key")
+	expectPanic(func() {
+		flush(root)
+	}, "closed or rendering root")
+	root = ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		value := ui.Int(scope, "value", 0)
+		value.Set(1)
+		return ui.Text("unreachable")
+	}))
+	expectPanic(func() {
+		flush(root)
+	}, "state cannot change during render")
+	root.Close()
+}
+
+func htmlSerialization() {
+	root := ui.NewRoot(ui.Element("p", ui.Text("<hello & \"world\">")).Attr("title", "< & \""))
+	flush(root)
+	html := root.HTML()
+	require(strings.Contains(html, "&lt;hello &amp; &quot;world&quot;&gt;"), "HTML text was not escaped")
+	require(strings.Contains(html, "title=\"&lt; &amp; &quot;\""), "HTML attribute was not escaped")
+	root.Close()
+}
+
+func nativeHTML() {
+	root := ui.NewRoot(ui.Fragment(ui.Element("textarea").Attr("value", "\n中文 & </textarea>"), ui.Element("svg", ui.Element("title", ui.Text("A <circle>")), ui.Element("linearGradient").Attr("id", "gradient"), ui.Element("foreignObject", ui.Element("input").Attr("disabled", "false"))).Attr("viewBox", "0 0 20 20"), ui.Element("div").Attr("hidden", "false").Attr("inert", "true")))
+	flush(root)
+	html := root.HTML()
+	require(strings.Contains(html, ">\n\n中文 &amp; &lt;/textarea&gt;</textarea>"), "textarea content escaping or leading newline changed")
+	require(!strings.Contains(html, "value="), "textarea emitted an ineffective value attribute")
+	require(strings.Contains(html, "<linearGradient") && strings.Contains(html, "viewBox="), "SVG casing changed")
+	require(strings.Contains(html, "A &lt;circle&gt;"), "SVG title could not serialize")
+	require(!strings.Contains(html, "hidden=") && !strings.Contains(html, "disabled=") &&
+		strings.Contains(html, "inert=\"true\""), "boolean attributes differ from browser semantics")
+	root.Close()
+	root = ui.NewRoot(ui.Element("textarea", ui.Text("untracked raw content")))
+	flush(root)
+	expectPanic(func() {
+		root.HTML()
+	}, "textarea uses its value binding")
+	root.Close()
+}
+
+func effectLifecycle() {
+	log := ""
+	var value *ui.IntState
+	var ready *ui.BoolState
+	var enabled *ui.BoolState
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		value = ui.Int(scope, "value", 0)
+		ready = ui.Bool(scope, "ready", false)
+		enabled = ui.Bool(scope, "enabled", true)
+		if enabled.Get() {
+			snapshot := value.Get()
+			ui.Effect(scope, "subscription", func() func() {
+				log += fmt.Sprint("start", snapshot, ";")
+				ready.Set(true)
+				return func() {
+					log += fmt.Sprint("stop", snapshot, ";")
+				}
+			}, snapshot)
+		}
+		return ui.Text(fmt.Sprint(ready.Get()))
+	}))
+	batch := root.Flush()
+	require(log == "", "effect ran before host commit")
+	expectPanic(func() {
+		root.Flush()
+	}, "needs commit acknowledgement")
+	expectPanic(func() {
+		root.Commit(batch.Revision + 1)
+	}, "invalid commit acknowledgement")
+	root.Commit(batch.Revision)
+	require(log == "start0;" && root.Pending(), "mount effect did not schedule its state update")
+	flush(root)
+	require(log == "start0;", "unchanged dependency restarted effect")
+	value.Set(1)
+	batch = root.Flush()
+	require(log == "start0;", "cleanup ran during render")
+	root.Commit(batch.Revision)
+	require(log == "start0;stop0;start1;", "dependency cleanup/setup order")
+	enabled.Set(false)
+	batch = root.Flush()
+	require(log == "start0;stop0;start1;", "conditional cleanup ran before commit")
+	root.Commit(batch.Revision)
+	require(log == "start0;stop0;start1;stop1;", "removed effect was not cleaned")
+	enabled.Set(true)
+	flush(root)
+	root.Close()
+	require(log == "start0;stop0;start1;stop1;start1;stop1;", "remount/close effect lifetime")
+	root.Close()
+	expectPanic(func() {
+		value.Set(2)
+	}, "disposed component")
+	starts := 0
+	server := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		ui.Effect(scope, "browser-only", func() func() {
+			starts++
+			return nil
+		})
+		return ui.Text("server content")
+	}))
+	server.Flush()
+	require(strings.Contains(server.HTML(), "server content"), "server HTML unavailable")
+	server.Close()
+	require(starts == 0, "SSR or abandoned render started an effect")
+}
+
+func effectFailures() {
+	cleaned := 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		ui.Effect(scope, "resource", func() func() {
+			return func() {
+				cleaned++
+				panic("secondary cleanup failure")
+			}
+		})
+		ui.Effect(scope, "failed", func() func() {
+			panic("primary setup failure")
+		})
+		return ui.Text("ready")
+	}))
+	batch := root.Flush()
+	expectPanic(func() {
+		root.Commit(batch.Revision)
+	}, "primary setup failure")
+	require(cleaned == 1, "failed setup leaked prior resource")
+	expectPanic(func() {
+		root.Flush()
+	}, "closed or rendering root")
+	root.Close()
+	root = ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		ui.Effect(scope, "first", func() func() {
+			return func() {
+				cleaned++
+				panic("cleanup failure")
+			}
+		})
+		ui.Effect(scope, "second", func() func() {
+			return func() {
+				cleaned++
+			}
+		})
+		return ui.Text("ready")
+	}))
+	flush(root)
+	expectPanic(func() {
+		root.Close()
+	}, "cleanup failure")
+	require(cleaned == 3, "one cleanup failure skipped later resources")
+	root.Close()
+	root = ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		ui.Effect(scope, "invalid", func() func() {
+			return nil
+		}, []int{1, 2})
+		return ui.Text("unreachable")
+	}))
+	expectPanic(func() {
+		root.Flush()
+	}, "comparable snapshots")
+}
+
+func main() {
+	identityAndUpdates()
+	dependenciesAndIsolation()
+	immutableViews()
+	keyedOrders()
+	keyedMinimumMoves()
+	invalidRenders()
+	htmlSerialization()
+	documentContracts()
+	nativeHTML()
+	nativeTextContracts()
+	dataBlockContracts()
+	htmlAttributeNames()
+	styleContracts()
+	htmlForms()
+	nativeDefaults()
+	effectLifecycle()
+	effectFailures()
+	memoContracts()
+	memoReloadContracts()
+	memoContextContracts()
+	memoDerivedContracts()
+	storeSelectionContracts()
+	fieldSubscriptionContracts()
+	derivedGraph()
+	inheritedContext()
+	structuredSnapshots()
+	taskLifetimes()
+	rootServiceContracts()
+	requestTimeouts()
+	subscriptionLifetimes()
+	eventContracts()
+	keyboardFilters()
+	modifierFilters()
+	elementRefs()
+	measurementContracts()
+	customElementContracts()
+	canvasContracts()
+	preparedPlotContracts()
+	editorContracts()
+	elementScroll()
+	elementScrollPosition()
+	textSelectionContracts()
+	viewportContracts()
+	sizeContracts()
+	variableContracts()
+	collectionContracts()
+	listboxContracts()
+	tableContracts()
+	paginationContracts()
+	tooltipContracts()
+	modalDialogs()
+	dialogMotionContracts()
+	decisionContracts()
+	toastContracts()
+	presenceContracts()
+	popoverContracts()
+	portalContracts()
+	childUpdateContracts()
+	menuContracts()
+	comboboxContracts()
+	selectionContracts()
+	indeterminateContracts()
+	feedbackContracts()
+	tabContracts()
+	accordionContracts()
+	formContracts()
+	fileContracts()
+	arrayFormContracts()
+	schemaFormContracts()
+	restoredFormSubmission()
+	serverFormContracts()
+	httpContracts()
+	multipleFormValues()
+	checkboxGroupContracts()
+	nativeSelection()
+	multipleSelectBinding()
+	formRenderMutationIsolation()
+	queryContracts()
+	prefetchContracts()
+	initialDataContracts()
+	inspectionContracts()
+	inspectionTaskContracts()
+	inspectionPropContracts()
+	reloadStateContracts()
+	reloadIdentityContracts()
+	reloadCaptureGuards()
+	reloadFormContracts()
+	queryRenderMutationIsolation()
+	routeContracts()
+	renderBoundaries()
+	mutationBatchOwnership()
+	wireEncoding()
+	println("ui-next runtime contracts: ok")
+}

@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use vo_app_host_native::{NativeInputEvent, NativeInputKind};
 use vo_app_protocol::{ViewHandle, WindowHandle};
-use vo_engine::{
+use vo_ui_integration::{
     NativeUiSessionConfig, NativeUiSessionError, NativeUiSessionReport, NativeUiSystemRequest,
     NativeUiVmSession, PreparedNativeUiReload,
 };

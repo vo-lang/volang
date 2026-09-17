@@ -10,15 +10,16 @@
 use crate::gc::GcRef;
 use crate::objects::{array, string};
 use crate::{RuntimeType, ValueKind, ValueRttid};
-use hashbrown::HashSet;
+use smallvec::{smallvec, SmallVec};
+
+mod workspace;
 #[cfg(test)]
 use vo_common_core::bytecode::Module;
 use vo_common_core::bytecode::RuntimeTypeMetadata;
+use workspace::TypeSet;
 
-#[cfg(not(feature = "std"))]
+#[cfg(all(test, not(feature = "std")))]
 use alloc::{vec, vec::Vec};
-#[cfg(feature = "std")]
-use std::vec::Vec;
 
 pub const HASH_K: u64 = 0xf1357aea2e62a9c5;
 pub const HASH_SEED: u64 = 0x517cc1b727220a95;
@@ -105,14 +106,20 @@ fn array_type_info(rttid: u32, module: RuntimeTypeMetadata<'_>) -> Option<(u64, 
 }
 
 fn value_rttid_is_comparable(value: ValueRttid, module: RuntimeTypeMetadata<'_>) -> bool {
+    match value.value_kind() {
+        ValueKind::Slice | ValueKind::Map | ValueKind::Closure => return false,
+        ValueKind::Struct | ValueKind::Array => {}
+        _ => return true,
+    }
+
     enum Task {
         Visit(ValueRttid),
         Exit(u32),
     }
 
-    let mut active = HashSet::new();
-    let mut complete = HashSet::new();
-    let mut pending = vec![Task::Visit(value)];
+    let mut active = TypeSet::new();
+    let mut complete = TypeSet::new();
+    let mut pending: SmallVec<[Task; 8]> = smallvec![Task::Visit(value)];
     while let Some(task) = pending.pop() {
         match task {
             Task::Visit(value) => match value.value_kind() {
@@ -275,13 +282,14 @@ pub(crate) unsafe fn deep_hash_value_inline_checked<'a>(
         return Err(UnhashableType);
     }
 
-    let resolver = module.resolver();
-    let mut pending = vec![HashTask::Value {
+    let mut pending: SmallVec<[HashTask<'_>; 8]> = smallvec![HashTask::Value {
         key,
         value,
         layout_validated: false,
     }];
-    let mut results = Vec::new();
+    // Each child is consumed by its immediately following Combine task.
+    // At most one completed hash is pending, regardless of nesting depth.
+    let mut result = None;
     while let Some(task) = pending.pop() {
         match task {
             HashTask::Value {
@@ -292,7 +300,7 @@ pub(crate) unsafe fn deep_hash_value_inline_checked<'a>(
                 let first = key.first().copied().unwrap_or_default();
                 match value.value_kind() {
                     ValueKind::Float32 | ValueKind::Float64 => {
-                        results.push(float_key_hash(value.value_kind(), first));
+                        result = Some(float_key_hash(value.value_kind(), first));
                     }
                     ValueKind::String => {
                         let mut hash = HASH_SEED;
@@ -301,7 +309,7 @@ pub(crate) unsafe fn deep_hash_value_inline_checked<'a>(
                                 hash = hash.wrapping_add(u64::from(byte)).wrapping_mul(HASH_K);
                             }
                         }
-                        results.push(hash.rotate_left(5));
+                        result = Some(hash.rotate_left(5));
                     }
                     ValueKind::Struct => {
                         let Some(meta) = get_struct_meta(value.rttid(), module) else {
@@ -321,9 +329,7 @@ pub(crate) unsafe fn deep_hash_value_inline_checked<'a>(
                         let Some((len, elem)) = array_type_info(value.rttid(), module) else {
                             return Err(UnhashableType);
                         };
-                        if !layout_validated
-                            && resolver.slot_count_for_value_rttid(value) != Some(key.len())
-                        {
+                        if !layout_validated && module.slot_count(value) != Some(key.len()) {
                             return Err(UnhashableType);
                         }
                         let len = usize::try_from(len).map_err(|_| UnhashableType)?;
@@ -339,8 +345,8 @@ pub(crate) unsafe fn deep_hash_value_inline_checked<'a>(
                             key.len() / len
                         };
                         if elem_slots == 0 {
-                            results
-                                .push(repeat_hash_fold(HASH_SEED, HASH_SEED, len).rotate_left(5));
+                            result =
+                                Some(repeat_hash_fold(HASH_SEED, HASH_SEED, len).rotate_left(5));
                         } else {
                             pending.push(HashTask::ArrayElement {
                                 key,
@@ -354,12 +360,12 @@ pub(crate) unsafe fn deep_hash_value_inline_checked<'a>(
                     }
                     ValueKind::Interface => {
                         let slot1 = key.get(1).copied().unwrap_or_default();
-                        results.push(unsafe { iface_hash_checked(first, slot1, module)? });
+                        result = Some(unsafe { iface_hash_checked(first, slot1, module)? });
                     }
                     ValueKind::Slice | ValueKind::Map | ValueKind::Closure => {
                         return Err(UnhashableType);
                     }
-                    _ => results.push(shallow_hash_inline(key)),
+                    _ => result = Some(shallow_hash_inline(key)),
                 }
             }
             HashTask::StructField {
@@ -369,7 +375,7 @@ pub(crate) unsafe fn deep_hash_value_inline_checked<'a>(
                 hash,
             } => {
                 let Some(field) = meta.fields.get(index) else {
-                    results.push(hash.rotate_left(5));
+                    result = Some(hash.rotate_left(5));
                     continue;
                 };
                 let start = usize::from(field.offset);
@@ -395,7 +401,7 @@ pub(crate) unsafe fn deep_hash_value_inline_checked<'a>(
                 next_index,
                 hash,
             } => {
-                let field_hash = results.pop().ok_or(UnhashableType)?;
+                let field_hash = result.take().ok_or(UnhashableType)?;
                 pending.push(HashTask::StructField {
                     key,
                     meta,
@@ -412,7 +418,7 @@ pub(crate) unsafe fn deep_hash_value_inline_checked<'a>(
                 hash,
             } => {
                 if index >= len {
-                    results.push(hash.rotate_left(5));
+                    result = Some(hash.rotate_left(5));
                     continue;
                 }
                 let start = index.checked_mul(elem_slots).ok_or(UnhashableType)?;
@@ -440,7 +446,7 @@ pub(crate) unsafe fn deep_hash_value_inline_checked<'a>(
                 len,
                 hash,
             } => {
-                let elem_hash = results.pop().ok_or(UnhashableType)?;
+                let elem_hash = result.take().ok_or(UnhashableType)?;
                 pending.push(HashTask::ArrayElement {
                     key,
                     elem,
@@ -452,10 +458,7 @@ pub(crate) unsafe fn deep_hash_value_inline_checked<'a>(
             }
         }
     }
-    match results.as_slice() {
-        [hash] => Ok(*hash),
-        _ => Err(UnhashableType),
-    }
+    result.ok_or(UnhashableType)
 }
 
 /// Apply `hash = (hash + value) * HASH_K` `count` times in O(log count).
@@ -566,7 +569,7 @@ fn get_struct_meta(
     let meta = module
         .resolver()
         .canonical_value_meta_for_value_rttid(ValueRttid::new(rttid, ValueKind::Struct))?;
-    module.struct_metas.get(meta.meta_id() as usize)
+    module.struct_metas().get(meta.meta_id() as usize)
 }
 
 unsafe fn deep_eq_value_inline_result(
@@ -605,8 +608,7 @@ unsafe fn deep_eq_value_inline_result(
         },
     }
 
-    let resolver = module.resolver();
-    let mut pending = vec![EqTask::Value {
+    let mut pending: SmallVec<[EqTask<'_>; 8]> = smallvec![EqTask::Value {
         a,
         b,
         value,
@@ -657,9 +659,7 @@ unsafe fn deep_eq_value_inline_result(
                         let Some((len, elem)) = array_type_info(value.rttid(), module) else {
                             return EqResult::Uncomparable;
                         };
-                        if !layout_validated
-                            && resolver.slot_count_for_value_rttid(value) != Some(a.len())
-                        {
+                        if !layout_validated && module.slot_count(value) != Some(a.len()) {
                             return EqResult::Uncomparable;
                         }
                         let Ok(len) = usize::try_from(len) else {
@@ -936,9 +936,9 @@ unsafe fn deep_hash_array_checked(
     let Ok(elem_layout) = crate::pack::sequence_element_layout(
         elem_meta,
         elem_bytes,
-        module.struct_metas,
-        module.named_type_metas,
-        module.runtime_types,
+        module.struct_metas(),
+        module.named_type_metas(),
+        module.runtime_types(),
     ) else {
         return Err(UnhashableType);
     };
@@ -1009,9 +1009,9 @@ unsafe fn deep_eq_array_result(
     let Ok(elem_layout) = crate::pack::sequence_element_layout(
         elem_meta,
         elem_bytes,
-        module.struct_metas,
-        module.named_type_metas,
-        module.runtime_types,
+        module.struct_metas(),
+        module.named_type_metas(),
+        module.runtime_types(),
     ) else {
         return EqResult::Uncomparable;
     };

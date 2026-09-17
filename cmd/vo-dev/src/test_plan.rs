@@ -1131,9 +1131,9 @@ mod tests {
     #[test]
     fn compatible_target_can_own_a_stronger_capability_surface() {
         let mut target = TestTarget {
-            name: "wasm-aot".to_string(),
+            name: "wasm-derived".to_string(),
             kind: "wasm".to_string(),
-            backend: "core-wasm-aot".to_string(),
+            backend: "wasm-derived".to_string(),
             native_aot_runtime_features: Vec::new(),
             compatible_with: Some("wasm".to_string()),
             inherit_compatible_skips: true,
@@ -1149,7 +1149,7 @@ mod tests {
 
         target.inherit_compatible_skips = false;
         assert!(!target_is_skipped(&["wasm".to_string()], &target));
-        assert!(target_is_skipped(&["wasm-aot".to_string()], &target));
+        assert!(target_is_skipped(&["wasm-derived".to_string()], &target));
     }
 
     #[test]

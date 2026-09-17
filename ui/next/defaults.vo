@@ -1,0 +1,120 @@
+package ui
+
+import (
+	"fmt"
+	"strings"
+)
+
+// Native control properties share one optional record; ordinary views carry no
+// additional metadata for defaults or multiple selection.
+type nativeControl struct {
+	value string
+	hasValue bool
+	checked bool
+	hasChecked bool
+	selected []string
+	selection string
+	hasSelection bool
+	indeterminate bool
+	hasIndeterminate bool
+}
+
+func (view View) copyControl() *nativeControl {
+	defaults := &nativeControl{}
+	if view.control != nil {
+		*defaults = *view.control
+	}
+	return defaults
+}
+
+// DefaultValue initializes an uncontrolled input or textarea. Later changes
+// update its native reset baseline; they preserve an already edited value.
+func (view View) DefaultValue(value string) View {
+	if view.kind != "input" && view.kind != "textarea" {
+		panic("ui: DefaultValue requires an input or textarea")
+	}
+	for _, attr := range view.attrs {
+		if strings.EqualFold(attr.name, "value") {
+			panic("ui: value and DefaultValue cannot be combined")
+		}
+	}
+	view.control = view.copyControl()
+	view.control.value = value
+	view.control.hasValue = true
+	return view
+}
+
+// DefaultChecked initializes native checkbox/radio checkedness and its reset
+// baseline. Checked owns live state only when declared as a controlled attribute.
+func (view View) DefaultChecked(checked bool) View {
+	if view.kind != "input" {
+		panic("ui: DefaultChecked requires an input")
+	}
+	for _, attr := range view.attrs {
+		if strings.EqualFold(attr.name, "checked") {
+			panic("ui: checked and DefaultChecked cannot be combined")
+		}
+	}
+	view.control = view.copyControl()
+	view.control.checked = checked
+	view.control.hasChecked = true
+	return view
+}
+
+func (view View) validateControl() {
+	if view.control != nil && view.control.hasIndeterminate {
+		kind, _ := attributeValue(view, "type")
+		if view.kind != "input" || !strings.EqualFold(kind, "checkbox") {
+			panic("ui: Indeterminate requires an HTML checkbox input")
+		}
+	}
+	if view.control == nil || !view.control.hasValue || view.control.value == "" {
+		return
+	}
+	for _, attr := range view.attrs {
+		if strings.EqualFold(attr.name, "type") && strings.EqualFold(attr.value, "file") {
+			panic("ui: file inputs cannot have a nonempty default value")
+		}
+	}
+}
+
+func (root *Root) updateControl(id int, before *nativeControl, after *nativeControl) {
+	if before == nil && after == nil {
+		return
+	}
+	old, current := nativeControl{}, nativeControl{}
+	if before != nil {
+		old = *before
+	}
+	if after != nil {
+		current = *after
+	}
+	if old.hasValue != current.hasValue || old.value != current.value {
+		root.emit(Mutation{Op: "default", ID: id, Name: "value", Value: current.value})
+	}
+	if old.hasChecked != current.hasChecked || old.checked != current.checked {
+		root.emit(Mutation{Op: "default", ID: id, Name: "checked", Value: fmt.Sprint(current.checked)})
+	}
+	if old.hasSelection != current.hasSelection || old.selection != current.selection {
+		root.emit(Mutation{Op: "selection", ID: id, Value: current.selection})
+	}
+	if old.hasIndeterminate != current.hasIndeterminate || old.indeterminate != current.indeterminate {
+		value := ""
+		if current.hasIndeterminate {
+			value = fmt.Sprint(current.indeterminate)
+		}
+		root.emit(Mutation{Op: "property", ID: id, Name: "indeterminate", Value: value})
+	}
+}
+
+// Indeterminate controls the native checkbox's mixed presentation, separately
+// from checkedness and submitted value. Omitting it releases live control.
+func (view View) Indeterminate(value bool) View {
+	if view.kind != "input" {
+		panic("ui: Indeterminate requires an HTML checkbox input")
+	}
+	view.control = view.copyControl()
+	view.control.hasIndeterminate = true
+	view.control.indeterminate = value
+	return view
+}

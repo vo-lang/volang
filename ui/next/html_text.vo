@@ -1,0 +1,73 @@
+package ui
+
+import (
+	"encoding/json"
+	"strings"
+)
+
+func textElement(kind string) bool {
+	return kind == "style" || kind == "title" || kind == "script"
+}
+
+// A native text element owns one ordinary Text identity. Its HTML marker lives
+// on the parent, since comments inside these elements become literal text.
+func (view View) validateText(svg bool) {
+	if view.kind == "script" {
+		kind, _ := attributeValue(view, "type")
+		_, source := attributeValue(view, "src")
+		if svg || !dataBlockType(kind) || source {
+			panic("ui: script requires an inline HTML JSON data block; use DataBlock")
+		}
+		if len(view.children) != 1 {
+			panic("ui: JSON data blocks require one direct Text child")
+		}
+	}
+	if svg {
+		return
+	}
+	switch view.kind {
+		case "template", "noscript", "xmp", "noembed", "noframes", "plaintext":
+			panic("ui: " + view.kind + " requires a dedicated HTML content binding")
+		case "iframe":
+			if len(view.children) != 0 {
+				panic("ui: iframe cannot have managed children; use src or srcdoc")
+			}
+	}
+	if !textElement(view.kind) {
+		return
+	}
+	if len(view.children) > 1 || len(view.children) == 1 && view.children[0].kind != "#text" {
+		panic("ui: native text elements accept at most one direct Text child")
+	}
+	if len(view.children) == 0 {
+		return
+	}
+	value := view.children[0].text
+	if strings.Contains(value, "\x00") {
+		panic("ui: native text elements cannot contain NUL")
+	}
+	if view.kind == "script" {
+		if strings.Contains(value, "<") || strings.Contains(value, "\r") || !json.Valid([]byte(value)) {
+			panic("ui: data block text requires valid JSON with HTML escapes and LF newlines; use DataBlock")
+		}
+		return
+	}
+	if view.kind != "style" {
+		return
+	}
+	if strings.Contains(value, "\r") {
+		panic("ui: style text requires LF newlines")
+	}
+	lower := strings.ToLower(value)
+	for {
+		index := strings.Index(lower, "</style")
+		if index < 0 {
+			return
+		}
+		after := index + len("</style")
+		if after < len(lower) && strings.Contains("\t\n\f />", lower[after:after + 1]) {
+			panic("ui: style text cannot contain an HTML closing style tag")
+		}
+		lower = lower[after:]
+	}
+}

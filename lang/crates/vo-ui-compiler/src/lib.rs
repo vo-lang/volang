@@ -248,7 +248,7 @@ pub fn compile_project_ui_outcome(
         project,
         mounts: Vec::new(),
     };
-    for file in &project.files {
+    for file in &project.main().files {
         finder.visit_file(file);
     }
     let mut mounts = finder.mounts.into_iter();
@@ -369,7 +369,7 @@ pub fn discover_project_ui_runtime(
         project,
         mounts: Vec::new(),
     };
-    for file in &project.files {
+    for file in &project.main().files {
         finder.visit_file(file);
     }
     let mut mounts = finder.mounts.into_iter();
@@ -1114,7 +1114,8 @@ struct MountFinder<'a> {
 impl Visitor for MountFinder<'_> {
     fn visit_expr(&mut self, expr: &Expr) {
         if let ExprKind::Call(call) = &expr.kind {
-            if ui_function_name(self.project, &self.project.type_info, &call.func) == Some("Mount")
+            if ui_function_name(self.project, &self.project.main().type_info, &call.func)
+                == Some("Mount")
             {
                 self.mounts.push(MountCall {
                     span: expr.span,
@@ -1145,7 +1146,7 @@ fn resolve_component_body(
     let expression = strip_parens(expression);
     match &expression.kind {
         ExprKind::FuncLit(function) => Ok(ResolvedComponent {
-            package: project.main_package,
+            package: project.main().key,
             name: "<mount>".to_string(),
             object: None,
             props_arity: u16::try_from(
@@ -1164,16 +1165,16 @@ fn resolve_component_body(
             })?,
             props_type_fingerprint: component_props_fingerprint(
                 project,
-                &project.type_info,
+                &project.main().type_info,
                 &function.sig,
             ),
-            props: component_props_from_sig(&project.type_info, &function.sig),
+            props: component_props_from_sig(&project.main().type_info, &function.sig),
             package_path: project.main_pkg().path().to_string(),
             declaration_span: expression.span,
             body: function.body.clone(),
         }),
         ExprKind::Ident(_) | ExprKind::Selector(_) => {
-            let Some(object) = called_function_object(&project.type_info, expression) else {
+            let Some(object) = called_function_object(&project.main().type_info, expression) else {
                 return Err(error(expression.span, CompileErrorKind::InvalidMountTarget));
             };
             find_component_function(project, object)
@@ -1290,11 +1291,9 @@ fn compile_resolved_component(
 }
 
 fn package_type_info<'a>(project: &'a Project, package_path: &str) -> Option<&'a TypeInfo> {
-    if package_path == project.main_pkg().path() {
-        Some(&project.type_info)
-    } else {
-        project.imported_type_infos.get(package_path)
-    }
+    project
+        .package_by_path(package_path)
+        .map(|package| &package.type_info)
 }
 
 fn component_props_arity(function: &FuncDecl) -> Result<u16, CompileError> {
@@ -1372,15 +1371,8 @@ struct ComponentFunctionRef<'a> {
 
 fn find_component_function(project: &Project, object: ObjKey) -> Option<ComponentFunctionRef<'_>> {
     let owner = project.tc_objs.lobjs[object].pkg()?;
-    let package_path = project.tc_objs.pkgs[owner].path();
-    let (type_info, files) = if owner == project.main_package {
-        (&project.type_info, project.files.as_slice())
-    } else {
-        (
-            project.imported_type_infos.get(package_path)?,
-            project.imported_files.get(package_path)?.as_slice(),
-        )
-    };
+    let package = project.package(owner)?;
+    let (type_info, files) = (&package.type_info, package.files.as_slice());
     let function = files.iter().find_map(|file| {
         file.decls.iter().find_map(|decl| match decl {
             Decl::Func(function) if type_info.get_def(&function.name) == Some(object) => {
@@ -1391,7 +1383,7 @@ fn find_component_function(project: &Project, object: ObjKey) -> Option<Componen
     })?;
     Some(ComponentFunctionRef {
         package: owner,
-        package_path,
+        package_path: project.tc_objs.pkgs[owner].path(),
         type_info,
         function,
     })

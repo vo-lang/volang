@@ -907,7 +907,7 @@ fn run_job_inner(job: &TestJob) -> Result<(), String> {
     if job.backend == "native-aot" {
         return native_aot::run(job).map_err(|error| error.to_string());
     }
-    let compiled = match vo_engine::compile(&job.path) {
+    let compiled = match vo_ui_integration::engine().compile(&job.path) {
         Ok(compiled) => compiled,
         Err(err) => {
             let msg = err.to_string();
@@ -930,7 +930,12 @@ fn run_job_inner(job: &TestJob) -> Result<(), String> {
         other => return Err(format!("unsupported backend in run-plan: {other}")),
     };
     let sink = vo_engine::CaptureSink::new();
-    let result = vo_engine::run_with_output_observed(compiled, mode, Vec::new(), sink.clone());
+    let result = vo_ui_integration::engine().run_with_output_observed(
+        compiled,
+        mode,
+        Vec::new(),
+        sink.clone(),
+    );
     let output = sink.take();
     if !output.is_empty() {
         print!("{output}");
@@ -944,6 +949,13 @@ fn validate_jit_observation(
     job: &TestJob,
     observation: vo_engine::RunObservation,
 ) -> Result<(), String> {
+    if matches!(job.target.as_str(), "jit-opt" | "gc-jit-opt")
+        && observation.optimizing_functions_executed == 0
+    {
+        return Err(
+            "optimizing JIT target completed without entering optimizing machine code".to_string(),
+        );
+    }
     if uses_eager_function_jit(job) && !observation.executed_jit_code() {
         return Err(
             "JIT backend completed without entering JIT-compiled function or loop code".to_string(),
@@ -1155,6 +1167,27 @@ mod tests {
                 jit_loop_entries_min: None,
             },
         }
+    }
+
+    #[test]
+    fn optimizing_jobs_require_executing_the_optimized_tier() {
+        let job = test_job("jit-opt", "jit", &[("VO_JIT_CALL_THRESHOLD", "1")]);
+        let baseline_only = vo_engine::RunObservation {
+            function_entries: 10,
+            optimizing_compilations: 2,
+            ..Default::default()
+        };
+        assert!(validate_jit_observation(&job, baseline_only).is_err());
+        validate_jit_observation(
+            &job,
+            vo_engine::RunObservation {
+                function_entries: 10,
+                optimizing_compilations: 2,
+                optimizing_functions_executed: 1,
+                ..Default::default()
+            },
+        )
+        .expect("the optimized body actually ran");
     }
 
     #[test]

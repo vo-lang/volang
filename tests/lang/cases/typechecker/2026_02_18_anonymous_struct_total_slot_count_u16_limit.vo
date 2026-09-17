@@ -4,5 +4,6 @@ func main() {
 	_ = struct {
 		a [40000]int
 		b [40000]int
-	}{}
+	}{
+	}
 }

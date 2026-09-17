@@ -154,6 +154,17 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
     semantic_row!(Opcode::IslandNew, OpcodeFamily::Island, BackendStatus::RuntimeHelper, RuntimePathPolicy::RuntimeHelper),
     semantic_row!(Opcode::GoIsland, OpcodeFamily::Island, BackendStatus::RuntimeHelper, RuntimePathPolicy::RuntimeHelper),
     semantic_row!(Opcode::ForLoop, OpcodeFamily::Control, BackendStatus::CompilerSpecific, RuntimePathPolicy::VmSideExit),
+    semantic_row!(Opcode::AddF32, OpcodeFamily::Arithmetic, BackendStatus::Native, RuntimePathPolicy::None),
+    semantic_row!(Opcode::SubF32, OpcodeFamily::Arithmetic, BackendStatus::Native, RuntimePathPolicy::None),
+    semantic_row!(Opcode::MulF32, OpcodeFamily::Arithmetic, BackendStatus::Native, RuntimePathPolicy::None),
+    semantic_row!(Opcode::DivF32, OpcodeFamily::Arithmetic, BackendStatus::Native, RuntimePathPolicy::None),
+    semantic_row!(Opcode::NegF32, OpcodeFamily::Arithmetic, BackendStatus::Native, RuntimePathPolicy::None),
+    semantic_row!(Opcode::EqF32, OpcodeFamily::Comparison, BackendStatus::Native, RuntimePathPolicy::None),
+    semantic_row!(Opcode::NeF32, OpcodeFamily::Comparison, BackendStatus::Native, RuntimePathPolicy::None),
+    semantic_row!(Opcode::LtF32, OpcodeFamily::Comparison, BackendStatus::Native, RuntimePathPolicy::None),
+    semantic_row!(Opcode::LeF32, OpcodeFamily::Comparison, BackendStatus::Native, RuntimePathPolicy::None),
+    semantic_row!(Opcode::GtF32, OpcodeFamily::Comparison, BackendStatus::Native, RuntimePathPolicy::None),
+    semantic_row!(Opcode::GeF32, OpcodeFamily::Comparison, BackendStatus::Native, RuntimePathPolicy::None),
 ];
 
 const INVALID_SEMANTICS: OpcodeSemantics = semantic_row!(

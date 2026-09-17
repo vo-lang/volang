@@ -1,0 +1,107 @@
+package main
+
+import (
+	"math"
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+func feedbackContracts() {
+	var amount *ui.IntState
+	var busy *ui.BoolState
+	var disabled *ui.BoolState
+	committed := 0.0
+	changes, dismissals := 0, 0
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		amount = ui.Int(scope, "amount", 25)
+		busy = ui.Bool(scope, "busy", false)
+		disabled = ui.Bool(scope, "disabled", false)
+		return ui.Fragment(kit.Slider(kit.SliderProps{
+			ID: "slider", Label: "Pace", Max: 1, Step: 0.25, Name: "pace", Form: "external",
+			Disabled: disabled.Get(), Hint: "Quarter steps", Error: "Review pace",
+			Value: func() float64 {
+				return float64(amount.Get()) / 100
+			},
+			OnChange: func(value float64) {
+				changes++
+				amount.Set(int(value * 100))
+			},
+			OnCommit: func(value float64) {
+				committed = value
+			},
+		}), kit.Progress(kit.ProgressProps{
+			ID: "progress", Label: "Completion", Value: float64(amount.Get()) / 100,
+			Indeterminate: busy.Get(),
+		}), kit.Spinner(kit.SpinnerProps{Label: "Preparing"}), kit.Spinner(kit.SpinnerProps{
+			Decorative: true,
+		}), kit.Alert(kit.AlertProps{
+			Title: "Attention", Urgent: true, Variant: "warning",
+			OnDismiss: func() {
+				dismissals++
+			},
+		}, ui.Text("Details")))
+	}))
+	first := flush(root)
+	ids := make(map[string]int)
+	dismiss := 0
+	for _, mutation := range first.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "id" {
+			ids[mutation.Value] = mutation.ID
+		}
+		if mutation.Op == "attr" && mutation.Name == "aria-label" && mutation.Value == "Dismiss message" {
+			dismiss = mutation.ID
+		}
+	}
+	html := root.HTML()
+	require(strings.Contains(html, `type="range"`) && strings.Contains(html, `step="0.25"`) &&
+		strings.Contains(html, `aria-describedby="slider-error slider-hint"`), "native slider semantics or descriptions missing")
+	require(strings.Contains(html, `<progress`) && strings.Contains(html, `role="alert"`) &&
+		strings.Contains(html, "Preparing"), "progress or feedback semantics missing")
+	sequence := 0
+	event := func(target int, kind string, value string) {
+		sequence++
+		root.Dispatch(ui.Event{Target: target, Kind: kind, Value: value, Sequence: sequence})
+	}
+	event(ids["slider"], "input", "0.5")
+	event(ids["slider"], "input", "0.75")
+	event(ids["slider"], "change", "0.75")
+	require(amount.Get() == 75 && committed == 0.75 && changes == 2, "fractional slider event ordering lost values")
+	flush(root)
+	for _, invalid := range []string{"NaN", "+Inf", "bad", "2", "-1"} {
+		event(ids["slider"], "input", invalid)
+	}
+	require(changes == 2, "invalid native number invoked slider callback")
+	disabled.Set(true)
+	busy.Set(true)
+	removedValue := false
+	for _, mutation := range flush(root).Mutations {
+		if mutation.ID == ids["progress"] && mutation.Op == "removeAttr" && mutation.Name == "value" {
+			removedValue = true
+		}
+	}
+	require(removedValue, "indeterminate progress retained native value")
+	event(ids["slider"], "input", "1")
+	event(ids["slider"], "change", "1")
+	require(amount.Get() == 75 && committed == 0.75, "disabled slider accepted changes")
+	event(dismiss, "click", "")
+	require(dismissals == 1, "alert dismissal was lost")
+	root.Close()
+	expectPanic(func() {
+		kit.Slider(kit.SliderProps{ID: "bad", Label: "Bad", Min: 5, Max: 2})
+	}, "increasing bounds")
+	expectPanic(func() {
+		kit.Slider(kit.SliderProps{
+			ID: "bad", Label: "Bad",
+			Value: func() float64 {
+				return math.NaN()
+			},
+		})
+	}, "finite and within")
+	expectPanic(func() {
+		kit.Progress(kit.ProgressProps{ID: "bad", Label: "Bad", Value: 2})
+	}, "within 0..max")
+	expectPanic(func() {
+		kit.Alert(kit.AlertProps{Variant: "unknown"})
+	}, "unknown feedback variant")
+}

@@ -1,0 +1,45 @@
+package main
+
+var registered int
+
+func nilDefers(count int) {
+	var f func()
+	for i := 0; i < count; i++ {
+		defer f()
+		registered++
+	}
+}
+
+func recoveredNilDefers(count int) {
+	registered = 0
+	defer func() {
+		message, ok := recover().(string)
+		assert(ok && message == "runtime error: call of nil function")
+		assert(registered == count)
+	}()
+	nilDefers(count)
+	panic("nil defer did not panic")
+}
+
+func nilDeferDuringPanic() {
+	var f func()
+	defer f()
+	panic("original panic")
+}
+
+func recoverNested() (result int) {
+	defer func() {
+		message, ok := recover().(string)
+		assert(ok && message == "runtime error: call of nil function")
+		result = 17
+	}()
+	nilDeferDuringPanic()
+	return -1
+}
+
+func main() {
+	recoveredNilDefers(1)
+	recoveredNilDefers(2)
+	recoveredNilDefers(2000)
+	assert(recoverNested() == 17)
+}

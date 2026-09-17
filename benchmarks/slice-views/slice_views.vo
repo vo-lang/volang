@@ -1,0 +1,22 @@
+package main
+
+func view(source []byte, offset int) []byte {
+	middle := source[offset:]
+	return middle[1:17:17]
+}
+
+func main() {
+	source := []byte("abcdefghijklmnopqrstuvwxyz012345")
+	var retained [8][]byte
+	sum := 0
+	for i := 0; i < 200000; i++ {
+		s := view(source, i & 15)
+		retained[i & 7] = s
+		sum += int(s[0]) + len(s) + cap(s)
+	}
+	for _, s := range retained {
+		sum += len(s) + int(s[1])
+	}
+	assert(sum == 27501012)
+	println(sum)
+}

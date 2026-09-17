@@ -9,7 +9,7 @@ logical data set with bounded row materialization.
 Run it for Web development with `vo ui dev ui/showcases/data-application`.
 Run the native development window with
 `vo ui run ui/showcases/data-application --mode=vm` or `--mode=jit`. Release
-verification uses `vo ui build` for Web Wasm AOT and `vo ui package` for
+verification uses `vo ui build` for Web Wasm VM and `vo ui package` for
 Native AOT.
 
 The permanent cross-runtime gate is `./eng/run-data-application-contracts.sh`.

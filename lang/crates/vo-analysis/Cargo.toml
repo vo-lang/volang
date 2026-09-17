@@ -10,6 +10,9 @@ homepage.workspace = true
 readme.workspace = true
 publish = ["crates-io"]
 
+[features]
+compiler-profile = ["vo-common/compiler-profile"]
+
 [dependencies]
 vo-common = { workspace = true, default-features = false }
 vo-common-core = { workspace = true, features = ["std"] }

@@ -1,0 +1,52 @@
+package kit
+
+import (
+	ui "github.com/vo-lang/ui/next"
+)
+
+type BreadcrumbItem struct {
+	Key string
+	Label string
+	Href string
+}
+
+type BreadcrumbProps struct {
+	Label string
+	Items []BreadcrumbItem
+	// Link optionally returns a native anchor, for example navigation.Link.
+	// It is used only for items with an Href. Keep the supplied label accessible.
+	Link func(BreadcrumbItem) ui.View
+	Class string
+}
+
+// Breadcrumb preserves ordinary anchor behavior and marks the last item current.
+func Breadcrumb(props BreadcrumbProps) ui.View {
+	if len(props.Items) == 0 || len(props.Items) > 64 {
+		panic("kit: breadcrumb requires between 1 and 64 items")
+	}
+	label := props.Label
+	if label == "" {
+		label = "Breadcrumb"
+	}
+	seen := make(map[string]bool, len(props.Items))
+	items := make([]ui.View, 0, len(props.Items))
+	for index, item := range props.Items {
+		last := index == len(props.Items) - 1
+		if item.Key == "" || item.Label == "" || seen[item.Key] || (!last && item.Href == "") {
+			panic("kit: breadcrumb requires unique keys, labels and a link for each ancestor")
+		}
+		seen[item.Key] = true
+		view := ui.Element("span", ui.Text(item.Label))
+		if item.Href != "" {
+			view = ui.Element("a", ui.Text(item.Label)).Attr("href", item.Href)
+			if props.Link != nil {
+				view = props.Link(item)
+			}
+		}
+		if last {
+			view = view.Attr("aria-current", "page")
+		}
+		items = append(items, ui.Element("li", view).Key(item.Key))
+	}
+	return ui.Element("nav", ui.Element("ol", items...)).Attr("aria-label", label).Class("vui-breadcrumb").Class(props.Class)
+}

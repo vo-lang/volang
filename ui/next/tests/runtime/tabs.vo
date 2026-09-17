@@ -1,0 +1,109 @@
+package main
+
+import (
+	"strings"
+	ui "github.com/vo-lang/ui/next"
+	"github.com/vo-lang/ui/next/kit"
+)
+
+var tabContentType = ui.Define("contract.TabContent")
+
+func tabContracts() {
+	var value *ui.StringState
+	var vertical *ui.BoolState
+	var rtl *ui.BoolState
+	var reversed *ui.BoolState
+	var note *ui.StringState
+	notes := ui.Component(tabContentType, func(scope *ui.Scope) ui.View {
+		note = ui.String(scope, "note", "retained")
+		return ui.Text(note.Get())
+	})
+	root := ui.NewRoot(ui.Component(branchType, func(scope *ui.Scope) ui.View {
+		value = ui.String(scope, "selected", "a")
+		vertical = ui.Bool(scope, "vertical", false)
+		rtl = ui.Bool(scope, "rtl", false)
+		reversed = ui.Bool(scope, "reversed", false)
+		items := []kit.TabItem{
+			{Key: "a", Label: "A", Content: notes},
+			{Key: "disabled", Label: "Disabled", Disabled: true, Content: ui.Text("")},
+			{Key: "b", Label: "B", Content: ui.Text("B content")},
+		}
+		if reversed.Get() {
+			items[0], items[2] = items[2], items[0]
+		}
+		return kit.Tabs(kit.TabsProps{
+			ID: "contract-tabs", Label: "Contract tabs", Class: "custom-tabs",
+			Title: func(heading kit.TabHeading) ui.View {
+				label := heading.Key
+				if heading.Selected {
+					label = "Current " + label
+				}
+				return ui.Element("span", ui.Text(label)).Attr("aria-hidden", "true")
+			},
+			Value: func() string {
+				return value.Get()
+			},
+			Items: items, Vertical: vertical.Get(), RTL: rtl.Get(),
+			OnChange: func(key string) {
+				value.Set(key)
+			},
+		})
+	}))
+	initial := flush(root)
+	ids := make(map[string]int)
+	for _, mutation := range initial.Mutations {
+		if mutation.Op == "attr" && mutation.Name == "id" {
+			ids[mutation.Value] = mutation.ID
+		}
+	}
+	a, b := ids["contract-tabs-tab-0"], ids["contract-tabs-tab-2"]
+	require(a > 0 && b > 0, "tab labels lost their ids")
+	require(attributeMutation(initial, a, "aria-label", "A") &&
+		strings.Contains(root.HTML(), "Current a") &&
+		strings.Contains(root.HTML(), "vui-tabs custom-tabs"), "custom tab heading lost state, class or accessible name")
+	sequence := 0
+	sequence = kitModifiedKeys(root, a, "ArrowRight", false, sequence)
+	press := func(id int, key string) ui.Batch {
+		sequence++
+		root.Dispatch(ui.Event{Target: id, Kind: "keydown", Key: key, Sequence: sequence})
+		return flush(root)
+	}
+	require(focusTarget(press(a, "ArrowRight")) == b && value.Get() == "b", "arrow did not skip disabled tab")
+	require(focusTarget(press(b, "ArrowRight")) == a && value.Get() == "a", "arrow did not wrap")
+	require(focusTarget(press(a, "End")) == b && value.Get() == "b", "End did not reach last tab")
+	require(focusTarget(press(b, "Home")) == a && value.Get() == "a", "Home did not reach first tab")
+	require(focusTarget(press(a, "Tab")) == 0 && value.Get() == "a", "tabs consumed native Tab navigation")
+	for index := 0; index < 2; index++ {
+		sequence++
+		root.Dispatch(ui.Event{Target: a, Kind: "keydown", Key: "ArrowRight", Sequence: sequence})
+	}
+	require(value.Get() == "a", "batched tab navigation read the old native focus position")
+	require(focusTarget(flush(root)) == a, "batched tab navigation focused the wrong final tab")
+	note.Set("kept while hidden")
+	press(a, "ArrowRight")
+	reversed.Set(true)
+	changed := flush(root)
+	for _, mutation := range changed.Mutations {
+		require(mutation.Op != "create", "reordered tabs remounted their state")
+	}
+	require(note.Get() == "kept while hidden", "hidden panel lost state")
+	rtl.Set(true)
+	flush(root)
+	require(focusTarget(press(b, "ArrowLeft")) == a, "RTL direction did not reverse horizontal navigation")
+	vertical.Set(true)
+	flush(root)
+	require(focusTarget(press(a, "ArrowLeft")) == 0, "vertical tabs consumed native horizontal navigation")
+	require(focusTarget(press(a, "ArrowUp")) == b, "vertical navigation did not skip disabled tab")
+	root.Close()
+	expectPanic(func() {
+		invalid := ui.NewRoot(kit.Tabs(kit.TabsProps{
+			ID: "invalid", Label: "Invalid",
+			Value: func() string {
+				return "missing"
+			},
+			Items: []kit.TabItem{{Key: "disabled", Label: "Disabled", Disabled: true}},
+			OnChange: func(string) {},
+		}))
+		invalid.Flush()
+	}, "value must identify an enabled item")
+}

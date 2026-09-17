@@ -1,0 +1,47 @@
+// Package schema adapts structured validation issues to native form fields.
+package schema
+
+type part struct {
+	field string
+	index int
+	isIndex bool
+	isValue bool
+}
+
+// Path names fields and zero-based array positions in a validation snapshot.
+// The zero value addresses the whole form. Appending returns an independent path.
+type Path struct {
+	parts []part
+}
+
+func Field(name string) Path {
+	return Path{}.Field(name)
+}
+
+func (path Path) append(value part) Path {
+	parts := make([]part, len(path.parts) + 1)
+	copy(parts, path.parts)
+	parts[len(path.parts)] = value
+	return Path{parts: parts}
+}
+
+// Field appends a literal field name. Consecutive fields use the form's dotted
+// naming convention; after Index it selects that row's relative field name.
+func (path Path) Field(name string) Path {
+	return path.append(part{field: name})
+}
+
+func (path Path) Index(index int) Path {
+	return path.append(part{index: index, isIndex: true})
+}
+
+// Value selects one item in a field's ordered string values. It must be the last
+// segment and maps the issue to that field, including a field inside an array row.
+func (path Path) Value(index int) Path {
+	return path.append(part{index: index, isValue: true})
+}
+
+type Issue struct {
+	Path Path
+	Message string
+}

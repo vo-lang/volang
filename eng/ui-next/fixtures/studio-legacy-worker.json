@@ -1,0 +1,9 @@
+{
+  "source": "cmd/vo/src/ui_dev.rs:write_web_policy_assets",
+  "captured": "2026-09-15",
+  "fixtureSha256": "78c3a0f749ea0148151dca6dfec5c0f71b4634e890daee3e2e5bffa6ae4e5ab4",
+  "application": "Volang Studio",
+  "scope": "/",
+  "cacheNamespace": "volang-ui-d7559a3ca207bb8c",
+  "note": "Unchanged generated worker logic, with a fixture version and two small precache documents. Retained after the old producer is removed so upgrades keep exercising its cache-first navigation behavior."
+}
