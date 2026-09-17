@@ -64,7 +64,7 @@
   "path": "apps/studio/documentation",
   "schemaVersion": 2,
   "sourceDigests": {
-    "Cargo.lock": "sha256:7e912ae03c4285638a4b06830b16cbb9dcd17efdf147e9ee5460fd2d838a54e2",
+    "Cargo.lock": "sha256:2029097585c70e92c2927ec9f8428b5a2450adf92138de8505b411a70b41071e",
     "apps/studio/ui.web.toml": "sha256:f2cb08609acd470422a3c8210659e645917fdfafede72fe261f13cbc33248b58",
     "cmd/vo-dev/Cargo.toml": "sha256:310b34e71588781869b7db48a787cf16d1495f75a7ec95515cf26ca7a4a26565",
     "cmd/vo-dev/src/generate_docs.rs": "sha256:041007db0a1bac8f10a8286cc014997c4a298380da32250d9446241a4f43d97c",

@@ -189,20 +189,17 @@ mod tests {
     use super::*;
     use serde_json::{json, Value};
     struct Fixture {
-        directory: PathBuf,
+        directory: tempfile::TempDir,
         manifest: Value,
     }
     impl Fixture {
         fn new() -> Self {
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let directory =
-                std::env::temp_dir().join(format!("vo-desktop-{}-{stamp}", std::process::id()));
-            std::fs::create_dir(&directory).unwrap();
+            let directory = tempfile::Builder::new()
+                .prefix("vo-desktop-")
+                .tempdir()
+                .unwrap();
             let file = |path: &str, content: &str, media: &str| {
-                std::fs::write(directory.join(path), content).unwrap();
+                std::fs::write(directory.path().join(path), content).unwrap();
                 json!({"path":path,"bytes":content.len(),"sha256":format!("{:x}",Sha256::digest(content.as_bytes())),"mediaType":media})
             };
             let manifest = json!({"schema":SCHEMA,"identifier":"dev.volang.bundle-test","title":"桌面 🌿","width":900,"height":600,"backend":"aot",
@@ -216,25 +213,54 @@ mod tests {
         }
         fn load(&self) -> Result<Bundle, String> {
             std::fs::write(
-                self.directory.join("desktop.json"),
+                self.directory.path().join("desktop.json"),
                 self.manifest.to_string(),
             )
             .unwrap();
-            Bundle::load(&self.directory)
+            Bundle::load(self.directory.path())
         }
     }
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.directory);
+    #[test]
+    fn concurrent_fixtures_keep_independent_files_and_lifetimes() {
+        let start = std::sync::Barrier::new(8);
+        let mut fixtures = std::thread::scope(|scope| {
+            let handles = (0..8)
+                .map(|index| {
+                    let start = &start;
+                    scope.spawn(move || {
+                        start.wait();
+                        let mut fixture = Fixture::new();
+                        fixture.manifest["title"] = json!(format!("fixture-{index}"));
+                        fixture
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let paths = fixtures
+            .iter()
+            .map(|fixture| fixture.directory.path().to_path_buf())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(paths.len(), fixtures.len());
+        drop(fixtures.pop().unwrap());
+        for (index, fixture) in fixtures.iter().enumerate() {
+            assert_eq!(
+                fixture.load().unwrap().manifest.title,
+                format!("fixture-{index}")
+            );
         }
     }
+
     #[test]
     fn bundle_is_independent_of_working_directory_and_rejects_changed_bytes() {
         let fixture = Fixture::new();
         assert_eq!(fixture.load().unwrap().manifest.title, "桌面 🌿");
-        std::fs::write(fixture.directory.join("app.css"), "broken").unwrap();
+        std::fs::write(fixture.directory.path().join("app.css"), "broken").unwrap();
         assert!(fixture.load().err().unwrap().contains("integrity mismatch"));
-        std::fs::remove_file(fixture.directory.join("desktop.js")).unwrap();
+        std::fs::remove_file(fixture.directory.path().join("desktop.js")).unwrap();
         assert!(fixture.load().is_err());
     }
     #[test]
@@ -272,7 +298,7 @@ mod tests {
         fixture.manifest["backend"] = json!("vm");
         assert!(fixture.load().is_err());
         fixture.manifest["application"] = json!({"path":"app.vob","bytes":3,"sha256":format!("{:x}",Sha256::digest(b"vob")),"mediaType":"binary"});
-        std::fs::write(fixture.directory.join("app.vob"), b"vob").unwrap();
+        std::fs::write(fixture.directory.path().join("app.vob"), b"vob").unwrap();
         assert_eq!(fixture.load().unwrap().application.unwrap(), b"vob");
         fixture.manifest["backend"] = json!("aot");
         assert!(fixture.load().is_err());
@@ -282,10 +308,10 @@ mod tests {
     fn resource_links_cannot_leave_the_bundle() {
         let fixture = Fixture::new();
         let other = Fixture::new();
-        std::fs::remove_file(fixture.directory.join("app.css")).unwrap();
+        std::fs::remove_file(fixture.directory.path().join("app.css")).unwrap();
         std::os::unix::fs::symlink(
-            other.directory.join("app.css"),
-            fixture.directory.join("app.css"),
+            other.directory.path().join("app.css"),
+            fixture.directory.path().join("app.css"),
         )
         .unwrap();
         assert!(fixture.load().err().unwrap().contains("escapes"));
