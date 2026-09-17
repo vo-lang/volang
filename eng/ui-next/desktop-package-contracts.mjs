@@ -92,6 +92,13 @@ assert.match(await run('window-document-unload',join(unloadOutput,unloadReceipt.
 for(const template of ['canvas','plot','listening','variable-list']) {
   const project=join(work,template);
   await run(`create-${template}`,compiler,['ui','create',project,'--template',template]);
+  if(template==='plot') {
+    // Keep local widget failures in the retained process log as well as the
+    // application's fallback UI, so a platform import failure is diagnosable.
+    const sourcePath=join(project,'app/app.vo'),source=await readFile(sourcePath,'utf8');
+    assert(source.includes('failure.Set(message)'));
+    await writeFile(sourcePath,source.replace('failure.Set(message)','println("Desktop plot widget: " + message)\n\t\t\t\tfailure.Set(message)'));
+  }
   const path=join(project,'web/index.html');
   await writeFile(path,(await readFile(path,'utf8')).replace('</body>',`<script src="/check.js" data-template="${template}" defer></script></body>`));
   await cp(join(root,'eng/ui-next/desktop-template-check.js'),join(project,'web/check.js'));
