@@ -1,4 +1,4 @@
-import {chmod,copyFile,mkdir,mkdtemp,readFile,readdir,rename,rm,writeFile} from 'node:fs/promises';
+import {chmod,copyFile,mkdir,mkdtemp,readFile,readdir,rm,writeFile} from 'node:fs/promises';
 import {basename,dirname,extname,join} from 'node:path';
 import {build} from './node_modules/esbuild/lib/main.js';
 import {toolchain,compilerPath} from './toolchain.mjs';
@@ -11,6 +11,7 @@ import {projectHost} from './project-features.mjs';
 import {desktopArtifact,readDesktopSdk} from './desktop-sdk-manifest.mjs';
 import {thirdPartyNotices} from './third-party.mjs';
 import {desktopAotArguments} from './desktop-link.mjs';
+import {renameDirectory} from './publish-directory.mjs';
 
 const types={'.html':'html','.js':'javascript','.css':'css','.svg':'svg','.png':'png','.jpg':'jpeg','.jpeg':'jpeg','.webp':'webp',
   '.woff2':'woff2','.json':'json','.txt':'text','.ico':'icon','.wav':'wav','.mp3':'mp3','.mp4':'mp4','.webm':'webm','.vob':'binary','.wasm':'wasm'};
@@ -86,8 +87,8 @@ export async function buildDesktopProject(directory,{backend='aot',signal,sdkDir
       profile:sdk.profile,wireVersion:config.wireVersion,entry:options.entry,features,thirdParty,
       executable:executable.slice(stage.length+1).replaceAll('\\','/'),artifacts},null,2)+'\n');
     signal?.throwIfAborted();
-    try {await rename(destination,backup);previous=true;}catch(error){if(error.code!=='ENOENT')throw error;}
-    try {await rename(stage,destination);}catch(error){if(previous){await rename(backup,destination);previous=false;}throw error;}
+    try {await renameDirectory(destination,backup,{signal});previous=true;}catch(error){if(error.code!=='ENOENT')throw error;}
+    try {await renameDirectory(stage,destination,{signal});}catch(error){if(previous){await renameDirectory(backup,destination);previous=false;}throw error;}
     if(previous){await rm(backup,{recursive:true,force:true});previous=false;}
     return destination;
   } finally {await rm(stage,{recursive:true,force:true});}

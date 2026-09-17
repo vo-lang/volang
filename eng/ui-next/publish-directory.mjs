@@ -1,4 +1,21 @@
-import {lstat,mkdir,rename,rmdir} from 'node:fs/promises';
+import fs from 'node:fs/promises';
+import {setTimeout as delay} from 'node:timers/promises';
+
+// Windows can briefly retain a sharing lock after an executable has exited.
+// Retry only sharing/access failures, for at most 4.55 seconds. A persistent
+// failure retains its original filesystem error; no destination is removed.
+export async function renameDirectory(stage,destination,{signal}={}) {
+  const waits=[50,100,200,400,800,1000,1000,1000];
+  for(let attempt=0;;attempt++) {
+    signal?.throwIfAborted();
+    try {await fs.rename(stage,destination);return;}
+    catch(error) {
+      if(process.platform!=='win32'||!['EPERM','EACCES','EBUSY'].includes(error.code)||attempt===waits.length)throw error;
+      try {await delay(waits[attempt],undefined,{signal});}
+      catch(error) {signal?.throwIfAborted();throw error;}
+    }
+  }
+}
 
 // Publish a complete staged directory without replacing an existing project.
 // Windows MoveFileEx refuses an existing directory, including an empty one,
@@ -8,15 +25,15 @@ import {lstat,mkdir,rename,rmdir} from 'node:fs/promises';
 export async function publishNewDirectory(stage,destination) {
   if(process.platform==='win32') {
     try {
-      await lstat(destination);
+      await fs.lstat(destination);
       throw new Error(`Destination already exists: ${destination}`);
     } catch(error) {
       if(error.code!=='ENOENT') throw error;
     }
-    await rename(stage,destination);
+    await fs.rename(stage,destination);
     return;
   }
-  await mkdir(destination);
-  try {await rename(stage,destination);}
-  catch(error) {await rmdir(destination).catch(()=>{});throw error;}
+  await fs.mkdir(destination);
+  try {await fs.rename(stage,destination);}
+  catch(error) {await fs.rmdir(destination).catch(()=>{});throw error;}
 }

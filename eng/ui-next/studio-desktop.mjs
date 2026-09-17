@@ -1,4 +1,4 @@
-import {cp,mkdir,mkdtemp,readFile,rename,rm,writeFile} from 'node:fs/promises';
+import {cp,mkdir,mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {basename,extname,join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {build} from './node_modules/esbuild/lib/main.js';
@@ -10,6 +10,7 @@ import {studioHostImports} from './studio-build.mjs';
 import {verifyStudioDocuments} from './studio-documents.mjs';
 import {buildPlaygroundSources} from './playground-sources.mjs';
 import {thirdPartyNotices} from './third-party.mjs';
+import {renameDirectory} from './publish-directory.mjs';
 
 // Studio remains an ordinary project consumer. This assembler supplies its
 // shared application sources, offline documentation and optional compiler workers.
@@ -72,8 +73,8 @@ export async function buildDesktopStudio({backend='jit',signal,check=false}={}) 
     await writeFile(join(built,'studio-report.json'),JSON.stringify({schema:'volang.studio-desktop.v1',backend,check,documents:docs.pages.length,
       execution:'native-ui-with-optional-wasm-playground-workers',thirdParty,browserInputs:Object.keys(bundled.metafile.inputs).sort()},null,2)+'\n');
     signal?.throwIfAborted();
-    try{await rename(destination,backup);previous=true;}catch(error){if(error.code!=='ENOENT')throw error;}
-    try{await rename(built,destination);}catch(error){if(previous){await rename(backup,destination);previous=false;}throw error;}
+    try{await renameDirectory(destination,backup,{signal});previous=true;}catch(error){if(error.code!=='ENOENT')throw error;}
+    try{await renameDirectory(built,destination,{signal});}catch(error){if(previous){await renameDirectory(backup,destination);previous=false;}throw error;}
     if(previous)await rm(backup,{recursive:true,force:true});
     return destination;
   } finally {await rm(stage,{recursive:true,force:true});}
