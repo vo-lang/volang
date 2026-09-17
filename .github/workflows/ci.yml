@@ -676,6 +676,9 @@ jobs:
             target/ui-next/desktop-delivery/*/*.log
             target/ui-next/studio-desktop/report.json
             target/ui-next/studio-desktop/*-window.log
+            target/ci/artifacts/ui-desktop-rewrite/sdk/*.json
+            target/ci/artifacts/ui-desktop-rewrite/sdk/*.jsonl
+            target/ci/artifacts/ui-desktop-rewrite/sdk/*.log
           if-no-files-found: warn
           retention-days: 14
 

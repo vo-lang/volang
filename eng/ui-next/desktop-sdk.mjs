@@ -24,9 +24,10 @@ export async function buildDesktopSdk(directory,{profile='release-native',signal
     const runner=process.platform==='win32'?'vo-ui-desktop.exe':'vo-ui-desktop';
     await copyFile(join(output,runner),join(stage,runner));
     console.log('Building Native AOT desktop runtime…');
-    const log=await execute('cargo',['rustc',...cargo,'--color','never','--message-format=json','--features','aot','--lib','--','--print','native-static-libs'],{env,signal});
+    const messages=join(stage,'cargo-messages.jsonl');
+    const log=await execute('cargo',['rustc',...cargo,'--color','never','--message-format=json','--features','aot','--lib','--','--print','native-static-libs'],{env,signal,stdoutFile:messages});
     await writeFile(join(stage,'aot-build.log'),log);
-    const requirements=nativeBuildRequirements(log),{nativeLink}=requirements;
+    const requirements=nativeBuildRequirements((await readFile(messages,'utf8'))+'\n'+log),{nativeLink}=requirements;
     const libraries=await bundleNativeLibraries(stage,requirements);
     const tree=await execute('cargo',['tree','--locked','--offline','-p','vo-ui-desktop-runtime','--features','aot','-e','normal'],{env,signal});
     for(const dependency of ['vo-ui-runtime ','vo-ui-vm ','vo-ui-integration ','vo-codegen ','cranelift-codegen ']) {

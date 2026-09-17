@@ -1,11 +1,43 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {mkdtemp,mkdir,writeFile,rm,rename} from 'node:fs/promises';
+import {mkdtemp,mkdir,readFile,writeFile,rm,rename} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {nativeBuildRequirements,bundleNativeLibraries} from './desktop-native-libraries.mjs';
 import {desktopArtifact,readDesktopSdk} from './desktop-sdk-manifest.mjs';
 import {desktopAotArguments} from './desktop-link.mjs';
+import {execute} from './execute.mjs';
+
+test('Cargo search paths survive large structured output while diagnostics stay bounded',async()=>{
+  const work=await mkdtemp(join(tmpdir(),'vo-cargo-output-'));
+  try {
+    const source=join(work,'Cargo cache 中文'),directory=join(work,'SDK'),stdoutFile=join(work,'cargo.jsonl');
+    await mkdir(source);await mkdir(directory);
+    await writeFile(join(source,'windows.0.48.5.lib'),'import library');
+    const script=`const fs=require('node:fs');
+      fs.writeSync(1,JSON.stringify({reason:'build-script-executed',linked_paths:[${JSON.stringify('native='+source)}]})+'\\n');
+      for(let i=0;i<1000;i++)fs.writeSync(1,JSON.stringify({reason:'compiler-artifact',features:['x'.repeat(256)]})+'\\n');
+      fs.writeSync(2,'diagnostic '.repeat(10000)+'\\nnote: native-static-libs: windows.0.48.5.lib user32.lib\\n');`;
+    const diagnostics=await execute(process.execPath,['-e',script],{stdoutFile});
+    assert(diagnostics.length<=65536);
+    const messages=await readFile(stdoutFile,'utf8');assert(messages.length>65536);
+    const requirements=nativeBuildRequirements(messages+'\n'+diagnostics);
+    assert.deepEqual(requirements.searchPaths,[source]);
+    assert.deepEqual(requirements.nativeLink,['windows.0.48.5.lib','user32.lib']);
+    const libraries=await bundleNativeLibraries(directory,{...requirements,platform:'win32'});
+    assert.deepEqual(libraries.map(value=>value.path),['native/windows.0.48.5.lib']);
+  } finally {await rm(work,{recursive:true,force:true});}
+});
+
+test('failed structured commands retain stdout and identify the complete diagnostic file',async()=>{
+  const work=await mkdtemp(join(tmpdir(),'vo-cargo-failure-')),stdoutFile=join(work,'cargo.jsonl');
+  try {
+    await assert.rejects(execute(process.execPath,['-e',"process.stdout.write('retained');process.exitCode=1"],{stdoutFile}),error=>{
+      assert(error.message.includes(stdoutFile));return true;
+    });
+    assert.equal(await readFile(stdoutFile,'utf8'),'retained');
+  } finally {await rm(work,{recursive:true,force:true});}
+});
 
 test('Cargo native requirements preserve argument order and cached dependency search paths',()=>{
   const log=[
