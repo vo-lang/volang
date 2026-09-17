@@ -78,6 +78,13 @@ nonzero exit. Local dirty executions can
 produce diagnostic receipts, but cannot produce certifiable evidence. Bundles
 reject mixed GitHub run attempts and missing command or log records.
 
+Re-running a failed job can help diagnose a platform failure, but cannot combine
+its new attempt with earlier successful jobs into a certificate. For complete
+revalidation, start a new CI workflow run for the candidate ref (the manual
+workflow uses the full merge profile on a branch), or validate the next PR
+commit. Preserve the original failure artifacts; do not replace evidence to
+make a partial rerun certifiable.
+
 Rust test commands require a nonempty successful test set, independently of the
 process exit code. Failure records identify the command, owner through the task
 definition, classification, reproduction command and diagnostic paths. Job

@@ -41,5 +41,8 @@ self.onmessage = async event => {
         removeEventListener: self.removeEventListener.bind(self),
       });
     } finally { vm.free(); }
-  } catch (error) { self.postMessage({ kind: 'ui-exit', error: String(error?.message ?? error).slice(0, 65536), diagnostics }); }
+  } catch (error) {
+    self.postMessage({ kind: 'ui-exit', error: String(error?.message ?? error).slice(0, 65536),
+      errorStack: String(error?.stack ?? error).slice(0, 65536), diagnostics });
+  }
 };

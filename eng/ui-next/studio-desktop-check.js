@@ -5,6 +5,7 @@
     const deadline = performance.now() + 45_000;
     while (!await predicate()) {
       if (window.__studioNext?.error) throw new Error(window.__studioNext.error);
+      if (window.__studioNext?.workers.preview?.error) throw new Error(window.__studioNext.workers.preview.error);
       if (performance.now() >= deadline) throw new Error(`Studio desktop timed out: ${label}; ${['#status','[data-output]','[data-preview-status]'].map(selector=>document.querySelector(selector)?.textContent??'').join('; ')}`);
       await new Promise(resolve => setTimeout(resolve, 25));
     }
