@@ -209,6 +209,7 @@ try {
     onError: showError,
     systemHost,
     onCommit: () => {
+      root.dataset.volangRevision = session.adapter.currentRevision.toString();
       if (interactiveMarked) return;
       interactiveMarked = true;
       activate();
