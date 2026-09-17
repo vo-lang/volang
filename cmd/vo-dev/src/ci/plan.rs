@@ -11,6 +11,7 @@ use std::path::{Component, Path};
 use std::process::Command;
 
 pub(crate) const PLAN_SCHEMA: &str = "volang.ci.plan.v2";
+const MAX_PLAN_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
@@ -155,7 +156,7 @@ pub(crate) fn write_plan(path: &Path, plan: &CiPlan) -> Result<()> {
 
 pub(crate) fn read_plan(root: &Path, path: &Path) -> Result<(CiPlan, Vec<u8>)> {
     let bytes = fs::read(path).with_context(|| format!("could not read {}", path.display()))?;
-    if bytes.len() > 8 * 1024 * 1024 {
+    if bytes.len() > MAX_PLAN_BYTES {
         bail!("CI plan exceeds 8 MiB: {}", path.display());
     }
     let plan: CiPlan = serde_json::from_slice(&bytes)
@@ -287,20 +288,30 @@ pub(crate) fn validate_plan(root: &Path, plan: &CiPlan) -> Result<()> {
 pub(crate) fn canonical_plan_bytes(plan: &CiPlan) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(plan)?;
     bytes.push(b'\n');
+    if bytes.len() > MAX_PLAN_BYTES {
+        bail!("CI plan exceeds 8 MiB; reduce redundant impact explanations before publication");
+    }
     Ok(bytes)
 }
 
 fn direct_reasons(task: &CiTask, impact: &Impact) -> Vec<String> {
-    let mut reasons = impact
-        .full
-        .iter()
-        .map(|reason| format!("run: {reason}"))
-        .collect::<Vec<_>>();
-    for capability in &task.capabilities {
-        if let Some(chains) = impact.capabilities.get(capability) {
-            reasons.extend(chains.iter().map(|chain| format!("run: {chain}")));
-        }
-    }
+    // A shared/unknown input already requires every eligible task. Repeating
+    // every transitive capability path adds no selection information and can
+    // make large refactoring plans exceed their wire-size contract.
+    let mut reasons: Vec<_> = if impact.full.is_empty() {
+        task.capabilities
+            .iter()
+            .filter_map(|capability| impact.capabilities.get(capability))
+            .flatten()
+            .map(|chain| format!("run: {chain}"))
+            .collect()
+    } else {
+        impact
+            .full
+            .iter()
+            .map(|reason| format!("run: {reason}"))
+            .collect()
+    };
     reasons.sort();
     reasons.dedup();
     reasons
@@ -371,7 +382,16 @@ fn selected_task_ids<'a>(
     let mut selected = BTreeSet::new();
     for id in &profile.tasks {
         let task = tasks[id.as_str()];
-        if !profile.changed_only || task.always || !direct_reasons(task, impact).is_empty() {
+        if !profile.changed_only
+            || task.always
+            || !impact.full.is_empty()
+            || task.capabilities.iter().any(|capability| {
+                impact
+                    .capabilities
+                    .get(capability)
+                    .is_some_and(|paths| !paths.is_empty())
+            })
+        {
             selected.insert(id.as_str());
         }
     }
@@ -541,6 +561,60 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_inputs_keep_large_refactoring_plans_small_without_changing_selection() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut plan = build_plan(&root, "main", None, None, &[]).unwrap();
+        let manifest = load_manifest(&root).unwrap();
+        let impact = Impact {
+            full: vec!["shared control input Cargo.lock".into()],
+            capabilities: BTreeMap::from([(
+                "rust".into(),
+                (0..40_000)
+                    .map(|index| format!("changed/{index}.rs -> dependency -> capability rust"))
+                    .collect(),
+            )]),
+        };
+        let baseline = Impact {
+            full: impact.full.clone(),
+            ..Default::default()
+        };
+        assert_eq!(
+            selected_task_ids(&manifest, "pull-request", &impact).unwrap(),
+            selected_task_ids(&manifest, "pull-request", &baseline).unwrap()
+        );
+        plan.decisions = selection_decisions(&manifest, "pull-request", &impact).unwrap();
+        assert_eq!(
+            plan.decisions,
+            selection_decisions(&manifest, "pull-request", &baseline).unwrap()
+        );
+        assert!(canonical_plan_bytes(&plan).unwrap().len() < 128 * 1024);
+    }
+
+    #[test]
+    fn plan_writer_rejects_oversized_output_before_replacing_an_existing_file() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut plan = build_plan(&root, "main", None, None, &[]).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "vo-ci-plan-limit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_plan(&path, &plan).unwrap();
+        let original = fs::read(&path).unwrap();
+        read_plan(&root, &path).unwrap();
+        plan.changed_files.push("x".repeat(MAX_PLAN_BYTES));
+        assert!(write_plan(&path, &plan)
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds 8 MiB"));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn shared_and_unknown_inputs_select_every_eligible_task() {

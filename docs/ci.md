@@ -37,6 +37,11 @@ Each CI run follows the same chain:
    promotable artifact is hashed recursively and must match the exact bytes
    recorded by its producing job.
 
+Impact explanations use shared or unknown inputs directly when they already
+require all eligible tasks; redundant transitive capability paths are omitted.
+Task selection retains the complete impact graph. Plan generation and loading
+share the same 8 MiB limit, so an oversized plan fails before publication.
+
 Local processes can build plans for inspection. The official workflows record
 receipts only inside GitHub Actions from a clean tracked worktree. Site and
 release promotion accept bundles downloaded from the exact successful main CI
