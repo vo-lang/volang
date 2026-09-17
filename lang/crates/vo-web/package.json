@@ -51,7 +51,7 @@
     "test:content-site-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/content-site-vm --content-site-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-content-site-browser.json",
     "test:media-application-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/media-application-vm --media-application-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-media-application-browser.json",
     "test:studio-workbench-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/studio-workbench-vm --studio-workbench-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-studio-workbench-browser.json",
-    "test:studio-vm-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/ci/artifacts/site --studio-vm-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-studio-vm-browser.json",
+    "test:studio-vm-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/ci/artifacts/legacy-studio --studio-vm-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-studio-vm-browser.json",
     "build": "npm run build:wasm && npm run build:js",
     "build:release": "npm run build:wasm:release && npm run build:js",
     "clean": "rm -rf dist pkg",

@@ -17,7 +17,7 @@ export async function runComponentStateSmoke(contract, timeoutMilliseconds, proj
     );
     return observed.buttons;
   };
-  const clickButton = async text => contract.clickButton(text);
+  const clickButton = async text => contract.afterCommit(() => contract.clickButton(text), timeoutMilliseconds);
   const checkpoints = {};
   checkpoints.initial = await expectButtons(["Reorder", "Alpha 0", "Beta 0"]);
   await clickButton("Alpha 0");
