@@ -90,7 +90,7 @@ fn print_usage() {
   vo-dev ci run --plan <path> --task <id>
   vo-dev ci record --plan <path> --task <id> --output target/ci/evidence/<id>.evidence.json
   vo-dev ci certify --plan <path> --evidence-dir <dir> --output target/ci/certification.json
-  vo-dev ci verify --bundle <path> [--profile <name>] [--artifact-task <id> --artifact <path>]
+  vo-dev ci verify --bundle <path> [--profile <name>] [--artifact-task <id> [--artifact-source <declared-path>] --artifact <path>]
   vo-dev release metadata [--tag <tag>] [--commit <commit>]
   vo-dev release version [--tag <tag>]
   vo-dev release sdk-plan [--check|--json]

@@ -113,6 +113,7 @@ jobs:
             --bundle target/ci/certification-input/certification.json \
             --profile main \
             --artifact-task ui-web-rewrite \
+            --artifact-source target/ci/artifacts/site \
             --artifact target/ci/artifacts/site
           test "$(cat target/ci/artifacts/site/CNAME)" = "volang.dev"
 
@@ -142,6 +143,7 @@ jobs:
           ./target/debug/vo-dev ci verify \
             --bundle target/ci/certification-input/certification.json \
             --profile main --artifact-task ui-web-rewrite \
+            --artifact-source target/ci/artifacts/site \
             --artifact target/ci/artifacts/site
 
       - name: Upload predeployment browser diagnostics
