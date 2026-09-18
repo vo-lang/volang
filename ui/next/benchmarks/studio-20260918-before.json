@@ -1,5 +1,5 @@
 {
-  "schema": "volang.studio-next-performance.v1",
+  "schema": "volang.studio-performance-samples.v1",
   "passed": true,
   "measuredAt": "2026-09-18T12:28:35.974Z",
   "buildReportSha256": "530806de5e7442fbc4a08bbfe9fc295ea522083344dc018677aabfa933335bdb",
@@ -514,5 +514,6 @@
       }
     }
   ],
-  "measurementNote": "Only latency is comparable across runs. Before used page Resource Timing; after includes Worker response sizes. These are separate sequential build measurements, not a randomized experiment."
+  "measurementNote": "Only latency is comparable across runs. Before used page Resource Timing; after includes Worker response sizes. These are separate sequential build measurements, not a randomized experiment.",
+  "sourceReportSchema": "volang.studio-next-performance.v1"
 }

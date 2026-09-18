@@ -668,7 +668,7 @@ mod tests {
             ])
         );
         for path in [
-            "apps/studio/main.vo",
+            "apps/studio/next/app/app.vo",
             "apps/studio/documentation/catalog.vo",
             "lang/crates/vo-web/js/vfs.ts",
         ] {
@@ -835,7 +835,7 @@ mod tests {
         assert!(glob_matches("ui/*", "ui/crates/core/src/lib.rs"));
         assert!(glob_matches("Cargo.*", "Cargo.lock"));
         assert!(glob_matches("*", "docs/ci.md"));
-        assert!(!glob_matches("ui/*", "apps/studio/main.vo"));
+        assert!(!glob_matches("ui/*", "apps/studio/next/app/app.vo"));
         assert!(!glob_matches("Cargo.*", "nested/Cargo.toml"));
     }
 

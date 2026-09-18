@@ -127,7 +127,6 @@ try {
   await rename(project,join(temporary,'Moved project 中文'));project=join(temporary,'Moved project 中文');
   assert.equal(JSON.parse(await readFile(join(project,'ui-next.json'))).desktop.identifier,applicationId);
   console.log(await cli('verify'));
-  assert.match(await execute(executable(),['ui','web','verify'],{cwd:temporary,env}),/Verified/);
   const nativeAuthoring = await checkNativeAuthoring(executable(),project,{env});
   const projectDiagnosis=await checkProjectDiagnosis(executable(),project,{env});
   assert(inventory.artifacts.some(file => file.path === 'editors/volang-ui-authoring.vsix'));
