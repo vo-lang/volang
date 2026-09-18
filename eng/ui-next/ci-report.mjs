@@ -9,6 +9,12 @@ import {guideApplication} from './guide-source.mjs';
 
 const engines = ['chromium','firefox','webkit'];
 
+export function toolchainBuildCoverage(builds) {
+  const expected=['canvas','default','document-data','editor','fieldnotes','first-steps',
+    'forms','kit-composition','listening','pages','plot','scroll-position','variable-list'];
+  assert.deepEqual(Object.keys(builds).sort(),expected.sort(),'portable toolchain build coverage');
+}
+
 export function publicHostEvidence(report) {
   assert.equal(report.schema,'volang.ui-public-host.v1');
   assert.equal(report.passed,true);
@@ -224,7 +230,7 @@ export async function collectCoreEvidence(root) {
   }
   assert.deepEqual(toolkit.editorCases.map(value => `${value.engine}-${value.backend}`).sort(),engines.flatMap(engine => backends.map(backend => `${engine}-${backend}`)).sort());
   assert(toolkit.editorCases.every(value => value.editor === true));
-  assert.deepEqual(Object.keys(toolkit.builds).sort(),['canvas','default','document-data','editor','fieldnotes','first-steps','kit-composition','listening','forms','pages','plot','scroll-position','variable-list']);
+  toolchainBuildCoverage(toolkit.builds);
   for (const [name,app] of Object.entries(toolkit.builds)) for (const value of app.artifacts) await artifact(join(output,'toolchain-project',name),value);
   await add('toolchain-project/report.json');await add('toolchain-project/toolchain-manifest.json');
   const packaged = await read('ci/toolchain/tools/toolchain.json'),tested = await read('toolchain-project/toolchain-manifest.json');
