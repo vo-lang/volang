@@ -1,7 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {createHash} from 'node:crypto';
-import {browserEvidence,staticStudioEvidence,nativeAuthoringEvidence,publicHostEvidence} from './ci-report.mjs';
+import {browserEvidence,staticStudioEvidence,nativeAuthoringEvidence,publicHostEvidence,toolchainBuildCoverage} from './ci-report.mjs';
+
+test('portable build coverage ignores order and rejects missing or unexpected applications',()=>{
+  const names=['default','fieldnotes','first-steps','kit-composition','listening','forms',
+    'pages','plot','canvas','document-data','editor','scroll-position','variable-list'];
+  const builds=Object.fromEntries(names.map(name=>[name,{}]));
+  toolchainBuildCoverage(builds);
+  toolchainBuildCoverage(Object.fromEntries(Object.entries(builds).reverse()));
+  const missing={...builds};delete missing.forms;
+  assert.throws(()=>toolchainBuildCoverage(missing),/build coverage/);
+  assert.throws(()=>toolchainBuildCoverage({...builds,unexpected:{}}),/build coverage/);
+});
 
 test('public host evidence requires installed package, both VM runtimes and complete root lifetimes', () => {
   const report={schema:'volang.ui-public-host.v1',passed:true,
