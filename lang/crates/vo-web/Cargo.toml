@@ -16,9 +16,7 @@ wasm-opt = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["compiler", "legacy-ui"]
-# Compatibility provider for the previous UI kernel and its host methods.
-legacy-ui = ["dep:vo-ui-vm"]
+default = ["compiler"]
 # Enable Vo source code compilation (full compiler chain)
 compiler = [
     "vo-common",
@@ -45,7 +43,6 @@ vo-web-runtime-wasm = { path = "runtime-wasm" }
 vo-runtime = { path = "../vo-runtime", default-features = false }
 vo-stdlib = { path = "../vo-stdlib", default-features = false }
 vo-ui-bridge.workspace = true
-vo-ui-vm = { workspace = true, optional = true }
 
 # Optional: compiler chain dependencies
 vo-common = { path = "../vo-common", default-features = false, optional = true }

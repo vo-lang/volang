@@ -49,8 +49,8 @@ await run('aot-dependencies', 'cargo', ['tree', '--locked', '--offline', '--mani
 const dependencies = await readFile(resolve(directory, 'aot-dependencies.log'), 'utf8');
 // The existing native stdlib's module resolver includes vo-analysis. This is
 // shared native-runtime policy; keep the UI probe independent of its redesign.
-for (const legacy of ['vo-ui-vm ', 'vo-ui-runtime ', 'vo-ui-integration ', 'vo-ui-desktop ', 'vo-codegen ', 'cranelift-codegen ']) {
-  assert(!dependencies.includes(legacy), `native AOT runtime unexpectedly includes ${legacy}`);
+for (const dependency of ['vo-codegen ', 'cranelift-codegen ']) {
+  assert(!dependencies.includes(dependency), `native AOT runtime unexpectedly includes ${dependency}`);
 }
 const archive = resolve(root, 'target/debug', process.platform === 'win32' ? 'vo_ui_native_aot_probe.lib' : 'libvo_ui_native_aot_probe.a');
 const executable = resolve(directory, process.platform === 'win32' ? 'interaction-aot.exe' : 'interaction-aot');

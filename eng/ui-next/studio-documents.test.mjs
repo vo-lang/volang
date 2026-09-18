@@ -6,12 +6,11 @@ import { resolve } from 'node:path';
 import { root } from './server.mjs';
 import { studioDocument, studioDocumentHtml, verifyStudioDocuments } from './studio-documents.mjs';
 
-test('maintained chapters produce one exact data cache request and no legacy UI pages', async () => {
+test('maintained chapters produce one exact data cache request', async () => {
   await verifyStudioDocuments(root);
   const metadata = JSON.parse(await readFile(resolve(root, 'apps/studio/next/documentation/index.json')));
-  assert.equal(metadata.pages.length, 23);
-  assert(!metadata.pages.some(page => page.SectionID === 'ui'));
-  assert.deepEqual(metadata.pages.filter(page => page.SectionID === 'web-ui').map(page => page.ID), ['first-steps','state','lifecycle','migration']);
+  assert.equal(metadata.pages.length, 24);
+  assert.deepEqual(metadata.pages.filter(page => page.SectionID === 'web-ui').map(page => page.ID), ['first-steps','state','lifecycle','forms','components']);
   const search = JSON.parse(await readFile(resolve(root, 'apps/studio/next/documentation', metadata.search.Asset)));
   assert.equal(search.version,1);
   assert.deepEqual(search.pages.map(page=>page.ID),metadata.pages.map(page=>page.ID));
@@ -26,7 +25,7 @@ test('maintained chapters produce one exact data cache request and no legacy UI 
     assert.equal(document.title, `${page.Title} · Volang Studio`);
     assert.equal(JSON.parse(document.initial).Data, document.data);
   }
-  const query = await studioDocument(root, new URL('https://example.test/studio/docs?topic=introduction'));
+  const query = await studioDocument(root, new URL('https://example.test/studio/docs/introduction'));
   assert.equal(query.title, 'Introduction · Volang Studio');
   assert.equal(query.data, '');
   const first = await studioDocument(root, new URL('https://example.test/studio/docs'), {includeBody:true});

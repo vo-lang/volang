@@ -15,7 +15,7 @@ var buttonsType = ui.Define("studio.Buttons")
 var fieldsType = ui.Define("studio.Fields")
 
 func Preview(title string, subtitle string, example ui.View, code string) ui.View {
-	return ui.Element("article", ui.Element("div", ui.Element("h2", ui.Text(title)), ui.Element("p", ui.Text(subtitle))).Attr("class", "studio-card-heading"), ui.Element("div", example).Attr("class", "studio-preview"), ui.Element("details", ui.Element("summary", ui.Text("View code")), ui.Element("pre", ui.Element("code", ui.Text(code)))).Attr("class", "studio-code")).Attr("class", "studio-card")
+	return ui.Element("article", ui.Element("div", ui.Element("h2", ui.Text(title)), ui.Element("p", ui.Text(subtitle))).Attr("class", "studio-card-heading"), ui.Element("div", example).Attr("class", "studio-preview"), ui.Element("details", ui.Element("summary", ui.Text("View code")), ui.Widget("studio.code-copy", code, func(ui.Result) {}).Class("studio-code-tools"), ui.Element("pre", ui.Element("code", ui.Text(code))), navigation.Link("/studio/playground/ui", ui.Text("Open complete examples →")).Class("studio-text-link")).Attr("class", "studio-code")).Attr("class", "studio-card")
 }
 
 func ButtonPreview() ui.View {

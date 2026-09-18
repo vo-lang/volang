@@ -135,12 +135,8 @@ built site and release Web runtimes comparable by byte digest, including when
 compiler caches reuse the embedding proc macro's output. Native debug source
 editing continues to read live files through the source API.
 
-Both Web profiles execute their ordered commands through `ci run`. The full
-profile retains all 31 semantic probes and tests the final Studio directory
-through the complete journey, startup, canary and offline lifecycle contracts.
-Image and precache budget results bind their measured artifacts, complete asset
-lists and consistent limits. These compatibility checks use
-`target/ci/artifacts/legacy-studio`; they no longer produce the default site.
+Both Wasm/Web profiles execute their ordered language, runtime, VFS and runner
+commands through `ci run`. UI and Studio acceptance belongs to `ui-web-rewrite`.
 The separate `ui-web-rewrite` task seals `target/ci/artifacts/site` in its own
 execution receipt. Site promotion verifies that producing task's artifact digest;
 no additional task infers success from the presence of a directory.
@@ -183,15 +179,14 @@ uploads include both reports and `desktop-sdk.tar.gz`, whose `sdk/` directory
 preserves native executable permissions. Failures retain the process logs and
 partial reports. `VO_UI_DESKTOP_SDK` selects an SDK for checkout-only drivers;
 packaged tools always use their inventoried SDK. CI owns its SDK output directory
-and archives earlier attempts before rebuilding it. These preview tasks retain
-separate identities from the previous native product's compatibility checks.
+and archives earlier attempts before rebuilding it.
 
-The experimental Web rewrite runs as `ui-web-rewrite` in the independent
+The Web framework runs as `ui-web-rewrite` in the independent
 `ui_web_preview` job. Pull requests select it through source impact; merge and
 main profiles include it. Its declared prerequisites build the JIT-enabled native
 compiler in the release profile, isolated browser compiler, execution-only Wasm VM
-from locked source. The default browser package is built separately for legacy
-compatibility probes. The job installs the locked Playwright versions of Chromium,
+from locked source. The public browser package is also checked through a fresh
+archive and independent consumer. The job installs the locked Playwright versions of Chromium,
 Firefox and WebKit.
 
 `node eng/ui-next/ci.mjs` executes the bounded core gate after those prerequisites
@@ -216,18 +211,15 @@ a fresh staging directory so an earlier local prepack cannot hide missing assets
 The mount boundary also checks queued SSR actions throughout artifact/runtime
 loading, repeated root ownership, failed startup/retry and native form resets.
 The portable-toolchain regression extracts both complete guide applications from
-the delivered toolkit; migration tests queue input and Save before activation.
+the delivered toolkit; form tests queue input and Save before activation.
 
 It then exports the static Studio, relocates it outside the checkout, and checks
-all three engines and both backends, including direct pages, hydration, browser
-compilation, the optional editor and project recovery. Static evidence is bound
-to the exact native distribution that produced its pages. The upgrade check
-keeps the previous Studio worker and an unsaved tab alive across an atomic local
-deployment. All three engines must preserve project files, drafts and unrelated
-caches/registrations, retire the owned cache, follow old URLs and recover from a
-failed VM startup. Its receipt binds the previous-worker fixture and exported
-site; partial upgrade coverage fails aggregation. The core command uses
-`VO_TEST_PROFILE=release` to select the tested native CLI and packaged executable.
+all three engines with the Wasm VM, including direct pages, hydration, browser
+compilation, the optional editor and draft persistence. Static evidence is bound
+to the exact native distribution that produced its pages. Asset-cache retirement
+only removes the named asset cache and unregisters its worker; user storage is
+untouched. The core command uses `VO_TEST_PROFILE=release` to select the tested
+native CLI and packaged executable.
 The broader `node eng/ui-next/cli.mjs check` also runs specialized project and
 server scenarios; those additional drivers are not implied by the core receipt.
 
@@ -420,8 +412,7 @@ compiler, plus a complete directory size limit. The policy is owned by
 `eng/ui-next/studio-site-budgets.mjs` and measures the actual gzip-6/Brotli-4
 siblings. Missing representations fail verification. These are size regression
 guards, separate from the unresolved interaction budgets documented in
-[the framework performance report](../ui/next/performance.md). The previous
-Studio's precache and image budgets remain in its compatibility task.
+[the framework performance report](../ui/next/performance.md).
 
 ### Nightly
 
@@ -482,16 +473,16 @@ attestations, and verifies each archive's signed source commit, workflow commit,
 main ref and hosted runner identity before publishing. Signed bundles and
 verification results are retained even when a later publication step fails.
 
-The native archives also carry the complete experimental Web project toolkit at
+The native archives also carry the complete Web project toolkit at
 `share/volang/ui-next`. Each target packages its own locked Node dependencies and
 matching CLI; the shared build supplies the separate execution-only Wasm runtime.
-Build receipts and archive provenance use schema 8 / `tar+gzip-v5`, recording every
+Build receipts and archive provenance use schema 9 / `tar+gzip-v6`, recording every
 toolkit file's size, digest and normalized executable mode. The copied toolkit
 compiler must match the top-level CLI byte for byte. Keeping the standalone
 toolkit layout makes relocation and verification use the same implementation;
-it currently includes a second copy of that CLI. The compatibility runtime stays
-in `share/volang/ui-web`, and its existing certification remains separate from
-the experimental replacement's status.
+it currently includes a second copy of that CLI. The public browser compiler and
+host modules are carried in `share/volang/ui-web`. Both layouts use the current
+Web implementation and the same certified release evidence.
 
 Every target job extracts its actual archive, resolves the project tools through
 the installed `vo`, verifies the inventory, creates a fresh project and runs its
@@ -576,19 +567,15 @@ Web checks use the locked npm workspace:
 ```sh
 npm --prefix lang/crates/vo-web ci
 npm --prefix lang/crates/vo-web run test:vfs
-npm --prefix lang/crates/vo-web run test:ui
-npm --prefix lang/crates/vo-web run test:ui-browser
+npm --prefix lang/crates/vo-web run test:runtime
+npm --prefix lang/crates/vo-web run test:runner
 ```
 
-Browser scenarios use the exact Playwright version and Chromium revision in
-`eng/browser/package-lock.json`. The compatibility entry point preserves all
-eight original product scenarios and adds Studio startup and account-free
-canary regressions plus a Nightly offline/recovery/resource-cleanup journey,
-with their assertion mapping in
-`eng/browser/coverage.json`. Each attempt retains failure traces, screenshots,
-console/network diagnostics, and HTML/JSON reports under `target/ci/browser`.
-Retries are disabled; `eng/browser/check-diagnostics.mjs` verifies controlled
-failures for every registered scenario. See `eng/browser/README.md` for local setup.
+Browser scenarios use the exact Playwright version in
+`eng/browser/package-lock.json`. UI and Studio drivers under `eng/ui-next` own
+their application builds, servers and browser lifetimes, retaining reports and
+failure artifacts under `target/ui-next`. The generic project probe is documented
+in `eng/browser/README.md`.
 
 Dependency audits are:
 

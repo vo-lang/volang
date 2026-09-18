@@ -44,18 +44,12 @@ export function createPersistentStorage(name: string, factory: IDBFactory = glob
   }
 
   return {
-    /** A synchronous legacy reader is imported only when this key is absent.
-     * The check and import share one transaction; existing values always win. */
-    get(key: string, signal?: AbortSignal, migrate?: () => string | null): Promise<string | null> {
-      return run(migrate ? 'readwrite' : 'readonly', signal, (store, result, fail) => {
+    get(key: string, signal?: AbortSignal): Promise<string | null> {
+      return run('readonly', signal, (store, result, fail) => {
         const request = store.get(key);
         request.onsuccess = () => {
           try {
-            let value: unknown = request.result;
-            if (value === undefined && migrate) {
-              value = migrate();
-              if (value !== null) store.put(value, key);
-            }
+            const value: unknown = request.result;
             if (value === undefined || value === null) result(null);
             else if (typeof value === 'string') result(value);
             else fail(new Error('Invalid persistent storage value.'));

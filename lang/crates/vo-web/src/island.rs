@@ -9,9 +9,6 @@ use wasm_bindgen::prelude::*;
 
 use crate::vm::Vm;
 
-#[cfg(feature = "legacy-ui")]
-mod legacy;
-
 fn outcome_to_string(outcome: SchedulingOutcome) -> String {
     match outcome {
         SchedulingOutcome::Completed => "completed".into(),
@@ -177,7 +174,7 @@ impl VoVm {
         vo_runtime::output::take_output()
     }
 
-    /// Take the latest versioned UI mutation frame emitted by `ui.Mount`.
+    /// Take the latest bounded UI exchange frame emitted by the guest.
     #[wasm_bindgen(js_name = "takeHostOutput")]
     pub fn take_host_output(&mut self) -> Option<js_sys::Uint8Array> {
         self.inner

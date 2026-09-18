@@ -27,7 +27,7 @@ const report={schema:'volang.studio-next-performance.v1',passed:false,measuredAt
     cache:'cold uses a fresh browser context; warm opens a second page in the same context; URLs revalidate normally; process/OS/Wasm caches may remain warm',
     interaction:'synthetic native button/checkbox click to matching DOM and forced layout; excludes paint and trusted-input overhead',
     dialog:'open measures native open state; close waits for the actual exit motion between samples and is not timed',
-    instrumentation:'test-only application-state setter records readiness; Resource Timing records actual transferred/encoded/decoded bytes',
+    instrumentation:'test-only application-state setter records readiness; page Resource Timing plus browser-context request sizes include dedicated Worker traffic',
     limits:['one host and Chromium engine','three loads per backend/cache by default','no network or mobile CPU throttling','no field INP/LCP or product certification']},runs:[]};
 
 async function measure(page,name,count) {
@@ -78,7 +78,10 @@ try {
         }});
       });
       for(const cache of ['cold','warm']) {
-        const page=await context.newPage(),errors=[];page.on('pageerror',error=>errors.push(error.message));
+        const page=await context.newPage(),errors=[],network=[];
+        page.on('pageerror',error=>errors.push(error.message));
+        const finished=request=>network.push(request.sizes().then(sizes=>({url:request.url(),...sizes})));
+        context.on('requestfinished',finished);
         try {
           await page.goto(server.url+'studio/gallery/?backend='+backend);
           await page.waitForFunction(()=>window.__studioNext?.ready || window.__studioNext?.error);
@@ -89,14 +92,16 @@ try {
             return {readyMs:window.studioPerformance.readyAt,paints:performance.getEntriesByType('paint').map(value=>({name:value.name,ms:value.startTime})),
               resources:entries.map(value=>({url:value.name,transferBytes:value.transferSize,encodedBytes:value.encodedBodySize,decodedBytes:value.decodedBodySize}))};
           });
+          load.network=await Promise.all(network);
+          assert(load.network.some(value=>/vo_web_bg.wasm/.test(value.url)), 'runtime traffic was not observed');
           assert(Number.isFinite(load.readyMs));
-          assert(!load.resources.some(value=>/\/compiler\/|editor-library|recovery-library/.test(value.url)),'Gallery eagerly loaded an optional tool');
+          assert(!load.network.some(value=>/\/compiler\/|editor-library/.test(value.url)),'Gallery eagerly loaded an optional tool');
           const run={backend,cache,round,load,scenarios:{}};
           for(const name of ['counter','theme','dialog']) {await measure(page,name,3);run.scenarios[name]=await measure(page,name,samples);}
           assert.equal(await page.evaluate(()=>window.__studioNext.error),null);assert.deepEqual(errors,[]);
           report.runs.push(run);await writeFile(join(output,'report.partial.json'),JSON.stringify(report,null,2)+'\n');
           console.log(`${backend} ${cache} round ${round+1}: ready ${load.readyMs.toFixed(1)} ms; `+Object.entries(run.scenarios).map(([name,values])=>`${name} ${distribution(values).p50.toFixed(2)} ms`).join(', '));
-        } finally {await page.close();}
+        } finally {context.off('requestfinished',finished);await Promise.allSettled(network);await page.close();}
       }
     } finally {await context.close();}
   }
@@ -106,7 +111,7 @@ try {
     report.summary[backend]={loads:Object.fromEntries(['cold','warm'].map(cache=>{
       const selected=runs.filter(value=>value.cache===cache);
       return [cache,{readyMs:distribution(selected.map(value=>value.load.readyMs)),
-        transferBytes:distribution(selected.map(value=>value.load.resources.reduce((sum,item)=>sum+item.transferBytes,0)))}];
+        responseBytes:distribution(selected.map(value=>value.load.network.reduce((sum,item)=>sum+item.responseHeadersSize+item.responseBodySize,0)))}];
     })),scenarios:Object.fromEntries(['counter','theme','dialog'].map(name=>[name,distribution(runs.flatMap(value=>value.scenarios[name]))]))};
   }
   await inventory();assert.deepEqual(await readFile(join(directory,'build-report.json')),buildBytes);

@@ -53,7 +53,7 @@ if (process.platform !== 'win32') {
   const link=output.match(/native-static-libs: ([^\n]+)/)?.[1].trim().split(/\s+/);
   assert(link?.length,'rustc did not report native static link requirements');
   const tree=await run('aot-dependencies','cargo',['tree','--locked','--offline','--manifest-path',resolve(runtime,'Cargo.toml'),'-e','normal']);
-  for(const old of ['vo-ui-runtime ','vo-ui-vm ','vo-ui-integration ','vo-codegen ','cranelift-codegen ']) assert(!tree.includes(old),`desktop AOT includes ${old}`);
+  for(const dependency of ['vo-codegen ','cranelift-codegen ']) assert(!tree.includes(dependency),`desktop AOT includes ${dependency}`);
   for(const [name,source] of [['interaction','ui/next/examples/interaction'],['failure','ui/next/tests/native_failure']]) {
     const object=resolve(directory,`${name}.o`);
     await run(`${name}-aot-object`,compilerPath(),['build',source,'--kind=object','--no-cache','-o',object]);

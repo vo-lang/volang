@@ -18,8 +18,8 @@ use tar::{Builder, Header};
 mod installation;
 pub(crate) mod toolchain;
 
-const BUILD_RECEIPT_SCHEMA: u32 = 8;
-const PROVENANCE_SCHEMA: u32 = 8;
+const BUILD_RECEIPT_SCHEMA: u32 = 9;
+const PROVENANCE_SCHEMA: u32 = 9;
 const MAX_RELEASE_BINARY_SIZE: u64 = 512 * 1024 * 1024;
 const MAX_RELEASE_ARCHIVE_SIZE: u64 = MAX_RELEASE_BINARY_SIZE * 5 + 8 * 1024 * 1024;
 const MAX_RELEASE_EVIDENCE_SIZE: u64 = 1024 * 1024;
@@ -36,7 +36,6 @@ struct ReleaseBuildReceipt {
     configuration: BuildConfiguration,
     binary: BinaryRecord,
     aot_runtime: BinaryRecord,
-    ui_aot_runtime: BinaryRecord,
     ui_web_runtime: Vec<BinaryRecord>,
     ui_web_toolchain: Vec<toolchain::Record>,
     ui_product: UiProductEvidence,
@@ -52,7 +51,6 @@ struct ReleaseProvenance {
     archive: ArchiveRecord,
     binary: BinaryRecord,
     aot_runtime: BinaryRecord,
-    ui_aot_runtime: BinaryRecord,
     ui_web_runtime: Vec<BinaryRecord>,
     ui_web_toolchain: Vec<toolchain::Record>,
     ui_product: UiProductEvidence,
@@ -83,7 +81,7 @@ struct UiProductEvidence {
     status: String,
     declaration_sha256: String,
     gate_count: u32,
-    showcase_count: u32,
+
     ci_schema: String,
     ci_status: String,
     ci_profile: String,
@@ -136,11 +134,9 @@ pub(crate) fn clear_release_build_outputs(
 ) -> Result<()> {
     let binary_name = release_binary_name(release, target);
     let runtime_name = release_aot_runtime_name(target);
-    let ui_runtime_name = release_ui_aot_runtime_name(target);
     for path in [
         release_binary_path(root, target, &binary_name),
         release_binary_path(root, target, runtime_name),
-        release_binary_path(root, target, ui_runtime_name),
         build_receipt_path(root, target),
     ] {
         match fs::symlink_metadata(&path) {
@@ -180,9 +176,6 @@ pub(crate) fn record_release_build(
     let runtime_name = release_aot_runtime_name(target);
     let runtime_path = release_binary_path(root, target, runtime_name);
     let aot_runtime = binary_record(&runtime_path, runtime_name)?;
-    let ui_runtime_name = release_ui_aot_runtime_name(target);
-    let ui_runtime_path = release_binary_path(root, target, ui_runtime_name);
-    let ui_aot_runtime = binary_record(&ui_runtime_path, ui_runtime_name)?;
     let ui_web_runtime = ui_web_runtime_records(root)?;
     let ui_web_toolchain = toolchain::records(root, target, &binary)?;
     let ui_product = ui_product_evidence(root, identity)?;
@@ -193,7 +186,6 @@ pub(crate) fn record_release_build(
         configuration: BuildConfiguration::declared(release),
         binary,
         aot_runtime,
-        ui_aot_runtime,
         ui_web_runtime,
         ui_web_toolchain,
         ui_product,
@@ -240,12 +232,6 @@ pub(crate) fn package_release_binary(
     if receipt.aot_runtime != aot_runtime {
         bail!("AOT runtime changed after its verified build receipt was written");
     }
-    let ui_runtime_name = release_ui_aot_runtime_name(target);
-    let ui_runtime_path = release_binary_path(root, target, ui_runtime_name);
-    let ui_aot_runtime = binary_record(&ui_runtime_path, ui_runtime_name)?;
-    if receipt.ui_aot_runtime != ui_aot_runtime {
-        bail!("UI AOT runtime changed after its verified build receipt was written");
-    }
     let ui_web_runtime = ui_web_runtime_records(root)?;
     let ui_web_toolchain = toolchain::records(root, target, &binary)?;
     if receipt.ui_web_runtime != ui_web_runtime {
@@ -273,10 +259,6 @@ pub(crate) fn package_release_binary(
             path: &runtime_path,
             name: runtime_name,
         },
-        ArchiveBinaryInput {
-            path: &ui_runtime_path,
-            name: ui_runtime_name,
-        },
         UiWebRuntimeInput {
             root,
             records: &ui_web_runtime,
@@ -291,7 +273,6 @@ pub(crate) fn package_release_binary(
         &tarball_path,
         &binary,
         &aot_runtime,
-        &ui_aot_runtime,
         &ui_web_runtime,
         &ui_web_toolchain,
         identity.source_date_epoch,
@@ -301,7 +282,7 @@ pub(crate) fn package_release_binary(
         path: tarball_name.clone(),
         sha256: sha256_file(&tarball_path)?,
         size: regular_file_size(&tarball_path)?,
-        format: "tar+gzip-v5".to_string(),
+        format: "tar+gzip-v6".to_string(),
     };
     let provenance = ReleaseProvenance {
         schema: PROVENANCE_SCHEMA,
@@ -311,7 +292,6 @@ pub(crate) fn package_release_binary(
         archive,
         binary,
         aot_runtime,
-        ui_aot_runtime,
         ui_web_runtime,
         ui_web_toolchain,
         ui_product,
@@ -379,7 +359,7 @@ fn validate_release_artifact(
             provenance.archive.path
         );
     }
-    if provenance.archive.format != "tar+gzip-v5" {
+    if provenance.archive.format != "tar+gzip-v6" {
         bail!(
             "unsupported release archive format {}",
             provenance.archive.format
@@ -422,14 +402,6 @@ fn validate_release_artifact(
         );
     }
     validate_binary_record(&provenance.aot_runtime)?;
-    let ui_runtime_name = release_ui_aot_runtime_name(target);
-    if provenance.ui_aot_runtime.path != ui_runtime_name {
-        bail!(
-            "release provenance UI AOT runtime path mismatch: expected {ui_runtime_name}, got {}",
-            provenance.ui_aot_runtime.path
-        );
-    }
-    validate_binary_record(&provenance.ui_aot_runtime)?;
     validate_ui_web_runtime_records(&provenance.ui_web_runtime)?;
     toolchain::validate(&provenance.ui_web_toolchain, &provenance.binary)?;
     let expected_ui_product = ui_product_evidence(root, identity)?;
@@ -441,7 +413,6 @@ fn validate_release_artifact(
         &tarball_path,
         &provenance.binary,
         &provenance.aot_runtime,
-        &provenance.ui_aot_runtime,
         &provenance.ui_web_runtime,
         &provenance.ui_web_toolchain,
         identity.source_date_epoch,
@@ -452,11 +423,10 @@ fn ui_product_evidence(root: &Path, identity: &ReleaseIdentity) -> Result<UiProd
     #[cfg(test)]
     if !root.join("ui/certification.toml").exists() {
         return Ok(UiProductEvidence {
-            schema: "volang.ui.product-evidence.v2".to_string(),
+            schema: "volang.ui.product-evidence.v3".to_string(),
             status: "product-certified".to_string(),
             declaration_sha256: "0".repeat(64),
-            gate_count: 12,
-            showcase_count: 5,
+            gate_count: 5,
             ci_schema: "volang.ci.certification.v1".to_string(),
             ci_status: "certified".to_string(),
             ci_profile: identity.purpose.certification_profile().to_string(),
@@ -464,7 +434,7 @@ fn ui_product_evidence(root: &Path, identity: &ReleaseIdentity) -> Result<UiProd
             ci_bundle_sha256: "0".repeat(64),
         });
     }
-    let (declaration_sha256, gate_count, showcase_count) = ui_declaration_evidence(root)?;
+    let (declaration_sha256, gate_count) = ui_declaration_evidence(root)?;
     let configured = std::env::var("VO_CI_CERTIFICATION_PATH")
         .unwrap_or_else(|_| "target/ci/release-input/certification.json".to_string());
     let relative = Path::new(&configured);
@@ -491,11 +461,10 @@ fn ui_product_evidence(root: &Path, identity: &ReleaseIdentity) -> Result<UiProd
         bail!("UI certification commit differs from the release identity");
     }
     let evidence = UiProductEvidence {
-        schema: "volang.ui.product-evidence.v2".to_string(),
+        schema: "volang.ui.product-evidence.v3".to_string(),
         status: "product-certified".to_string(),
         declaration_sha256,
         gate_count,
-        showcase_count,
         ci_schema: "volang.ci.certification.v1".to_string(),
         ci_status: certification.status,
         ci_profile: certification.profile,
@@ -506,34 +475,16 @@ fn ui_product_evidence(root: &Path, identity: &ReleaseIdentity) -> Result<UiProd
     Ok(evidence)
 }
 
-fn ui_declaration_evidence(root: &Path) -> Result<(String, u32, u32)> {
-    const SOURCES: [&str; 17] = [
-        "ui/certification.toml",
-        "ui/product-certification.toml",
-        "ui/product-roadmap.toml",
-        "ui/capabilities.toml",
-        "ui/delivery.toml",
-        "ui/quality-matrix.toml",
-        "ui/module-profiles.toml",
-        "ui/kit/catalog.toml",
-        "ui/docs/getting-started.md",
-        "ui/docs/authoring-guide.md",
-        "ui/docs/testing-troubleshooting.md",
-        "ui/docs/accessibility-localization.md",
-        "ui/docs/security.md",
-        "ui/docs/compatibility-migration.md",
-        "ui/docs/contributing-support.md",
-        "ui/docs/release-notes-1.0.md",
-        "ui/docs/release-policy.md",
-    ];
+fn ui_declaration_evidence(root: &Path) -> Result<(String, u32)> {
+    let sources = crate::ui_certification::evidence_sources(root)?;
     let status = crate::ui_certification::certification_status(root)?;
     if status != "declaration-valid" {
         bail!("UI declaration validation did not succeed");
     }
     let mut hasher = Sha256::new();
     hasher.update(b"volang-ui-declaration-evidence-v1\0");
-    for relative in SOURCES {
-        let path = root.join(relative);
+    for relative in sources {
+        let path = root.join(&relative);
         let metadata = fs::symlink_metadata(&path)
             .with_context(|| format!("could not inspect UI product evidence {}", path.display()))?;
         if !metadata.file_type().is_file() || metadata.len() > MAX_RELEASE_EVIDENCE_SIZE {
@@ -549,18 +500,17 @@ fn ui_declaration_evidence(root: &Path) -> Result<(String, u32, u32)> {
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(&bytes);
     }
-    Ok((format!("{:x}", hasher.finalize()), 12, 5))
+    Ok((format!("{:x}", hasher.finalize()), 5))
 }
 
 fn validate_ui_product_evidence(
     evidence: &UiProductEvidence,
     identity: &ReleaseIdentity,
 ) -> Result<()> {
-    if evidence.schema != "volang.ui.product-evidence.v2"
+    if evidence.schema != "volang.ui.product-evidence.v3"
         || evidence.status != "product-certified"
         || !valid_sha256(&evidence.declaration_sha256)
-        || evidence.gate_count != 12
-        || evidence.showcase_count != 5
+        || evidence.gate_count != 5
         || evidence.ci_schema != "volang.ci.certification.v1"
         || evidence.ci_status != "certified"
         || evidence.ci_profile != identity.purpose.certification_profile()
@@ -583,7 +533,6 @@ fn create_deterministic_tarball(
     output_path: &Path,
     binary: ArchiveBinaryInput<'_>,
     runtime: ArchiveBinaryInput<'_>,
-    ui_runtime: ArchiveBinaryInput<'_>,
     ui_web_runtime: UiWebRuntimeInput<'_>,
     ui_web_toolchain: toolchain::Input<'_>,
     source_date_epoch: u64,
@@ -593,7 +542,6 @@ fn create_deterministic_tarball(
     }
     validate_release_binary_size(regular_file_size(binary.path)?)?;
     validate_release_binary_size(regular_file_size(runtime.path)?)?;
-    validate_release_binary_size(regular_file_size(ui_runtime.path)?)?;
     validate_ui_web_runtime_records(ui_web_runtime.records)?;
     toolchain::validate(
         ui_web_toolchain.records,
@@ -621,13 +569,6 @@ fn create_deterministic_tarball(
         builder
             .append(&header, &mut runtime_file)
             .context("could not append AOT runtime to deterministic archive")?;
-        let ui_runtime_size = regular_file_size(ui_runtime.path)?;
-        let header = deterministic_tar_header(ui_runtime.name, ui_runtime_size, source_date_epoch)?;
-        let mut ui_runtime_file = File::open(ui_runtime.path)
-            .with_context(|| format!("could not read {}", ui_runtime.path.display()))?;
-        builder
-            .append(&header, &mut ui_runtime_file)
-            .context("could not append UI AOT runtime to deterministic archive")?;
         for asset in ui_web_runtime.records {
             let source = ui_web_runtime_source_path(ui_web_runtime.root, asset)?;
             let header = deterministic_tar_header_with_mode(
@@ -667,7 +608,6 @@ fn verify_deterministic_tarball(
     archive_path: &Path,
     binary: &BinaryRecord,
     aot_runtime: &BinaryRecord,
-    ui_aot_runtime: &BinaryRecord,
     ui_web_runtime: &[BinaryRecord],
     ui_web_toolchain: &[toolchain::Record],
     source_date_epoch: u64,
@@ -681,7 +621,6 @@ fn verify_deterministic_tarball(
     }
     validate_binary_record(binary)?;
     validate_binary_record(aot_runtime)?;
-    validate_binary_record(ui_aot_runtime)?;
     validate_ui_web_runtime_records(ui_web_runtime)?;
     toolchain::validate(ui_web_toolchain, binary)?;
 
@@ -709,12 +648,6 @@ fn verify_deterministic_tarball(
     let mut decoder = GzDecoder::new(BufReader::new(file));
     verify_tar_entry(&mut decoder, binary, source_date_epoch, "release binary")?;
     verify_tar_entry(&mut decoder, aot_runtime, source_date_epoch, "AOT runtime")?;
-    verify_tar_entry(
-        &mut decoder,
-        ui_aot_runtime,
-        source_date_epoch,
-        "UI AOT runtime",
-    )?;
     for asset in ui_web_runtime {
         verify_tar_entry_with_mode(
             &mut decoder,
@@ -953,8 +886,8 @@ fn validate_ui_web_runtime_records(records: &[BinaryRecord]) -> Result<()> {
     }
     for required in [
         "dist/index.js",
-        "dist/ui_dom.js",
-        "dist/ui_system.js",
+        "dist/ui_next/index.js",
+        "dist/ui_next/host.js",
         "pkg/vo_web.js",
         "pkg/vo_web_bg.wasm",
     ] {
@@ -1029,14 +962,6 @@ fn release_aot_runtime_name(target: &str) -> &'static str {
         "vo_aot_runtime.lib"
     } else {
         "libvo_aot_runtime.a"
-    }
-}
-
-fn release_ui_aot_runtime_name(target: &str) -> &'static str {
-    if target.contains("windows") {
-        "vo_ui_aot_runtime_native.lib"
-    } else {
-        "libvo_ui_aot_runtime_native.a"
     }
 }
 
@@ -1209,9 +1134,6 @@ mod tests {
         let runtime_path = root.join("libvo_aot_runtime.a");
         fs::write(&runtime_path, b"deterministic AOT runtime").unwrap();
         let runtime = binary_record(&runtime_path, "libvo_aot_runtime.a").unwrap();
-        let ui_runtime_path = root.join("libvo_ui_aot_runtime_native.a");
-        fs::write(&ui_runtime_path, b"deterministic UI AOT runtime").unwrap();
-        let ui_runtime = binary_record(&ui_runtime_path, "libvo_ui_aot_runtime_native.a").unwrap();
         let ui_web_runtime = write_ui_web_runtime_fixture(&root);
         let kit_directory = root.join("kit");
         let ui_web_toolchain = toolchain::fixture(&kit_directory, &binary, &binary_path);
@@ -1226,10 +1148,6 @@ mod tests {
             ArchiveBinaryInput {
                 path: &runtime_path,
                 name: "libvo_aot_runtime.a",
-            },
-            ArchiveBinaryInput {
-                path: &ui_runtime_path,
-                name: "libvo_ui_aot_runtime_native.a",
             },
             UiWebRuntimeInput {
                 root: &root,
@@ -1252,10 +1170,6 @@ mod tests {
                 path: &runtime_path,
                 name: "libvo_aot_runtime.a",
             },
-            ArchiveBinaryInput {
-                path: &ui_runtime_path,
-                name: "libvo_ui_aot_runtime_native.a",
-            },
             UiWebRuntimeInput {
                 root: &root,
                 records: &ui_web_runtime,
@@ -1271,7 +1185,6 @@ mod tests {
             &first,
             &binary,
             &runtime,
-            &ui_runtime,
             &ui_web_runtime,
             &ui_web_toolchain,
             1_700_000_000,
@@ -1291,9 +1204,6 @@ mod tests {
         let runtime_path = root.join("libvo_aot_runtime.a");
         fs::write(&runtime_path, b"strict AOT runtime").unwrap();
         let runtime = binary_record(&runtime_path, "libvo_aot_runtime.a").unwrap();
-        let ui_runtime_path = root.join("libvo_ui_aot_runtime_native.a");
-        fs::write(&ui_runtime_path, b"strict UI AOT runtime").unwrap();
-        let ui_runtime = binary_record(&ui_runtime_path, "libvo_ui_aot_runtime_native.a").unwrap();
         let ui_web_runtime = write_ui_web_runtime_fixture(&root);
         let kit_directory = root.join("kit");
         let ui_web_toolchain = toolchain::fixture(&kit_directory, &binary, &binary_path);
@@ -1308,10 +1218,6 @@ mod tests {
             ArchiveBinaryInput {
                 path: &runtime_path,
                 name: "libvo_aot_runtime.a",
-            },
-            ArchiveBinaryInput {
-                path: &ui_runtime_path,
-                name: "libvo_ui_aot_runtime_native.a",
             },
             UiWebRuntimeInput {
                 root: &root,
@@ -1331,7 +1237,6 @@ mod tests {
             &bad_header,
             &binary,
             &runtime,
-            &ui_runtime,
             &ui_web_runtime,
             &ui_web_toolchain,
             1_700_000_000,
@@ -1348,10 +1253,6 @@ mod tests {
             ArchiveBinaryInput {
                 path: &runtime_path,
                 name: "libvo_aot_runtime.a",
-            },
-            ArchiveBinaryInput {
-                path: &ui_runtime_path,
-                name: "libvo_ui_aot_runtime_native.a",
             },
             UiWebRuntimeInput {
                 root: &root,
@@ -1374,7 +1275,6 @@ mod tests {
             &trailing,
             &binary,
             &runtime,
-            &ui_runtime,
             &ui_web_runtime,
             &ui_web_toolchain,
             1_700_000_000,
@@ -1450,11 +1350,6 @@ mod tests {
         fs::write(
             binary_dir.join("libvo_aot_runtime.a"),
             "fake static AOT runtime",
-        )
-        .unwrap();
-        fs::write(
-            binary_dir.join("libvo_ui_aot_runtime_native.a"),
-            "fake static UI AOT runtime",
         )
         .unwrap();
         write_ui_web_runtime_fixture(&root);
@@ -1555,11 +1450,10 @@ mod tests {
     #[test]
     fn repository_ui_declaration_evidence_is_bounded_and_valid() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let (digest, gate_count, showcase_count) = ui_declaration_evidence(&root).unwrap();
+        let (digest, gate_count) = ui_declaration_evidence(&root).unwrap();
         assert!(valid_sha256(&digest));
         assert_ne!(digest, "0".repeat(64));
-        assert_eq!(gate_count, 12);
-        assert_eq!(showcase_count, 5);
+        assert_eq!(gate_count, 5);
     }
 
     #[test]
@@ -1572,17 +1466,14 @@ mod tests {
         let binary = release_dir.join("vo");
         let receipt = release_dir.join("vo.release-build.json");
         let runtime = release_dir.join("libvo_aot_runtime.a");
-        let ui_runtime = release_dir.join("libvo_ui_aot_runtime_native.a");
         fs::write(&binary, "stale binary").unwrap();
         fs::write(&runtime, "stale runtime").unwrap();
-        fs::write(&ui_runtime, "stale UI runtime").unwrap();
         fs::write(&receipt, "stale receipt").unwrap();
 
         clear_release_build_outputs(&root, &release, target).unwrap();
 
         assert!(!binary.exists());
         assert!(!runtime.exists());
-        assert!(!ui_runtime.exists());
         assert!(!receipt.exists());
         fs::remove_dir_all(root).unwrap();
     }
@@ -1628,8 +1519,8 @@ mod tests {
         let runtime = root.join("lang/crates/vo-web");
         for relative in [
             "dist/index.js",
-            "dist/ui_dom.js",
-            "dist/ui_system.js",
+            "dist/ui_next/index.js",
+            "dist/ui_next/host.js",
             "pkg/vo_web.js",
             "pkg/vo_web_bg.wasm",
             "pkg/snippets/runtime/inline0.js",

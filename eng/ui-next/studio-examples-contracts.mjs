@@ -128,9 +128,9 @@ export async function checkStudioExamplesBrowser(browser, url, outputDirectory =
     const failedRead = await browser.newPage();
     try {
       await failedRead.addInitScript(() => {
-        const read = Storage.prototype.getItem, write = IDBObjectStore.prototype.put;
+        const read = IDBObjectStore.prototype.get, write = IDBObjectStore.prototype.put;
         window.draftWrites = [];
-        Storage.prototype.getItem = function(key) {
+        IDBObjectStore.prototype.get = function(key) {
           if (key === 'volang.studio.next.draft.v1') throw new Error('Draft storage temporarily unavailable.');
           return read.call(this, key);
         };

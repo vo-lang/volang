@@ -4,7 +4,7 @@ version = 2
 crate = "vo"
 binary = "vo"
 artifact_prefix = "vo"
-build_args = ["--release", "--locked", "-p", "vo", "--no-default-features", "--features", "jit,desktop-ui"]
+build_args = ["--release", "--locked", "-p", "vo", "--no-default-features", "--features", "jit"]
 release_opt_level = "3"
 release_lto = "thin"
 
@@ -12,7 +12,6 @@ release_lto = "thin"
 registry = "crates-io"
 internal_standalone = [
   "fuzz/app-protocol",
-  "fuzz/ui-artifact",
   "fuzz/voplay-protocol",
 ]
 packages = [

@@ -12,10 +12,6 @@ mod next;
 
 const CATALOG_PATH: &str = "lang/docs/catalog.toml";
 const GENERATOR_PATH: &str = "cmd/vo-dev/src/generate_docs.rs";
-const STUDIO_WEB_MANIFEST: &str = "apps/studio/ui.web.toml";
-const OUTPUT_DIRECTORY: &str = "apps/studio/documentation";
-const OUTPUT_PATH: &str = "apps/studio/documentation/catalog.vo";
-const PROVENANCE_PATH: &str = "apps/studio/documentation/provenance.json";
 const MAX_PAGE_BYTES: usize = 1024 * 1024;
 const MAX_TOTAL_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -53,27 +49,11 @@ struct LoadedPage<'a> {
 }
 
 struct GeneratedDocs {
-    catalog_vo: Vec<u8>,
-    provenance: Vec<u8>,
     next: BTreeMap<String, Vec<u8>>,
 }
 
 pub(crate) fn generate_studio_docs(root: &Path, write: bool) -> Result<()> {
     let generated = materialize(root)?;
-    if write {
-        let directory = root.join(OUTPUT_DIRECTORY);
-        fs::create_dir_all(&directory)
-            .with_context(|| format!("create {}", directory.display()))?;
-        reject_unexpected_outputs(&directory)?;
-        fs::write(root.join(OUTPUT_PATH), &generated.catalog_vo)
-            .with_context(|| format!("write {OUTPUT_PATH}"))?;
-        fs::write(root.join(PROVENANCE_PATH), &generated.provenance)
-            .with_context(|| format!("write {PROVENANCE_PATH}"))?;
-    } else {
-        compare(root, OUTPUT_PATH, &generated.catalog_vo)?;
-        compare(root, PROVENANCE_PATH, &generated.provenance)?;
-        reject_unexpected_outputs(&root.join(OUTPUT_DIRECTORY))?;
-    }
     next::synchronize(root, &generated.next, write)?;
     let mode = if write { "--write" } else { "--check" };
     println!("vo-dev generate studio-docs {mode}: ok");
@@ -82,9 +62,6 @@ pub(crate) fn generate_studio_docs(root: &Path, write: bool) -> Result<()> {
 
 pub(crate) fn check_studio_docs(root: &Path) -> Result<()> {
     let generated = materialize(root)?;
-    compare(root, OUTPUT_PATH, &generated.catalog_vo)?;
-    compare(root, PROVENANCE_PATH, &generated.provenance)?;
-    reject_unexpected_outputs(&root.join(OUTPUT_DIRECTORY))?;
     next::synchronize(root, &generated.next, false)
 }
 
@@ -131,8 +108,6 @@ fn materialize(root: &Path) -> Result<GeneratedDocs> {
             });
         }
     }
-    validate_studio_routes(root, &catalog)?;
-    inputs.push(STUDIO_WEB_MANIFEST.to_string());
     inputs.push(GENERATOR_PATH.to_string());
     inputs.extend(
         [
@@ -144,55 +119,11 @@ fn materialize(root: &Path) -> Result<GeneratedDocs> {
         .map(str::to_owned),
     );
 
-    let catalog_vo = vo_syntax::format_source(&render_vo(&catalog, &loaded))
-        .map_err(anyhow::Error::msg)?
-        .into_bytes();
-    let provenance = render_provenance(
-        root,
-        &inputs,
-        &BTreeMap::from([("catalog.vo".to_string(), catalog_vo.clone())]),
-        "studio-documentation.generated",
-        OUTPUT_DIRECTORY,
-    )?
-    .into_bytes();
     let mut next = next::materialize(&catalog, &loaded)?;
     let next_provenance =
         render_provenance(root, &inputs, &next, next::ARTIFACT, next::DIRECTORY)?.into_bytes();
     next.insert("provenance.json".into(), next_provenance);
-    Ok(GeneratedDocs {
-        catalog_vo,
-        provenance,
-        next,
-    })
-}
-
-fn validate_studio_routes(root: &Path, catalog: &Catalog) -> Result<()> {
-    let text = fs::read_to_string(root.join(STUDIO_WEB_MANIFEST))
-        .with_context(|| format!("read Studio Web manifest {STUDIO_WEB_MANIFEST}"))?;
-    let manifest: toml::Value = toml::from_str(&text)
-        .with_context(|| format!("parse Studio Web manifest {STUDIO_WEB_MANIFEST}"))?;
-    let routes = manifest
-        .get("routes")
-        .and_then(toml::Value::as_array)
-        .context("apps/studio/ui.web.toml routes must be an array")?;
-    let found = routes
-        .iter()
-        .filter_map(toml::Value::as_str)
-        .filter(|route| route.starts_with("/docs/"))
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
-    let expected = catalog
-        .section
-        .iter()
-        .flat_map(|section| section.page.iter())
-        .map(|page| format!("/docs/{}", page.id))
-        .collect::<BTreeSet<_>>();
-    if found != expected {
-        let missing = expected.difference(&found).cloned().collect::<Vec<_>>();
-        let stale = found.difference(&expected).cloned().collect::<Vec<_>>();
-        bail!("Studio documentation routes are stale; missing={missing:?}; stale={stale:?}");
-    }
-    Ok(())
+    Ok(GeneratedDocs { next })
 }
 
 fn validate_catalog(catalog: &Catalog) -> Result<()> {
@@ -240,12 +171,9 @@ fn validate_catalog(catalog: &Catalog) -> Result<()> {
             if !page.file.ends_with(".md") {
                 bail!("documentation page {} must reference Markdown", page.id);
             }
-            if !page.file.starts_with("lang/docs/")
-                && !page.file.starts_with("ui/docs/")
-                && !page.file.starts_with("ui/next/guides/")
-            {
+            if !page.file.starts_with("lang/docs/") && !page.file.starts_with("ui/next/") {
                 bail!(
-                    "documentation page {} must live under lang/docs, ui/docs or ui/next/guides",
+                    "documentation page {} must live under lang/docs or ui/next",
                     page.id
                 );
             }
@@ -293,58 +221,6 @@ fn validate_markdown(page: &Page, markdown: &str) -> Result<()> {
     Ok(())
 }
 
-fn render_vo(catalog: &Catalog, pages: &[LoadedPage<'_>]) -> String {
-    let mut output = String::from(
-        "// Code generated from lang/docs/catalog.toml by vo-dev. DO NOT EDIT.\n\
-         // Every Markdown byte remains owned by its SourcePath.\n\
-         package documentation\n\n\
-         import \"github.com/vo-lang/studio/domain\"\n\n",
-    );
-    output.push_str(&format!(
-        "func Version() string {{ return {} }}\n\n",
-        quote(&catalog.version)
-    ));
-    output.push_str(&format!(
-        "func PageCount() int {{ return {} }}\n\n",
-        pages.len()
-    ));
-    output.push_str("func Sections() []domain.DocSection {\n\treturn []domain.DocSection{\n");
-    for section in &catalog.section {
-        output.push_str(&format!(
-            "\t\t{{ID: {}, Title: {}}},\n",
-            quote(&section.id),
-            quote(&section.title)
-        ));
-    }
-    output.push_str("\t}\n}\n\n");
-    output.push_str("func Pages() []domain.DocPage {\n\treturn []domain.DocPage{\n");
-    for loaded in pages {
-        output.push_str("\t\t{\n");
-        output.push_str(&format!("\t\t\tID: {},\n", quote(&loaded.page.id)));
-        output.push_str(&format!("\t\t\tTitle: {},\n", quote(&loaded.page.title)));
-        output.push_str(&format!(
-            "\t\t\tSectionID: {},\n",
-            quote(&loaded.section.id)
-        ));
-        output.push_str(&format!(
-            "\t\t\tSection: {},\n",
-            quote(&loaded.section.title)
-        ));
-        output.push_str(&format!(
-            "\t\t\tSummary: {},\n",
-            quote(&loaded.page.summary)
-        ));
-        output.push_str(&format!(
-            "\t\t\tSourcePath: {},\n",
-            quote(&loaded.page.file)
-        ));
-        output.push_str(&format!("\t\t\tMarkdown: {},\n", quote(&loaded.markdown)));
-        output.push_str("\t\t},\n");
-    }
-    output.push_str("\t}\n}\n");
-    output
-}
-
 fn render_provenance(
     root: &Path,
     inputs: &[String],
@@ -390,28 +266,6 @@ fn compare(root: &Path, relative: &str, expected: &[u8]) -> Result<()> {
         bail!(
             "generated Studio documentation is stale: {relative}; run `cargo run -q -p vo-dev --locked -- generate studio-docs --write`"
         );
-    }
-    Ok(())
-}
-
-fn reject_unexpected_outputs(directory: &Path) -> Result<()> {
-    if !directory.is_dir() {
-        bail!(
-            "generated Studio documentation directory is missing: {}",
-            directory.display()
-        );
-    }
-    let allowed = BTreeSet::from(["catalog.vo", "provenance.json"]);
-    for entry in fs::read_dir(directory).with_context(|| format!("read {}", directory.display()))? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !entry.file_type()?.is_file() || !allowed.contains(name.as_ref()) {
-            bail!(
-                "unexpected generated Studio documentation output: {}",
-                entry.path().display()
-            );
-        }
     }
     Ok(())
 }

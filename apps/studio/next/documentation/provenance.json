@@ -36,18 +36,11 @@
     "lang/docs/spec/dynamic.md",
     "lang/docs/spec/native-ffi.md",
     "lang/docs/spec/runtime-memory.md",
-    "ui/docs/getting-started.md",
-    "ui/docs/authoring-guide.md",
-    "ui/docs/component-model-v2.md",
-    "ui/docs/testing-troubleshooting.md",
-    "ui/docs/web-desktop-products.md",
-    "ui/docs/accessibility-localization.md",
-    "ui/docs/security.md",
     "ui/next/guides/first-steps.md",
     "ui/next/guides/state.md",
     "ui/next/guides/lifecycle.md",
-    "ui/next/guides/migration.md",
-    "apps/studio/ui.web.toml",
+    "ui/next/guides/forms.md",
+    "ui/next/kit/README.md",
     "cmd/vo-dev/src/generate_docs.rs",
     "cmd/vo-dev/src/generate_docs/document.rs",
     "cmd/vo-dev/src/generate_docs/next.rs",
@@ -56,14 +49,14 @@
   ],
   "outputs": [
     {
-      "digest": "sha256:6cf6a0973c8e44fb6b6b52373782e8a3e1cacf07f990eba0a4c6c346ac68ed3a",
+      "digest": "sha256:c35aab280da8f9bee275c0799cc0f75583b56bcaf6f542f71d22993d343f5c4c",
       "path": "catalog.vo",
-      "size": 10190
+      "size": 10528
     },
     {
-      "digest": "sha256:f6c35671216b1594b05ac665629779f1fcd5c5233796a096b00b9f805351f6dd",
+      "digest": "sha256:50bc99bd17092eaf9a52b1639a4061d4b708d3b8849484c9a1f6c31c9b261ec6",
       "path": "index.json",
-      "size": 9127
+      "size": 9440
     },
     {
       "digest": "sha256:6137a9a32d09c787ba94034eccf9d145d1dfdebcea0af00b883ca45f92cccffd",
@@ -71,9 +64,14 @@
       "size": 44141
     },
     {
-      "digest": "sha256:9490ee6e58ee13da01489fdbb3d243727b0120b3e255a21b549cb0df75c265ab",
+      "digest": "sha256:a693b4dfbe2d768d44e75de670d2107b853ba78523b47b3936f191293b20c107",
       "path": "page-cli.json",
-      "size": 10419
+      "size": 9733
+    },
+    {
+      "digest": "sha256:dc4f854920fad1df4dc7b061206a6582f37d99b5a2ed404c920fe82230415a4f",
+      "path": "page-components.json",
+      "size": 48713
     },
     {
       "digest": "sha256:7ded74d3fe7e5dfa42e0c23e28d67364d584f4469c61dc9097b42d13f0c0790a",
@@ -106,9 +104,14 @@
       "size": 7722
     },
     {
-      "digest": "sha256:b9bff0fa320bc1d9ad5d0b50f347c37385ed6c828362e8d2165e4c62fa417de6",
+      "digest": "sha256:0ce915a6b9b679ab4e3caab98cc7f7bcd5b2ca36b37cd0714416e62faddd2e25",
       "path": "page-first-steps.json",
-      "size": 10169
+      "size": 9889
+    },
+    {
+      "digest": "sha256:14beed6b957e34fd67dba8413781243135289e27b8e2b9972b26d2d48274b6ec",
+      "path": "page-forms.json",
+      "size": 4533
     },
     {
       "digest": "sha256:d8766a40621257d1f84f7cf2d5cc9ae0dfa93769b13de4d4f8e8d538f3abe757",
@@ -116,9 +119,9 @@
       "size": 5822
     },
     {
-      "digest": "sha256:311f2efdc4fa45fa955378e8da44ce2b99adfe9dea9fe0df83eef86aef399fef",
+      "digest": "sha256:8d7ec5c53e26548f2eb8162efc892023b9b16bfc63bb060a074accf82af1643b",
       "path": "page-installation.json",
-      "size": 5097
+      "size": 6239
     },
     {
       "digest": "sha256:8d71035ead391499afa1db54d8ba3ab76af5443b7ad65afed9da3f986c978e51",
@@ -139,11 +142,6 @@
       "digest": "sha256:d1c2dcb1d3738055ce73b87b5073aa35acb1ef64574c888d68bdb07e4e562d09",
       "path": "page-lifecycle.json",
       "size": 6702
-    },
-    {
-      "digest": "sha256:f54a82d0ff67df2a3c7de48d8b4d4cbbf049391b85249872f1b938260f116f24",
-      "path": "page-migration.json",
-      "size": 23267
     },
     {
       "digest": "sha256:d2119b162a3b3568bb5ef542c8d6b6f4f8665e10dde57ccd87c0260e7a0cc554",
@@ -181,29 +179,28 @@
       "size": 14955
     },
     {
-      "digest": "sha256:2d7d5939e35c8036bde06019cc8eb44e991c03eb6980bae7ffaf9d90ec5e7885",
+      "digest": "sha256:3d42ee5cc2fc24f967621841725b6553ef0a8e1f7911738d0ae9ca540453bb22",
       "path": "search.json",
-      "size": 269796
+      "size": 294771
     }
   ],
   "path": "apps/studio/next/documentation",
   "schemaVersion": 2,
   "sourceDigests": {
-    "Cargo.lock": "sha256:2029097585c70e92c2927ec9f8428b5a2450adf92138de8505b411a70b41071e",
-    "apps/studio/ui.web.toml": "sha256:f2cb08609acd470422a3c8210659e645917fdfafede72fe261f13cbc33248b58",
+    "Cargo.lock": "sha256:99d0f28b80a457a9c4e64d043a99dad6cf7460b42ae379afacb0527b9be6ce06",
     "cmd/vo-dev/Cargo.toml": "sha256:310b34e71588781869b7db48a787cf16d1495f75a7ec95515cf26ca7a4a26565",
-    "cmd/vo-dev/src/generate_docs.rs": "sha256:041007db0a1bac8f10a8286cc014997c4a298380da32250d9446241a4f43d97c",
+    "cmd/vo-dev/src/generate_docs.rs": "sha256:ff2be0bc4d781f835684cec39d85b6afc62e116862c43c24120d789c5cc06638",
     "cmd/vo-dev/src/generate_docs/document.rs": "sha256:e8c0c537cf0670b71eba8c30e75f98014a35678eabb7016c5e89f16f0e5078fd",
-    "cmd/vo-dev/src/generate_docs/next.rs": "sha256:c1d51a1da9e2f873d36a8853bb84c60248bd812389f80b0f3679693b5f7b4eba",
-    "lang/docs/catalog.toml": "sha256:ccd710b0c3e62d675a6510d0038e3643f4c291edd4a0f1c8e8e57eb8cf9c69d7",
-    "lang/docs/guides/cli.md": "sha256:95c1f803d209d354eafccb4aba870273c00f69874b0be520d74d1d3349f99ab7",
+    "cmd/vo-dev/src/generate_docs/next.rs": "sha256:64d94b3f310dfd65f129080191bf4a6c0fa8e9a3fb6f4f8dde96c6976d3f1bb0",
+    "lang/docs/catalog.toml": "sha256:e1d08571039aaf79702cfbd8f8a1760a2fe511274fb62cb1e7027f2881f41e5e",
+    "lang/docs/guides/cli.md": "sha256:f5dad2d0be598fa876e83b86f29e41781dabe0b3630f61dbfc4f10d3356c12c5",
     "lang/docs/guides/concurrency.md": "sha256:bc4738dd9353df968930d2d3ae7f43e95ffb54a9909efef49d80c63693568f7a",
     "lang/docs/guides/dynamic-access.md": "sha256:975ff8178f034411df5bae0c045adb5ad4685c8c08de440c7553db89d3502530",
     "lang/docs/guides/embedding-rust.md": "sha256:4fcc19a0c3cfcb83b2e69bc3636206dde182809f97854e815943a6e801e6f7a0",
     "lang/docs/guides/error-handling.md": "sha256:d7e1337bf2031515042428ef274d75bda645a81586a014c215b6687d8b7915a5",
     "lang/docs/guides/execution-backends.md": "sha256:908437e1fec50bd502cbb463e43eca60572acdcd5f4b60d5a4c9b765a0ee6110",
     "lang/docs/guides/hello-world.md": "sha256:5cb550485a259c7b82f7399fb1cf98692892d6e0ab9a737b936debe20ceabfdf",
-    "lang/docs/guides/installation.md": "sha256:5986bb5ad0f7802f2f15ad1a4eea810e09fa24da5c0d447f151974bf72691ec7",
+    "lang/docs/guides/installation.md": "sha256:609429b08719cbf12cd48b43892af889fff619b12e26aefa62c670d61f58ab79",
     "lang/docs/guides/introduction.md": "sha256:0b88ae0f9f691aec850a3257a3643ed81ab55d578f69bc91e5a41b86072f72cf",
     "lang/docs/guides/language-tour.md": "sha256:d8206031aab76cf4c30a696aa0c330a3e51b4af07dbc08c9bbe8d43168723925",
     "lang/docs/guides/modules.md": "sha256:14b9f9aecfffd24fa6877f025afda4ca420c4183e9c71c81b7746cc5d222f44a",
@@ -215,17 +212,11 @@
     "lang/docs/spec/native-ffi.md": "sha256:7f09313179e0af13b41990ba79ce96c98c83d80b19ca464eb4ffd3cd93e0917a",
     "lang/docs/spec/runtime-memory.md": "sha256:dc64a6816f25327c85e2aa5280d8f451eab3b1e864f7f931e6103e373b403364",
     "lang/docs/vo-for-gophers.md": "sha256:795ad3f06046844334732f4e9ac5c4663147b3eaafc48ef083673c40aeb7b136",
-    "ui/docs/accessibility-localization.md": "sha256:1408efc55eb088b7d970caeee20e217b8a27980b259d0ec76333f908e7b237e8",
-    "ui/docs/authoring-guide.md": "sha256:62477c83bddb3e9f2f59f39635367faa60b66c76bc8d9d55fcf8acc03f2d1b25",
-    "ui/docs/component-model-v2.md": "sha256:b3d4409092b0fab7b27b3d423929612d8149eff34ffa58be01ff8ed4890b14e9",
-    "ui/docs/getting-started.md": "sha256:e5bfb8fb7e2a0d9f7f5c9796da0b6f37def57a7fd3ea468ec709a0e6c0bd33d9",
-    "ui/docs/security.md": "sha256:523112c5b8c11e2e5fbfe99087164a6f4d52331b0e0c5fe5c1229bc09ec52628",
-    "ui/docs/testing-troubleshooting.md": "sha256:91b4725adf1c509821a4f6ff52864c0702fb46f2df05e4274f5fbe6e70fafb3a",
-    "ui/docs/web-desktop-products.md": "sha256:f564e8cae39f8cd83ce3e0b9f5d5e9fa3ee2a1052ee7359eeefbdb7bf4f33f58",
-    "ui/next/guides/first-steps.md": "sha256:92f247e6209f008d9f48f1bc1d66c1ca119f6adc5dd2ad74189a9f55c574d41c",
+    "ui/next/guides/first-steps.md": "sha256:5db7fb49481ff080eeb6364fa8ea7faa5da928250bdde0dae922bc3b79427c9f",
+    "ui/next/guides/forms.md": "sha256:1812a42f2450935c0432999c7179d3ebc2057e587d4f35b111d63999ed5a3009",
     "ui/next/guides/lifecycle.md": "sha256:878225cdf34328fc2b9f447f3683712d8ccdea02a2d20498c276b852c26ddf9f",
-    "ui/next/guides/migration.md": "sha256:708a906a2201463ab6808ab740a51f7a6f13dfc8913f0432a5b8e0f06e1f3008",
-    "ui/next/guides/state.md": "sha256:f4b1c64d6ee18bf382326bddb3b484b53b08c5a07d7af05e2dde88285bb8b76c"
+    "ui/next/guides/state.md": "sha256:f4b1c64d6ee18bf382326bddb3b484b53b08c5a07d7af05e2dde88285bb8b76c",
+    "ui/next/kit/README.md": "sha256:17b854adcb803e4ca06186e37fc9b3e50041d521ae8519b1032b3017d52019ab"
   },
   "toolchain": {
     "rust": "workspace-1.94.0"

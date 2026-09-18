@@ -5,36 +5,6 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// A manifest selects the replacement project tools for familiar positional
-// commands. Projects without that manifest retain the compatibility commands.
-pub(super) fn is_project_command(args: &[OsString]) -> bool {
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    project_command_in(args, &cwd)
-}
-
-fn project_command_in(args: &[OsString], cwd: &Path) -> bool {
-    match args.first().and_then(|value| value.to_str()) {
-        Some("create" | "check" | "preview" | "verify" | "browsers") => true,
-        Some("build" | "dev" | "test" | "run" | "package" | "doctor") => {
-            args[1..]
-                .iter()
-                .any(|value| value == OsStr::new("--project"))
-                || args.len() == 2 && matches!(args[1].to_str(), Some("--help" | "-h"))
-                || inferred_project(args, cwd)
-                    .is_some_and(|directory| directory.join("ui-next.json").exists())
-        }
-        _ => false,
-    }
-}
-
-fn inferred_project(args: &[OsString], cwd: &Path) -> Option<PathBuf> {
-    match args.get(1) {
-        None => Some(cwd.to_path_buf()),
-        Some(value) if !value.to_string_lossy().starts_with('-') => Some(cwd.join(value)),
-        _ => Some(cwd.to_path_buf()),
-    }
-}
-
 // Keep the packaged implementation's explicit argument grammar as the single
 // command executor. Native aliases normalize only the project position.
 fn project_arguments(args: &[OsString]) -> Vec<OsString> {
@@ -74,13 +44,12 @@ pub(super) fn print_usage() {
         templates.keys().cloned().collect::<Vec<_>>().join("|")
     );
     println!("usage: vo ui <check|build|dev|preview|test> [directory]");
-    println!("Projects with ui-next.json select the new tools; --project <directory> selects them explicitly.");
+    println!("Use --project <directory> to select a project explicitly.");
     println!("usage: vo ui <run|package> [directory] [--backend vm|jit|aot]");
     println!("Native desktop commands require the matching desktop SDK. Run defaults to JIT; package defaults to Native AOT.");
     println!("usage: vo ui doctor [directory] [--target web|desktop] [--json]");
     println!("usage: vo ui verify");
     println!("usage: vo ui browsers install [chromium|firefox|webkit ...]");
-    println!("The vo ui web spelling remains available for the same commands.");
     println!("Use the matching packaged tools; VO_UI_TOOLCHAIN selects an explicit installation.");
 }
 
@@ -118,9 +87,7 @@ fn toolchain_entry(executable: &Path, selected: Option<&OsStr>) -> Result<PathBu
 pub(super) fn cmd_ui_web(args: &[OsString]) -> i32 {
     if args.is_empty()
         || args.len() == 1 && matches!(args[0].to_str(), Some("help" | "--help" | "-h"))
-        || args.len() == 2
-            && is_project_command(args)
-            && matches!(args[1].to_str(), Some("--help" | "-h"))
+        || args.len() == 2 && matches!(args[1].to_str(), Some("--help" | "-h"))
     {
         print_usage();
         return 0;
@@ -159,64 +126,6 @@ pub(super) fn cmd_ui_web(args: &[OsString]) -> i32 {
 mod tests {
     use super::*;
     use std::fs;
-
-    #[test]
-    fn command_selection_preserves_existing_positional_projects() {
-        let selected = |args: &[&str]| {
-            is_project_command(&args.iter().map(OsString::from).collect::<Vec<_>>())
-        };
-        for name in ["create", "check", "preview", "verify", "browsers"] {
-            assert!(selected(&[name]));
-        }
-        for name in ["build", "dev", "test", "run", "package", "doctor"] {
-            assert!(selected(&[name, "--project", "A project 中文"]));
-            assert!(selected(&[name, "--project"]));
-            assert!(selected(&[name, "--help"]));
-            assert!(!selected(&[name]));
-            assert!(!selected(&[name, "apps/studio"]));
-        }
-        for args in [
-            vec![],
-            vec!["--help"],
-            vec!["new", "app"],
-            vec!["run", "app"],
-            vec!["package", "app"],
-            vec!["inspect", "app"],
-            vec!["unknown", "--project", "app"],
-        ] {
-            assert!(!selected(&args));
-        }
-    }
-
-    #[test]
-    fn project_manifest_selects_default_and_positional_commands() {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let temporary =
-            env::temp_dir().join(format!("vo-ui-selection-{}-{stamp}", std::process::id()));
-        fs::create_dir(&temporary).unwrap();
-        let root = temporary.as_path();
-        let project = root.join("A project 中文");
-        fs::create_dir(&project).unwrap();
-        // Selection must not parse or silently bypass a malformed new manifest.
-        fs::write(project.join("ui-next.json"), "invalid JSON").unwrap();
-        for name in ["build", "dev", "test", "run", "package", "doctor"] {
-            assert!(project_command_in(&[name.into()], &project));
-            assert!(project_command_in(
-                &[name.into(), "A project 中文".into()],
-                root
-            ));
-            assert!(!project_command_in(&[name.into()], root));
-            assert!(!project_command_in(&[name.into(), "legacy".into()], root));
-            assert!(project_command_in(
-                &[name.into(), "A project 中文".into(), "--unknown".into()],
-                root
-            ));
-        }
-        fs::remove_dir_all(temporary).unwrap();
-    }
 
     #[test]
     fn project_aliases_preserve_paths_and_forward_invalid_options() {

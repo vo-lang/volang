@@ -132,53 +132,6 @@ summary = "Normative object layout, roots, GC interaction, and runtime memory co
 file = "lang/docs/spec/runtime-memory.md"
 
 [[section]]
-id = "ui"
-title = "Legacy UI compatibility"
-
-[[section.page]]
-id = "ui-getting-started"
-title = "UI getting started"
-summary = "Create, develop, test, build, and package a pure-Volang UI application."
-file = "ui/docs/getting-started.md"
-
-[[section.page]]
-id = "ui-authoring"
-title = "UI authoring guide"
-summary = "Compose typed views, state, effects, events, responsive layouts, and UIKit components."
-file = "ui/docs/authoring-guide.md"
-
-[[section.page]]
-id = "ui-component-model"
-title = "UI component model"
-summary = "Understand identity, state slots, effects, invalidation, reconciliation, and concurrency."
-file = "ui/docs/component-model-v2.md"
-
-[[section.page]]
-id = "ui-testing"
-title = "UI testing and troubleshooting"
-summary = "Exercise semantic interactions and diagnose VM, JIT, Web, and desktop behavior."
-file = "ui/docs/testing-troubleshooting.md"
-
-[[section.page]]
-id = "ui-platforms"
-title = "Web and desktop products"
-summary = "Design one application for Wasm VM Web and Native AOT desktop hosts."
-file = "ui/docs/web-desktop-products.md"
-
-[[section.page]]
-id = "ui-accessibility"
-title = "Accessibility and localization"
-summary = "Build keyboard, screen-reader, locale, direction, and reduced-motion support into products."
-file = "ui/docs/accessibility-localization.md"
-
-[[section.page]]
-id = "ui-security"
-title = "UI security"
-summary = "Apply capability, authority, isolation, payload, navigation, and release boundaries."
-file = "ui/docs/security.md"
-
-
-[[section]]
 id = "web-ui"
 title = "Web UI framework"
 
@@ -201,7 +154,13 @@ summary = "Own effects, requests, subscriptions and cancellation through the com
 file = "ui/next/guides/lifecycle.md"
 
 [[section.page]]
-id = "migration"
-title = "Migrate a Web screen"
-summary = "Move existing state and controls into an owned component and test startup interactions."
-file = "ui/next/guides/migration.md"
+id = "forms"
+title = "Build a settings form"
+summary = "Build a validated form with typed controls, local state and browser tests."
+file = "ui/next/guides/forms.md"
+
+[[section.page]]
+id = "components"
+title = "Component API"
+summary = "Control props, keyboard behavior, tables, overlays, forms and lifecycle contracts."
+file = "ui/next/kit/README.md"

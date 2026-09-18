@@ -65,8 +65,8 @@ export async function exportStudio({source = join(root,'target/ui-next/studio-di
   const paths = JSON.parse(await renderOutput(executable,['run',artifact,'--','--static-paths'],{...options,maxBytes:65536}));
   const pages = studioStaticPages(paths);
   const redirects = studioStaticRedirects(JSON.parse(await renderOutput(executable,['run',artifact,'--','--static-redirects'],{...options,maxBytes:65536})),pages);
-  const template = (await readFile(join(source,'server/document.html'),'utf8')).replace('studio-assets/boot.js','studio-assets/static-boot.js');
-  if (!template.includes('studio-assets/static-boot.js')) throw new Error('Studio static boot outlet is missing.');
+  const template = await readFile(join(source,'server/document.html'),'utf8');
+  if (!template.includes('studio-assets/boot.js')) throw new Error('Studio static boot outlet is missing.');
   const compose = prepareHtml(template,true);
   // One static 404 serves every unknown URL. Its native links work without
   // starting a guest whose route would disagree with that shared HTML.
@@ -101,7 +101,7 @@ export async function exportStudio({source = join(root,'target/ui-next/studio-di
     for (const name of await readdir(join(source,'public'))) await cp(join(source,'public',name),join(stage,name),{recursive:true,errorOnExist:true,force:false});
     for (const name of ['LICENSE','THIRD_PARTY_NOTICES.txt']) await cp(join(source,name),join(stage,name));
     await writeFile(join(stage,'.nojekyll'),'');
-    await writeFile(join(stage,'README.md'),'# Volang Studio static preview\n\nDeploy this entire directory at the origin root on a static HTTP host with\ndirectory indexes. Use 404.html as its missing-page document, keeping HTTP 404.\nServe Wasm as application/wasm and JavaScript modules with a JavaScript MIME type.\nThe host needs no Volang compiler, Node runtime, source checkout or API service.\nGallery and all chapters include HTML before JavaScript; interactive examples\ncompile locally in browser workers. Query-based legacy chapter links require\nJavaScript and redirect to their canonical path; direct chapter paths also work\nwithout JavaScript. Publish all files together and revalidate stable URLs.\nThe .gz and .br siblings are optional precompressed representations; configure\nContent-Encoding when serving them. Subdirectory deployment is not supported.\n');
+    await writeFile(join(stage,'README.md'),'# Volang Studio static preview\n\nDeploy this entire directory at the origin root on a static HTTP host with\ndirectory indexes. Use 404.html as its missing-page document, keeping HTTP 404.\nServe Wasm as application/wasm and JavaScript modules with a JavaScript MIME type.\nThe host needs no Volang compiler, Node runtime, source checkout or API service.\nGallery and all chapters include HTML before JavaScript; interactive examples\ncompile locally in browser workers. Chapter paths work without JavaScript. Publish all files together and revalidate stable URLs.\nThe .gz and .br siblings are optional precompressed representations; configure\nContent-Encoding when serving them. Subdirectory deployment is not supported.\n');
     await verify();
     assert.deepEqual(await readFile(join(source,'build-report.json')),reportBytes,'Studio build identity changed during export.');
     const report = {schema:'volang.studio-next-static.v1',sourceBuildSha256:createHash('sha256').update(reportBytes).digest('hex'),

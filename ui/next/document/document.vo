@@ -238,16 +238,29 @@ func View(document Document) ui.View {
 	if err := Validate(document); err != nil {
 		panic(err)
 	}
-	return ui.Fragment(views(document.Nodes)...)
+	return ui.Fragment(views(document.Nodes, Options{})...)
 }
 
 var preparedType = ui.Define("document.Prepared")
 
 // Prepared owns validated immutable views. Keep it in state or DerivedMemo;
 // mounting in multiple roots gives each tree independent component identities.
+type Heading struct {
+	ID string
+	Text string
+	Level int
+}
+
+// Options adds presentation without changing the semantic document format.
+type Options struct {
+	HeadingLinks bool
+	CodeTools func(string) ui.View
+}
+
 type Prepared struct {
 	headingID string
 	content ui.View
+	outline []Heading
 }
 
 func Prepare(document Document) (*Prepared, error) {
@@ -259,15 +272,46 @@ func Prepare(document Document) (*Prepared, error) {
 
 // Parse validates a wire document once and prepares its reusable view snapshot.
 func Parse(source string) (*Prepared, error) {
+	return ParseWithOptions(source, Options{})
+}
+
+func ParseWithOptions(source string, options Options) (*Prepared, error) {
 	document, err := Decode(source)
 	if err != nil {
 		return nil, err
 	}
-	return prepare(document), nil
+	return prepareWithOptions(document, options), nil
 }
 
 func prepare(document Document) *Prepared {
-	return &Prepared{headingID: document.HeadingID, content: ui.Fragment(views(document.Nodes)...)}
+	return prepareWithOptions(document, Options{})
+}
+
+func prepareWithOptions(document Document, options Options) *Prepared {
+	outline := collectHeadings(document.Nodes)
+	return &Prepared{headingID: document.HeadingID, content: ui.Fragment(views(document.Nodes, options)...), outline: outline}
+}
+
+func nodeText(node Node) string {
+	if node.Tag == "#text" { return node.Text }
+	var text strings.Builder
+	for _, child := range node.Children { text.WriteString(nodeText(child)) }
+	return text.String()
+}
+
+func collectHeadings(nodes []Node) []Heading {
+	outline := []Heading{}
+	for _, node := range nodes {
+		if len(node.Tag) == 2 && node.Tag[0] == 'h' && node.Tag[1] >= '1' && node.Tag[1] <= '6' && node.Attrs["id"] != "" {
+			outline = append(outline, Heading{ID: node.Attrs["id"], Text: nodeText(node), Level: int(node.Tag[1] - '0')})
+		}
+		outline = append(outline, collectHeadings(node.Children)...)
+	}
+	return outline
+}
+
+func (prepared *Prepared) Outline() []Heading {
+	return append([]Heading{}, prepared.outline...)
 }
 
 func (prepared *Prepared) HeadingID() string {
@@ -283,14 +327,14 @@ func (prepared *Prepared) View() ui.View {
 	}).Memo(prepared)
 }
 
-func views(nodes []Node) []ui.View {
+func views(nodes []Node, options Options) []ui.View {
 	result := make([]ui.View, 0, len(nodes))
 	for _, node := range nodes {
 		if node.Tag == "#text" {
 			result = append(result, ui.Text(node.Text))
 			continue
 		}
-		children := views(node.Children)
+		children := views(node.Children, options)
 		view := ui.Element(node.Tag, children...)
 		if node.Tag == "a" {
 			view = navigation.Link(node.Attrs["href"], children...)
@@ -302,6 +346,12 @@ func views(nodes []Node) []ui.View {
 		sort.Strings(names)
 		for _, name := range names {
 			view = view.Attr(name, node.Attrs[name])
+		}
+		if options.HeadingLinks && len(node.Tag) == 2 && node.Tag[0] == 'h' && node.Tag[1] >= '1' && node.Tag[1] <= '6' && node.Attrs["id"] != "" {
+			view = ui.Element(node.Tag, append(children, ui.Element("a", ui.Text("#")).Attr("href", "#" + node.Attrs["id"]).Attr("aria-label", "Link to " + nodeText(node)).Class("doc-heading-link"))...).Attr("id", node.Attrs["id"]).Attr("aria-label", nodeText(node))
+		}
+		if node.Tag == "pre" && options.CodeTools != nil {
+			view = ui.Element("div", options.CodeTools(nodeText(node)), view).Class("doc-code-block")
 		}
 		result = append(result, view)
 	}

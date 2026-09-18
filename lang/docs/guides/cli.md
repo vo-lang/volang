@@ -29,13 +29,12 @@ missing dependencies and generated source explicitly before this check.
 
 ```sh
 vo init <module-path>
-vo ui new <path> [--module=local/name] \
-  [--template=default|dashboard|media|studio]
+vo ui create <path>
 ```
 
-`init` creates module intent in an existing directory. `ui new` creates a
-complete official UI project, generates a lock, and materializes its bundled UI
-dependency.
+`init` creates module intent in an existing directory. `ui create` creates a
+complete UI project with source, browser tests and a locked framework dependency.
+
 
 ## Build artifacts
 
@@ -92,30 +91,27 @@ updates approved checked-in outputs when the project contract permits it.
 ## Build UI products
 
 ```sh
-vo ui dev [path] [--addr=127.0.0.1:4173] [--open]
-vo ui run [path] [--mode=vm|jit] [--no-watch]
-vo ui test [path] [--mode=vm|jit] [interaction options]
-vo ui inspect [path] [--target=portable|web|native] [--runtime]
-vo ui doctor [path]
-vo ui build [path] [-o dist]
-vo ui package [path] [-o dist] [--target=TRIPLE] [--runtime=PATH]
+vo ui dev [path]
+vo ui check [path]
+vo ui build [path]
+vo ui preview [path]
+vo ui test [path]
+vo ui doctor [path] [--target web|desktop] [--json]
+vo ui run [path] [--backend vm|jit|aot]
+vo ui package [path] [--backend vm|jit|aot]
 ```
 
-`ui dev` serves the Web development projection with state-preserving rebuilds.
-`ui run` opens the native development host. `ui test` drives semantic input and
-can capture governed snapshots. `inspect` reports the view/runtime contract;
-`doctor` diagnoses project and host readiness. `build` creates a bytecode and Wasm VM
-Web bundle, and `package` creates a Native AOT desktop package.
+UI projects declare their entrypoints and delivery settings in `ui-next.json`.
+`dev` serves the Web application with development reload. `check` validates source
+and host imports without executing prerender code or writing a distribution.
+`build` creates the deployable Web bundle; `preview` serves that build; `test`
+runs the project's browser tests. `doctor` reports configuration and platform
+prerequisites without installing them. `run` and `package` require a matching
+desktop SDK and open or package the system WebView application.
 
-`vo ui source` lists or exports official UIKit package source for inspection.
-
-New projects created with `vo ui create` contain `ui-next.json` and select the
-replacement UI tools. Their `vo ui check [path]` validates source entries and host
-imports without running prerendering or writing a distribution. Use `build`
-before `preview`. `vo ui doctor [path] [--target web|desktop] [--json]` reports
-configuration and installation checks with repair guidance and a nonzero status
-on failure. It does not change the project or install dependencies. Projects
-without the new manifest retain the compatibility commands above.
+The UI toolchain requires Node.js 24. `vo ui verify` checks the installed
+matching compiler, framework, runtime and project tools. See the
+[UI guide](../../../ui/next/guides/first-steps.md).
 
 ## Release modules
 

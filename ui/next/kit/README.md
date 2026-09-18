@@ -1,4 +1,4 @@
-# Experimental kit
+# Component API
 
 The kit composes semantic elements, events and owned state from `ui/next`.
 Load `theme.css` and place controls inside a `.vui` ancestor. Semantic CSS
@@ -484,7 +484,7 @@ Previous/next callbacks read the latest page, including within a native event
 burst. The current page uses aria-current. Neighbors defaults to one and is
 bounded at five; first/last pages and gaps keep rendered work independent of
 PageCount. Label, PreviousLabel, NextLabel and PageLabel support localization.
-Both controls have a [Studio example](../../../apps/studio/next/table.vo), including
+Both controls have a [Studio example](../../../apps/studio/next/app/table.vo), including
 notes retained by record key across sorting and pagination. Multi-column sorting,
 virtual tables and spreadsheet-style grid navigation remain separate features.
 

@@ -736,7 +736,6 @@ mod tests {
             let selected = selected_task_ids(&manifest, profile, &Impact::default()).unwrap();
             for platform in ["linux", "macos", "windows"] {
                 assert!(selected.contains(format!("ui-desktop-rewrite-{platform}").as_str()));
-                assert!(selected.contains(format!("ui-platform-{platform}-full").as_str()));
             }
             assert!(selected.contains("wasm-web-full"));
         }
@@ -746,13 +745,7 @@ mod tests {
                 .iter()
                 .find(|task| task.id == format!("ui-platform-{platform}-smoke"))
                 .unwrap();
-            assert_eq!(task.commands[0], "ui-next-webview-contracts");
-            assert!(task
-                .commands
-                .contains(&format!("ui-window-nested-aot-{platform}")));
-            assert!(task
-                .commands
-                .contains(&format!("ui-window-settings-vm-{platform}")));
+            assert_eq!(task.commands, ["ui-next-webview-contracts"]);
         }
     }
 

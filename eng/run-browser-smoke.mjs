@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Compatibility entry point. Playwright owns browser lifecycle, waiting and reports.
+// Generic project probe. Playwright owns browser lifecycle, waiting and reports.
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -11,7 +11,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const options = parseArguments(process.argv.slice(2));
 options.projectRoot = resolve(options.staticRoot ?? options.project);
 options.bundleEntry = options.bundleEntry === null ? null : resolve(options.bundleEntry);
-const scenario = Object.entries(options).find(([key, value]) => key.endsWith('Smoke') && value)?.[0] ?? 'ui-conformance';
+const scenario = 'project';
 options.scenario = scenario;
 const attempt = join(root, 'target/ci/browser', scenario, `${Date.now()}-${process.pid}`);
 await mkdir(attempt, { recursive: true });

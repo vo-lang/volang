@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import { root } from './repository-paths.mjs';
 
-export const documentContracts = ['maintained-chapter-catalog', 'chapter-search', 'chapter-lazy-load',
+export const documentContracts = ['maintained-chapter-catalog', 'chapter-outline', 'heading-permalinks', 'copy-code', 'chapter-search', 'chapter-lazy-load',
   'generated-ui-guide', 'content-index-lazy-load', 'body-and-code-search', 'search-error-title-fallback-and-retry', 'content-index-cache-reuse',
   'chapter-cache-reuse', 'chapter-error-and-retry', 'invalid-document-local-error', 'chapter-route-cancellation',
   'delayed-fragment-restoration', 'server-document-content', 'server-document-metadata',
@@ -33,6 +33,14 @@ export async function checkStudioDocuments(browser, url, outputDirectory = resol
       await page.getByRole('link', { name: 'Documentation', exact: true }).click();
       const nav = page.getByRole('navigation', { name: 'Documentation chapters' });
       await chapter(page, 'first-steps');
+      await page.locator('.studio-doc-contents summary').click();
+      assert(await page.getByRole('navigation', {name:'On this page',exact:true}).getByRole('link').count() > 0);
+      assert(await page.locator('.doc-heading-link').count() > 0);
+      await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async value=>{window.copiedStudioCode=value;}}}));
+      const firstCode=await page.locator('.doc-code-block pre').first().textContent();
+      await page.getByRole('button',{name:'Copy code block',exact:true}).first().click();
+      await page.waitForFunction(value=>window.copiedStudioCode===value,firstCode);
+
       assert(!requests.some(url => url.includes('/studio-docs/search.json')), 'opening a chapter eagerly loaded its search index');
       let searchAttempts = 0;
       await page.route('**/studio-docs/search.json?*', async route => {
@@ -58,8 +66,8 @@ export async function checkStudioDocuments(browser, url, outputDirectory = resol
       assert.equal(await page.title(), 'Hello world · Volang Studio');
       assert.equal(await page.getByLabel('Find a chapter', { exact: true }).inputValue(), 'hello');
       await page.getByLabel('Find a chapter', { exact: true }).fill('');
-      await page.waitForFunction(() => document.querySelectorAll('.studio-doc-nav a').length === 23);
-      assert.equal(await nav.getByRole('link').count(), 23);
+      await page.waitForFunction(() => document.querySelectorAll('.studio-doc-nav a').length === 24);
+      assert.equal(await nav.getByRole('link').count(), 24);
       assert.equal(requests.filter(url => url.includes('/studio-docs/page-first-steps.json')).length, 1);
       assert.equal(requests.filter(url => url.includes('/studio-docs/page-hello-world.json')).length, 1);
       assert.equal(searchAttempts,2, 'query edits or chapter navigation refetched the immutable index');

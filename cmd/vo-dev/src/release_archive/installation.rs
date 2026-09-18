@@ -23,16 +23,11 @@ fn local_installation_archive() {
         _ => panic!("unsupported release host"),
     };
     let binary_name = if cfg!(windows) { "vo.exe" } else { "vo" };
-    let paths = [
-        binary_name,
-        release_aot_runtime_name(target),
-        release_ui_aot_runtime_name(target),
-    ]
-    .map(|name| root.join("target/release").join(name));
+    let paths = [binary_name, release_aot_runtime_name(target)]
+        .map(|name| root.join("target/release").join(name));
     let binary = binary_record(&paths[0], binary_name).unwrap();
     let runtime = binary_record(&paths[1], release_aot_runtime_name(target)).unwrap();
-    let ui_runtime = binary_record(&paths[2], release_ui_aot_runtime_name(target)).unwrap();
-    let compatibility = ui_web_runtime_records(&root).unwrap();
+    let runtime_assets = ui_web_runtime_records(&root).unwrap();
     let toolkit = toolchain::records_from(&kit, target, &binary).unwrap();
     fs::create_dir(&output).expect("archive rehearsal output must be a new directory");
     let archive = output.join("installation.tar.gz");
@@ -47,13 +42,9 @@ fn local_installation_archive() {
             path: &paths[1],
             name: &runtime.path,
         },
-        ArchiveBinaryInput {
-            path: &paths[2],
-            name: &ui_runtime.path,
-        },
         UiWebRuntimeInput {
             root: &root,
-            records: &compatibility,
+            records: &runtime_assets,
         },
         toolchain::Input {
             directory: &kit,
@@ -66,8 +57,7 @@ fn local_installation_archive() {
         &archive,
         &binary,
         &runtime,
-        &ui_runtime,
-        &compatibility,
+        &runtime_assets,
         &toolkit,
         epoch,
     )
@@ -81,8 +71,8 @@ fn local_installation_archive() {
     write_json_atomic(&output.join("packaging-report.json"), &serde_json::json!({
         "schema":"volang.local-release-installation.v1", "target":target,
         "archiveSha256":sha256_file(&archive).unwrap(), "archiveBytes":regular_file_size(&archive).unwrap(),
-        "binary":binary, "aotRuntime":runtime, "uiAotRuntime":ui_runtime,
-        "compatibility":compatibility, "toolkit":toolkit,
+        "binary":binary, "aotRuntime":runtime,
+        "runtime_assets":runtime_assets, "toolkit":toolkit,
         "archiveVerified":true, "productCertified":false, "published":false
     })).unwrap();
     println!(

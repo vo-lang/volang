@@ -69,10 +69,8 @@ Embedders that omit `WindowOptions.application_id` use an ephemeral WebView.
 
 The desktop SDK uses format v3, with authenticated native import libraries; the
 application manifest uses v2. Rebuild the matching SDK/toolchain and repackage
-applications together; older SDK formats are rejected. Earlier preview bundles
-used platform default storage with no application identity. Export important drafts
-from the old application before upgrading. The new profile starts empty and leaves
-old storage untouched; see [migration notes](guides/migration.md).
+applications together. Set a stable application identifier to keep its storage
+profile independent of its installation path.
 
 For saved drafts and preferences, import `createPersistentStorage` from
 `@volang/ui-next` in the authored boot and pass the owned task's cancellation
@@ -92,9 +90,7 @@ const tasks = {
 
 The system's `localStorage` follows its browser's asynchronous disk-flush policy;
 a completed `setItem` does not acknowledge durable storage before process exit.
-Studio uses the transaction adapter and imports existing localStorage drafts only
-when the corresponding committed key is absent. Existing browser profiles and
-legacy draft values remain available.
+Studio uses the transaction adapter for acknowledged draft saves.
 
 The build reuses `web/index.html` and its canonical
 `<script type="module" src="<!--ui-next:assets-->assets/app.js"></script>` slot.

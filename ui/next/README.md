@@ -1,14 +1,11 @@
-# UI rewrite laboratory
+# Volang UI framework
 
-Experimental implementation of the [Web-first rewrite plan](../../docs/ui-platform-rewrite-plan-20260913.md).
-The public API and transport are provisional. This directory provides executable
-architecture evidence and the default Studio Web site candidate. Existing stable
-UI packages remain available during migration; the replacement is not yet
-product-certified.
+A typed component framework for Web and system WebView desktop applications.
+The public API has preview stability.
 
 Start with [First steps](guides/first-steps.md), then read
 [State & identity](guides/state.md) and [Lifecycle & requests](guides/lifecycle.md).
-For existing screens, use [Migrate a Web screen](guides/migration.md).
+Build a complete [settings form](guides/forms.md).
 Both complete guide applications are tested directly from the delivered source
 through the public CLI on the Web VM and all three browser engines.
 
@@ -45,9 +42,8 @@ The new [Studio](../../apps/studio/next/README.md) consumes this API at
 `/studio/gallery`, `/studio/docs` and `/studio/playground`. Gallery and Docs do not
 load the compiler. Playground runs standard-library examples in a disposable
 worker and preserves a local draft. `/studio/playground/ui` also compiles and runs
-a UI component in an isolated preview document, with an independent draft. The
-new static distribution owns the default CI site candidate; hosted promotion and
-the remaining native consumers have separate migration acceptance.
+a UI component in an isolated preview document, with an independent draft. The static distribution supplies the website and desktop acceptance runs
+against the same application.
 
 The optional [navigation package](navigation/README.md) supplies nested layouts,
 default pages, dynamic parameters and explicit 404 views. Studio uses a shared
@@ -468,15 +464,11 @@ module imports; the standalone application check separately executes regexp supp
 `test_compiler.mjs` helper. Framework probes disable workspace overrides;
 Studio explicitly uses the repository's `vo.work` to consume the new local UI.
 
-The execution-only and Playground compiler builds include the isolated
-`vo-ui-bridge` transport and check their Wasm dependency graphs for legacy UI
-kernels. Their outputs live in `target/ui-next/wasm-runtime` and
-`target/ui-next/wasm-compiler`. Studio downloads the compiler only when running
-an example; it uses the same isolated compiler in development and deployment. Standard
-`vo-web` builds keep the previous UI through the default `legacy-ui` feature;
-old execution-only embedders can select `--no-default-features --features legacy-ui`.
-The new framework uses generic Island exchange and owns its own component state
-and reload, independently of the old UI arena and browser methods.
+The execution-only and Playground compiler builds use the `vo-ui-bridge`
+transport. Their outputs live in `target/ui-next/wasm-runtime` and
+`target/ui-next/wasm-compiler`. Studio loads the compiler when an example or
+language-service operation needs it. Component state and reload belong to the
+Vo framework and its host session.
 
 `build.mjs` builds bytecode, executes the
 native contracts, serializes server HTML and records artifact sizes/digests.
@@ -495,8 +487,7 @@ server, or `dev` for Studio VM rebuilds and live CSS. Compilation errors preserv
 the running page; correcting Vo source restores compatible local state. CSS
 changes preserve the DOM. See [development reload](develop/README.md) for state,
 input, service ownership and reset rules. Projects with `ui-next.json` select
-these tools through the public `vo ui` commands; other projects retain their
-compatibility command path.
+these tools through the public `vo ui` commands.
 
 ## Create an independent application
 
@@ -515,11 +506,9 @@ assets. `vendor/ui` contains the current framework source snapshot, selected by
 `vo.work` and a compiler-generated `vo.lock`; builds never rewrite that lock.
 `ui-next.json` binds the experiment's wire version. These commands also ship in
 the [portable toolchain preview](toolchain.md), available through `vo ui create`
-and `vo ui <command> --project <directory>`. The earlier `vo ui web` spelling
-continues to use the same tools.
+and `vo ui <command> --project <directory>`.
 Projects and tools can move independently; generated browser fixtures use the
-active runner. Existing positional UI commands retain their project behavior.
-Release publication and the remaining default Web migration continue separately.
+active runner.
 Use [`vo ui doctor`](diagnosis.md) for configuration and installation diagnostics.
 `check` validates every declared source entry and host import without executing
 prerender code or generating a distribution.
@@ -712,76 +701,15 @@ schema with `node eng/ui-next/generate.mjs --write` and verify with `--check`.
 
 ## Limits of this evidence
 
-The examples and independent applications exercise T1–T6, with the remaining
-product acceptance tracked in the [rewrite plan](../../docs/ui-platform-rewrite-plan-20260913.md).
-Chromium 153.0.8010.12, Firefox 155.0 and WebKit 26.6 have passed the Wasm VM
-browser checks. Composition-event tests are synthetic; real IME, screen-reader
-and mobile-device validation remain. Full HTML/property and raw-text hydration
-coverage, guest goroutine task composition, runtime linking into an existing
-root, native multipart upload endpoints, complete UIKit/device acceptance and
-formal performance budgets remain open.
+Acceptance declarations live in [ui/certification.toml](../certification.toml),
+with executable tasks in [eng/ci.toml](../../eng/ci.toml). Browser contracts cover
+Chromium, Firefox and WebKit. Composition-event tests are synthetic; real IME,
+screen-reader and mobile-device validation require separate testing. Test results
+apply to their recorded build and platform.
 
-Studio provides Gallery, Playground and Docs, with 19 maintained language/toolchain
-chapters, four UI guides, optional editing, local drafts and old-project export.
-Its independent native and static distributions include rendered content and
-versioned initial data; old links and cache retirement have separate upgrade
-contracts. The single-file UI source preview uses the Wasm VM; package installation
-is not supplied. Native VM/JIT tests
-establish headless core semantics. Desktop windows and complete native host/Native
-AOT UI execution have not been established here.
-
-The same 1,000-row comparison is implemented for Vue, Svelte and Vo Wasm VM. After building the guest artifacts above, reproduce it with:
-
-```sh
-node eng/ui-next/benchmark/build.mjs
-node eng/ui-next/benchmark/run.mjs
-node eng/ui-next/benchmark/phases.mjs
-```
-
-The comparison uses production/minified bundles, three rotated rounds and 60
-measured updates per scenario. Reports under `target/ui-next/benchmark/` retain
-raw samples, artifact hashes, total raw/gzip bytes, DOM/host work and available
-memory counters. `phases.mjs` separately times guest rendering and wire encoding in
-Node, using the same app definitions in an instrumented image. These measurements
-cover a narrow workload; mobile/network/paint and long-term resource evidence are
-still pending. See [performance.md](performance.md) for the recorded results.
-
-New starters include [application browser tests](testing.md). Run
-`node eng/ui-next/cli.mjs test --project <directory>` to check/build a production
-application and exercise its semantic Playwright tests on three engines and both
-Web backends. Failed runs retain screenshots, traces and a separate report.
-
-Production VM pages use the execution-only runtime built by `build-runtime.mjs`;
-Playground uses the separately built `--compiler` package. Host loader types
-require only initialization, VM construction, exchange and disposal, so either
-actual Wasm package can be passed from TypeScript without a legacy API dependency.
-Wasm VM UI roots use an isolated host session. Browser persistence belongs to
-explicit application services; opening a new UI root does not initialize the old
-Studio's OPFS namespace.
-Applications can still pull in formatting, JSON and SSR through their own imports.
-New Web packages register `vo-ui-bridge` directly. The public APIs remain
-experimental while migration and product acceptance continue.
-
-The optional [`server`](server/README.md) package and `serverEntry` project setting
-provide request-time HTML delivery through a prepared native entry and a bundled
-Node host. Route/data decisions stay in Vo; the host owns request cancellation,
-admission and document assembly. See its guide for deployment and current limits.
-
-Experimental wire v25 uses generated binary codecs on both sides. A frame contains
-`VUI`, a one-byte version and message kind, signed little-endian 64-bit integers
-restricted to JavaScript's safe range, strict booleans, operation codes, and
-32-bit length-prefixed strings/arrays. Array length `0xffffffff` denotes nil.
-Optional records use a strict boolean presence byte; coordinates use finite
-IEEE754 little-endian float64 values.
-Frames, counts, integers and complete consumption are checked before use; DOM
-topology is still preflighted as a whole batch. Web strings use UTF-8 replacement
-for invalid guest bytes and preserve a leading Unicode BOM. There is one schema
-and one generated codec path, with no generic JSON transport dependency.
-Regenerate and rebuild all guest and host artifacts together. The current schema
-includes request timeouts, event options/payloads, bounded keyboard filters, focus
-and modal mutations, bounded Portal placement, complete native multiple-selection values, and the initial-data handshake. Earlier
-hosts reject the new version. The recorded binary performance slice uses v3.
-This is an unreleased experimental protocol.
-See [design.md](design.md) for current decisions and gaps.
-
-See [native size observations](size.md) and [measured collections](collection/README.md).
+Studio provides Gallery, Playground and Docs with 24 maintained chapters, optional
+editing and local drafts. Its native server and static distributions include
+rendered content and versioned initial data. Studio executes components in a
+Worker and keeps DOM and browser services on the document thread. The single-file
+UI preview uses the Wasm VM; package installation is not supplied. Desktop
+acceptance includes VM/JIT and Native AOT execution through the system WebView.

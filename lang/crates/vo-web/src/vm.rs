@@ -156,14 +156,7 @@ fn register_ui_module(
     registry: &mut ExternRegistry,
     module: &Module,
 ) -> Result<(), ExternContractError> {
-    #[cfg(feature = "legacy-ui")]
-    {
-        vo_ui_vm::register_module(registry, module)
-    }
-    #[cfg(not(feature = "legacy-ui"))]
-    {
-        vo_ui_bridge::register_externs(registry, &module.externs)
-    }
+    vo_ui_bridge::register_externs(registry, &module.externs)
 }
 
 fn register_wasm_platform_externs(
@@ -293,29 +286,6 @@ pub fn create_loaded_vm_from_module_with_memory(
 ) -> Result<Vm, String> {
     create_loaded_vm_from_module_with_ui(module, register_externs, admission, register_ui_module)
         .map(|(vm, _)| vm)
-}
-
-/// Builds and verifies a replacement UI VM without mutating the currently
-/// mounted UI arena. The caller starts a transactional arena checkpoint only
-/// after this function succeeds.
-#[cfg(feature = "legacy-ui")]
-pub(crate) fn create_loaded_ui_reload_vm(
-    bytecode: &[u8],
-) -> Result<(Vm, vo_ui_vm::PreparedReloadModule), String> {
-    fn no_extra_externs(
-        _registry: &mut ExternRegistry,
-        _externs: &[ExternDef],
-    ) -> Result<(), ExternContractError> {
-        Ok(())
-    }
-
-    let module = decode_bytecode_module(bytecode)?;
-    create_loaded_vm_from_module_with_ui(
-        module,
-        no_extra_externs,
-        WasmMemoryAdmission::default(),
-        vo_ui_vm::prepare_reload_module,
-    )
 }
 
 fn create_loaded_vm_from_module_with_ui<T>(
@@ -526,11 +496,7 @@ mod tests {
                 param_kinds: Vec::new(),
             })
             .collect::<Vec<_>>();
-        let ui_providers = [
-            (vo_ui_bridge::PACKAGE, "Exchange"),
-            #[cfg(feature = "legacy-ui")]
-            (vo_ui_vm::UI_MODULE_PATH, "Mount"),
-        ];
+        let ui_providers = [(vo_ui_bridge::PACKAGE, "Exchange")];
         let names = ui_providers.map(|(package, function)| {
             vo_common_core::extern_key::ExternKeyRef::new(package, function)
                 .encode()

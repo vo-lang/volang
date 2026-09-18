@@ -33,7 +33,7 @@ export async function studioDocument(root, url, { includeBody = false, now = Dat
   if (!match) return result;
   const index = JSON.parse(await readFile(resolve(root, directory, 'index.json'), 'utf8'));
   assert.equal(index.version, 1);
-  const page = index.pages.find(page => page.ID === (match[1] || url.searchParams.get('topic') || 'first-steps'));
+  const page = index.pages.find(page => page.ID === (match[1] || 'first-steps'));
   if (!page) return result;
   result.title = `${page.Title} · Volang Studio`;
   result.description = page.Summary;

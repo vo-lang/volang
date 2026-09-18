@@ -11,12 +11,6 @@ var studioRoutes = navigation.NewRoutes([]navigation.Route{
 		Children: []navigation.Route{
 			{ID: "home", Render: GalleryRoute}, {ID: "gallery", Path: "gallery", Render: GalleryRoute},
 			{
-				ID: "recover", Path: "recover",
-				Render: func(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {
-					return Recovery()
-				},
-			},
-			{
 				ID: "playground", Path: "playground",
 				Render: func(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {
 					return Playground()
@@ -56,7 +50,7 @@ func docTopic(match navigation.Match) string {
 	if match.ID == "docs-topic" {
 		return match.Param("topic")
 	}
-	return match.Location.Query.Get("topic")
+	return ""
 }
 
 func DocsRoute(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {

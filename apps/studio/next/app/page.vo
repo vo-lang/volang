@@ -23,7 +23,7 @@ type PageInfo struct {
 // navigation. The native delivery entry exposes this list to the exporter.
 func StaticPaths() []string {
 	paths := []string{
-		"/studio", "/studio/gallery", "/studio/playground", "/studio/playground/ui", "/studio/recover",
+		"/studio", "/studio/gallery", "/studio/playground", "/studio/playground/ui",
 		"/studio/docs",
 	}
 	for _, page := range chapters() {
@@ -39,9 +39,6 @@ func describeMatch(match navigation.Match) PageInfo {
 	}
 	switch match.ID {
 		case "home", "gallery":
-		case "recover":
-			page.Title = "Recover browser projects"
-			page.Description = "Download projects saved in the previous browser Studio."
 		case "playground", "ui-playground":
 			page.Title = "Playground"
 		case "docs-start", "docs-topic":

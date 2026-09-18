@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {sourceEditor} from './editor-controls.mjs';
-import {waitStudioDraft} from './studio-draft-contracts.mjs';
+import {waitStudioDraft,seedStudioDrafts} from './studio-draft-contracts.mjs';
 
 export async function checkStudioEditor(browser, url) {
   const reports = [];
@@ -9,10 +9,9 @@ export async function checkStudioEditor(browser, url) {
     const restoredDraft = mode === 'client' || mode === 'failure';
     const restored = 'package main\r\nfunc main() {\r  unused := "中文🙂"\r\n  missingName()\r}\r\n';
     const normalized = restored.replace(/\r\n?/g, '\n');
-    if (restoredDraft) await page.addInitScript(source => {
-      localStorage.setItem('volang.studio.next.draft.v1', source);
-      localStorage.setItem('volang.studio.next.ui-draft.v1', source);
-    }, restored);
+    if (restoredDraft) await seedStudioDrafts(page, {
+      'volang.studio.next.draft.v1':restored, 'volang.studio.next.ui-draft.v1':restored,
+    });
     const checkRestored = async (id, key, action) => {
       const control = sourceEditor(page, id);
       await page.waitForFunction(({id, source}) => document.getElementById(id)?.value === source, {id, source:normalized});

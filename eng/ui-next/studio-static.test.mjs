@@ -11,7 +11,7 @@ test('Studio export uses canonical bounded directory-index routes',()=>{
   for (const paths of [[],null,{},Array(257).fill('/studio'),['/'],['/assets'],['/studio/../file'],['/studio/A','/studio/a/'],['/studio/é','/studio/e\u0301']]) assert.throws(()=>studioStaticPages(paths));
 });
 
-test('legacy redirects have one direct public target and cannot overwrite pages',()=>{
+test('redirects have one direct public target and cannot overwrite pages',()=>{
   const pages=studioStaticPages(['/studio/gallery','/studio/docs/hello-world']);
   const root={from:'/',to:'/studio/gallery'};
   assert.deepEqual(studioStaticRedirects([root,{from:'/docs/hello-world',to:'/studio/docs/hello-world'}],pages).map(value=>[value.file,value.to]),

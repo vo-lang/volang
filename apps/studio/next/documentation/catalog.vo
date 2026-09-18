@@ -19,7 +19,7 @@ func Version() string {
 }
 
 func PageCount() int {
-	return 23
+	return 24
 }
 
 func Pages() []Page {
@@ -29,7 +29,7 @@ func Pages() []Page {
 			Summary: "Create, inspect, test and build your first Web UI application.", SectionID: "web-ui",
 			Section: "Web UI framework", SourcePath: "ui/next/guides/first-steps.md",
 			Asset: "page-first-steps.json",
-			SHA256: "b9bff0fa320bc1d9ad5d0b50f347c37385ed6c828362e8d2165e4c62fa417de6",
+			SHA256: "0ce915a6b9b679ab4e3caab98cc7f7bcd5b2ca36b37cd0714416e62faddd2e25",
 			HeadingID: "doc-a-small-idea-brought-to-life",
 		},
 		{
@@ -49,12 +49,20 @@ func Pages() []Page {
 			HeadingID: "doc-a-place-for-every-effect",
 		},
 		{
-			ID: "migration", Title: "Migrate a Web screen",
-			Summary: "Move existing state and controls into an owned component and test startup interactions.",
-			SectionID: "web-ui", Section: "Web UI framework", SourcePath: "ui/next/guides/migration.md",
-			Asset: "page-migration.json",
-			SHA256: "f54a82d0ff67df2a3c7de48d8b4d4cbbf049391b85249872f1b938260f116f24",
-			HeadingID: "doc-move-a-legacy-web-screen-to-the-new-component-api",
+			ID: "forms", Title: "Build a settings form",
+			Summary: "Build a validated form with typed controls, local state and browser tests.",
+			SectionID: "web-ui", Section: "Web UI framework", SourcePath: "ui/next/guides/forms.md",
+			Asset: "page-forms.json",
+			SHA256: "14beed6b957e34fd67dba8413781243135289e27b8e2b9972b26d2d48274b6ec",
+			HeadingID: "doc-build-a-settings-form",
+		},
+		{
+			ID: "components", Title: "Component API",
+			Summary: "Control props, keyboard behavior, tables, overlays, forms and lifecycle contracts.",
+			SectionID: "web-ui", Section: "Web UI framework", SourcePath: "ui/next/kit/README.md",
+			Asset: "page-components.json",
+			SHA256: "dc4f854920fad1df4dc7b061206a6582f37d99b5a2ed404c920fe82230415a4f",
+			HeadingID: "doc-component-api",
 		},
 		{
 			ID: "introduction", Title: "Introduction",
@@ -69,7 +77,7 @@ func Pages() []Page {
 			Summary: "Install the CLI, verify the toolchain, and choose a development workflow.",
 			SectionID: "start", Section: "Start here", SourcePath: "lang/docs/guides/installation.md",
 			Asset: "page-installation.json",
-			SHA256: "311f2efdc4fa45fa955378e8da44ce2b99adfe9dea9fe0df83eef86aef399fef",
+			SHA256: "8d7ec5c53e26548f2eb8162efc892023b9b16bfc63bb060a074accf82af1643b",
 			HeadingID: "doc-installation",
 		},
 		{
@@ -141,7 +149,7 @@ func Pages() []Page {
 			Summary: "Use the current run, check, test, format, module, generation, release, and UI commands.",
 			SectionID: "toolchain", Section: "Toolchain", SourcePath: "lang/docs/guides/cli.md",
 			Asset: "page-cli.json",
-			SHA256: "9490ee6e58ee13da01489fdbb3d243727b0120b3e255a21b549cb0df75c265ab",
+			SHA256: "a693b4dfbe2d768d44e75de670d2107b853ba78523b47b3936f191293b20c107",
 			HeadingID: "doc-command-line-reference",
 		},
 		{
@@ -216,5 +224,5 @@ func SearchAsset() string {
 }
 
 func SearchSHA256() string {
-	return "2d7d5939e35c8036bde06019cc8eb44e991c03eb6980bae7ffaf9d90ec5e7885"
+	return "3d42ee5cc2fc24f967621841725b6553ef0a8e1f7911738d0ae9ca540453bb22"
 }

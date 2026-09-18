@@ -200,13 +200,13 @@ try {
   delete config.developmentEntry;
   await writeFile(configPath, JSON.stringify(config));
   await writeFile(htmlPath, template.replace('<!--ui-next:backend-->', 'vm'));
-  const legacy = await buildProject(project, { development: true });
-  assert.equal(JSON.parse(await readFile(join(legacy, 'build-report.json'), 'utf8')).inspection, false);
-  server=await serveFiles(legacy);browser=await engines.chromium.launch({headless:true});
-  const legacyPage=await browser.newPage();await legacyPage.goto(server.url);
-  await legacyPage.getByRole('button',{name:'Make it happen'}).click();
-  await legacyPage.waitForFunction(()=>document.querySelector('[data-count]').textContent.startsWith('1 '));
-  assert.equal(await legacyPage.locator('meta[name="ui-next-backend"]').first().getAttribute('content'),'vm');
+  const basic = await buildProject(project, { development: true });
+  assert.equal(JSON.parse(await readFile(join(basic, 'build-report.json'), 'utf8')).inspection, false);
+  server=await serveFiles(basic);browser=await engines.chromium.launch({headless:true});
+  const basicPage=await browser.newPage();await basicPage.goto(server.url);
+  await basicPage.getByRole('button',{name:'Make it happen'}).click();
+  await basicPage.waitForFunction(()=>document.querySelector('[data-count]').textContent.startsWith('1 '));
+  assert.equal(await basicPage.locator('meta[name="ui-next-backend"]').first().getAttribute('content'),'vm');
   await browser.close();browser=undefined;await server.close();server=undefined;
   await mkdir(join(temporary, 'outside'));
   config.developmentEntry = '../outside';
@@ -218,7 +218,7 @@ try {
   await assert.rejects(buildProject(project), /prerenderEntry must stay inside this project/);
   await writeFile(resolve(root, 'target/ui-next/project-report.json'), JSON.stringify({
     passed: true, browsers: reports,
-    contracts: ['create-with-spaces-and-unicode', 'existing-directory-preserved', 'locked-framework-snapshot', 'source-check', 'failed-build-retains-distribution', 'standalone-static-subdirectory', 'vm-interaction', 'portable-regexp', 'mobile-layout', 'production-inspector-excluded', 'production-static-html', 'pre-boot-input-adoption', 'failed-prerender-retains-distribution', 'prerender-template-contract', 'optional-prerender-client-fallback', 'prerender-entry-contained', 'initial-compile-error-page', 'development-inspector-state', 'live-css-preserves-state', 'compile-error-retains-interaction', 'reconnected-error-overlay', 'source-fix-recovers', 'legacy-entry-preserved', 'development-entry-contained'],
+    contracts: ['create-with-spaces-and-unicode', 'existing-directory-preserved', 'locked-framework-snapshot', 'source-check', 'failed-build-retains-distribution', 'standalone-static-subdirectory', 'vm-interaction', 'portable-regexp', 'mobile-layout', 'production-inspector-excluded', 'production-static-html', 'pre-boot-input-adoption', 'failed-prerender-retains-distribution', 'prerender-template-contract', 'optional-prerender-client-fallback', 'prerender-entry-contained', 'initial-compile-error-page', 'development-inspector-state', 'live-css-preserves-state', 'compile-error-retains-interaction', 'reconnected-error-overlay', 'source-fix-recovers', 'optional-development-entry', 'development-entry-contained'],
   }, null, 2) + '\n');
   console.log('Application workflow passed: create, check, build, static deployment, development recovery and history return');
 } finally {

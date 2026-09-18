@@ -51,7 +51,6 @@ export async function runStudioCommand(command) {
       await node('eng/ui-next/studio-distribution-contracts.mjs');
       await node('eng/ui-next/studio-static-build-contracts.mjs');
       await node('eng/ui-next/studio-static-contracts.mjs');
-      await node('eng/ui-next/studio-upgrade-contracts.mjs');
       await node('eng/ui-next/asset-delivery-contracts.mjs');
     }
   } else {

@@ -7,7 +7,6 @@ import {pathToFileURL} from 'node:url';
 import {root} from './server.mjs';
 import {compilerPath} from '../../lang/crates/vo-web/test_compiler.mjs';
 import {checkStudio} from './studio-contracts.mjs';
-import {checkStudioRecovery} from './studio-recovery-contracts.mjs';
 import {checkStudioEditor} from './studio-editor-contracts.mjs';
 
 // Use the actual built distribution, then move it to a fresh directory whose
@@ -33,8 +32,8 @@ try {
     assert.equal(digest(bytes),artifact.sha256,artifact.path);
     if (artifact.path.endsWith('.js') || artifact.path.endsWith('.mjs')) assert(!bytes.includes(Buffer.from(root)),`local path embedded in ${artifact.path}`);
   }
-  assert(report.browserInputs.every(path => !/ui_(dom|system|renderer)|inspection|development|apps\/studio\/(app|services)\//.test(path)), 'legacy or development implementation bundled');
-  assert.equal(report.documents,23);
+  assert(report.browserInputs.every(path => !/inspection|development/.test(path)), 'development implementation bundled');
+  assert.equal(report.documents,24);
   const {start} = await import(pathToFileURL(join(deployed,'server/entry.mjs')).href);
   assert.throws(() => start({base:'/nested/'}), /requires deployment/);
   application = await start({executable:compilerPath(), onError:error=>errors.push(error.message)});
@@ -42,12 +41,11 @@ try {
   const redirect = await fetch(url+'/?backend=vm',{redirect:'manual'});
   assert.equal(redirect.status,307);
   assert.equal(redirect.headers.get('location'),'/studio/gallery?backend=vm');
-  for (const path of ['/studio/gallery','/studio/playground','/studio/playground/ui','/studio/docs/state','/studio/recover']) {
+  for (const path of ['/studio/gallery','/studio/playground','/studio/playground/ui','/studio/docs/state']) {
     const response = await fetch(url+path);
     assert.equal(response.status,200,path);
     const html = await response.text();
     assert.match(html,/data-vo-id=/);
-    if (path === '/studio/recover') assert.match(html, /<title>Recover browser projects · Volang Studio<\/title>/);
   }
   for (const path of ['/unknown','/studio/missing','/studio/docs/no-such-chapter']) {
     const response = await fetch(url+path);
@@ -88,7 +86,7 @@ try {
   await writeFile(chapterPath,original);
   assert.equal((await fetch(url+'/studio/docs/'+index.pages[0].ID)).status,200);
   assert.equal(errors.length,1); errors.length=0;
-  console.log('Relocated Studio: all 23 native chapters, search index, metadata, assets and request failures passed');
+  console.log('Relocated Studio: all 24 native chapters, search index, metadata, assets and request failures passed');
   process.env.PLAYWRIGHT_BROWSERS_PATH ??= resolve(root,'target/playwright-browsers');
   const engines = await import('../browser/node_modules/playwright/index.mjs');
   for (const name of selected) {
@@ -97,15 +95,13 @@ try {
     const directory = join(output,name); await mkdir(directory,{recursive:true});
     const studio = await checkStudio(browser,url,directory);
     const editor = await checkStudioEditor(browser,url);
-    const recovery = await checkStudioRecovery(browser,url,join(directory,'recovery'), {createOrigin:() =>
-      start({executable:compilerPath(), onError:error=>errors.push(error.message)})});
-    results.push({engine:name,studio,editor,recovery});
-    await writeFile(join(directory,'report.json'),JSON.stringify({passed:true,delivery:'request-time-ssr',build:report,studio,editor,recovery},null,2)+'\n');
+    results.push({engine:name,studio,editor});
+    await writeFile(join(directory,'report.json'),JSON.stringify({passed:true,delivery:'request-time-ssr',build:report,studio,editor},null,2)+'\n');
     await browser.close();
     console.log(`${name}: deployed Studio VM, SSR, documents, drafts and workers passed`);
   }
   assert.deepEqual(errors,[]);
-  await writeFile(join(output,'report.json'),JSON.stringify({passed:true,build:report,relocated:true,nativeChapters:23,searchIndex:true,
+  await writeFile(join(output,'report.json'),JSON.stringify({passed:true,build:report,relocated:true,nativeChapters:24,searchIndex:true,
     publicAssetDigests:true,requestFailureIsolation:true,results},null,2)+'\n');
 } finally {
   await Promise.allSettled(browsers.map(browser=>browser.close()));

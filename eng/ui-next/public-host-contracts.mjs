@@ -59,8 +59,7 @@ try {
   const entry = manifest.exports['./ui/next'];
   assert.equal(entry.import, './dist/ui_next/index.js');
   assert.equal(entry.types, './dist/ui_next/index.d.ts');
-  for (const [name, path] of Object.entries({'.': 'dist/index', './vfs': 'dist/vfs', './ui': 'dist/ui_dom',
-    './ui/system': 'dist/ui_system', './wasm': 'pkg/vo_web'})) {
+  for (const [name, path] of Object.entries({'.': 'dist/index', './vfs': 'dist/vfs', './wasm': 'pkg/vo_web'})) {
     assert.equal(manifest.exports[name]?.import, './' + path + '.js', name);
     assert.equal(manifest.exports[name]?.types, './' + path + '.d.ts', name);
   }
@@ -93,9 +92,8 @@ try {
     platform: 'browser', target: 'es2022', metafile: true, logLevel: 'silent'});
   const inputs = Object.keys(bundle.metafile.inputs);
   assert(inputs.some(path => path.endsWith('ui_next/mount.js')));
-  assert(!inputs.some(path => /\/ui_(?:dom|protocol|system)\.js$/.test(path)));
   assert(!inputs.some(path => /node_modules\/(?:codemirror|@codemirror|uplot)/.test(path)));
-  report.checks.browserBundle = report.checks.legacyUiExcluded = report.checks.heavyWidgetsExcluded = true;
+  report.checks.browserBundle = report.checks.heavyWidgetsExcluded = true;
   await writeFile(join(output, 'bundle.json'), JSON.stringify(bundle.metafile, null, 2) + '\n');
   report.artifacts.push(await identity(join(output, 'bundle.json')));
 

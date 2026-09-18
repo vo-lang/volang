@@ -40,7 +40,7 @@ export async function checkStudio(browser, url, outputDirectory = resolve(root, 
     await defaultPage.getByRole('button', {name:'Make it happen'}).click();
     await defaultPage.waitForFunction(() => document.querySelector('[data-demo-count]').textContent.startsWith('1 '));
     assert(defaultRequests.some(url => url.endsWith('/artifacts/studio.vob')), 'Studio defaults to VM');
-    assert(!defaultRequests.some(url => /\/artifacts\/studio\.wasm$|\/compiler\/|editor-library|recovery-library/.test(url)));
+    assert(!defaultRequests.some(url => /\/artifacts\/studio\.wasm$|\/compiler\/|editor-library/.test(url)));
     assert.deepEqual(defaultErrors, []);
   } finally {await defaultPage.close();}
   for (const backend of ['vm']) {
@@ -134,7 +134,7 @@ export async function checkStudio(browser, url, outputDirectory = resolve(root, 
     let release;
     const gate = new Promise(resolve => { release = resolve; });
     await page.route('**/artifacts/studio.*', async route => { await gate; await route.continue(); });
-    await page.goto(`${url}/studio/docs?topic=state&backend=${backend}&ssr`, { waitUntil: 'commit' });
+    await page.goto(`${url}/studio/docs/state?backend=${backend}&ssr`, { waitUntil: 'commit' });
     await page.getByRole('heading', { name: 'State that stays close.' }).waitFor();
     await page.evaluate(() => { window.serverHeading = document.querySelector('h1'); });
     await page.locator('#docs-search').fill('lifecycle');

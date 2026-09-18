@@ -35,7 +35,7 @@ func Playground() ui.View {
 				return
 			}
 			source := draft.source.Get()
-			pending := ui.Start(scope, ui.Request{Service: "studio.run", Value: source}.WithTimeout(10000), func(result ui.Result) {
+			pending := ui.Start(scope, ui.Request{Service: "studio.run", Value: source}.WithTimeout(90000), func(result ui.Result) {
 				execution.Update(func(any) any {
 					if result.Error != "" {
 						return consoleExecution{output: result.Error}
