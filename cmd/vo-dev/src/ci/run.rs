@@ -643,6 +643,7 @@ mod tests {
                     impact: vec!["*".into()],
                     platforms: vec!["linux".into()],
                     capabilities: vec!["contracts".into()],
+                    selection_capabilities: Vec::new(),
                     timeout_minutes: 2,
                     budget_minutes: 1,
                     evidence_kind: "contract".into(),

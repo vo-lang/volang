@@ -41,7 +41,7 @@ capabilities = ["rust", "browser", "studio", "pages", "offline", "headless", "de
 id = "app-protocol"
 paths = ["lang/protocol/*", "fuzz/app-protocol/*"]
 depends_on = ["cargo:lang/crates/vo-app-protocol"]
-capabilities = ["rust", "vm", "jit", "wasm-vm", "browser", "headless", "desktop-vm", "desktop-jit", "desktop-native-aot", "app-protocol"]
+capabilities = ["rust", "vm", "jit", "wasm-vm", "browser", "headless", "desktop-vm", "desktop-jit", "desktop-native-aot", "app-protocol", "desktop-delivery"]
 
 [[component]]
 id = "ui-artifact-fuzz"
@@ -54,6 +54,13 @@ id = "ecosystem"
 paths = ["fuzz/voplay-protocol/*"]
 depends_on = ["app-protocol"]
 capabilities = ["rust", "vm", "jit", "browser", "app-protocol"]
+
+# Packaging/loader changes retain complete desktop acceptance on pull requests.
+# Core runtime and UI changes use the cross-platform feedback lanes first.
+[[component]]
+id = "desktop-delivery"
+paths = ["cmd/vo/src/main.rs", "lang/crates/vo-ui-desktop-runtime/*", "lang/crates/vo-ui-webview/*", "lang/crates/vo-ui-native/*", "apps/studio/ui.desktop.toml", "apps/studio/host-native/*", "apps/studio/aot-runtime-native/*"]
+capabilities = ["desktop-delivery"]
 
 # Profiles describe certification depth. Pull requests use impact selection;
 # merge queues and immutable branch candidates exercise the complete matrix.
@@ -69,8 +76,8 @@ tasks = [
   "wasm-web-smoke",
   "ui-web-rewrite",
   "ui-platform-linux-smoke",
-  "ui-platform-macos-full",
-  "ui-platform-windows-full",
+  "ui-platform-macos-smoke",
+  "ui-platform-windows-smoke",
   "ui-desktop-rewrite-linux",
   "ui-desktop-rewrite-macos",
   "ui-desktop-rewrite-windows",
@@ -132,11 +139,11 @@ tasks = [
 
 [[task]]
 id = "contracts"
-commands = ["contract-lint", "ui-catalog", "language-manifest", "language-format", "dependency-policy-unit", "workflow-lint"]
+commands = ["ci-planner-contracts", "publication-contracts", "contract-lint", "ui-catalog", "language-manifest", "language-format", "dependency-policy-unit", "workflow-lint"]
 inputs = ["*"]
 resource_group = "cargo"
 tier = "feedback"
-workflow_job = "quality_rust"
+workflow_job = "contracts"
 runner = "ubuntu-24.04"
 always = true
 owners = ["engineering"]
@@ -340,7 +347,7 @@ results = [
 # Replacement desktop acceptance uses the system WebView and an independent SDK.
 [[task]]
 id = "ui-desktop-rewrite-linux"
-commands = ["ui-web-rewrite-tooling", "ui-web-rewrite-dependencies", "ui-web-authoring-dependencies", "ui-desktop-browser-dependencies", "ui-desktop-rewrite-runtime", "ui-web-rewrite-compiler", "ui-next-webview-contracts", "ui-desktop-sdk-dependencies", "ui-desktop-rewrite-sdk", "ui-desktop-link-contracts", "ui-desktop-rewrite-packages-linux", "ui-desktop-rewrite-studio-linux", "ui-desktop-rewrite-evidence", "ui-desktop-rewrite-archive"]
+commands = ["ui-next-webview-contracts", "ui-web-rewrite-tooling", "ui-web-rewrite-dependencies", "ui-web-authoring-dependencies", "ui-desktop-browser-dependencies", "ui-desktop-rewrite-runtime", "ui-web-rewrite-compiler", "ui-desktop-sdk-dependencies", "ui-desktop-rewrite-sdk", "ui-desktop-link-contracts", "ui-desktop-rewrite-packages-linux", "ui-desktop-rewrite-studio-linux", "ui-desktop-rewrite-evidence", "ui-desktop-rewrite-archive"]
 inputs = ["*"]
 resource_group = "cargo"
 artifacts = ["target/ci/artifacts/ui-desktop-rewrite"]
@@ -352,6 +359,7 @@ owners = ["ui", "language"]
 impact = ["Cargo.*", "rust-toolchain.toml", "cmd/vo/*", "lang/crates/vo-ui-*", "ui/*", "apps/studio/*", "eng/ui-next/*", "eng/browser/*", ".github/*"]
 platforms = ["linux"]
 capabilities = ["desktop-vm", "desktop-jit", "desktop-native-aot", "real-window"]
+selection_capabilities = ["desktop-delivery"]
 timeout_minutes = 70
 budget_minutes = 45
 evidence_kind = "platform-test"
@@ -360,7 +368,7 @@ results = ["target/ci/results/ui-desktop-rewrite.json"]
 # Replacement desktop acceptance uses the system WebView and an independent SDK.
 [[task]]
 id = "ui-desktop-rewrite-macos"
-commands = ["ui-web-rewrite-tooling", "ui-web-rewrite-dependencies", "ui-web-authoring-dependencies", "ui-desktop-browser-dependencies", "ui-desktop-rewrite-runtime", "ui-web-rewrite-compiler", "ui-next-webview-contracts", "ui-desktop-sdk-dependencies", "ui-desktop-rewrite-sdk", "ui-desktop-link-contracts", "ui-desktop-rewrite-packages", "ui-desktop-rewrite-studio", "ui-desktop-rewrite-evidence", "ui-desktop-rewrite-archive"]
+commands = ["ui-next-webview-contracts", "ui-web-rewrite-tooling", "ui-web-rewrite-dependencies", "ui-web-authoring-dependencies", "ui-desktop-browser-dependencies", "ui-desktop-rewrite-runtime", "ui-web-rewrite-compiler", "ui-desktop-sdk-dependencies", "ui-desktop-rewrite-sdk", "ui-desktop-link-contracts", "ui-desktop-rewrite-packages", "ui-desktop-rewrite-studio", "ui-desktop-rewrite-evidence", "ui-desktop-rewrite-archive"]
 inputs = ["*"]
 resource_group = "cargo"
 artifacts = ["target/ci/artifacts/ui-desktop-rewrite"]
@@ -372,6 +380,7 @@ owners = ["ui", "language"]
 impact = ["Cargo.*", "rust-toolchain.toml", "cmd/vo/*", "lang/crates/vo-ui-*", "ui/*", "apps/studio/*", "eng/ui-next/*", "eng/browser/*", ".github/*"]
 platforms = ["macos"]
 capabilities = ["desktop-vm", "desktop-jit", "desktop-native-aot", "real-window"]
+selection_capabilities = ["desktop-delivery"]
 timeout_minutes = 70
 budget_minutes = 45
 evidence_kind = "platform-test"
@@ -380,7 +389,7 @@ results = ["target/ci/results/ui-desktop-rewrite.json"]
 # Replacement desktop acceptance uses the system WebView and an independent SDK.
 [[task]]
 id = "ui-desktop-rewrite-windows"
-commands = ["ui-web-rewrite-tooling", "ui-web-rewrite-dependencies", "ui-web-authoring-dependencies", "ui-desktop-browser-dependencies", "ui-desktop-rewrite-runtime", "ui-web-rewrite-compiler", "ui-next-webview-contracts", "ui-desktop-sdk-dependencies", "ui-desktop-rewrite-sdk", "ui-desktop-link-contracts", "ui-desktop-rewrite-packages", "ui-desktop-rewrite-studio", "ui-desktop-rewrite-evidence", "ui-desktop-rewrite-archive"]
+commands = ["ui-next-webview-contracts", "ui-web-rewrite-tooling", "ui-web-rewrite-dependencies", "ui-web-authoring-dependencies", "ui-desktop-browser-dependencies", "ui-desktop-rewrite-runtime", "ui-web-rewrite-compiler", "ui-desktop-sdk-dependencies", "ui-desktop-rewrite-sdk", "ui-desktop-link-contracts", "ui-desktop-rewrite-packages", "ui-desktop-rewrite-studio", "ui-desktop-rewrite-evidence", "ui-desktop-rewrite-archive"]
 inputs = ["*"]
 resource_group = "cargo"
 artifacts = ["target/ci/artifacts/ui-desktop-rewrite"]
@@ -392,14 +401,67 @@ owners = ["ui", "language"]
 impact = ["Cargo.*", "rust-toolchain.toml", "cmd/vo/*", "lang/crates/vo-ui-*", "ui/*", "apps/studio/*", "eng/ui-next/*", "eng/browser/*", ".github/*"]
 platforms = ["windows"]
 capabilities = ["desktop-vm", "desktop-jit", "desktop-native-aot", "real-window"]
+selection_capabilities = ["desktop-delivery"]
 timeout_minutes = 70
 budget_minutes = 45
 evidence_kind = "platform-test"
 results = ["target/ci/results/ui-desktop-rewrite.json"]
 
 [[task]]
+id = "ui-platform-macos-smoke"
+commands = ["ui-next-webview-contracts", "ui-desktop-check", "ui-platform-contracts", "ui-desktop-contracts", "ui-vm-jit-contracts", "ui-native-cli", "ui-nested-link-macos", "ui-window-nested-aot-macos", "ui-window-settings-vm-macos"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/artifacts/native"]
+tier = "feedback"
+workflow_job = "ui_platform"
+runner = "macos-15"
+depends_on = ["contracts"]
+owners = ["ui"]
+impact = [
+  "Cargo.*",
+  "cmd/vo/*",
+  "lang/crates/vo-engine/*",
+  "lang/crates/vo-ui-*",
+  "ui/*",
+  "apps/studio/*",
+  "eng/run-*-contracts.sh",
+]
+platforms = ["macos"]
+capabilities = ["headless", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+timeout_minutes = 30
+budget_minutes = 18
+evidence_kind = "platform-test"
+
+[[task]]
+id = "ui-platform-windows-smoke"
+commands = ["ui-next-webview-contracts", "ui-desktop-check", "ui-platform-contracts", "ui-desktop-contracts", "ui-vm-jit-contracts", "ui-native-cli", "ui-nested-link-windows", "ui-window-nested-aot-windows", "ui-window-settings-vm-windows"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/artifacts/native"]
+tier = "feedback"
+workflow_job = "ui_platform"
+runner = "windows-2025"
+depends_on = ["contracts"]
+owners = ["ui"]
+impact = [
+  "Cargo.*",
+  "cmd/vo/*",
+  "lang/crates/vo-engine/*",
+  "lang/crates/vo-ui-*",
+  "ui/*",
+  "apps/studio/*",
+  "eng/run-*-contracts.sh",
+]
+platforms = ["windows"]
+capabilities = ["headless", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+timeout_minutes = 30
+budget_minutes = 18
+evidence_kind = "platform-test"
+
+[[task]]
 id = "ui-platform-linux-smoke"
-commands = ["ui-desktop-check", "ui-platform-contracts", "ui-desktop-contracts", "ui-vm-jit-contracts", "ui-native-cli", "ui-nested-link-linux", "ui-window-nested-aot-linux", "ui-window-settings-vm-linux"]
+commands = ["ui-next-webview-contracts", "ui-desktop-check", "ui-platform-contracts", "ui-desktop-contracts", "ui-vm-jit-contracts", "ui-native-cli", "ui-nested-link-linux", "ui-window-nested-aot-linux", "ui-window-settings-vm-linux"]
 inputs = ["*"]
 resource_group = "cargo"
 artifacts = ["target/ci/artifacts/native"]
@@ -667,10 +729,23 @@ evidence_kind = "security-audit"
 results = ["target/ci/results/dependencies.json"]
 
 [[command]]
+id = "ci-planner-contracts"
+argv = ["cargo", "test", "--locked", "-p", "vo-dev", "ci::"]
+timeout_seconds = 300
+failure_kind = "product"
+report = "cargo-test"
+
+[[command]]
+id = "publication-contracts"
+argv = ["node", "--test", "eng/ui-next/studio-site.test.mjs", "eng/ui-next/publish-directory.test.mjs", "eng/ui-next/desktop-link.test.mjs"]
+timeout_seconds = 120
+failure_kind = "product"
+
+[[command]]
 id = "contract-lint"
 argv = ["target/debug/vo-dev", "lint", "all"]
 timeout_seconds = 600
-failure_kind = "infrastructure"
+failure_kind = "product"
 
 [[command]]
 id = "ui-catalog"

@@ -299,7 +299,7 @@ fn direct_reasons(task: &CiTask, impact: &Impact) -> Vec<String> {
     // every transitive capability path adds no selection information and can
     // make large refactoring plans exceed their wire-size contract.
     let mut reasons: Vec<_> = if impact.full.is_empty() {
-        task.capabilities
+        task.impact_capabilities()
             .iter()
             .filter_map(|capability| impact.capabilities.get(capability))
             .flatten()
@@ -385,7 +385,7 @@ fn selected_task_ids<'a>(
         if !profile.changed_only
             || task.always
             || !impact.full.is_empty()
-            || task.capabilities.iter().any(|capability| {
+            || task.impact_capabilities().iter().any(|capability| {
                 impact
                     .capabilities
                     .get(capability)
@@ -629,7 +629,6 @@ mod tests {
         for path in [
             "rust-toolchain.toml",
             "eng/tests.toml",
-            "lang/crates/vo-runtime/src/gc.rs",
             "unknown/input",
             "lang/protocol/app-runtime/generated/schema.rs",
         ] {
@@ -683,11 +682,8 @@ mod tests {
                     "wasm-web-smoke",
                     "ui-web-rewrite",
                     "ui-platform-linux-smoke",
-                    "ui-platform-macos-full",
-                    "ui-platform-windows-full",
-                    "ui-desktop-rewrite-linux",
-                    "ui-desktop-rewrite-macos",
-                    "ui-desktop-rewrite-windows"
+                    "ui-platform-macos-smoke",
+                    "ui-platform-windows-smoke"
                 ]),
                 "{path}"
             );
@@ -696,6 +692,67 @@ mod tests {
                 .iter()
                 .any(|reason| reason.contains(path) && reason.contains("capability browser")));
             assert!(decisions["language-native-smoke"][0].starts_with("skip:"));
+        }
+    }
+
+    #[test]
+    fn feedback_keeps_platform_contracts_and_escalates_delivery_changes() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = load_manifest(&root).unwrap();
+        let graph = ImpactGraph::load(&root, None).unwrap();
+        for path in [
+            "lang/crates/vo-runtime/src/gc.rs",
+            "ui/crates/vo-ui-reactive/src/lib.rs",
+        ] {
+            let selected =
+                selected_task_ids(&manifest, "pull-request", &graph.impact(&[path.into()]))
+                    .unwrap();
+            for platform in ["linux", "macos", "windows"] {
+                assert!(
+                    selected.contains(format!("ui-platform-{platform}-smoke").as_str()),
+                    "{path}"
+                );
+                assert!(
+                    !selected.contains(format!("ui-desktop-rewrite-{platform}").as_str()),
+                    "{path}"
+                );
+            }
+        }
+        for path in [
+            "lang/crates/vo-ui-desktop-runtime/src/bundle.rs",
+            "Cargo.lock",
+        ] {
+            let selected =
+                selected_task_ids(&manifest, "pull-request", &graph.impact(&[path.into()]))
+                    .unwrap();
+            for platform in ["linux", "macos", "windows"] {
+                assert!(
+                    selected.contains(format!("ui-desktop-rewrite-{platform}").as_str()),
+                    "{path}"
+                );
+            }
+        }
+        for profile in ["merge", "main"] {
+            let selected = selected_task_ids(&manifest, profile, &Impact::default()).unwrap();
+            for platform in ["linux", "macos", "windows"] {
+                assert!(selected.contains(format!("ui-desktop-rewrite-{platform}").as_str()));
+                assert!(selected.contains(format!("ui-platform-{platform}-full").as_str()));
+            }
+            assert!(selected.contains("wasm-web-full"));
+        }
+        for platform in ["linux", "macos", "windows"] {
+            let task = manifest
+                .tasks
+                .iter()
+                .find(|task| task.id == format!("ui-platform-{platform}-smoke"))
+                .unwrap();
+            assert_eq!(task.commands[0], "ui-next-webview-contracts");
+            assert!(task
+                .commands
+                .contains(&format!("ui-window-nested-aot-{platform}")));
+            assert!(task
+                .commands
+                .contains(&format!("ui-window-settings-vm-{platform}")));
         }
     }
 

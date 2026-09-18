@@ -25,10 +25,31 @@ export function siteArguments(args) {
   return {command,options};
 }
 
+export function siteFailureDetails(error,phase) {
+  const causes=[],seen=new Set();
+  for(let cause=error;cause&&!seen.has(cause)&&causes.length<6;cause=cause.cause) {
+    seen.add(cause);
+    causes.push({name:String(cause.name??'Error').slice(0,128),code:String(cause.code??'').slice(0,128),message:String(cause.message??cause).slice(0,4096)});
+  }
+  return {phase,causes,stack:String(error?.stack??error).slice(0,8192)};
+}
+
+async function failedPages(browser,output) {
+  if(!browser)return [];
+  return Promise.all(browser.contexts().flatMap(context=>context.pages()).slice(-3).map(async(page,index)=>{
+    const result={url:page.url()};
+    const text=selector=>page.locator(selector).first().textContent({timeout:1000}).then(value=>value?.slice(0,8192)).catch(()=>null);
+    [result.consoleOutput,result.previewStatus]=await Promise.all([text('[data-output]'),text('[data-preview-status]')]);
+    const path=join(output,`failure-page-${index}.png`);
+    try {await page.screenshot({path,timeout:3000});result.screenshot=path;}catch(error){result.screenshotError=String(error).slice(0,1024);}
+    return result;
+  }));
+}
+
 export async function checkStudioSite({directory,output,origin,signal}) {
   ({source:directory,destination:output}=await separateSiteDirectories(directory,output));
   await mkdir(output,{recursive:true});
-  const file=join(output,'report.json');let browser,server;
+  const file=join(output,'report.json');let browser,server,phase='candidate';
   const stop=()=>{void browser?.close().catch(()=>{});};
   const write=value=>writeFile(file,JSON.stringify(value,null,2)+'\n');
   await write({schema:'volang.browser-result.v1',passed:false,report:{passed:false,complete:false,checks:[]}});
@@ -37,20 +58,28 @@ export async function checkStudioSite({directory,output,origin,signal}) {
     signal?.throwIfAborted();
     const budgets=studioSiteBudgets(await verifyStudioSite(directory));
     if(!origin){const {serveFiles}=await import('./static-server.mjs');server=await serveFiles(directory,{notFoundDocument:'404.html'});origin=server.url;}
+    phase='origin-before';
     const before=await verifyStudioOrigin(directory,origin,{signal});
+    phase='browser-start';
     process.env.PLAYWRIGHT_BROWSERS_PATH??=resolve('target/playwright-browsers');
     const {chromium}=await import('../browser/node_modules/playwright/index.mjs');
     const {checkStudio}=await import('./studio-contracts.mjs');
     browser=await chromium.launch();signal?.throwIfAborted();
+    phase='browser-journey';
     const application=await checkStudio(browser,new URL(origin).origin,output);
     if(!application.length||application.some(value=>!value.passed)||[...new Set(application.map(value=>value.backend))].sort().join(',')!=='vm')throw new Error('Studio site browser coverage is incomplete.');
+    phase='origin-after';
     const after=await verifyStudioOrigin(directory,origin,{signal});
     if(JSON.stringify(before)!==JSON.stringify(after))throw new Error('Studio site changed during its browser check.');
     const result={schema:'volang.browser-result.v1',passed:true,report:{passed:true,complete:true,scope:'studio-site',
       checks:['candidate-files','deployment-budgets','http-file-identities','wasm-js-css-content-types','gallery-docs-playground','wasm-vm','post-journey-identities'],
       browserVersion:browser.version(),candidate:after,budgets,application}};
     await write(result);return result;
-  }catch(error){await write({schema:'volang.browser-result.v1',passed:false,error:String(error),report:{passed:false,complete:false,checks:[]}});throw error;}
+  }catch(error){
+    const failure=siteFailureDetails(error,phase);
+    try {failure.pages=await failedPages(browser,output);}catch(diagnosticError){failure.diagnosticError=String(diagnosticError).slice(0,1024);}
+    await write({schema:'volang.browser-result.v1',passed:false,error:String(error),failure,report:{passed:false,complete:false,checks:[]}});throw error;
+  }
   finally{signal?.removeEventListener('abort',stop);try{await browser?.close();}finally{await server?.close();}}
 }
 
@@ -71,4 +100,4 @@ export async function runSiteCommand(args) {
   }finally{for(const signal of ['SIGINT','SIGTERM'])process.off(signal,stop);}
 }
 
-if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)await runSiteCommand(process.argv.slice(2)).catch(error=>{console.error(error.message);process.exitCode=1;});
+if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)await runSiteCommand(process.argv.slice(2)).catch(error=>{console.error(error);process.exitCode=1;});

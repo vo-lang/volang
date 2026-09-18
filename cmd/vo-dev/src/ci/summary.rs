@@ -78,7 +78,7 @@ fn validate(
         || summary.failure_kind.as_deref().is_some_and(|kind| {
             !matches!(
                 kind,
-                "product" | "infrastructure" | "portability" | "dependency-policy"
+                "product" | "infrastructure" | "portability" | "dependency-policy" | "timeout"
             )
         })
         || (summary.state == SummaryState::Passed
@@ -226,6 +226,7 @@ mod tests {
             impact: vec![],
             platforms: vec!["linux".into()],
             capabilities: vec!["contracts".into()],
+            selection_capabilities: Vec::new(),
             timeout_minutes: 1,
             budget_minutes: 1,
             evidence_kind: "contract".into(),

@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {artifactInventory} from './artifact-inventory.mjs';
 import {serveFiles} from './static-server.mjs';
 import {stageStudioSite,verifyStudioSite,verifyStudioOrigin} from './studio-site.mjs';
-import {siteArguments,checkStudioSite} from './studio-site-cli.mjs';
+import {siteArguments,checkStudioSite,siteFailureDetails} from './studio-site-cli.mjs';
 import {studioSiteBudgets} from './studio-site-budgets.mjs';
 
 async function fixture() {
@@ -108,4 +108,28 @@ test('final-site browser journeys have no native compiler or UI build dependency
   const inputs=Object.keys(result.metafile.inputs),imports=Object.values(result.metafile.outputs).flatMap(output=>output.imports);
   assert(inputs.length>0&&!inputs.some(path=>path.includes('node_modules/')),'browser verification loads UI build dependencies');
   assert(imports.every(entry=>entry.path.startsWith('node:')&&entry.path!=='node:child_process'),'browser verification loads native tooling');
+});
+
+
+test('network failures retain the requested URL and nested cause',async t=>{
+  const value=await fixture();t.after(()=>rm(value.directory,{recursive:true,force:true}));
+  await stageStudioSite(value);
+  const cause=Object.assign(new Error('connection timed out'),{code:'UND_ERR_CONNECT_TIMEOUT'});
+  const failure=new TypeError('fetch failed',{cause});
+  await assert.rejects(verifyStudioOrigin(value.destination,'https://volang.dev/',{fetch:async()=>{throw failure;}}),error=>{
+    assert.match(error.message,/https:\/\/volang\.dev\//);
+    assert.equal(error.cause,failure);
+    const details=siteFailureDetails(error,'origin-before');
+    assert.equal(details.phase,'origin-before');
+    assert.equal(details.causes.at(-1).code,'UND_ERR_CONNECT_TIMEOUT');
+    return true;
+  });
+});
+
+test('failure details stay bounded even for cyclic causes',()=>{
+  const error=new Error('x'.repeat(20000));error.cause=error;
+  const result=siteFailureDetails(error,'browser-journey');
+  assert.equal(result.causes.length,1);
+  assert.equal(result.causes[0].message.length,4096);
+  assert(result.stack.length<=8192);
 });

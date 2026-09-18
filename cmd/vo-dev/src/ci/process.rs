@@ -120,6 +120,7 @@ pub(crate) fn run_command(
     };
     if cancelled.load(Ordering::Relaxed) || remaining.is_zero() {
         result.status = if remaining.is_zero() {
+            result.failure_kind = Some("timeout".into());
             CommandStatus::TimedOut
         } else {
             CommandStatus::Cancelled
@@ -145,6 +146,7 @@ pub(crate) fn run_command(
             } else if over_limit {
                 CommandStatus::Failed
             } else {
+                result.failure_kind = Some("timeout".into());
                 CommandStatus::TimedOut
             };
             result.error = Some(if over_limit {
@@ -496,6 +498,7 @@ mod tests {
             "{result:?}"
         );
         assert!(!result.passed());
+        assert_eq!(result.failure_kind.as_deref(), Some("timeout"));
     }
 
     #[test]

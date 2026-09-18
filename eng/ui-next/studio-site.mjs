@@ -88,14 +88,16 @@ export async function verifyStudioOrigin(directory,baseURL,{signal,fetch:request
     while(next<files.length) {
       active.throwIfAborted();const entry=files[next++];
       const url=new URL(entry.path.split('/').map(encodeURIComponent).join('/'),base);
-      const response=await request(url,{signal:AbortSignal.any([active,AbortSignal.timeout(30000)]),redirect:'error',cache:'no-store',headers:{'Accept-Encoding':'identity'}});
-      if(response.status!==200||!response.body) throw new Error('Deployed Studio file is unavailable: '+entry.path+' ('+response.status+')');
-      const type=response.headers.get('content-type')??'';
-      if(entry.path.endsWith('.wasm')&&!/^application\/wasm(?:;|$)/i.test(type)||/\.(?:m?js)$/.test(entry.path)&&!/^(?:text|application)\/javascript(?:;|$)/i.test(type)||entry.path.endsWith('.css')&&!/^text\/css(?:;|$)/i.test(type)) throw new Error('Deployed Studio has an incorrect content type: '+entry.path);
-      const digest=createHash('sha256');let bytes=0;
-      for await(const chunk of response.body){bytes+=chunk.length;if(bytes>entry.bytes)throw new Error('Deployed Studio file is too large: '+entry.path);digest.update(chunk);}
-      if(bytes!==entry.bytes||digest.digest('hex')!==entry.sha256) throw new Error('Deployed Studio file differs from the candidate: '+entry.path);
-      total+=bytes;
+      try {
+        const response=await request(url,{signal:AbortSignal.any([active,AbortSignal.timeout(30000)]),redirect:'error',cache:'no-store',headers:{'Accept-Encoding':'identity'}});
+        if(response.status!==200||!response.body) throw new Error('Deployed Studio file is unavailable: '+entry.path+' ('+response.status+')');
+        const type=response.headers.get('content-type')??'';
+        if(entry.path.endsWith('.wasm')&&!/^application\/wasm(?:;|$)/i.test(type)||/\.(?:m?js)$/.test(entry.path)&&!/^(?:text|application)\/javascript(?:;|$)/i.test(type)||entry.path.endsWith('.css')&&!/^text\/css(?:;|$)/i.test(type)) throw new Error('Deployed Studio has an incorrect content type: '+entry.path);
+        const digest=createHash('sha256');let bytes=0;
+        for await(const chunk of response.body){bytes+=chunk.length;if(bytes>entry.bytes)throw new Error('Deployed Studio file is too large: '+entry.path);digest.update(chunk);}
+        if(bytes!==entry.bytes||digest.digest('hex')!==entry.sha256) throw new Error('Deployed Studio file differs from the candidate: '+entry.path);
+        total+=bytes;
+      } catch(error) {throw new Error(`Studio verification failed at ${url}: ${error.message}`,{cause:error});}
     }
   };
   const outcomes=await Promise.allSettled(Array.from({length:4},async()=>{try{await check();}catch(error){lifetime.abort(error);throw error;}}));
