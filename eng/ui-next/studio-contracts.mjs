@@ -133,6 +133,9 @@ export async function checkStudio(browser, url, outputDirectory = resolve(root, 
     const page = await browser.newPage();
     let release;
     const gate = new Promise(resolve => { release = resolve; });
+    let releaseSearch;
+    const searchGate = new Promise(resolve => { releaseSearch = resolve; });
+    await page.route('**/studio-docs/search.json?*', async route => { await searchGate; await route.continue(); });
     await page.route('**/artifacts/studio.*', async route => { await gate; await route.continue(); });
     await page.goto(`${url}/studio/docs/state?backend=${backend}&ssr`, { waitUntil: 'commit' });
     await page.getByRole('heading', { name: 'State that stays close.' }).waitFor();
@@ -140,14 +143,28 @@ export async function checkStudio(browser, url, outputDirectory = resolve(root, 
     await page.locator('#docs-search').fill('lifecycle');
     release();
     await page.waitForFunction(() => window.__studioNext?.ready || window.__studioNext?.error);
-    await page.getByRole('link', { name: 'Lifecycle & requests', exact: true }).click();
+    assert.equal(await page.evaluate(() => window.__studioNext.error), null);
+    const searching = page.getByText('Searching chapter text…', { exact: true });
+    await searching.waitFor();
+    const chapterLink = page.getByRole('link', { name: 'Lifecycle & requests', exact: true });
+    await chapterLink.scrollIntoViewIfNeeded();
+    const before = await chapterLink.boundingBox();
+    await chapterLink.evaluate(element => { window.earlyChapterLink = element; });
+    await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2);
+    await page.mouse.down();
+    try {
+      releaseSearch();
+      await searching.waitFor({ state: 'hidden' });
+      assert.deepEqual(await chapterLink.boundingBox(), before, 'content search moved a title link during a click');
+      assert.equal(await chapterLink.evaluate(element => element === window.earlyChapterLink), true);
+    } finally { releaseSearch(); await page.mouse.up(); }
     await page.getByRole('heading', { name: 'A place for every effect.' }).waitFor();
     assert.equal(await page.locator('#docs-search').inputValue(), 'lifecycle');
     assert.equal(await page.evaluate(() => window.serverHeading === document.querySelector('h1')), true);
     assert.equal(await page.evaluate(() => window.__studioNext.error), null);
     await page.screenshot({ path: resolve(outputDirectory, `studio-docs-${backend}.png`), fullPage: true });
     await page.evaluate(async () => { window.__studioNext.close(); await window.__studioNext.done; });
-    reports.push({ backend, mode: 'hydrate', passed: true, contracts: ['deep-link-server-html', 'initial-data-agreement', 'server-node-adoption', 'hydrated-navigation', 'nested-route-layout-identity', 'early-layout-input-retained'] });
+    reports.push({ backend, mode: 'hydrate', passed: true, contracts: ['deep-link-server-html', 'initial-data-agreement', 'server-node-adoption', 'hydrated-navigation', 'nested-route-layout-identity', 'early-layout-input-retained', 'search-result-click-stability'] });
     await page.close();
     console.log(`${backend}: new Studio deep-link SSR adoption passed`);
   }
