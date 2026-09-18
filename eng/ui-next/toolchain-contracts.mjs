@@ -329,7 +329,7 @@ try {
     contracts:['toolchain-and-project-relocation','no-checkout-or-cargo-required','fixed-compiler-identity','manifest-required','same-package-inventory-after-use',
       'production-inspector-excluded','development-declared-props','development-independent-state','complete-delivered-guide-application','complete-delivered-example-applications',
       'native-cli-relative-discovery','standard-project-cli','portable-browser-fixtures','three-browser-engines','wasm-vm','named-page-images','request-time-ssr',
-      'direct-project-commands','web-command-alias','subcommand-help','configured-production-backend',
+      'direct-project-commands','subcommand-help','configured-production-backend',
       'manifest-project-selection','current-directory-project-commands','positional-project-commands',
       'native-document-data','variable-list-and-pinned-focus','scroll-position-and-guard','optional-plot-and-lifetime','optional-canvas-and-lifetime','optional-editor-and-notices','no-editor-in-basic-app','native-ssr-controls','source-reload','compiler-cache-does-not-reload-page','failed-compile-recovery','graceful-command-shutdown']},null,2) + '\n');
   console.log(`Portable toolchain passed: ${publicTestingCases} public browser cases, 3 editor cases and named-page source reload`);

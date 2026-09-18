@@ -218,7 +218,7 @@ export async function collectCoreEvidence(root) {
   assert.equal(toolkit.variableList.sourceSha256,createHash('sha256').update(await readFile(join(root,'ui/next/examples/variable-list/app.vo'))).digest('hex'));
   assert.equal(toolkit.scrollPosition.sourceSha256,createHash('sha256').update(await readFile(join(root,'ui/next/examples/scroll-position/app.vo'))).digest('hex'));
   assert(toolkit.contracts.includes('compiler-cache-does-not-reload-page'));
-  for (const contract of ['direct-project-commands','web-command-alias','subcommand-help','configured-production-backend',
+  for (const contract of ['direct-project-commands','subcommand-help','configured-production-backend',
     'manifest-project-selection','current-directory-project-commands','positional-project-commands']) {
     assert(toolkit.contracts.includes(contract),'portable toolkit is missing '+contract);
   }
