@@ -125,7 +125,7 @@ Native `vo ui run/package` commands use the optional [desktop SDK](desktop.md).
 The same package can carry Web tools and native launch/link artifacts; desktop
 applications run independently after building.
 
-This is an experimental distribution path. Protected release publication,
-remaining default Web migration, platform certification and removal of legacy UI
-remain tracked in the rewrite plan. The package builder selects its current
-platform; cross-platform packaging requires building and testing on that target.
+The package builder selects its current platform; cross-platform packaging
+requires building and testing on that target. Release publication follows
+[the release policy](../docs/release-policy.md), with verified CI evidence for
+the source commit and every required platform.
