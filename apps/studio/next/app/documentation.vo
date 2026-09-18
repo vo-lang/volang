@@ -100,6 +100,29 @@ func Docs(scope *ui.Scope, topic string) ui.View {
 	return ui.Element("div", content).Attr("data-document", page.ID).Attr("aria-busy", fmt.Sprint(result.Fetching))
 }
 
+func chapterGroups(pages []documentation.Page, current string) ui.View {
+	groups := []ui.View{}
+	section := ""
+	links := []ui.View{}
+	for _, chapter := range pages {
+		if section != chapter.Section && len(links) > 0 {
+			groups = append(groups, ui.Element("section", ui.Element("h2", ui.Text(section)), ui.Element("ul", links...)).Key(section))
+			links = nil
+		}
+		section = chapter.Section
+		href := chapterURL(chapter)
+		link := navigation.Link(href, ui.Text(chapter.Title))
+		if chapter.ID == current {
+			link = link.Attr("aria-current", "page")
+		}
+		links = append(links, ui.Element("li", link).Key(href))
+	}
+	if len(links) > 0 {
+		groups = append(groups, ui.Element("section", ui.Element("h2", ui.Text(section)), ui.Element("ul", links...)).Key(section))
+	}
+	return ui.Element("div", groups...).Class("studio-doc-groups")
+}
+
 func DocsLayout(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {
 	initial := ui.UseContext(scope, initialDataContext).([]data.InitialValue)
 	client := data.NewClient(scope, "documents", data.Options{
@@ -122,33 +145,26 @@ func DocsLayout(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View
 	if page.Title == "Unknown chapter" {
 		title = "This chapter is still unwritten."
 	}
-	groups := []ui.View{}
-	section := ""
-	links := []ui.View{}
 	query := strings.ToLower(strings.TrimSpace(filter.Get()))
 	contentMatches, searchStatus := chapterContentMatches(scope, client, query)
+	titleMatches := []documentation.Page{}
+	textMatches := []documentation.Page{}
 	for _, chapter := range chapters() {
-		if !chapterMetadataMatches(chapter, query) && !contentMatches[chapter.ID] {
-			continue
+		if chapterMetadataMatches(chapter, query) {
+			titleMatches = append(titleMatches, chapter)
+		} else if contentMatches[chapter.ID] {
+			textMatches = append(textMatches, chapter)
 		}
-		if section != chapter.Section && len(links) > 0 {
-			groups = append(groups, ui.Element("section", ui.Element("h2", ui.Text(section)), ui.Element("ul", links...)).Key(section))
-			links = nil
-		}
-		section = chapter.Section
-		href := chapterURL(chapter)
-		link := navigation.Link(href, ui.Text(chapter.Title))
-		if chapter.ID == page.ID {
-			link = link.Attr("aria-current", "page")
-		}
-		links = append(links, ui.Element("li", link).Key(href))
 	}
-	if len(links) > 0 {
-		groups = append(groups, ui.Element("section", ui.Element("h2", ui.Text(section)), ui.Element("ul", links...)).Key(section))
+	// Keep immediate title matches in place when the content index arrives.
+	// Separate keyed ranges retain link identity even across matching sections.
+	textResults := ui.Fragment()
+	if len(textMatches) > 0 {
+		textResults = ui.Fragment(paragraph("In chapter text").Class("studio-doc-search-status"), chapterGroups(textMatches, page.ID))
+	} else if len(titleMatches) == 0 {
+		textResults = paragraph("No matching chapters.")
 	}
-	if len(groups) == 0 {
-		groups = append(groups, paragraph("No matching chapters."))
-	}
+	chapterNav := ui.Element("nav", chapterGroups(titleMatches, page.ID).Key("titles"), searchStatus.Key("status"), textResults.Key("content")).Class("studio-doc-nav").Attr("aria-label", "Documentation chapters")
 	search := kit.Field("docs-search", "Find a chapter", "", ui.Element("input").Attr("type", "search").Attr("maxlength", "128").Attr("placeholder", "Search titles and content").Attr("value", filter.Get()).On("input", func(event ui.Event) {
 		filter.Set(event.Value)
 	}))
@@ -174,5 +190,5 @@ func DocsLayout(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View
 			page.SourcePath).Class("studio-doc-source"))
 	}
 	intro := ui.Element("header", introContent...).Class("studio-intro")
-	return ui.Element("section", breadcrumb, intro, ui.Element("div", ui.Element("div", search, searchStatus, ui.Element("nav", groups...).Class("studio-doc-nav").Attr("aria-label", "Documentation chapters")).Class("studio-doc-tools"), ui.Element("article", outlet).Class("studio-prose")).Class("studio-doc-layout"))
+	return ui.Element("section", breadcrumb, intro, ui.Element("div", ui.Element("div", search, chapterNav).Class("studio-doc-tools"), ui.Element("article", outlet).Class("studio-prose")).Class("studio-doc-layout"))
 }
