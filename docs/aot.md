@@ -9,7 +9,7 @@ Native targets:
 
 | Target | `vo build --kind` | Output | Runtime contract |
 | --- | --- | --- | --- |
-| 64-bit little-endian native host | `bin` | linked executable | packaged `libvo_aot_runtime.a` or UI-aware `libvo_ui_aot_runtime_native.a` |
+| 64-bit little-endian native host | `bin` | linked executable | packaged `libvo_aot_runtime.a` |
 | 64-bit little-endian native target | `object` | ELF, Mach-O, or COFF object | matching static runtime at link time |
 
 All paths consume the serialized, verified Volang module and run target
@@ -25,16 +25,15 @@ Build a native executable for the current host:
 vo build ./cmd/server -o server
 ```
 
-The official release archive places `vo`, `libvo_aot_runtime.a`, and
-`libvo_ui_aot_runtime_native.a` together.
+The official release archive places `vo` and `libvo_aot_runtime.a` together.
 A custom runtime can be selected explicitly:
 
 ```sh
 vo build ./cmd/server --runtime=/opt/volang/libvo_aot_runtime.a -o server
 ```
 
-On Windows/MSVC the matching archives are `vo_aot_runtime.lib` and
-`vo_ui_aot_runtime_native.lib`; `vo build` drives `link.exe` and emits an
+On Windows/MSVC the matching archive is `vo_aot_runtime.lib`; `vo build` drives
+`link.exe` and emits an
 `.exe`. `VO_AOT_LINKER` may select another link-compatible MSVC driver. As on
 Unix, executable linking requires the platform linker and SDK to be installed;
 `--kind=object` remains available when a downstream build owns final linking.
@@ -47,12 +46,11 @@ and routes them through this same linker. On Windows, `--windows-gui` chooses
 the GUI subsystem and the CRT startup for the generated `main` function. The
 default executable remains a console application.
 
-The linker selects the platform's UI runtime archive automatically when the
-verified module mounts `github.com/vo-lang/ui`; ordinary command-line programs
-keep the smaller core runtime. Packaged toolchains install both archives. A
-custom UI runtime can be selected with `VO_UI_AOT_RUNTIME_LIB` or
-`--runtime=PATH`; `VO_AOT_RUNTIME_LIB` continues to select the core runtime and
-acts as the explicit fallback for UI builds.
+`VO_AOT_RUNTIME_LIB` or `--runtime=PATH` selects a custom command-line runtime.
+Desktop UI applications use `vo ui package` and the matching desktop SDK, which
+owns the native runner, WebView runtime and platform link requirements. The CLI
+runtime registers the UI exchange contract for headless rendering; interactive
+windows need a desktop host.
 
 Programs importing the `toolchain` package require a compiler host. Their
 generated native entry calls the versioned runtime symbol

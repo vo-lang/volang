@@ -33,7 +33,7 @@ homebrew = [
   "brew tap vo-lang/vo",
   "brew install vo",
 ]
-manual_install = "Download the archive for your platform and preserve its `vo`, core and UI AOT runtimes, and the complete `share/volang` layout (Web project tools in `ui-next`, compatibility runtime in `ui-web`) while adding `vo` to your PATH. Web project tools require Node.js 24 or newer."
+manual_install = "Download the archive for your platform and preserve its `vo`, native AOT runtime, and the complete `share/volang` layout (project tools in `ui-next`, browser runtime in `ui-web`) while adding `vo` to your PATH. Web project tools require Node.js 24 or newer."
 
 [homebrew]
 repository = "vo-lang/homebrew-vo"

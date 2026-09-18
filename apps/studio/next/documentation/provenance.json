@@ -187,7 +187,7 @@
   "path": "apps/studio/next/documentation",
   "schemaVersion": 2,
   "sourceDigests": {
-    "Cargo.lock": "sha256:99d0f28b80a457a9c4e64d043a99dad6cf7460b42ae379afacb0527b9be6ce06",
+    "Cargo.lock": "sha256:0266041b9dde8c27477685be8738c25a49d7c28cebe91ddb72c82c8648c33217",
     "cmd/vo-dev/Cargo.toml": "sha256:310b34e71588781869b7db48a787cf16d1495f75a7ec95515cf26ca7a4a26565",
     "cmd/vo-dev/src/generate_docs.rs": "sha256:ff2be0bc4d781f835684cec39d85b6afc62e116862c43c24120d789c5cc06638",
     "cmd/vo-dev/src/generate_docs/document.rs": "sha256:e8c0c537cf0670b71eba8c30e75f98014a35678eabb7016c5e89f16f0e5078fd",
