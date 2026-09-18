@@ -3,6 +3,7 @@ import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {build} from './node_modules/esbuild/lib/main.js';
 import {root} from './repository-paths.mjs';
+import {readStudioDraft,waitStudioDraft} from './studio-draft-contracts.mjs';
 
 export async function checkPersistentStorage(browser) {
   const bundle=await build({entryPoints:[resolve(root,'lang/crates/vo-web/js/ui_next/storage.ts')],bundle:true,write:false,format:'iife',globalName:'storageAdapter',platform:'browser'});
@@ -36,8 +37,16 @@ export async function checkPersistentStorage(browser) {
     });
     await page.reload();await load();
     assert.equal(await page.evaluate(()=>storageAdapter.createPersistentStorage('storage-contract').get('draft')),'Saved 中文 🌿');
+    await page.evaluate(async()=>{
+      const drafts=storageAdapter.createPersistentStorage('volang.studio.next.drafts.v1');
+      await drafts.set('delayed-empty','previous draft');
+      window.delayedDraftWrite=new Promise(resolve=>setTimeout(resolve,250)).then(()=>drafts.set('delayed-empty',''));
+    });
+    await waitStudioDraft(page,'','delayed-empty');
+    assert.equal(await readStudioDraft(page,'delayed-empty'),'','draft wait returned before the empty write committed');
+    await page.evaluate(()=>window.delayedDraftWrite);
     assert.deepEqual(errors,[]);
-    return [...checks,'reopen-committed-draft'].map(name=>({name,passed:true}));
+    return [...checks,'reopen-committed-draft','wait-for-delayed-empty-draft'].map(name=>({name,passed:true}));
   } finally {await page.close();}
 }
 

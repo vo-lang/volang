@@ -1,25 +1,35 @@
+import {setTimeout as delay} from 'node:timers/promises';
+
 // Inspect committed storage independently of the Studio service implementation.
-async function queryStudioDraft({key,value,compare}) {
+async function queryStudioDraft({key}) {
   const db=await new Promise((resolve,reject)=>{
     const request=indexedDB.open('volang.studio.next.drafts.v1',1);
     request.onupgradeneeded=()=>request.transaction.abort();
     request.onsuccess=()=>resolve(request.result);request.onerror=()=>request.error?.name==='AbortError'?resolve(null):reject(request.error);
   });
   try {
-    if(!db?.objectStoreNames.contains('values'))return compare?false:null;
+    if(!db?.objectStoreNames.contains('values'))return null;
     return await new Promise((resolve,reject)=>{
       const tx=db.transaction('values','readonly'),request=tx.objectStore('values').get(key);
-      tx.oncomplete=()=>resolve(compare?request.result===value:request.result??null);tx.onabort=()=>reject(tx.error);
+      tx.oncomplete=()=>resolve(request.result??null);tx.onabort=()=>reject(tx.error);
     });
   } finally {db?.close();}
 }
 
-export async function waitStudioDraft(page,value,key='volang.studio.next.draft.v1') {
-  await page.waitForFunction(queryStudioDraft,{key,value,compare:true});
+export async function waitStudioDraft(page,value,key='volang.studio.next.draft.v1',{timeout=30000}={}) {
+  const deadline=performance.now()+timeout;
+  // waitForFunction treats a Promise as truthy before its result is known.
+  // Await each committed read here, then decide whether another poll is needed.
+  for (;;) {
+    if(await readStudioDraft(page,key)===value)return;
+    const remaining=deadline-performance.now();
+    if(remaining<=0)throw new Error(`Studio draft ${key} did not commit within ${timeout} ms`);
+    await delay(Math.min(25,remaining));
+  }
 }
 
 export async function readStudioDraft(page,key='volang.studio.next.draft.v1') {
-  return page.evaluate(queryStudioDraft,{key,compare:false});
+  return page.evaluate(queryStudioDraft,{key});
 }
 
 // Seed the same committed store the application reads; no compatibility import.
