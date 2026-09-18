@@ -1,5 +1,5 @@
 //! The complete Web project toolkit travels with each native CLI release.
-//! Keep its inventory separate from the compatibility runtime and certification.
+//! Its inventory binds the installed compiler, browser assets and project tools.
 use super::*;
 
 const ARCHIVE_ROOT: &str = "share/volang/ui-next";

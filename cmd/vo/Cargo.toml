@@ -14,9 +14,8 @@ name = "vo"
 path = "src/main.rs"
 
 [features]
-default = ["jit", "desktop-ui"]
-jit = ["vo-engine/jit", "vo-ui-integration/jit"]
-desktop-ui = ["dep:vo-ui-shell-native"]
+default = ["jit"]
+jit = ["vo-engine/jit"]
 
 [dependencies]
 lsp-server = "=0.7.9"
@@ -26,25 +25,15 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 toml = "0.8"
+vo-ui-bridge = { workspace = true, features = ["toolchain"] }
 vo-common-core = { path = "../../lang/crates/vo-common-core" }
 vo-common = { path = "../../lang/crates/vo-common" }
 vo-engine = { path = "../../lang/crates/vo-engine", default-features = false, features = ["aot-native"] }
-vo-ui-integration = { path = "../../lang/crates/vo-ui-integration", default-features = false, features = ["aot-native"] }
 vo-module = { path = "../../lang/crates/vo-module" }
 vo-release = { path = "../../lang/crates/vo-release" }
 vo-schema-compiler = { path = "../../lang/crates/vo-schema-compiler" }
 vo-syntax = { path = "../../lang/crates/vo-syntax" }
 vo-target.workspace = true
-vo-ui-artifact.workspace = true
-vo-ui-accessibility.workspace = true
-vo-ui-core.workspace = true
-vo-ui-layout.workspace = true
-vo-ui-paint.workspace = true
-vo-ui-plan.workspace = true
-vo-ui-protocol.workspace = true
-vo-ui-shell-native = { workspace = true, optional = true, features = ["desktop-window"] }
-vo-ui-vm.workspace = true
-vo-ui-web.workspace = true
 vo-vm = { path = "../../lang/crates/vo-vm", default-features = false }
 
 [target.'cfg(windows)'.dependencies]

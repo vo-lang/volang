@@ -5,7 +5,11 @@
   "version": "0.1.4",
   "publisher": "vo-lang",
   "license": "MIT",
-  "repository": {"type": "git", "url": "https://github.com/vo-lang/volang.git", "directory": "ui/editors/vscode"},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vo-lang/volang.git",
+    "directory": "ui/editors/vscode"
+  },
   "main": "./extension.cjs",
   "activationEvents": [
     "onLanguage:volang"
@@ -81,10 +85,6 @@
       }
     ],
     "snippets": [
-      {
-        "language": "volang",
-        "path": "./snippets/ui.json"
-      },
       {
         "language": "volang",
         "path": "./snippets/web.json"

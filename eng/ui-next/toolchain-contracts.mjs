@@ -127,7 +127,6 @@ try {
   await rename(project,join(temporary,'Moved project 中文'));project=join(temporary,'Moved project 中文');
   assert.equal(JSON.parse(await readFile(join(project,'ui-next.json'))).desktop.identifier,applicationId);
   console.log(await cli('verify'));
-  assert.match(await execute(executable(),['ui','web','verify'],{cwd:temporary,env}),/Verified/);
   const nativeAuthoring = await checkNativeAuthoring(executable(),project,{env});
   const projectDiagnosis=await checkProjectDiagnosis(executable(),project,{env});
   assert(inventory.artifacts.some(file => file.path === 'editors/volang-ui-authoring.vsix'));
@@ -172,11 +171,11 @@ try {
   await cp(join(root,'eng/ui-next/fixtures/guide-app.test.mjs'),join(guideProject,'tests/browser/app.test.mjs'));
   const guideBuild=await publicTests(guideProject,'first-steps');
 
-  const migrationProject=join(temporary,'Migration 中文');await cli('create',migrationProject);
-  const migrationSource=guideApplication(await readFile(join(kit,'ui/next/guides/migration.md'),'utf8'));
-  await writeFile(join(migrationProject,'app/app.vo'),migrationSource);
-  await cp(join(root,'eng/ui-next/fixtures/migration-app.test.mjs'),join(migrationProject,'tests/browser/app.test.mjs'));
-  const migrationBuild=await publicTests(migrationProject,'migration',6);
+  const formsProject=join(temporary,'Forms 中文');await cli('create',formsProject);
+  const formsSource=guideApplication(await readFile(join(kit,'ui/next/guides/forms.md'),'utf8'));
+  await writeFile(join(formsProject,'app/app.vo'),formsSource);
+  await cp(join(root,'eng/ui-next/fixtures/forms-app.test.mjs'),join(formsProject,'tests/browser/app.test.mjs'));
+  const formsBuild=await publicTests(formsProject,'forms',6);
 
   const pages = join(temporary,'Pages 中文');await cli('create',pages,'--template','pages');
   const pageBuild = await publicTests(pages,'pages');assert.equal(pageBuild.entries.length,2);
@@ -318,7 +317,7 @@ try {
   await writeFile(join(evidence,'toolchain-manifest.json'),manifest);
   await writeFile(join(evidence,'report.json'),JSON.stringify({passed:true,toolchain:verification,publicTestingCases,editorCases:results,deliveredExamples,nativeAuthoring,projectDiagnosis,
     firstSteps:{passed:true,publicCases:3,deliveredGuide:true,sourceSha256:hash(guideSource)},
-    migration:{passed:true,publicCases:6,deliveredGuide:true,sourceSha256:hash(migrationSource)},
+    forms:{passed:true,publicCases:6,deliveredGuide:true,sourceSha256:hash(formsSource)},
     development:{passed:true,namedEntry:'notes',state:true,selection:true,errorRecovery:true,cleanShutdown:true},
     documentData:{passed:true,publicCases:9,rawCases:6,sourceReload:true,savedRetained:true,newMetadataApplied:true,sourceSha256:hash(source),rawSourceSha256:hash(dataBlockSource)},
     kitComposition:{passed:true,publicCases:6,nativeModifiers:true,retainedItems:true,customContent:true,sourceSha256:hash(kitSource)},
@@ -326,7 +325,7 @@ try {
     canvas:{passed:true,publicCases:6,sourceReload:true,paletteRetained:true,backingReleased:true,sourceSha256:hash(canvasSource)},
     scrollPosition:{passed:true,publicCases:6,sourceReload:true,positionRetained:true,newRequest:true,sourceSha256:hash(scrollSource)},
     variableList:{...variableReload,publicCases:9,sourceSha256:hash(variableSource)},
-    builds:{default:ordinary,'first-steps':guideBuild,migration:migrationBuild,pages:pageBuild,'document-data':dataBlockBuild,'kit-composition':kitBuild,fieldnotes:serverBuild,listening:mediaBuild,editor:editorBuild,canvas:canvasBuild,plot:plotBuild,'scroll-position':scrollBuild,'variable-list':variableBuild},
+    builds:{default:ordinary,'first-steps':guideBuild,forms:formsBuild,pages:pageBuild,'document-data':dataBlockBuild,'kit-composition':kitBuild,fieldnotes:serverBuild,listening:mediaBuild,editor:editorBuild,canvas:canvasBuild,plot:plotBuild,'scroll-position':scrollBuild,'variable-list':variableBuild},
     contracts:['toolchain-and-project-relocation','no-checkout-or-cargo-required','fixed-compiler-identity','manifest-required','same-package-inventory-after-use',
       'production-inspector-excluded','development-declared-props','development-independent-state','complete-delivered-guide-application','complete-delivered-example-applications',
       'native-cli-relative-discovery','standard-project-cli','portable-browser-fixtures','three-browser-engines','wasm-vm','named-page-images','request-time-ssr',

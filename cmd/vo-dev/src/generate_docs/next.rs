@@ -11,12 +11,7 @@ pub(super) fn materialize(
     catalog: &Catalog,
     pages: &[LoadedPage<'_>],
 ) -> Result<BTreeMap<String, Vec<u8>>> {
-    // The released UI guide still documents the previous runtime. Its source
-    // remains in the legacy product; the Web guides use this same generator.
-    let mut selected: Vec<_> = pages
-        .iter()
-        .filter(|page| page.section.id != "ui")
-        .collect();
+    let mut selected: Vec<_> = pages.iter().collect();
     selected.sort_by_key(|page| page.section.id != "web-ui");
     let routes = selected
         .iter()
@@ -186,28 +181,28 @@ mod search_tests {
                     }],
                 },
                 Section {
-                    id: "ui".into(),
-                    title: "Compatibility".into(),
+                    id: "language".into(),
+                    title: "Language".into(),
                     page: vec![Page {
-                        id: "old-ui".into(),
-                        title: "Old UI".into(),
-                        summary: "Earlier API".into(),
-                        file: "ui/docs/old.md".into(),
+                        id: "types".into(),
+                        title: "Types".into(),
+                        summary: "Language types".into(),
+                        file: "lang/docs/guides/types.md".into(),
                     }],
                 },
             ],
         };
         let selected = &catalog.section[0];
-        let legacy = &catalog.section[1];
+        let language = &catalog.section[1];
         let pages = [
             LoadedPage {section: selected, page: &selected.page[0], markdown: "# Guide\n\nA **typed** component.\n\n```vo\nui.InspectProp(scope, \"name\", name)\n```\n\n中文\n".into()},
-            LoadedPage {section: legacy, page: &legacy.page[0], markdown: "# Legacy\n\nRetiredSearchTerm\n".into()},
+            LoadedPage {section: language, page: &language.page[0], markdown: "# Types\n\nDistinctSearchTerm\n".into()},
         ];
         let files = materialize(&catalog, &pages).unwrap();
         let index: serde_json::Value = serde_json::from_slice(&files["index.json"]).unwrap();
         let search: serde_json::Value = serde_json::from_slice(&files["search.json"]).unwrap();
         assert_eq!(search["version"], 1);
-        assert_eq!(search["pages"].as_array().unwrap().len(), 1);
+        assert_eq!(search["pages"].as_array().unwrap().len(), 2);
         assert_eq!(search["pages"][0]["ID"], "first-steps");
         let text = search["pages"][0]["Text"].as_str().unwrap();
         assert!(text.contains("a typed component."));
@@ -216,7 +211,7 @@ mod search_tests {
             "the separately rendered first heading must be searchable"
         );
         assert!(text.contains("ui.inspectprop") && text.contains("中文"));
-        assert!(!text.contains("retiredsearchterm"));
+        assert!(!text.contains("distinctsearchterm"));
         assert_eq!(index["search"]["Asset"], "search.json");
         assert_eq!(
             index["search"]["SHA256"],

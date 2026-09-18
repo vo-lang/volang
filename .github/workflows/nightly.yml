@@ -296,8 +296,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: ui_artifact_decoders
-            task: nightly-fuzz-ui-artifact
           - target: decoders
             task: nightly-fuzz-app-protocol
     steps:

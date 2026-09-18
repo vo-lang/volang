@@ -27,7 +27,7 @@ func handle(request server.Request) (server.Page, error) {
 		if path != "/" {
 			path = strings.TrimRight(path, "/")
 		}
-		for _, redirect := range app.LegacyRedirects() {
+		for _, redirect := range app.SiteRedirects() {
 			if path == redirect.From {
 				return server.Page{Status: 307, Headers: map[string][]string{"location": {redirect.To + query}}}, nil
 			}
@@ -95,7 +95,7 @@ func main() {
 			return
 		}
 		if os.Args[1] == "--static-redirects" {
-			printJSON(app.LegacyRedirects())
+			printJSON(app.SiteRedirects())
 			return
 		}
 	}

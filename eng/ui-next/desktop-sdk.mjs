@@ -30,7 +30,7 @@ export async function buildDesktopSdk(directory,{profile='release-native',signal
     const requirements=nativeBuildRequirements((await readFile(messages,'utf8'))+'\n'+log),{nativeLink}=requirements;
     const libraries=await bundleNativeLibraries(stage,requirements);
     const tree=await execute('cargo',['tree','--locked','--offline','-p','vo-ui-desktop-runtime','--features','aot','-e','normal'],{env,signal});
-    for(const dependency of ['vo-ui-runtime ','vo-ui-vm ','vo-ui-integration ','vo-codegen ','cranelift-codegen ']) {
+    for(const dependency of ['vo-codegen ','cranelift-codegen ']) {
       if(tree.includes(dependency))throw new Error(`Desktop AOT unexpectedly depends on ${dependency}`);
     }
     await writeFile(join(stage,'aot-dependencies.txt'),tree);

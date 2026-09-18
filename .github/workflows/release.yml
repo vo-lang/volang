@@ -375,31 +375,11 @@ jobs:
           case "${{ matrix.target }}" in
             *windows*)
               packaged_vo="$unpack/vo.exe"
-              packaged_ui_runtime="$unpack/vo_ui_aot_runtime_native.lib"
-              ui_native="./target/${{ matrix.target }}/release/ui-native-aot-smoke.exe"
               ;;
             *)
               packaged_vo="$unpack/vo"
-              packaged_ui_runtime="$unpack/libvo_ui_aot_runtime_native.a"
-              ui_native="./target/${{ matrix.target }}/release/ui-native-aot-smoke"
               ;;
           esac
-          "$packaged_vo" ui build ui/examples/settings \
-            -o "./target/${{ matrix.target }}/release/ui-web-smoke"
-          test -f "./target/${{ matrix.target }}/release/ui-web-smoke/app.vob"
-          test -f "./target/${{ matrix.target }}/release/ui-web-smoke/runtime/pkg/vo_web_bg.wasm"
-          test -f "./target/${{ matrix.target }}/release/ui-web-smoke/runtime/dist/index.js"
-          starter="$RUNNER_TEMP/vo-ui-release-starter"
-          export VO_MOD_CACHE="$RUNNER_TEMP/vo-ui-module-cache"
-          "$packaged_vo" ui new "$starter"
-          test -f "$starter/vo.lock"
-          "$packaged_vo" ui test "$starter" --mode=vm
-          "$packaged_vo" build ui/examples/settings \
-            --runtime="$packaged_ui_runtime" \
-            --no-cache \
-            -o "$ui_native"
-          test -f "$ui_native"
-          ./target/debug/vo-dev release probe-native-ui "${{ matrix.target }}"
           # Resolve tools from the extracted installation, without checkout overrides.
           unset VO_UI_TOOLCHAIN VO_UI_NODE
           "$packaged_vo" ui verify

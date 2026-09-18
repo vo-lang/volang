@@ -362,12 +362,10 @@ pub(crate) fn require_ui_evidence(bundle: &CertificationBundle) -> Result<()> {
         .iter()
         .map(|evidence| evidence.task_id.as_str())
         .collect::<BTreeSet<_>>();
-    let web = tasks.contains("wasm-web-full");
-    let linux = tasks.contains("ui-platform-linux-full");
-    let macos = tasks.contains("ui-platform-macos-full");
-    let windows = tasks.contains("ui-platform-windows-full");
-    if !(web && linux && macos && windows) {
-        bail!("CI bundle lacks the full Web, Linux, macOS, and Windows UI evidence set");
+    for required in crate::ui_certification::REQUIRED_TASKS {
+        if !tasks.contains(required) {
+            bail!("CI bundle lacks required UI evidence: {required}");
+        }
     }
     Ok(())
 }

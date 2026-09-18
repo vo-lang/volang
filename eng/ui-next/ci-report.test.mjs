@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {createHash} from 'node:crypto';
-import {browserEvidence,staticStudioEvidence,studioUpgradeEvidence,nativeAuthoringEvidence,publicHostEvidence} from './ci-report.mjs';
+import {browserEvidence,staticStudioEvidence,nativeAuthoringEvidence,publicHostEvidence} from './ci-report.mjs';
 
 test('public host evidence requires installed package, both VM runtimes and complete root lifetimes', () => {
   const report={schema:'volang.ui-public-host.v1',passed:true,
     package:{name:'vo-web',version:'0.1.4',files:1,export:{types:'./dist/ui_next/index.d.ts',import:'./dist/ui_next/index.js'}},
-    checks:Object.fromEntries(['freshPackageStaging','archiveInstalled','existingExportsRetained','strictConsumerTypes','browserBundle','legacyUiExcluded','heavyWidgetsExcluded'].map(key=>[key,true])),
+    checks:Object.fromEntries(['freshPackageStaging','archiveInstalled','existingExportsRetained','strictConsumerTypes','browserBundle','heavyWidgetsExcluded'].map(key=>[key,true])),
     cases:['chromium','firefox','webkit'].flatMap(engine=>[['vm','minimal'],['vm','package']].flatMap(([backend,runtime])=>[false,true].map(hydrate=>({
       engine,backend,runtime,hydrate,browserVersion:'tested-browser',passed:true,independentState:true,nativeInput:true,regexp:true,
       scopedProviders:true,closeIsolation:true,remount:true,staleCompletion:true,cleanShutdown:true,
@@ -55,7 +55,7 @@ function complete() {
   for (const name of ['domBoundary','nativeMedia','nativeText','dataBlocks','indeterminate','canvas','plot','scrollPosition','textSelection','size','delegatedInputs','pointerBoundary','multipleSelection','reloadBoundary','fileBoundary','customElements','lazyWidgets',
     'widgetCommit','codeEditor','editorLanguage','shadowFocus','measurement','navigation','scrollNavigation','modalBoundary','motionBoundary',
     'workerUi','inspectionPanel','localApplicationCompiler','editorCompiler','popoverBoundary','popoverMotion','keyboardBoundary','mount']) report[name]={passed:true};
-  for (const name of ['backends','inspection','styles','workbench','lazyWidgetApplications','studioEditor','studioRecovery','studio']) {
+  for (const name of ['backends','inspection','styles','workbench','lazyWidgetApplications','studioEditor','studio']) {
     report[name]=['vm'].map(backend => ({backend,passed:true}));
   }
   report.pointerBoundary.contracts=['explicit-latest-pointer-delivery'];
@@ -103,7 +103,6 @@ test('partial backend coverage and failed nested checks cannot become a passing 
     report => {report.studioEditor[0].previewDiagnostics=false;},
     report => {report.studioEditor[0].restoredDraft=false;},
     report => {report.studioEditor[0].warnings=false;},
-    report => {report.studioRecovery[0].passed=false;},
     report => {report.fileBoundary.passed=false;},
     report => {report.mount.contracts=[];},
     report => {delete report.mount.startup;},
@@ -153,34 +152,14 @@ test('static Studio evidence binds its native producer and every delivered backe
   const build={schema:'volang.studio-next-static.v1',sourceBuildSha256:createHash('sha256').update(source).digest('hex')};
   const report={passed:true,relocated:true,build,results:['chromium','firefox','webkit'].map(engine=>({
     engine,browserVersion:'test',passed:true,rootRedirect:true,refresh:true,missingPage:true,noScript:true,
-    ...Object.fromEntries(['studio','recovery'].map(name=>[name,['vm'].map(backend=>({backend,passed:true}))])),editor:editorResults(),language:languageResults(),
+    ...Object.fromEntries(['studio'].map(name=>[name,['vm'].map(backend=>({backend,passed:true}))])),editor:editorResults(),language:languageResults(),
   }))};
   staticStudioEvidence(report,build,source);
   assert.throws(()=>staticStudioEvidence(report,build,Buffer.from('another native build')),/native build/);
   for(const alter of [value=>value.results.pop(),value=>value.results[0].editor.shift(),value=>value.results[0].language[0].workersReleased=false,
-    value=>value.results[0].recovery[0].passed=false,value=>value.results[0].noScript=false,
+    value=>value.results[0].noScript=false,
     value=>value.build.sourceBuildSha256='different',value=>value.relocated=false]) {
     const changed=structuredClone(report);alter(changed);
     assert.throws(()=>staticStudioEvidence(changed,build,source));
-  }
-});
-
-test('Studio upgrade evidence requires data preservation, all engines and both retries',()=>{
-  const fixture=Buffer.from('previous worker'),build={schema:'volang.studio-next-static.v1',artifacts:[]};
-  const report={passed:true,nativeRedirects:true,readOnlyMethods:true,build,
-    fixtureSha256:createHash('sha256').update(fixture).digest('hex'),
-    results:['chromium','firefox','webkit'].map(engine=>({engine,browserVersion:'test',passed:true,
-      workerRetired:true,otherRegistrationRetained:true,assetCacheRetired:true,otherCacheRetained:true,
-      openDraftRetained:true,projectFilesRetained:true,oldLinks:true,noScriptLegacy:true,unknownTopic:true,
-      retries:['vm'].map(backend=>({backend,passed:true})),
-    }))};
-  studioUpgradeEvidence(report,build,fixture);
-  assert.throws(()=>studioUpgradeEvidence(report,build,Buffer.from('different worker')),/legacy worker/);
-  for (const alter of [value=>value.results.pop(),value=>value.results[0].retries.pop(),
-    value=>value.results[0].retries[0].passed=false,value=>value.results[0].projectFilesRetained=false,
-    value=>value.results[0].otherCacheRetained=false,value=>value.nativeRedirects=false,
-    value=>value.build.artifacts.push('different')]) {
-    const changed=structuredClone(report);alter(changed);
-    assert.throws(()=>studioUpgradeEvidence(changed,build,fixture));
   }
 });

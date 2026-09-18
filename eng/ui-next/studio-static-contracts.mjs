@@ -10,7 +10,6 @@ import {serveFiles} from './static-server.mjs';
 import {checkStudio} from './studio-contracts.mjs';
 import {checkStudioEditor} from './studio-editor-contracts.mjs';
 import {checkStudioLanguageService} from './studio-language-contracts.mjs';
-import {checkStudioRecovery} from './studio-recovery-contracts.mjs';
 
 const source=await exportStudio();
 const build=JSON.parse(await readFile(join(source,'build-report.json')));
@@ -31,7 +30,7 @@ try {
   const createOrigin=()=>serveFiles(deployed,{notFoundDocument:'404.html'});
   application=await createOrigin();
   const url=application.url.replace(/\/$/,'');
-  assert.equal(build.pages.filter(page=>page.status===200).length,build.documents + 6);
+  assert.equal(build.pages.filter(page=>page.status===200).length,build.documents + 5);
   for(const page of build.pages) {
     const response=await fetch(url+page.path,{headers:{accept:'text/html'}});
     assert.equal(response.status,page.status,page.path);
@@ -83,7 +82,7 @@ try {
     assert.equal(await page.evaluate(()=>window.__studioNext.error),null);
     assert.deepEqual(errors,[]);await page.close();
     const noScript=await browser.newPage({javaScriptEnabled:false});
-    for(const path of ['/studio/gallery','/studio/docs/hello-world','/studio/playground','/studio/recover']) {
+    for(const path of ['/studio/gallery','/studio/docs/hello-world','/studio/playground']) {
       assert.equal((await noScript.goto(url+path)).status(),200);
       assert(await noScript.locator('h1').count());
       assert(await noScript.locator('#root').innerText());
@@ -92,13 +91,12 @@ try {
     const studio=await checkStudio(browser,url,directory);
     const editor=await checkStudioEditor(browser,url);
     const language=await checkStudioLanguageService(browser,url);
-    const recovery=await checkStudioRecovery(browser,url,join(directory,'recovery'),{createOrigin});
-    const result={engine:name,browserVersion:browser.version(),passed:true,studio,editor,language,recovery,
+    const result={engine:name,browserVersion:browser.version(),passed:true,studio,editor,language,
       rootRedirect:true,refresh:true,missingPage:true,noScript:true};
     results.push(result);
     await writeFile(join(directory,'report.json'),JSON.stringify(result,null,2)+'\n');
     await browser.close();
-    console.log(`${name}: relocated static Studio, VM, ${build.documents + 6} pages, hydration, editor, workers and recovery passed`);
+    console.log(`${name}: relocated static Studio, VM, ${build.documents + 5} pages, hydration, editor, workers passed`);
   }
   await writeFile(join(output,'report.json'),JSON.stringify({passed:true,build,relocated:true,documents:build.documents,results},null,2)+'\n');
 } finally {

@@ -4,7 +4,7 @@ version = 2
 crate = "vo"
 binary = "vo"
 artifact_prefix = "vo"
-build_args = ["--release", "--locked", "-p", "vo", "--no-default-features", "--features", "jit,desktop-ui"]
+build_args = ["--release", "--locked", "-p", "vo", "--no-default-features", "--features", "jit"]
 release_opt_level = "3"
 release_lto = "thin"
 
@@ -12,7 +12,6 @@ release_lto = "thin"
 registry = "crates-io"
 internal_standalone = [
   "fuzz/app-protocol",
-  "fuzz/ui-artifact",
   "fuzz/voplay-protocol",
 ]
 packages = [
@@ -34,7 +33,7 @@ homebrew = [
   "brew tap vo-lang/vo",
   "brew install vo",
 ]
-manual_install = "Download the archive for your platform and preserve its `vo`, core and UI AOT runtimes, and the complete `share/volang` layout (Web project tools in `ui-next`, compatibility runtime in `ui-web`) while adding `vo` to your PATH. Web project tools require Node.js 24 or newer."
+manual_install = "Download the archive for your platform and preserve its `vo`, native AOT runtime, and the complete `share/volang` layout (project tools in `ui-next`, browser runtime in `ui-web`) while adding `vo` to your PATH. Web project tools require Node.js 24 or newer."
 
 [homebrew]
 repository = "vo-lang/homebrew-vo"

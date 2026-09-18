@@ -61,9 +61,6 @@ func StudioLayout(scope *ui.Scope, match navigation.Match, content ui.View) ui.V
 		theme = "dark"
 	}
 	section := "gallery"
-	if match.ID == "recover" {
-		section = "recover"
-	}
 	if match.ID == "playground" || match.ID == "ui-playground" {
 		section = "playground"
 	}
@@ -73,7 +70,7 @@ func StudioLayout(scope *ui.Scope, match navigation.Match, content ui.View) ui.V
 	ui.Effect(scope, "navigation", func() func() {
 		router.SetTitle(describeMatch(match).Title)
 		return nil
-	}, location.Path, location.Query.Get("topic"))
+	}, location.Path)
 	nav := []ui.View{}
 	for _, entry := range []string{"gallery", "playground", "docs"} {
 		label := "Gallery"
@@ -98,5 +95,5 @@ func StudioLayout(scope *ui.Scope, match navigation.Match, content ui.View) ui.V
 			dark.Set(value)
 		},
 	})).Attr("class", "studio-sidebar-footer")).Attr("class", "studio-sidebar")
-	return ui.Element("div", ui.Element("a", ui.Text("Skip to content")).Attr("href", "#studio-content").Attr("class", "studio-skip"), sidebar, ui.Element("main", content, ui.Element("p", ui.Text(router.Error())).Attr("role", "alert"), ui.Element("footer", ui.Text("Built with Volang UI · A work in progress, made to be explored."), navigation.Link("/studio/recover", ui.Text("Recover browser projects")).Class("studio-recovery-link"))).Attr("id", "studio-content").Attr("tabindex", "-1")).Attr("class", "vui studio").Attr("data-theme", theme).Attr("data-section", section)
+	return ui.Element("div", ui.Element("a", ui.Text("Skip to content")).Attr("href", "#studio-content").Attr("class", "studio-skip"), sidebar, ui.Element("main", content, ui.Element("p", ui.Text(router.Error())).Attr("role", "alert"), ui.Element("footer", ui.Text("Built with Volang UI · A work in progress, made to be explored."))).Attr("id", "studio-content").Attr("tabindex", "-1")).Attr("class", "vui studio").Attr("data-theme", theme).Attr("data-section", section)
 }

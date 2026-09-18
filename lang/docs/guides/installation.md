@@ -63,27 +63,36 @@ vo run hello.vo
 
 The expected output is `Volang is ready`.
 
-## Optional Web prerequisites
+## UI toolchain
 
-Normal language and native UI development has no Node package dependency.
-Repository maintainers who rebuild the browser runtime support package use the
-tool versions governed by the repository. A released `vo ui build` consumes a
-compatible packaged Web runtime directory and emits a self-contained Web
-bundle.
-
-## Editor and Studio
-
-Volang Studio is the dogfood IDE built with the official UI framework. From a
-source checkout, start it with:
+UI project commands require Node.js 24 or newer and a matching packaged UI
+toolchain. Installing the language CLI alone does not install the Web compiler,
+framework sources or browser tooling. Verify the complete installation first:
 
 ```sh
-cargo build -p vo --locked
-./target/debug/vo ui dev apps/studio --open
+vo ui verify
+vo ui create my-app
+vo ui dev --project my-app
 ```
 
-Studio includes persistent projects, examples, analysis, VM/JIT execution,
-preview, documentation, and release-oriented Web and desktop hosts. The CLI
-remains the source of truth for compilation and module operations.
+The toolchain is discovered beside the CLI installation. `VO_UI_TOOLCHAIN` may
+select a complete toolchain directory containing `ui.mjs` and
+`tools/toolchain.json`. Keep the compiler and tools from the same distribution.
+Native desktop run/package commands additionally require its matching desktop
+SDK; `vo ui doctor --project my-app --target desktop` checks those prerequisites.
+See the [first application guide](../../../ui/next/guides/first-steps.md) for
+checking, browser testing and building an application.
+
+## Studio
+
+[Volang Studio](https://volang.dev/studio/gallery) demonstrates UI components,
+runs editable console and UI examples, and serves the language and framework
+reference. Drafts stay in the browser. Browser execution uses the Wasm VM.
+
+To develop Studio from a source checkout, follow the runtime prerequisites in
+`ui/next/README.md`, then run `node eng/ui-next/cli.mjs dev` from the repository
+root. Studio is a showcase and Playground; project creation and packaging use
+the CLI toolchain described above.
 
 ## Module cache
 

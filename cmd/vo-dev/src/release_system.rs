@@ -113,16 +113,6 @@ pub(crate) fn cmd_release(root: &Path, mut args: Vec<String>) -> Result<()> {
     }
     match args.remove(0).as_str() {
         "candidate" => cmd_candidate(root, args),
-        "probe-native-ui" => {
-            if args.len() != 1 {
-                bail!("usage: vo-dev release probe-native-ui TARGET");
-            }
-            let release = load_release(root)?;
-            lint_release_file(&release)?;
-            let target = release_target(&release, &args[0])?;
-            let commit = crate::release_identity::checkout_commit(root)?;
-            crate::ci::probe_native_ui(root, &target.target, commit)
-        }
         "matrix" => cmd_matrix(root, args),
         "metadata" => cmd_metadata(root, args),
         "version" => cmd_version(root, args),
@@ -389,8 +379,6 @@ fn build_with_identity(
             "--timings",
             "-p",
             "vo-aot-runtime",
-            "-p",
-            "vo-ui-aot-runtime-native",
             "--target",
             &target.target,
         ])

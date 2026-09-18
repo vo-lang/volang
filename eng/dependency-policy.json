@@ -2,8 +2,7 @@
   "schema": "volang.dependency-policy.v1",
   "rust_lockfiles": [
     "Cargo.lock",
-    "fuzz/app-protocol/Cargo.lock",
-    "fuzz/ui-artifact/Cargo.lock"
+    "fuzz/app-protocol/Cargo.lock"
   ],
   "npm_workspaces": [
     "lang/crates/vo-web",
@@ -23,12 +22,12 @@
       "reviewed": "2026-09-05",
       "expires": "2026-12-04",
       "dependency_chain": [
-        "vo-ui-shell-native",
-        "drag",
+        "vo-ui-webview",
+        "wry",
         "gtk",
         "atk"
       ],
-      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+      "reason": "The system WebView depends on GTK3 bindings on Linux. Track upstream replacement while retaining Linux WebView acceptance."
     },
     {
       "advisory": "RUSTSEC-2024-0416",
@@ -42,13 +41,13 @@
       "reviewed": "2026-09-05",
       "expires": "2026-12-04",
       "dependency_chain": [
-        "vo-ui-shell-native",
-        "drag",
+        "vo-ui-webview",
+        "wry",
         "gtk",
         "atk",
         "atk-sys"
       ],
-      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+      "reason": "The system WebView depends on GTK3 bindings on Linux. Track upstream replacement while retaining Linux WebView acceptance."
     },
     {
       "advisory": "RUSTSEC-2024-0412",
@@ -62,11 +61,11 @@
       "reviewed": "2026-09-05",
       "expires": "2026-12-04",
       "dependency_chain": [
-        "vo-ui-shell-native",
-        "drag",
+        "vo-ui-webview",
+        "wry",
         "gdk"
       ],
-      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+      "reason": "The system WebView depends on GTK3 bindings on Linux. Track upstream replacement while retaining Linux WebView acceptance."
     },
     {
       "advisory": "RUSTSEC-2024-0418",
@@ -80,12 +79,12 @@
       "reviewed": "2026-09-05",
       "expires": "2026-12-04",
       "dependency_chain": [
-        "vo-ui-shell-native",
-        "drag",
+        "vo-ui-webview",
+        "wry",
         "gdk",
         "gdk-sys"
       ],
-      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+      "reason": "The system WebView depends on GTK3 bindings on Linux. Track upstream replacement while retaining Linux WebView acceptance."
     },
     {
       "advisory": "RUSTSEC-2024-0417",
@@ -99,11 +98,11 @@
       "reviewed": "2026-09-05",
       "expires": "2026-12-04",
       "dependency_chain": [
-        "vo-ui-shell-native",
-        "drag",
+        "vo-ui-webview",
+        "wry",
         "gdkx11"
       ],
-      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+      "reason": "The system WebView depends on GTK3 bindings on Linux. Track upstream replacement while retaining Linux WebView acceptance."
     },
     {
       "advisory": "RUSTSEC-2024-0414",
@@ -117,12 +116,12 @@
       "reviewed": "2026-09-05",
       "expires": "2026-12-04",
       "dependency_chain": [
-        "vo-ui-shell-native",
-        "drag",
+        "vo-ui-webview",
+        "wry",
         "gdkx11",
         "gdkx11-sys"
       ],
-      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+      "reason": "The system WebView depends on GTK3 bindings on Linux. Track upstream replacement while retaining Linux WebView acceptance."
     },
     {
       "advisory": "RUSTSEC-2024-0415",
@@ -136,11 +135,11 @@
       "reviewed": "2026-09-05",
       "expires": "2026-12-04",
       "dependency_chain": [
-        "vo-ui-shell-native",
-        "drag",
+        "vo-ui-webview",
+        "wry",
         "gtk"
       ],
-      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+      "reason": "The system WebView depends on GTK3 bindings on Linux. Track upstream replacement while retaining Linux WebView acceptance."
     },
     {
       "advisory": "RUSTSEC-2024-0420",
@@ -154,12 +153,12 @@
       "reviewed": "2026-09-05",
       "expires": "2026-12-04",
       "dependency_chain": [
-        "vo-ui-shell-native",
-        "drag",
+        "vo-ui-webview",
+        "wry",
         "gtk",
         "gtk-sys"
       ],
-      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+      "reason": "The system WebView depends on GTK3 bindings on Linux. Track upstream replacement while retaining Linux WebView acceptance."
     },
     {
       "advisory": "RUSTSEC-2024-0419",
@@ -173,12 +172,12 @@
       "reviewed": "2026-09-05",
       "expires": "2026-12-04",
       "dependency_chain": [
-        "vo-ui-shell-native",
-        "drag",
+        "vo-ui-webview",
+        "wry",
         "gtk",
         "gtk3-macros"
       ],
-      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+      "reason": "The system WebView depends on GTK3 bindings on Linux. Track upstream replacement while retaining Linux WebView acceptance."
     },
     {
       "advisory": "RUSTSEC-2024-0436",
@@ -212,32 +211,13 @@
       "reviewed": "2026-09-05",
       "expires": "2026-12-04",
       "dependency_chain": [
-        "vo-ui-shell-native",
-        "drag",
+        "vo-ui-webview",
+        "wry",
         "gtk",
         "gtk3-macros",
         "proc-macro-error"
       ],
-      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
-    },
-    {
-      "advisory": "RUSTSEC-2026-0192",
-      "package": "ttf-parser",
-      "version": "0.25.1",
-      "kind": "unmaintained",
-      "lockfiles": [
-        "Cargo.lock"
-      ],
-      "owner": "ui",
-      "reviewed": "2026-09-05",
-      "expires": "2026-12-04",
-      "dependency_chain": [
-        "vo-ui-text-native",
-        "cosmic-text",
-        "fontdb",
-        "ttf-parser"
-      ],
-      "reason": "Transitive fontdb dependency from cosmic-text. Update the text stack with font shaping and native layout regressions."
+      "reason": "The system WebView depends on GTK3 bindings on Linux. Track upstream replacement while retaining Linux WebView acceptance."
     },
     {
       "advisory": "RUSTSEC-2024-0429",
@@ -251,12 +231,12 @@
       "reviewed": "2026-09-05",
       "expires": "2026-10-05",
       "dependency_chain": [
-        "vo-ui-shell-native",
-        "drag",
+        "vo-ui-webview",
+        "wry",
         "gdk",
         "glib"
       ],
-      "reason": "GTK3-compatible glib remains required by native drag/menu dependencies. VariantStrIter is unsound; replacing the GTK3 dependency chain is required. No direct VariantStrIter use was found in repository or drag/muda sources; transitive reachability remains a recorded risk."
+      "reason": "The system WebView depends on GTK3 bindings on Linux. Track upstream replacement while retaining Linux WebView acceptance."
     }
   ]
 }

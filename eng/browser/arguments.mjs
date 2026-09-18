@@ -6,16 +6,6 @@ export function parseArguments(arguments_) {
     staticRoot: null,
     baseURL: null,
     expectedArtifact: null,
-    componentStateSmoke: false,
-    uikitGallerySmoke: false,
-    dataApplicationSmoke: false,
-    contentSiteSmoke: false,
-    mediaApplicationSmoke: false,
-    studioWorkbenchSmoke: false,
-    studioVmSmoke: false,
-    studioCanarySmoke: false,
-    studioBootstrapSmoke: false,
-    studioLifecycleSmoke: false,
     button: null,
     timeout: 30_000,
     serveOnly: false,
@@ -46,26 +36,6 @@ export function parseArguments(arguments_) {
       parsed.staticRoot = value;
       if (parsed.html === "browser-smoke.html") parsed.html = "index.html";
       index += 1;
-    } else if (argument === "--component-state-smoke") {
-      parsed.componentStateSmoke = true;
-    } else if (argument === "--uikit-gallery-smoke") {
-      parsed.uikitGallerySmoke = true;
-    } else if (argument === "--data-application-smoke") {
-      parsed.dataApplicationSmoke = true;
-    } else if (argument === "--content-site-smoke") {
-      parsed.contentSiteSmoke = true;
-    } else if (argument === "--media-application-smoke") {
-      parsed.mediaApplicationSmoke = true;
-    } else if (argument === "--studio-workbench-smoke") {
-      parsed.studioWorkbenchSmoke = true;
-    } else if (argument === "--studio-vm-smoke") {
-      parsed.studioVmSmoke = true;
-    } else if (argument === "--studio-canary-smoke") {
-      parsed.studioCanarySmoke = true;
-    } else if (argument === "--studio-bootstrap-smoke") {
-      parsed.studioBootstrapSmoke = true;
-    } else if (argument === "--studio-lifecycle-smoke") {
-      parsed.studioLifecycleSmoke = true;
     } else if (argument === "--button" && value !== undefined) {
       parsed.button = value;
       index += 1;
@@ -84,34 +54,10 @@ export function parseArguments(arguments_) {
       throw new Error(`unknown or incomplete argument: ${argument}`);
     }
   }
-  const compiledSmoke = parsed.project.length > 0 && parsed.global.length > 0;
-  const staticSmoke = (parsed.staticRoot !== null || parsed.baseURL !== null)
-    && (parsed.componentStateSmoke || parsed.uikitGallerySmoke
-      || parsed.dataApplicationSmoke || parsed.contentSiteSmoke
-      || parsed.mediaApplicationSmoke || parsed.studioWorkbenchSmoke
-      || parsed.studioVmSmoke || parsed.studioCanarySmoke || parsed.studioBootstrapSmoke || parsed.studioLifecycleSmoke);
-  const staticScenarios = [
-    parsed.componentStateSmoke,
-    parsed.uikitGallerySmoke,
-    parsed.dataApplicationSmoke,
-    parsed.contentSiteSmoke,
-    parsed.mediaApplicationSmoke,
-    parsed.studioWorkbenchSmoke,
-    parsed.studioVmSmoke,
-    parsed.studioCanarySmoke,
-    parsed.studioBootstrapSmoke,
-    parsed.studioLifecycleSmoke,
-  ].filter(Boolean).length;
+  if (!parsed.global || !(parsed.project || parsed.staticRoot || parsed.baseURL)) {
+    throw new Error("usage: run-browser-smoke.mjs (--project <dir> | --static-root <dir> | --base-url <url>) --global <window-key>");
+  }
   if (parsed.expectedArtifact && !parsed.baseURL) throw new Error("expected artifact requires a deployed base URL");
-  if (parsed.baseURL && !parsed.studioVmSmoke && !parsed.studioCanarySmoke) throw new Error("base URL requires a Studio journey");
-  if (staticScenarios > 1) {
-    throw new Error("choose exactly one static browser smoke scenario");
-  }
-  if (!compiledSmoke && !staticSmoke) {
-    throw new Error(
-      "usage: run-browser-smoke.mjs (--project <dir> --global <window-key> | --static-root <dir> (--component-state-smoke | --uikit-gallery-smoke | --data-application-smoke | --content-site-smoke | --media-application-smoke | --studio-workbench-smoke | --studio-vm-smoke | --studio-canary-smoke | --studio-bootstrap-smoke | --studio-lifecycle-smoke))",
-    );
-  }
   if (!Number.isSafeInteger(parsed.timeout) || parsed.timeout < 1_000 || parsed.timeout > 120_000) {
     throw new Error("browser smoke timeout must be an integer between 1000 and 120000 ms");
   }

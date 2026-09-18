@@ -39,8 +39,8 @@ for (const name of ['interaction', 'workbench', 'styling', 'keyed-order']) {
 }
 const native = execute(['run', 'ui/next/tests/runtime']);
 assert.equal(native, 'ui-next runtime contracts: ok\n');
-assert.equal(execute(['run', 'apps/studio/next/tests/documents'], true), 'studio document contracts: 23 chapters and text search ok\n');
-assert.equal(execute(['run', 'apps/studio/next/tests/pages'], true), 'studio page contracts: routes and 23 chapter identities ok\n');
+assert.equal(execute(['run', 'apps/studio/next/tests/documents'], true), 'studio document contracts: 24 chapters and text search ok\n');
+assert.equal(execute(['run', 'apps/studio/next/tests/pages'], true), 'studio page contracts: routes and 24 chapter identities ok\n');
 const sources = await readFile(await buildPlaygroundSources());
 outputs.push({ path: 'target/ui-next/playground-ui.json', sha256: createHash('sha256').update(sources).digest('hex'), bytes: sources.length, gzipBytes: gzipSync(sources).length });
 assert.deepEqual(await webArtifactInventory(root),webPackages,'Web runtime packages changed during the application build');

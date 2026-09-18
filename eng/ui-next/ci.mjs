@@ -55,7 +55,6 @@ try {
   await node('studio-delivery','eng/ui-next/asset-delivery-contracts.mjs');
   await node('studio-static-build','eng/ui-next/studio-static-build-contracts.mjs');
   await node('studio-static','eng/ui-next/studio-static-contracts.mjs');
-  await node('studio-upgrade','eng/ui-next/studio-upgrade-contracts.mjs');
   await rm(join(directory,'toolchain'),{recursive:true,force:true});
   await node('package','eng/ui-next/cli.mjs','package',join(directory,'toolchain'));
   commands.passed=true;

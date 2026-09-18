@@ -65,5 +65,3 @@ In a project created with `vo ui create`, edit its shared `app/app.vo` and retai
 `View(initial string)`; the complete application snippet is for a separate
 single-file entry. See [First steps](../../next/guides/first-steps.md),
 [state](../../next/guides/state.md) and [requests](../../next/guides/lifecycle.md).
-Previous `vui-app`, `vui-component` and `vui-task` snippets keep their compatibility
-API and are labelled accordingly.

@@ -89,18 +89,16 @@ packs stay outside an application's host bundle. Explicit host providers retain
 their normal override precedence.
 
 Web projects use Wasm VM in development and production. `defaultBackend` may be
-omitted or set to `"vm"`; the retired `"aot"` value produces a migration diagnostic.
-Update older boot files to fetch `app.vob` and supply `loadVm` to `mountUi`, then
-rebuild the complete distribution. Recreate the generated boot file from a current
-template when an old project imports the removed AOT API.
+omitted or set to `"vm"`. The generated entry loads `app.vob` with a matching
+execution runtime.
 
 The HTML slot `<meta name="ui-next-backend" content="<!--ui-next:backend-->">`
 resolves to `vm`. This applies to static pages and native SSR.
 
-`vo ui` discovers tools beside the installed executable. The previous `vo ui web`
-spelling uses the same project tools. Current-directory and positional commands select the new tools when
-`ui-next.json` exists; `--project` selects them explicitly. Projects without this
-manifest keep the compatibility commands. Command help is available without installing the tools or Node.
+`vo ui` discovers tools beside the installed executable. Current-directory and
+positional commands select a project; `--project` selects one explicitly.
+Projects declare their configuration in `ui-next.json`. Command help is available
+without installing the tools or Node.
 Set
 `VO_UI_TOOLCHAIN` to a complete package directory to select another installation;
 set `VO_UI_NODE` to a Node executable if it is absent from PATH. Direct

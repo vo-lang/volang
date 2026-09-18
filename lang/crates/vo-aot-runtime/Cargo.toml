@@ -15,9 +15,10 @@ crate-type = ["rlib", "staticlib"]
 
 [features]
 default = []
-toolchain-host = ["dep:vo-ui-integration"]
+toolchain-host = ["dep:vo-engine", "vo-ui-bridge/toolchain"]
 
 [dependencies]
 vo-aot-runtime-core = { path = "../vo-aot-runtime-core" }
 vo-vm = { path = "../vo-vm", features = ["native"] }
-vo-ui-integration = { path = "../vo-ui-integration", optional = true }
+vo-ui-bridge.workspace = true
+vo-engine = { path = "../vo-engine", optional = true }

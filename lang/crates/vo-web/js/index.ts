@@ -1,8 +1,5 @@
 import { vfs, VirtualFS, registerVFSBindings } from './vfs.js';
 export { vfs, VirtualFS, registerVFSBindings };
-export * from './ui_protocol.js';
-export * from './ui_dom.js';
-export * from './ui_system.js';
 
 let wasmModule: typeof import('../pkg/vo_web.js') | null = null;
 

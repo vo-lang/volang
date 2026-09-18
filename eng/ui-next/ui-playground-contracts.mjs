@@ -1,5 +1,5 @@
 import {sourceEditor} from './editor-controls.mjs';
-import {readStudioDraft,waitStudioDraft} from './studio-draft-contracts.mjs';
+import {readStudioDraft,waitStudioDraft,seedStudioDrafts} from './studio-draft-contracts.mjs';
 import assert from 'node:assert/strict';
 
 export const uiPlaygroundContracts = ['ui-source-lazy-compile', 'ui-source-interactive-worker', 'ui-preview-rerun-reset',
@@ -93,10 +93,9 @@ export async function checkUiPlaygroundSsr(browser, url) {
     let release;
     const gate = new Promise(resolve => { release = resolve; });
     try {
-      await page.addInitScript(() => {
-        if (window !== window.top) return;
-        localStorage.setItem('volang.studio.next.ui-draft.v1', 'older saved draft');
-        localStorage.setItem('volang.studio.next.draft.v1', 'independent console draft');
+      await seedStudioDrafts(page, {
+        'volang.studio.next.ui-draft.v1':'older saved draft',
+        'volang.studio.next.draft.v1':'independent console draft',
       });
       await page.route('**/artifacts/studio.*', async route => { await gate; await route.continue(); });
       const response = await page.goto(`${url}/studio/playground/ui?backend=${backend}&ssr`, { waitUntil: 'commit' });
@@ -112,7 +111,7 @@ export async function checkUiPlaygroundSsr(browser, url) {
       await waitStudioDraft(page,source,'volang.studio.next.ui-draft.v1');
       assert.equal(await editor.inputValue(), source, 'late draft restore replaced pre-boot editing');
       assert.equal(await page.evaluate(() => window.earlyUiEditor === document.querySelector('#ui-playground-source')), true);
-      assert.equal(await page.evaluate(() => localStorage.getItem('volang.studio.next.draft.v1')), 'independent console draft');
+      assert.equal(await readStudioDraft(page,'volang.studio.next.draft.v1'), 'independent console draft');
       await page.locator('[data-run-preview]').click();
       await page.frameLocator('iframe').getByRole('heading', { name: 'Written before boot 中文', exact: true }).waitFor({ timeout: 35000 });
       await page.evaluate(async () => { window.__studioNext.close(); await window.__studioNext.done; });

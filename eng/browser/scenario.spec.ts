@@ -3,44 +3,17 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import { prepareApplication } from './server.mjs';
 import { deployedAssetRecords, verifyDeployedArtifact } from './deployed-artifact.mjs';
-import { PageContract, pollEvaluation, waitForVmInteractive } from './page-contract.mjs';
-import { runComponentStateSmoke } from './scenarios/component-state.mjs';
-import { runUikitGallerySmoke } from './scenarios/uikit-gallery.mjs';
-import { runDataApplicationSmoke } from './scenarios/data-application.mjs';
-import { runContentSiteSmoke } from './scenarios/content-site.mjs';
-import { runMediaApplicationSmoke } from './scenarios/media-application.mjs';
-import { runStudioWorkbenchSmoke } from './scenarios/studio-workbench.mjs';
-import { runStudioVmSmoke } from './scenarios/studio.mjs';
-import { prepareStudioBootstrap, runStudioBootstrapSmoke } from './scenarios/studio-bootstrap.mjs';
-import { runStudioLifecycleSmoke } from './scenarios/studio-lifecycle.mjs';
-import { runStudioCanarySmoke } from './scenarios/studio-canary.mjs';
+import { PageContract, pollEvaluation } from './page-contract.mjs';
 
 const request = process.env.VO_BROWSER_REQUEST
   ? JSON.parse(await readFile(process.env.VO_BROWSER_REQUEST, 'utf8')) : null;
 if (!request) throw new Error('use eng/run-browser-smoke.mjs to select a scenario and its built artifact');
-const coverage = JSON.parse(await readFile(new URL('./coverage.json', import.meta.url), 'utf8'))
-  .scenarios.find((scenario: any) => scenario.flag === request.scenario);
-if (!coverage) throw new Error(`unregistered browser scenario: ${request.scenario}`);
-
 const test = base.extend<{ applicationURL: string }>({
   applicationURL: async ({}, use) => {
     const application = await prepareApplication(request);
     try { await use(application.url); } finally { await application.close(); }
   },
 });
-
-const scenarios = {
-  componentStateSmoke: runComponentStateSmoke,
-  uikitGallerySmoke: runUikitGallerySmoke,
-  dataApplicationSmoke: runDataApplicationSmoke,
-  contentSiteSmoke: runContentSiteSmoke,
-  mediaApplicationSmoke: runMediaApplicationSmoke,
-  studioWorkbenchSmoke: runStudioWorkbenchSmoke,
-  studioVmSmoke: runStudioVmSmoke,
-  studioCanarySmoke: runStudioCanarySmoke,
-  studioBootstrapSmoke: runStudioBootstrapSmoke,
-  studioLifecycleSmoke: runStudioLifecycleSmoke,
-};
 
 test(request.scenario, async ({ page, context, browser, applicationURL }, testInfo) => {
   const diagnostics: object[] = [];
@@ -56,31 +29,13 @@ test(request.scenario, async ({ page, context, browser, applicationURL }, testIn
       const verification = await verifyDeployedArtifact(applicationURL, assets);
       await testInfo.attach('deployed-artifact', { body: JSON.stringify({ ...verification, assets }, null, 2), contentType: 'application/json' });
     }
-    if (request.studioBootstrapSmoke) await prepareStudioBootstrap(page);
-    await page.goto(applicationURL, { waitUntil: 'load' });
-    if (request.staticRoot !== null || request.baseURL) {
-      const guard = await page.locator('#volang-root').evaluate(root => ({
-        phase: (root as HTMLElement).dataset.volangActivation,
-        inert: root.hasAttribute('inert'), busy: root.getAttribute('aria-busy'),
-        bootHidden: (document.querySelector('#volang-boot') as HTMLElement)?.hidden,
-      }));
-      if (guard.phase !== 'ready') expect(guard).toMatchObject({ inert: true, busy: 'true', bootHidden: false });
-      await waitForVmInteractive(contract, request.timeout);
-    }
+    await page.goto(applicationURL, {waitUntil:'load'});
     if (process.env.VO_BROWSER_INJECT_FAILURE === request.scenario) {
       expect(false, `controlled diagnostic failure: ${request.scenario}`).toBe(true);
     }
-    const scenario = Object.entries(scenarios).find(([flag]) => request[flag]);
-    let report;
-    if (scenario) report = await scenario[1](contract, request.timeout, request.projectRoot);
-    else {
-      if (request.button) await page.locator(`[id=${JSON.stringify(request.button)}]`).click();
-      report = await pollEvaluation(contract, `window[${JSON.stringify(request.global)}] ?? null`, value => value?.complete === true, request.timeout);
-    }
+    if (request.button) await page.locator(`[id=${JSON.stringify(request.button)}]`).click();
+    const report = await pollEvaluation(contract, `window[${JSON.stringify(request.global)}] ?? null`, value => value?.complete === true, request.timeout);
     expect(report.passed).toBe(true);
-    if (coverage.checks) expect(report.checks).toEqual(coverage.checks);
-    if (coverage.checkpoints) expect(Object.keys(report.checkpoints)).toEqual(expect.arrayContaining(coverage.checkpoints));
-    if (coverage.added_checkpoints) expect(Object.keys(report.checkpoints)).toEqual(expect.arrayContaining(coverage.added_checkpoints));
     result = { schema: 'volang.browser-result.v1', passed: true, project: basename(request.projectRoot), scenario: request.scenario, browser: browser.version(), report };
     await testInfo.attach('domain-result', { body: JSON.stringify(result, null, 2), contentType: 'application/json' });
   } catch (error) {

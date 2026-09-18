@@ -524,10 +524,10 @@ mod tests {
         assert!(impact.full.is_empty());
         assert!(impact.capabilities["browser"]
             .iter()
-            .any(|chain| chain.contains("artifact:studio-documentation.generated -> studio")));
+            .any(|chain| chain.contains("artifact:studio-next-documentation.generated -> studio")));
         graph
             .nodes
-            .get_mut("artifact:studio-documentation.generated")
+            .get_mut("artifact:studio-next-documentation.generated")
             .unwrap()
             .paths
             .push("docs/product.md".into());

@@ -41,7 +41,7 @@ second application into that same root fails without disturbing the first;
 closing an old application cannot remove its replacement.
 
 For VM execution, pass a `loadVm` callback returning the matching Wasm module;
-the mount initializes it. The package's compatibility runtime is available as
+the mount initializes it. The package's compiler-enabled runtime is available as
 `() => import('vo-web/wasm')`; a matching execution-only build can also be used.
 Generated Wasm declarations require TypeScript's `ESNext.Disposable` library
 when compiling against an older JavaScript target.
@@ -49,24 +49,21 @@ when compiling against an older JavaScript target.
 Providers for tasks, subscriptions and optional DOM widgets remain scoped
 to the mounted root. The entry exposes their types and `createLazyWidget`; callers
 explicitly supply heavyweight library loaders. Basic entry imports omit chart and
-editor libraries and the compatibility UI kernel.
+editor libraries.
 
 `createPersistentStorage(name)` supplies optional string persistence for task
 providers. Await `get(key, signal)`, `set(key, value, signal)` or
 `remove(key, signal)`; writes acknowledge a committed IndexedDB transaction with
 strict durability. Cancelling the owned task aborts uncommitted work. Connections
-close after each operation. A third `get` argument may synchronously read a legacy
-string or null: it is imported atomically only when the new key is absent, and
-the adapter leaves the legacy source untouched. For example,
-`store.get('draft', signal, () => localStorage.getItem('old-draft'))` preserves
-existing committed drafts during migration. Browser storage availability, quota
-and version errors reject the request for the application to display.
+close after each operation. Missing values return null. Browser storage
+availability, quota and version errors reject the request for the application to
+display. Applications own their keys and decide when to write or remove drafts.
 
 A browser module host can preserve the package's directory layout and use an
 import map. A bundler must carry the referenced Wasm assets as well as JavaScript;
 a successful JavaScript build alone does not establish runtime asset delivery.
-Compatibility `vo-web/ui` entrypoints retain their existing API. This new subpath
-has preview stability and does not grant product certification to the rewrite.
+The UI host subpath has preview stability. Packaging checks and local browser
+results do not grant product certification.
 
 For maintainers, run `npm run build:release` before `npm pack`. The `prepack`
 hook checks required outputs and makes wasm-pack's generated directories visible

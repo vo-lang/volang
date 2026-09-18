@@ -9,7 +9,7 @@ import (
 func main() {
 	paths := app.StaticPaths()
 	seen := make(map[string]bool)
-	if len(paths) != len(documentation.Pages()) + 6 {
+	if len(paths) != len(documentation.Pages()) + 5 {
 		panic("static page catalog is incomplete")
 	}
 	for _, path := range paths {
@@ -25,10 +25,10 @@ func main() {
 		Status int
 	}{
 		{"/studio", "Gallery", 200}, {"/studio/gallery", "Gallery", 200},
-		{"/studio/recover", "Recover browser projects", 200}, {"/studio/playground", "Playground", 200},
+		{"/studio/recover", "Page not found", 404}, {"/studio/playground", "Playground", 200},
 		{"/studio/playground/ui", "Playground", 200}, {"/studio/docs", "First steps", 200},
 		{"/studio/docs/first-steps", "First steps", 200}, {"/studio/docs/state", "State & identity", 200},
-		{"/studio/docs?topic=lifecycle", "Lifecycle & requests", 200},
+		{"/studio/docs/lifecycle", "Lifecycle & requests", 200},
 		{"/studio/docs/unknown", "Documentation", 404}, {"/studio/missing", "Page not found", 404},
 		{"/studio/docs/hello%2Fworld", "Documentation", 404}, {"/unknown", "Page not found", 404},
 	} {
@@ -42,7 +42,7 @@ func main() {
 			panic("missing static chapter: " + chapter.ID)
 		}
 		for _, location := range []string{
-			"/studio/docs/" + chapter.ID, "/studio/docs/?topic=" + chapter.ID,
+			"/studio/docs/" + chapter.ID, "/studio/docs/" + chapter.ID + "/",
 		} {
 			page, err := app.Describe(location)
 			if err != nil || page.Status != 200 || page.Title != chapter.Title + " · Volang Studio" ||
@@ -53,16 +53,9 @@ func main() {
 			}
 		}
 	}
-	legacy := make(map[string]bool)
-	redirects := app.LegacyRedirects()
-	if len(redirects) != len(documentation.Pages()) + 14 {
-		panic("legacy redirect catalog is incomplete")
+	redirects := app.SiteRedirects()
+	if len(redirects) != 1 || redirects[0].From != "/" || redirects[0].To != "/studio/gallery" {
+		panic("invalid site entry")
 	}
-	for _, redirect := range redirects {
-		if legacy[redirect.From] || seen[redirect.From] || !seen[redirect.To] {
-			panic("invalid legacy redirect: " + redirect.From)
-		}
-		legacy[redirect.From] = true
-	}
-	fmt.Println("studio page contracts: routes and 23 chapter identities ok")
+	fmt.Println("studio page contracts: routes and 24 chapter identities ok")
 }

@@ -53,8 +53,8 @@ outputs. `vo-dev lint artifacts` additionally checks Git tracking of these files
 
 Known relative Markdown links resolve to Studio chapter URLs and namespaced
 heading anchors. Other relative repository links resolve to their source on
-GitHub. Raw HTML is displayed as literal code/text. The existing released UI
-chapters remain with that product; experimental UI guides belong to the rewrite.
+GitHub. Raw HTML is displayed as literal code/text. The catalog includes the maintained
+language, toolchain and UI guides.
 
 The native contract suite covers valid content, snapshot isolation, malformed
 trees and budgets. Studio's native document fixture decodes and renders every
@@ -70,3 +70,12 @@ identity. Keep the prepared value in state or `DerivedMemo`, replacing it when
 source data changes. Mutating the original nodes cannot change the prepared view,
 and the same prepared value can mount in independent roots. The ordinary `View`
 function remains available for callers that intentionally rebuild a snapshot.
+
+
+`ParseWithOptions(encoded, Options{HeadingLinks: true, CodeTools: tools})` adds
+heading permalinks and application-provided code controls. `CodeTools` receives
+the complete code text and returns a view; the application owns clipboard or
+other browser effects. Default parsing adds no controls. `Prepared.Outline()`
+returns an independent list of heading IDs, text and levels for a table of
+contents. The document's separate `HeadingID()` remains available for the page
+title. Studio demonstrates both an accessible outline and copy buttons.

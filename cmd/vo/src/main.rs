@@ -33,8 +33,6 @@ use vo_syntax::format_source;
 
 mod generate;
 mod lsp;
-mod ui_dev;
-mod ui_registry;
 mod ui_web;
 
 fn main() {
@@ -69,7 +67,7 @@ fn run_cli(args: &[OsString]) -> i32 {
         "generate" => generate::cmd_generate(rest),
         "lsp" => lsp::cmd_lsp(rest),
         "release" => cmd_release(rest),
-        "ui" => ui_dev::cmd_ui(rest),
+        "ui" => ui_web::cmd_ui_web(rest),
         "-h" | "--help" | "help" => {
             print_usage();
             0
@@ -105,7 +103,7 @@ fn print_usage() {
     println!("  ui dev [path]            Run a ui-next.json project's Web development server");
     println!("  ui build [path]          Build its deployable Web UI application");
     println!("  ui test [path]           Run its browser tests");
-    println!("  ui --help                Show Web and existing UI project commands");
+    println!("  ui --help                Show Web and desktop UI commands");
     println!("  ui run [path]             Run the native UI in VM or JIT mode");
     println!("  ui package [path]         Build a standalone desktop application");
     println!();
@@ -362,10 +360,10 @@ fn default_emit_output_path(input: &Path, module_name: &str) -> PathBuf {
 
 fn compile_cli_path(path: &Path) -> Result<CompileOutput, String> {
     match generate::generate_for_build(path)? {
-        Some(generated_sources) => vo_ui_integration::engine()
+        Some(generated_sources) => vo_ui_bridge::engine()
             .compile_path_with_generated_sources_and_auto_install(path, generated_sources)
             .map_err(|error| error.to_string()),
-        None => vo_ui_integration::engine()
+        None => vo_ui_bridge::engine()
             .compile_path_with_auto_install(path)
             .map_err(|error| error.to_string()),
     }
@@ -544,11 +542,11 @@ fn cmd_run_os(args: &[OsString]) -> i32 {
     }
 
     let run_result = if jit_stats_json.is_some() {
-        vo_ui_integration::engine()
+        vo_ui_bridge::engine()
             .run_with_byte_args_and_memory_observed(output, mode, program_args, memory_config)
             .map(Some)
     } else {
-        vo_ui_integration::engine()
+        vo_ui_bridge::engine()
             .run_with_byte_args_and_memory(output, mode, program_args, memory_config)
             .map(|()| None)
     };
@@ -597,28 +595,16 @@ fn os_arg_into_bytes(value: OsString) -> Result<Vec<u8>, String> {
     }
 }
 
-fn runtime_archive_filename(target: &TargetSpec, ui: bool) -> &'static str {
-    match (target.object_format(), ui) {
-        (ObjectFormat::Coff, true) => "vo_ui_aot_runtime_native.lib",
-        (ObjectFormat::Coff, false) => "vo_aot_runtime.lib",
-        (_, true) => "libvo_ui_aot_runtime_native.a",
-        (_, false) => "libvo_aot_runtime.a",
+fn runtime_archive_filename(target: &TargetSpec) -> &'static str {
+    match target.object_format() {
+        ObjectFormat::Coff => "vo_aot_runtime.lib",
+        _ => "libvo_aot_runtime.a",
     }
-}
-
-fn has_official_ui_mount(module: &Module) -> bool {
-    module.externs.iter().any(|external| {
-        vo_common_core::extern_key::decode_extern_name(&external.name).is_ok_and(|key| {
-            key.package() == "github.com/vo-lang/ui"
-                && matches!(key.function(), "Mount" | "runtimeCommitAndWait")
-        })
-    })
 }
 
 fn find_aot_runtime_archive(
     explicit: Option<PathBuf>,
     target: &TargetSpec,
-    ui: bool,
 ) -> Result<PathBuf, String> {
     if let Some(path) = explicit {
         return path
@@ -626,11 +612,7 @@ fn find_aot_runtime_archive(
             .then_some(path.clone())
             .ok_or_else(|| format!("AOT runtime archive does not exist: {}", path.display()));
     }
-    let environment = if ui {
-        env::var_os("VO_UI_AOT_RUNTIME_LIB").or_else(|| env::var_os("VO_AOT_RUNTIME_LIB"))
-    } else {
-        env::var_os("VO_AOT_RUNTIME_LIB")
-    };
+    let environment = env::var_os("VO_AOT_RUNTIME_LIB");
     if let Some(path) = environment.map(PathBuf::from) {
         return path
             .is_file()
@@ -638,7 +620,7 @@ fn find_aot_runtime_archive(
             .ok_or_else(|| format!("AOT runtime archive does not exist: {}", path.display()));
     }
 
-    let filename = runtime_archive_filename(target, ui);
+    let filename = runtime_archive_filename(target);
     let executable = env::current_exe()
         .map_err(|error| format!("failed to locate the vo executable: {error}"))?;
     let bin_dir = executable
@@ -659,9 +641,8 @@ fn find_aot_runtime_archive(
         .find(|path| path.is_file())
         .ok_or_else(|| {
             format!(
-                "AOT runtime archive {filename} for {} is not installed; set {} or pass --runtime=PATH",
-                target.triple(),
-                if ui { "VO_UI_AOT_RUNTIME_LIB" } else { "VO_AOT_RUNTIME_LIB" }
+                "AOT runtime archive {filename} for {} is not installed; set VO_AOT_RUNTIME_LIB or pass --runtime=PATH",
+                target.triple()
             )
         })
 }
@@ -793,7 +774,6 @@ struct NativeLinkOptions<'a> {
     runtime: Option<PathBuf>,
     extension_archives: &'a [PathBuf],
     extra_args: &'a [OsString],
-    ui: bool,
     compiler_host: bool,
     windows_gui: bool,
 }
@@ -808,7 +788,6 @@ fn link_native_aot(
         runtime,
         extension_archives,
         extra_args,
-        ui,
         compiler_host: _compiler_host,
         windows_gui: _windows_gui,
     } = options;
@@ -819,7 +798,7 @@ fn link_native_aot(
             target.triple()
         ));
     }
-    let runtime = find_aot_runtime_archive(runtime, target, ui)?;
+    let runtime = find_aot_runtime_archive(runtime, target)?;
     let object_file = create_build_temp_file(output, "object", object)
         .map_err(|error| format!("failed to stage AOT object: {error}"))?;
     let linked_file = create_build_temp_file(output, "linked", &[])
@@ -847,7 +826,7 @@ fn link_native_aot(
         &runtime,
         &linked_file.0,
         extension_archives,
-        ui || _compiler_host,
+        _compiler_host,
         _windows_gui,
     ));
     #[cfg(not(windows))]
@@ -856,10 +835,6 @@ fn link_native_aot(
         .arg(&runtime)
         .arg("-o")
         .arg(&linked_file.0);
-    #[cfg(not(windows))]
-    if ui {
-        command.arg("-Wl,-S");
-    }
     #[cfg(target_vendor = "apple")]
     for archive in extension_archives {
         if archive.as_os_str().as_encoded_bytes().contains(&b',') {
@@ -878,14 +853,11 @@ fn link_native_aot(
     }
     #[cfg(target_vendor = "apple")]
     {
-        if ui {
-            command.args(["-Wl,-dead_strip", "-Wl,-x"]);
-        }
         for framework in ["Security", "CoreFoundation", "SystemConfiguration"] {
             command.arg("-framework").arg(framework);
         }
         command.args(["-liconv", "-lresolv"]);
-        if ui || _compiler_host {
+        if _compiler_host {
             for framework in [
                 "ApplicationServices",
                 "CoreGraphics",
@@ -903,9 +875,6 @@ fn link_native_aot(
     }
     #[cfg(all(unix, not(target_vendor = "apple")))]
     {
-        if ui {
-            command.arg("-Wl,--gc-sections");
-        }
         command.args(["-ldl", "-lpthread", "-lm", "-lrt", "-lutil"]);
     }
     let result = command
@@ -1138,7 +1107,6 @@ fn cmd_build(args: &[OsString]) -> i32 {
             return 1;
         }
     };
-    let ui_application = has_official_ui_mount(output.module.module());
 
     let output_path =
         output_path.unwrap_or_else(|| default_aot_output_path(&output.module.name, kind, &target));
@@ -1172,14 +1140,14 @@ fn cmd_build(args: &[OsString]) -> i32 {
             return 1;
         }
     } else if matches!(kind, BuildKind::Binary | BuildKind::Object) {
-        let cache_key = vo_ui_integration::engine().aot_cache_key(
+        let cache_key = vo_ui_bridge::engine().aot_cache_key(
             &module_bytes,
             &target,
             AotCacheArtifactKind::NativeObject,
             debug_ir,
         );
         let object_bytes = match build_cached_aot_artifact(aot_cache.as_ref(), &cache_key, || {
-            vo_ui_integration::engine()
+            vo_ui_bridge::engine()
                 .compile_native_aot_object(&output, &target, debug_ir)
                 .map(|object| object.bytes)
                 .map_err(|error| error.to_string())
@@ -1201,7 +1169,6 @@ fn cmd_build(args: &[OsString]) -> i32 {
                     runtime,
                     extension_archives: &extension_archives,
                     extra_args: &link_args,
-                    ui: ui_application,
                     compiler_host: vo_engine::native_aot_requires_toolchain_host(
                         output.module.module(),
                     ),
@@ -1264,7 +1231,7 @@ fn cmd_check(args: &[OsString]) -> i32 {
 
     println!("Checking project: {}", path.display());
     let result = if read_only == 1 {
-        vo_ui_integration::engine()
+        vo_ui_bridge::engine()
             .compile_path(&path)
             .map_err(|error| error.to_string())
     } else {
@@ -1340,7 +1307,7 @@ fn cmd_test(args: &[OsString]) -> i32 {
         }
     };
 
-    match vo_ui_integration::engine().run(output, mode, Vec::new()) {
+    match vo_ui_bridge::engine().run(output, mode, Vec::new()) {
         Ok(()) => 0,
         Err(RunError::Exited(code)) => code,
         Err(error) => {
@@ -2926,7 +2893,7 @@ mod tests {
         let temporary = unique_temp_dir("bytecode-skip-generation");
         fs::create_dir_all(&temporary).unwrap();
         let root = temporary.canonicalize().unwrap();
-        let expected = vo_ui_integration::engine()
+        let expected = vo_ui_bridge::engine()
             .compile_source_at("package main\nfunc main() {}\n", &root)
             .unwrap();
         let artifact = root.join("program.vob");
@@ -3370,22 +3337,9 @@ mod tests {
         );
 
         let native = TargetSpec::host().unwrap();
-        assert!(runtime_archive_filename(&native, false).contains("vo_aot_runtime"));
-        assert!(runtime_archive_filename(&native, true).contains("vo_ui_aot_runtime_native"));
-        assert_ne!(
-            runtime_archive_filename(&native, false),
-            runtime_archive_filename(&native, true)
-        );
-
+        assert!(runtime_archive_filename(&native).contains("vo_aot_runtime"));
         let windows = TargetSpec::parse("x86_64-pc-windows-msvc").unwrap();
-        assert_eq!(
-            runtime_archive_filename(&windows, false),
-            "vo_aot_runtime.lib"
-        );
-        assert_eq!(
-            runtime_archive_filename(&windows, true),
-            "vo_ui_aot_runtime_native.lib"
-        );
+        assert_eq!(runtime_archive_filename(&windows), "vo_aot_runtime.lib");
         assert_eq!(
             default_aot_output_path("github.com/acme/app", BuildKind::Binary, &windows),
             PathBuf::from("app.exe")
@@ -3397,7 +3351,7 @@ mod tests {
         let extensions = vec![PathBuf::from("extension-one.lib"), PathBuf::from("two.lib")];
         let arguments = msvc_aot_link_arguments(
             Path::new("program.obj"),
-            Path::new("vo_ui_aot_runtime_native.lib"),
+            Path::new("custom_runtime.lib"),
             Path::new("program.exe"),
             &extensions,
             true,
@@ -3411,7 +3365,7 @@ mod tests {
                 OsString::from("/SUBSYSTEM:CONSOLE"),
                 OsString::from("/STACK:8388608"),
                 OsString::from("program.obj"),
-                OsString::from("vo_ui_aot_runtime_native.lib"),
+                OsString::from("custom_runtime.lib"),
                 OsString::from("/OUT:program.exe"),
                 OsString::from("/WHOLEARCHIVE:extension-one.lib"),
                 OsString::from("/WHOLEARCHIVE:two.lib"),
@@ -3476,7 +3430,7 @@ mod tests {
         let root = unique_temp_dir("aot-cache");
         let cache = AotArtifactCache::new(root.clone()).unwrap();
         let target = TargetSpec::parse(vo_engine::WASM32_UNKNOWN_UNKNOWN).unwrap();
-        let key = vo_ui_integration::engine().aot_cache_key(
+        let key = vo_ui_bridge::engine().aot_cache_key(
             b"verified-module",
             &target,
             AotCacheArtifactKind::NativeObject,

@@ -11,7 +11,6 @@ import {checkPersistentStorage} from './storage-contracts.mjs';
 import {checkStudioEditor} from './studio-editor-contracts.mjs';
 import {checkStudioLanguageService} from './studio-language-contracts.mjs';
 import {checkEditorLanguageBoundary} from './editor-language-boundary.mjs';
-import {checkStudioRecovery} from './studio-recovery-contracts.mjs';
 import { checkNavigationContracts } from './navigation-contracts.mjs';
 import { checkModalBoundary } from './modal-boundary.mjs';
 import { checkMotionBoundary } from './motion-boundary.mjs';
@@ -225,7 +224,6 @@ try {
   report.storage = await checkPersistentStorage(browser);
   report.studioEditor = await checkStudioEditor(browser, application.url);
   report.studioLanguage = await checkStudioLanguageService(browser,application.url);
-  report.studioRecovery = await checkStudioRecovery(browser, application.url, resolve(outputDirectory, 'recovery'), {createOrigin:serve});
   report.collectionContracts = collectionContracts;
   report.studio = await checkStudio(browser, application.url, outputDirectory);
   assert.deepEqual(await webArtifactInventory(root),build.webPackages,'Web runtime packages changed during browser tests');

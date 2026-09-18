@@ -18,7 +18,7 @@ import {assetsMarker, contentMarker, dataMarker, descriptionMarker, modeMarker, 
 export const studioHostImports = {
   name:'studio-host-imports',
   setup(build) {
-    build.onResolve({filter:/^\/artifacts\/(editor|recovery)-library\.js$/}, ({path}) => ({path:resolve(root, 'eng/ui-next', basename(path, '.js') + '.mjs')}));
+    build.onResolve({filter:/^\/artifacts\/(editor)-library\.js$/}, ({path}) => ({path:resolve(root, 'eng/ui-next', basename(path, '.js') + '.mjs')}));
     build.onResolve({filter:/^\/host\//}, async ({path}) => {
       const source = resolve(root, 'lang/crates/vo-web/js', path.slice('/host/'.length));
       try {await access(source); return {path:source};}
@@ -59,7 +59,7 @@ export async function buildStudio({signal} = {}) {
     const docs = JSON.parse(await readFile(join(source,'documentation/index.json'),'utf8'));
     for (const item of [...docs.pages,docs.search]) await cp(join(source,'documentation',item.Asset), join(publicDirectory,'studio-docs',item.Asset));
     for (const name of ['studio.css','preview.html']) await cp(join(source,name),join(assets,name));
-    await cp(join(source,'legacy-worker.js'),join(publicDirectory,'service-worker.js'));
+    await cp(join(source,'cache-retirement-worker.js'),join(publicDirectory,'service-worker.js'));
     await mkdir(join(publicDirectory,'ui-kit'));
     await cp(resolve(root,'ui/next/kit/theme.css'),join(publicDirectory,'ui-kit/theme.css'));
     for (const [from,to] of [['target/ui-next/wasm-runtime','wasm'],['target/ui-next/wasm-compiler','compiler']]) {
@@ -67,7 +67,7 @@ export async function buildStudio({signal} = {}) {
         !basename(path).startsWith('.') && !['.ts','.json','.md'].includes(extname(path))});
     }
     const bundled = await bundle({
-      absWorkingDir:root, entryPoints:Object.fromEntries(['boot','static-boot','redirect','runner','preview','ui-runner','language-worker'].map(name=>[name,join(source,name+'.js')])),
+      absWorkingDir:root, entryPoints:Object.fromEntries(['boot','studio-worker','redirect','runner','preview','ui-runner','language-worker'].map(name=>[name,join(source,name+'.js')])),
       outdir:assets, chunkNames:'chunks/[name]-[hash]', bundle:true, splitting:true,
       format:'esm', platform:'browser', target:'es2022', minify:true, metafile:true,
       plugins:[studioHostImports], external:['/compiler/*','/wasm/*'],

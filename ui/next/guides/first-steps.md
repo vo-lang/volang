@@ -5,9 +5,8 @@ page, state records what can change, and the browser keeps native HTML behavior.
 The Web application runs with the Wasm VM.
 
 This guide uses the new Web UI preview in `github.com/vo-lang/ui/next`. Use a
-matching toolchain that includes the Web UI tools. Existing applications using
-`ui.Mount` and positional `vo ui dev path` follow the compatibility guides until
-they migrate. A toolchain with the native desktop SDK can also run and package
+matching toolchain that includes the Web UI tools. A toolchain with the native
+desktop SDK can also run and package
 this application with `vo ui run` and `vo ui package`; see the desktop preview
 guide in the toolkit for platform requirements.
 

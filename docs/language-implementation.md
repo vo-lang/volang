@@ -84,21 +84,19 @@ dynamic type identity. Both rules have analysis and executable regression cases.
 
 ## UI composition above the engine
 
-Dependency direction is `CLI / Studio / native shell` → `vo-ui-integration` →
-`vo-engine`. The language engine has no UI dependency, feature, native session,
-SSR entry point, or UI test dependency, even with all backend features enabled.
-Renderer-neutral framework crates remain independent of both adapters and engine.
+The CLI uses `vo-engine` for compilation and language execution. UI components
+compile as ordinary Vo packages. `vo-ui-bridge` provides the exchange boundary;
+`vo-ui-native` and `vo-ui-webview` own native application sessions. Browser host
+modules live in `vo-web/js/ui_next`. The language engine has no UI dependency,
+even with every backend feature enabled.
 
 `Engine` owns the common compilation and execution pipeline. `EngineExtension`
 supplies an immutable compilation policy, provider admission, target restrictions,
 and a versioned cache identity. Every compiler input path passes through the
 selected instance; common verification, frozen snapshots, native extension
 admission, and generation validation remain mandatory engine boundaries.
-Free `vo_engine` functions preserve the plain language API. UI hosts explicitly use
-`vo_ui_integration::engine()` for compilation, execution, AOT, and AOT cache keys.
-They use `vo_ui_integration::build_native_gui_vm_for_mode` and its related entry
-points for sessions, transactional reload, and SSR. This replaces the former
-engine `ui` feature and UI convenience exports.
+Free `vo_engine` functions preserve the plain language API. UI project tooling
+uses the same compiler and supplies platform providers at the host boundary.
 
 Compilation and AOT caches include the selected extension identity. Source
 snapshot generation checks remain independent of the cache partition. The engine
@@ -114,10 +112,8 @@ Engine features remain explicit:
 | `jit` | VM execution with JIT and OSR |
 | `aot-native` | Native AOT generation and its cache |
 
-Both engine and integration default to JIT and Native AOT; integration
-forwards these features to its engine dependency. Core VM/JIT regressions live in
-the engine, and UI compilation, VM/JIT, reload, SSR, and AOT regressions live in
-`vo-ui-integration`. CI rejects UI dependencies in the engine's complete graph.
+The engine defaults to JIT and Native AOT. UI contracts live in `eng/ui-next`
+and its native adapter tests. CI rejects UI dependencies in the engine graph.
 
 The stdlib toolchain host is a process-wide application service. An engine can
 construct `toolchain_host()` retaining its selected compiler/execution policy.
@@ -134,8 +130,7 @@ VOWORK=off cargo test -p vo-common -p vo-analysis -p vo-ffi-macro --locked
 VOWORK=off cargo test -p vo-common-core -p vo-runtime -p vo-codegen -p vo-jit --locked
 VOWORK=off cargo test -p vo-engine --all-features --locked
 VOWORK=off cargo check -p vo-engine --no-default-features --locked
-VOWORK=off cargo check -p vo-ui-integration --no-default-features --locked
-VOWORK=off cargo test -p vo-ui-integration --all-features --locked
+VOWORK=off cargo test -p vo-ui-bridge -p vo-ui-native --locked
 ```
 
 Use `--target-dir` for isolated Rust tests that spawn Cargo fixtures; a globally

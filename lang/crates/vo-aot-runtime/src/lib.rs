@@ -11,8 +11,7 @@ use vo_vm::vm::SchedulingOutcome;
 #[cfg(all(not(test), feature = "toolchain-host"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn vo_aot_initialize_toolchain_host_v1() -> i32 {
-    match std::panic::catch_unwind(|| vo_ui_integration::engine().ensure_toolchain_host_installed())
-    {
+    match std::panic::catch_unwind(|| vo_ui_bridge::engine().ensure_toolchain_host_installed()) {
         Ok(()) => 0,
         Err(_) => 101,
     }
@@ -20,8 +19,16 @@ pub extern "C" fn vo_aot_initialize_toolchain_host_v1() -> i32 {
 
 #[cfg(not(test))]
 unsafe fn run_embedded(argc: i32, argv: *const *const c_char) -> Result<i32, String> {
-    let mut vm =
-        unsafe { vo_aot_runtime_core::load_embedded_vm(argc, argv, |_vm, _module| Ok(())) }?;
+    let mut vm = unsafe {
+        vo_aot_runtime_core::load_embedded_vm(argc, argv, |vm, module| {
+            vo_ui_bridge::register_externs(
+                vm.extern_registry_mut()
+                    .map_err(|error| format!("{error:?}"))?,
+                &module.externs,
+            )
+            .map_err(|error| error.to_string())
+        })
+    }?;
     let outcome = vm.run().map_err(|error| {
         use std::fmt::Write;
         let mut message = format!("AOT execution failed: {error:?}");

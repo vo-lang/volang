@@ -12,7 +12,7 @@ const engines = ['chromium','firefox','webkit'];
 export function publicHostEvidence(report) {
   assert.equal(report.schema,'volang.ui-public-host.v1');
   assert.equal(report.passed,true);
-  for (const key of ['freshPackageStaging','archiveInstalled','existingExportsRetained','strictConsumerTypes','browserBundle','legacyUiExcluded','heavyWidgetsExcluded']) {
+  for (const key of ['freshPackageStaging','archiveInstalled','existingExportsRetained','strictConsumerTypes','browserBundle','heavyWidgetsExcluded']) {
     assert.equal(report.checks?.[key],true,'public host '+key);
   }
   assert.equal(report.package?.name,'vo-web');
@@ -121,7 +121,7 @@ export function browserEvidence(report,engine,build) {
   for (const contract of ['source-selection-projection','stale-source-selection','native-label-dependencies']) {
     assert(report.codeEditor.contracts.includes(contract),engine + ' editor missing ' + contract);
   }
-  for (const name of ['backends','inspection','styles','workbench','lazyWidgetApplications','studioEditor','studioRecovery','studio']) {
+  for (const name of ['backends','inspection','styles','workbench','lazyWidgetApplications','studioEditor','studio']) {
     assert(Array.isArray(report[name]) && report[name].length,engine + ' ' + name);
     assert(report[name].every(item => item.passed === true),engine + ' ' + name);
     assert.deepEqual([...new Set(report[name].map(item => item.backend))].sort(),backends,engine + ' ' + name);
@@ -157,26 +157,12 @@ export function staticStudioEvidence(report,build,sourceBytes) {
   for (const result of report.results) {
     for (const name of ['passed','rootRedirect','refresh','missingPage','noScript']) assert.equal(result[name],true,result.engine+' '+name);
     assert.equal(typeof result.browserVersion,'string');assert(result.browserVersion.length);
-    for (const name of ['studio','editor','recovery']) {
+    for (const name of ['studio','editor']) {
       assert(result[name].every(value=>value.passed === true));
       assert.deepEqual([...new Set(result[name].map(value=>value.backend))].sort(),backends,result.engine+' static '+name);
     }
     editorDiagnosticsEvidence(result.editor,result.engine+' static Studio');
     studioLanguageEvidence(result.language,result.engine+' static Studio');
-  }
-}
-
-export function studioUpgradeEvidence(report,build,fixtureBytes) {
-  for (const name of ['passed','nativeRedirects','readOnlyMethods']) assert.equal(report[name],true,'Studio upgrade '+name);
-  assert.deepEqual(report.build,build,'Studio upgrade tests used another export');
-  assert.equal(report.fixtureSha256,createHash('sha256').update(fixtureBytes).digest('hex'),'Studio upgrade used another legacy worker');
-  assert.deepEqual(report.results.map(value=>value.engine).sort(),engines);
-  for (const result of report.results) {
-    for (const name of ['passed','workerRetired','otherRegistrationRetained','assetCacheRetired','otherCacheRetained',
-      'openDraftRetained','projectFilesRetained','oldLinks','noScriptLegacy','unknownTopic']) assert.equal(result[name],true,result.engine+' upgrade '+name);
-    assert.equal(typeof result.browserVersion,'string');assert(result.browserVersion.length);
-    assert.deepEqual(result.retries.map(value=>value.backend).sort(),backends);
-    assert(result.retries.every(value=>value.passed === true));
   }
 }
 
@@ -212,8 +198,8 @@ export async function collectCoreEvidence(root) {
   assert(toolkit.contracts.includes('complete-delivered-example-applications'));
   assert(toolkit.firstSteps.passed && toolkit.firstSteps.deliveredGuide && toolkit.firstSteps.publicCases === 3);
   assert.equal(toolkit.firstSteps.sourceSha256,createHash('sha256').update(guideApplication(await readFile(join(root,'ui/next/guides/first-steps.md'),'utf8'))).digest('hex'));
-  assert(toolkit.migration.passed && toolkit.migration.deliveredGuide && toolkit.migration.publicCases === 6);
-  assert.equal(toolkit.migration.sourceSha256,createHash('sha256').update(guideApplication(await readFile(join(root,'ui/next/guides/migration.md'),'utf8'))).digest('hex'));
+  assert(toolkit.forms.passed && toolkit.forms.deliveredGuide && toolkit.forms.publicCases === 6);
+  assert.equal(toolkit.forms.sourceSha256,createHash('sha256').update(guideApplication(await readFile(join(root,'ui/next/guides/forms.md'),'utf8'))).digest('hex'));
   assert.equal(toolkit.kitComposition.publicCases,6);
   for(const key of ['passed','nativeModifiers','retainedItems','customContent']) assert(toolkit.kitComposition[key],'kit composition '+key);
   assert.equal(toolkit.kitComposition.sourceSha256,createHash('sha256').update(await readFile(join(root,'eng/ui-next/fixtures/kit-composition-app.vo'))).digest('hex'));
@@ -238,7 +224,7 @@ export async function collectCoreEvidence(root) {
   }
   assert.deepEqual(toolkit.editorCases.map(value => `${value.engine}-${value.backend}`).sort(),engines.flatMap(engine => backends.map(backend => `${engine}-${backend}`)).sort());
   assert(toolkit.editorCases.every(value => value.editor === true));
-  assert.deepEqual(Object.keys(toolkit.builds).sort(),['canvas','default','document-data','editor','fieldnotes','first-steps','kit-composition','listening','migration','pages','plot','scroll-position','variable-list']);
+  assert.deepEqual(Object.keys(toolkit.builds).sort(),['canvas','default','document-data','editor','fieldnotes','first-steps','kit-composition','listening','forms','pages','plot','scroll-position','variable-list']);
   for (const [name,app] of Object.entries(toolkit.builds)) for (const value of app.artifacts) await artifact(join(output,'toolchain-project',name),value);
   await add('toolchain-project/report.json');await add('toolchain-project/toolchain-manifest.json');
   const packaged = await read('ci/toolchain/tools/toolchain.json'),tested = await read('toolchain-project/toolchain-manifest.json');
@@ -266,11 +252,8 @@ export async function collectCoreEvidence(root) {
   assert.deepEqual(staticOwnership.build,staticBuild,'static export ownership tests used another build');
   for (const name of ['passed','repeatable','cancelledAfterNativeRender','lastSitePreserved','stagingRemoved']) assert.equal(staticOwnership[name],true,'static export '+name);
   staticStudioEvidence(staticReport,staticBuild,await readFile(join(output,'studio-distribution/build-report.json')));
-  studioUpgradeEvidence(await read('studio-upgrade-check/report.json'),staticBuild,
-    await readFile(join(root,'eng/ui-next/fixtures/studio-legacy-worker.js')));
   for (const value of staticBuild.artifacts) await artifact(join(output,'studio-static'),value);
   await add('studio-static/build-report.json');await add('studio-static-check/report.json');await add('studio-static-build-report.json');
-  await add('studio-upgrade-check/report.json');
   const commands = await read('ci/commands.json');
   const pointerDevelopment = await read('pointer-development-check/report.json');
   for (const name of ['passed','widthRetained','dragReset','newDrag']) assert.equal(pointerDevelopment[name],true,'pointer development '+name);
@@ -289,6 +272,6 @@ export async function collectCoreEvidence(root) {
   return {schema:'volang.browser-result.v1',passed:true,report:{passed:true,complete:true,
     scope:'experimental-web-ui-core',browserVersions:versions,checks:['native-vm','native-jit','wasm-vm',
       'core-node-contracts','three-engine-ui-matrices','portable-native-cli','request-time-server-template','optional-editor',
-      'standalone-cache-and-reload','pointer-development-reset','public-host-package-and-isolation','studio-compressed-delivery','studio-static-delivery','studio-upgrade-and-retry','offline-schema-and-file-worker','browser-runtime-package-identity','artifact-identity'],
+      'standalone-cache-and-reload','pointer-development-reset','public-host-package-and-isolation','studio-compressed-delivery','studio-static-delivery','offline-schema-and-file-worker','browser-runtime-package-identity','artifact-identity'],
     evidence:reports,toolchain:toolkit.toolchain,formalPerformanceBenchmark:false,productCertification:false}};
 }

@@ -20,10 +20,8 @@ export async function checkPersistentStorage(browser) {
       await store.set('draft','Saved 中文 🌿');await store.set('empty','');
       check(await store.get('empty')==='','empty value must remain distinct from missing');
       check(await createPersistentStorage('other-contract').get('draft')===null,'named stores must be isolated');
-      let imports=0;
-      check(await store.get('legacy',undefined,()=>{imports++;return 'old';})==='old','legacy import');
-      await store.set('legacy','new');
-      check(await store.get('legacy',undefined,()=>{imports++;return 'stale';})==='new'&&imports===1,'legacy data overwrote committed value');
+      await store.set('replaced','first');await store.set('replaced','second');
+      check(await store.get('replaced')==='second','committed replacement missing');
       const before=new AbortController();before.abort();
       await store.set('never','bad',before.signal).then(()=>{throw Error('accepted cancelled write');},()=>{});
       const opening=new AbortController(),pending=store.set('never','bad',opening.signal);opening.abort();
@@ -33,10 +31,8 @@ export async function checkPersistentStorage(browser) {
       try {await store.set('draft','bad',writing.signal).then(()=>{throw Error('accepted aborted transaction');},()=>{});}
       finally {IDBObjectStore.prototype.put=put;}
       check(await store.get('draft')==='Saved 中文 🌿'&&await store.get('never')===null,'aborted write escaped its transaction');
-      await store.get('bad-import',undefined,()=>{throw undefined;}).then(()=>{throw Error('ignored import failure');},()=>{});
-      check(await store.get('bad-import')===null,'failed import changed storage');
       await store.remove('empty');check(await store.get('empty')===null,'delete did not commit');
-      return ['committed-unicode-and-empty-values','isolated-names','atomic-legacy-import','cancel-open-and-write','failed-import-and-delete'];
+      return ['committed-unicode-and-empty-values','isolated-names','committed-replacement','cancel-open-and-write','committed-delete'];
     });
     await page.reload();await load();
     assert.equal(await page.evaluate(()=>storageAdapter.createPersistentStorage('storage-contract').get('draft')),'Saved 中文 🌿');

@@ -63,14 +63,29 @@ func Docs(scope *ui.Scope, topic string) ui.View {
 		if !result.HasValue {
 			return preparedChapter{}
 		}
-		decoded, err := document.Parse(result.Value)
+		decoded, err := document.ParseWithOptions(result.Value, document.Options{
+			HeadingLinks: true,
+			CodeTools: func(source string) ui.View {
+				return ui.Widget("studio.code-copy", source, func(ui.Result) {}).Class("studio-code-tools")
+			},
+		})
 		if err != nil || decoded.HeadingID() != page.HeadingID {
 			return preparedChapter{error: "This chapter could not be read."}
 		}
 		return preparedChapter{document: decoded}
 	}, result.HasValue, result.Value, page.HeadingID).Get().(preparedChapter)
 	if prepared.document != nil {
-		content = prepared.document.View()
+		outline := []ui.View{}
+		for _, heading := range prepared.document.Outline() {
+			if heading.Level <= 3 {
+				outline = append(outline, ui.Element("li", ui.Element("a", ui.Text(heading.Text)).Attr("href", "#" + heading.ID)).Key(heading.ID))
+			}
+		}
+		contents := ui.Fragment()
+		if len(outline) > 0 {
+			contents = ui.Element("details", ui.Element("summary", ui.Text("On this page")), ui.Element("nav", ui.Element("ul", outline...)).Attr("aria-label", "On this page")).Class("studio-doc-contents")
+		}
+		content = ui.Fragment(contents, prepared.document.View())
 	}
 	if prepared.error != "" {
 		message = prepared.error

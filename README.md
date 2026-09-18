@@ -130,11 +130,10 @@ release claims.
 
 ## Volang UI
 
-The Web UI rewrite provides typed Volang components, scoped state, native HTML,
+Volang UI provides typed Volang components, scoped state, native HTML,
 an official kit, forms, navigation, server HTML and development tools. Web
 applications execute with the Wasm VM. The [desktop preview](ui/next/desktop.md)
-uses native VM, JIT or Native AOT with a system WebView. Device, cross-platform
-and migration acceptance remains in progress. With a matching Web UI toolchain
+uses native VM, JIT or Native AOT with a system WebView. With a matching UI toolchain
 and Node.js 24 or newer:
 
 ```sh
@@ -154,10 +153,9 @@ vo ui preview --project hello-ui
 Start with the [complete first application](ui/next/guides/first-steps.md),
 [UI overview](ui/README.md) and [Studio](apps/studio/README.md). Applications keep
 ordinary Vo sources and a locked framework snapshot, with no npm application
-graph. Existing UI APIs and native commands retain their
-[compatibility path](ui/legacy.md); the [rewrite plan](docs/ui-platform-rewrite-plan-20260913.md)
-and [release policy](ui/docs/release-policy.md) distinguish replacement acceptance
-from the previous implementation's certification declarations.
+graph. The [architecture](ui/docs/architecture.md) describes the framework and
+host boundaries; the [release policy](ui/docs/release-policy.md) defines acceptance
+and publication evidence.
 
 ## Development
 

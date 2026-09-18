@@ -8,6 +8,17 @@ import (
 )
 
 func documentContracts() {
+	decorated, decorationError := document.ParseWithOptions(`{"version":1,"nodes":[{"tag":"h2","attrs":{"id":"example"},"children":[{"tag":"#text","text":"Example"}]},{"tag":"pre","children":[{"tag":"code","children":[{"tag":"#text","text":"println(42)"}]}]}]}`, document.Options{
+		HeadingLinks: true,
+		CodeTools: func(source string) ui.View { return ui.Element("button", ui.Text(source)).Attr("data-code-tools", "true") },
+	})
+	require(decorationError == nil, "document presentation rejected valid content")
+	outline := decorated.Outline()
+	require(len(outline) == 1 && outline[0].ID == "example" && outline[0].Text == "Example" && outline[0].Level == 2, "document outline lost heading identity")
+	outline[0].Text = "changed"
+	require(decorated.Outline()[0].Text == "Example", "document outline leaked a mutable alias")
+	decoratedHTML := host.HTML(decorated.View())
+	require(strings.Contains(decoratedHTML, `href="#example"`) && strings.Contains(decoratedHTML, `aria-label="Example"`) && strings.Contains(decoratedHTML, `data-code-tools="true"`), "document presentation lost heading or code tools: " + decoratedHTML)
 	source := `{"version":1,"headingID":"doc-intro","nodes":[{"tag":"p","children":[{"tag":"#text","text":"<literal> & 中文 "},{"tag":"a","attrs":{"href":"/studio/docs/tour#doc-types"},"children":[{"tag":"strong","children":[{"tag":"#text","text":"Explore"}]}]}]},{"tag":"table","children":[{"tag":"thead","children":[{"tag":"tr","children":[{"tag":"th","attrs":{"scope":"col"},"children":[{"tag":"#text","text":"Name"}]}]}]},{"tag":"tbody","children":[{"tag":"tr","children":[{"tag":"td","children":[{"tag":"#text","text":"Ada"}]}]}]}]},{"tag":"ul","children":[{"tag":"li","children":[{"tag":"input","attrs":{"type":"checkbox","disabled":"true","checked":"true","aria-label":"Completed"}},{"tag":"#text","text":"Done"}]}]}]}`
 	decoded, err := document.Decode(source)
 	require(err == nil, "semantic document did not decode")

@@ -1,5 +1,4 @@
 import {sourceEditor} from './editor-controls.mjs';
-import {instrumentRecovery, seedRecovery} from './studio-recovery-contracts.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, rm } from 'node:fs/promises';
@@ -30,7 +29,6 @@ try {
   });
   browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
-  await instrumentRecovery(page);
   const connected = page.waitForResponse(response => response.url().endsWith('/__ui-next/events'));
   await page.goto(url);
   await connected;
@@ -100,22 +98,9 @@ try {
   await page.frameLocator('iframe').getByRole('button', { name: 'One more idea', exact: true }).waitFor({ timeout: 35000 });
   await page.locator('[data-stop-preview]').click();
   await page.waitForFunction(() => window.__studioNext.workers.started === window.__studioNext.workers.stopped);
-  await page.getByRole('link', {name:'Recover browser projects', exact:true}).click();
-  await page.getByRole('button', {name:'Find browser projects', exact:true}).waitFor();
-  await seedRecovery(page);
-  await page.getByRole('button', {name:'Find browser projects', exact:true}).click();
-  await page.getByLabel('Browser project', {exact:true}).waitFor();
-  await page.getByRole('button', {name:'Prepare download', exact:true}).click();
-  await page.locator('a[download]').waitFor();
-  const preparedURL = await page.locator('a[download]').getAttribute('href');
-  await reload();
-  await page.waitForFunction(url => window.recoveryProbe.revoked.includes(url), preparedURL);
-  assert.equal(await page.locator('a[download]').count(), 0);
-  assert.equal(await page.getByLabel('Browser project', {exact:true}).count(), 0);
-  assert.equal(await page.getByRole('button', {name:'Find browser projects', exact:true}).isEnabled(), true);
   await writeFile(resolve(root, 'target/ui-next/development-report.json'), JSON.stringify({
     passed: true, contracts: ['initial-vm-build', 'live-css-preserves-dom-and-state', 'compile-error-retains-working-page', 'source-fix-rebuilds-and-recovers', 'development-ui-source-snapshot', 'development-ui-preview'],
-    componentStateReload: true, runningWorkReload: true, exampleDraftRestoreReload: true, editorFocusSelectionReload:true, recoveryDownloadReload:true,
+    componentStateReload: true, runningWorkReload: true, exampleDraftRestoreReload: true, editorFocusSelectionReload:true,
   }, null, 2) + '\n');
   console.log('Studio development contracts passed: live CSS, last good page, diagnostics and automatic recovery');
 } finally {
