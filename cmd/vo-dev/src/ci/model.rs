@@ -77,6 +77,9 @@ pub(crate) struct CiTask {
     pub(crate) impact: Vec<String>,
     pub(crate) platforms: Vec<String>,
     pub(crate) capabilities: Vec<String>,
+    // Feedback selection can be narrower than the capabilities certified by a full lane.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) selection_capabilities: Vec<String>,
     pub(crate) timeout_minutes: u32,
     pub(crate) budget_minutes: u32,
     pub(crate) evidence_kind: String,
@@ -90,6 +93,16 @@ pub(crate) struct CiTask {
     pub(crate) inputs: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) resource_group: String,
+}
+
+impl CiTask {
+    pub(crate) fn impact_capabilities(&self) -> &[String] {
+        if self.selection_capabilities.is_empty() {
+            &self.capabilities
+        } else {
+            &self.selection_capabilities
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -251,6 +264,13 @@ fn validate_manifest(manifest: &CiManifest) -> Result<()> {
         validate_nonempty_patterns(&task.id, &task.impact)?;
         validate_nonempty_tokens(&task.id, "platforms", &task.platforms)?;
         validate_nonempty_tokens(&task.id, "capabilities", &task.capabilities)?;
+        if !task.selection_capabilities.is_empty() {
+            validate_nonempty_tokens(
+                &task.id,
+                "selection capabilities",
+                &task.selection_capabilities,
+            )?;
+        }
         validate_token("CI evidence kind", &task.evidence_kind)?;
         if task.timeout_minutes == 0 || task.budget_minutes == 0 {
             bail!("CI task {} budgets must be positive", task.id);
@@ -467,6 +487,7 @@ mod tests {
             impact: vec!["cmd/".to_string()],
             platforms: vec!["linux".to_string()],
             capabilities: vec!["rust".to_string()],
+            selection_capabilities: Vec::new(),
             timeout_minutes: 10,
             budget_minutes: 5,
             evidence_kind: "contract".to_string(),

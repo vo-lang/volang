@@ -59,12 +59,15 @@ directory. It archives earlier outputs, locks the task's local resource group,
 captures command stdout/stderr, and compares declared source inputs before and
 after execution. Task and command deadlines terminate the complete process
 group or Windows Job Object. Workflow jobs reserve a further 15 minutes for
-provisioning and diagnostic uploads; the quality job includes both sequential
-task budgets. These outer allowances do not change test or task deadlines.
+provisioning and diagnostic uploads; contracts and Rust quality have separate job
+budgets. These outer allowances do not change test or task deadlines.
 Cancellation uses the same cleanup path. Commands
 run once using their declared argument vector and environment. Commands that
 explicitly select Bash use fail-fast scripts; the executor never implicitly
-expands an argument through a shell. Automatic retries remain disabled. Platform Nightly lanes
+expands an argument through a shell. Automatic retries remain disabled. A deadline records `timeout` separately from
+product assertions and infrastructure setup failures; it does not establish the
+root cause or justify marking a test flaky. A pass after a failure must retain the
+original evidence and be investigated separately. Platform Nightly lanes
 run a byte-checked copy of `vo-dev` from `target/ci/bin`, allowing workspace
 Cargo tests to replace `target/debug/vo-dev.exe` while the executor remains alive
 on Windows.
@@ -148,8 +151,10 @@ push and rechecks those bytes before publishing.
 
 The replacement desktop framework has three independent tasks:
 `ui-desktop-rewrite-linux`, `ui-desktop-rewrite-macos`, and
-`ui-desktop-rewrite-windows`. Pull requests select them through desktop source
-impact; merge and main include all three. They build the release compiler,
+`ui-desktop-rewrite-windows`. Pull requests select them for delivery/loader
+changes through `desktop-delivery`; shared controls, dependency changes and unknown
+inputs conservatively select them too. Ordinary UI and runtime changes use the
+three platform smoke lanes first; merge and main include all three full rewrite lanes. They build the release compiler,
 execution-only Wasm runtime and optional Studio compiler, then a matching native
 SDK. The first Wasm build may install the exact binding tools selected from
 Cargo.lock; subsequent builds reuse them. SDK builds run offline after an
@@ -380,12 +385,28 @@ and manual dispatches.
 
 Pull requests use conservative component impact selection:
 
-- repository contracts always run;
+- repository contracts always run in an independent prerequisite job; Rust,
+  language, browser and native jobs start only after it passes;
 - Rust, language, Web, and UI smoke lanes run only when their owned inputs are
   affected;
-- UI product changes include Linux smoke and the macOS/Windows platform lanes;
+- ordinary UI changes include Linux, macOS and Windows smoke lanes, each checking
+  the rewritten WebView/bundle contracts first, followed by VM/JIT contracts,
+  native linking and real VM/AOT windows;
+- desktop packaging/loader changes additionally select the three complete rewrite
+  lanes; their certified capabilities stay separate from `selection_capabilities`,
+  which only narrow feedback selection. Shared/unknown inputs still select every
+  eligible task. The complete main/merge profiles ignore this narrowing;
 - weighted case sharding keeps every backend variant of a language case
   together while balancing declared timeout cost.
+
+The prerequisite includes planner/certificate regression tests and lightweight
+site staging, directory publication and cross-platform link contracts, alongside
+generated-state and workflow validation. The publication tests install their locked
+Node dependencies through `ui-web-rewrite-dependencies`; they require no SDK or
+browser download.
+The planner records why each task ran or was skipped. Use `vo-dev ci plan --profile
+pull-request --changed-file <path>` to inspect local selection; use a manual CI
+run on a branch for the complete merge profile before a particularly broad change.
 
 Merge groups and `main` run the complete language matrix, full Wasm/Web suite,
 and real Linux, macOS, and Windows UI/AOT matrix. A `main` run additionally
@@ -432,6 +453,10 @@ served application file against the certified directory around the journey.
 CNAME and `.nojekyll` remain bound locally; HTTP availability is not required
 for these hosting metadata files. Cancellation joins requests and closes the
 browser and local server. Reports stay outside the candidate directory.
+The deployed journey checks the URL returned by Pages and also HTTPS when Pages
+returns an HTTP URL. Both results belong to the same Site run and must pass.
+Failure reports include the verification phase, URL/cause chain, and bounded page
+output and screenshots captured before the browser closes.
 
 The Pages environment remains the deployment authority, and superseded main
 candidates cannot deploy. For Actions-based Pages publishing, domain settings
@@ -624,9 +649,9 @@ content assets (HTML, JavaScript, Wasm, JSON, images, CSS and fonts) against tha
 same certified artifact, with bounded downloads and no retries. It then creates a
 fresh browser-local project, edits and runs code, saves, clicks the UI preview and
 checks refresh/reopen persistence. Failures retain Playwright traces, screenshots
-and domain results. Pages configuration, private build markers, TypeScript declarations
-and source maps are outside the public asset comparison. The complete artifact
-including those files remains bound by the promotion certificate.
+and domain results. Only `CNAME` and `.nojekyll` are excluded from HTTP requests;
+the complete artifact, including both hosting files, remains bound by the
+promotion certificate.
 
 ### Language host contracts
 
@@ -642,3 +667,19 @@ checks that the domain host matches the producing task runner.
 Resource groups reserve case groups within each plan without occupying workers
 waiting for busy resources. Native AOT retains its independent two-linker bound;
 Wasm VM retains a bounded worker pool. No automatic test retries are added.
+
+## Deployment completion and follow-up diagnostics
+
+A site delivery is complete when the exact main candidate has full CI certification,
+Site verifies and publishes that artifact, and the deployed journey passes for the
+Pages URL and HTTPS. A skipped or superseded deployment is not a completed delivery.
+Record the source commit, CI run, Site run and deployed URL together.
+
+Additional local checks are diagnostic. Keep their results separate from the remote
+acceptance reports, including connection failures and any changed timeout settings.
+Do not repeatedly rerun the full remote matrix for a local connection failure. Inspect
+the recorded URL, cause and page output, then reproduce only the unresolved step.
+Do not silently relax deadlines, retry assertions into green, or replace the original
+failure artifact. Further changes or unresolved product evidence justify another
+validation round; an already successful deployment does not require endless local
+revalidation.

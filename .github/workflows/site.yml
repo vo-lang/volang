@@ -242,7 +242,18 @@ jobs:
           node eng/ui-next/studio-site-cli.mjs check \
             --origin "$PAGE_URL" \
             --directory target/ci/artifacts/site \
-            --output target/ci/results/site-canary
+            --output target/ci/results/site-canary/deployment-url
+
+      - name: Verify HTTPS bytes and user journey
+        if: startsWith(needs.deploy.outputs.page_url, 'http:')
+        env:
+          PAGE_URL: ${{ needs.deploy.outputs.page_url }}
+        run: |
+          HTTPS_URL="${PAGE_URL/#http:/https:}"
+          node eng/ui-next/studio-site-cli.mjs check \
+            --origin "$HTTPS_URL" \
+            --directory target/ci/artifacts/site \
+            --output target/ci/results/site-canary/https
 
       - name: Upload deployed journey diagnostics
         if: always()
