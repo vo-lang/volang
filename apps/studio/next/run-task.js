@@ -1,8 +1,10 @@
 // Each run owns one worker. Deadlines belong to phases so a cold compiler load
 // cannot consume the execution budget; cancellation always releases the worker.
+export const RUN_PHASE_DEADLINES = Object.freeze({loading:45000, compiling:15000, running:10000});
+
 export function createRunTask(counters, {
   createWorker = () => new Worker('/studio-assets/runner.js', {type:'module', name:'volang-playground'}),
-  deadlines = {loading:45000, compiling:15000, running:10000},
+  deadlines = RUN_PHASE_DEADLINES,
 } = {}) {
   return (source, signal) => {
     if (source.length > 100000) return Promise.reject(new Error('Please keep this example under 100,000 characters.'));

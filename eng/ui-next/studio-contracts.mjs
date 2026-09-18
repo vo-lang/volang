@@ -1,7 +1,9 @@
 import {sourceEditor} from './editor-controls.mjs';
 import {waitStudioDraft} from './studio-draft-contracts.mjs';
 import assert from 'node:assert/strict';
+import {writeFile} from 'node:fs/promises';
 import { resolve } from 'node:path';
+import {RUN_PHASE_DEADLINES} from '../../apps/studio/next/run-task.js';
 import { root } from './repository-paths.mjs';
 import { checkDialog } from './dialog-contracts.mjs';
 import { checkDialogMotion, dialogMotionContracts } from './dialog-motion-contracts.mjs';
@@ -29,6 +31,39 @@ const menuContracts = ['menu-native-activation', 'menu-keyboard-navigation', 'me
   'menu-typeahead', 'menu-native-tab-exit', 'menu-pointer-and-escape'];
 
 export async function checkStudio(browser, url, outputDirectory = resolve(root, 'target/ui-next')) {
+  try { return await studioContracts(browser,url,outputDirectory); }
+  catch(error) {
+    const pages=[];
+    for(const page of browser.contexts().flatMap(context=>context.pages()).slice(-3)) {
+      pages.push(await page.evaluate(()=>({url:location.href,error:window.__studioNext?.error,
+        workers:window.__studioNext?.workers,output:document.querySelector('[data-output]')?.textContent?.slice(0,4000),
+        preview:document.querySelector('[data-preview-status]')?.textContent?.slice(0,4000),
+        source:document.querySelector('textarea')?.value?.slice(0,4000),
+        runDisabled:document.querySelector('[data-run]')?.disabled})).catch(cause=>({error:String(cause)})));
+    }
+    const diagnostic={error:String(error),pages};
+    console.error('Studio failure:',JSON.stringify(diagnostic));
+    await writeFile(resolve(outputDirectory,'studio-failure.json'),JSON.stringify(diagnostic,null,2)+'\n').catch(()=>{});
+    throw error;
+  }
+}
+
+async function runConsole(page) {
+  const started=await page.evaluate(()=>window.__studioNext.workers.started);
+  await page.locator('[data-run]').click();
+  await page.waitForFunction(before=>window.__studioNext.error || window.__studioNext.workers.started>before,started,{timeout:10000});
+  assert.equal(await page.evaluate(()=>window.__studioNext.error),null);
+  // Allow the declared loading, compilation and execution phases to settle;
+  // assert the actual result immediately, including errors and wrong output.
+  const timeout=Object.values(RUN_PHASE_DEADLINES).reduce((total,value)=>total+value,0)+5000;
+  await page.waitForFunction(()=>window.__studioNext.error ||
+    window.__studioNext.workers.started===window.__studioNext.workers.stopped &&
+    document.querySelector('[data-run]')?.disabled===false,null,{timeout});
+  assert.equal(await page.evaluate(()=>window.__studioNext.error),null);
+  return page.locator('[data-output]').textContent();
+}
+
+async function studioContracts(browser, url, outputDirectory) {
   const reports = [];
   const defaultPage = await browser.newPage(), defaultRequests = [], defaultErrors = [];
   try {
@@ -99,12 +134,10 @@ export async function checkStudio(browser, url, outputDirectory = resolve(root, 
     await page.locator('#playground-source').waitFor();
     const source = 'package main\nimport "fmt"\nfunc main() { fmt.Println("Hello, 中文") }\n';
     await sourceEditor(page).fill(source);
-    await page.locator('[data-run]').click();
-    await page.waitForFunction(() => document.querySelector('[data-output]').textContent === 'Hello, 中文\n');
+    assert.equal(await runConsole(page),'Hello, 中文\n');
     assert.equal(await page.evaluate(() => window.__studioNext.workers.started), 1);
     await sourceEditor(page).fill('package main\nfunc main() { missingName() }');
-    await page.locator('[data-run]').click();
-    await page.waitForFunction(() => document.querySelector('[data-output]').textContent.includes('missingName'));
+    assert.match(await runConsole(page),/missingName/);
     await sourceEditor(page).fill('package main\nfunc main() { for {} }');
     await page.locator('[data-run]').click();
     await page.locator('[data-stop]').click();
