@@ -9,6 +9,13 @@ homepage.workspace = true
 description = "Transport-only provider for the Volang UI framework"
 publish = false
 
+[features]
+default = []
+# Compiler hosts compose this provider without pulling a renderer or native window.
+toolchain = ["dep:vo-engine", "dep:vo-vm"]
+
 [dependencies]
 vo-common-core.workspace = true
 vo-runtime.workspace = true
+vo-engine = { path = "../vo-engine", default-features = false, optional = true }
+vo-vm = { path = "../vo-vm", default-features = false, optional = true }

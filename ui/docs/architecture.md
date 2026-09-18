@@ -11,7 +11,9 @@ Worker-owned VM execution. Worker execution keeps guest turns off the main
 thread; the page retains DOM and service ownership. Every root must release its
 listeners, requests, watches, workers and VM when closed.
 
-`vo-ui-bridge` connects the VM to this exchange. `vo-ui-native` owns native guest
+`vo-ui-bridge` connects the VM to this exchange. Its optional `toolchain` feature
+registers the same provider for CLI execution, SSR and AOT lowering; execution-only
+Web and desktop packages omit that feature. `vo-ui-native` owns native guest
 execution. `vo-ui-webview` hosts the same application in the system WebView;
 `vo-ui-desktop-runtime` supplies its packaged native runtime. Framework state
 and application business logic remain in Vo across Web and desktop.

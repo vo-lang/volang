@@ -3765,6 +3765,7 @@ dependencies = [
  "vo-schema-compiler",
  "vo-syntax",
  "vo-target",
+ "vo-ui-bridge",
  "vo-vm",
 ]
 
@@ -3788,6 +3789,7 @@ version = "0.1.4"
 dependencies = [
  "vo-aot-runtime-core",
  "vo-engine",
+ "vo-ui-bridge",
  "vo-vm",
 ]
 
@@ -4092,7 +4094,9 @@ name = "vo-ui-bridge"
 version = "0.1.4"
 dependencies = [
  "vo-common-core",
+ "vo-engine",
  "vo-runtime",
+ "vo-vm",
 ]
 
 [[package]]

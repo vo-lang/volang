@@ -360,10 +360,10 @@ fn default_emit_output_path(input: &Path, module_name: &str) -> PathBuf {
 
 fn compile_cli_path(path: &Path) -> Result<CompileOutput, String> {
     match generate::generate_for_build(path)? {
-        Some(generated_sources) => vo_engine::Engine::default()
+        Some(generated_sources) => vo_ui_bridge::engine()
             .compile_path_with_generated_sources_and_auto_install(path, generated_sources)
             .map_err(|error| error.to_string()),
-        None => vo_engine::Engine::default()
+        None => vo_ui_bridge::engine()
             .compile_path_with_auto_install(path)
             .map_err(|error| error.to_string()),
     }
@@ -542,11 +542,11 @@ fn cmd_run_os(args: &[OsString]) -> i32 {
     }
 
     let run_result = if jit_stats_json.is_some() {
-        vo_engine::Engine::default()
+        vo_ui_bridge::engine()
             .run_with_byte_args_and_memory_observed(output, mode, program_args, memory_config)
             .map(Some)
     } else {
-        vo_engine::Engine::default()
+        vo_ui_bridge::engine()
             .run_with_byte_args_and_memory(output, mode, program_args, memory_config)
             .map(|()| None)
     };
@@ -1140,14 +1140,14 @@ fn cmd_build(args: &[OsString]) -> i32 {
             return 1;
         }
     } else if matches!(kind, BuildKind::Binary | BuildKind::Object) {
-        let cache_key = vo_engine::Engine::default().aot_cache_key(
+        let cache_key = vo_ui_bridge::engine().aot_cache_key(
             &module_bytes,
             &target,
             AotCacheArtifactKind::NativeObject,
             debug_ir,
         );
         let object_bytes = match build_cached_aot_artifact(aot_cache.as_ref(), &cache_key, || {
-            vo_engine::Engine::default()
+            vo_ui_bridge::engine()
                 .compile_native_aot_object(&output, &target, debug_ir)
                 .map(|object| object.bytes)
                 .map_err(|error| error.to_string())
@@ -1231,7 +1231,7 @@ fn cmd_check(args: &[OsString]) -> i32 {
 
     println!("Checking project: {}", path.display());
     let result = if read_only == 1 {
-        vo_engine::Engine::default()
+        vo_ui_bridge::engine()
             .compile_path(&path)
             .map_err(|error| error.to_string())
     } else {
@@ -1307,7 +1307,7 @@ fn cmd_test(args: &[OsString]) -> i32 {
         }
     };
 
-    match vo_engine::Engine::default().run(output, mode, Vec::new()) {
+    match vo_ui_bridge::engine().run(output, mode, Vec::new()) {
         Ok(()) => 0,
         Err(RunError::Exited(code)) => code,
         Err(error) => {
@@ -2893,7 +2893,7 @@ mod tests {
         let temporary = unique_temp_dir("bytecode-skip-generation");
         fs::create_dir_all(&temporary).unwrap();
         let root = temporary.canonicalize().unwrap();
-        let expected = vo_engine::Engine::default()
+        let expected = vo_ui_bridge::engine()
             .compile_source_at("package main\nfunc main() {}\n", &root)
             .unwrap();
         let artifact = root.join("program.vob");
@@ -3430,7 +3430,7 @@ mod tests {
         let root = unique_temp_dir("aot-cache");
         let cache = AotArtifactCache::new(root.clone()).unwrap();
         let target = TargetSpec::parse(vo_engine::WASM32_UNKNOWN_UNKNOWN).unwrap();
-        let key = vo_engine::Engine::default().aot_cache_key(
+        let key = vo_ui_bridge::engine().aot_cache_key(
             b"verified-module",
             &target,
             AotCacheArtifactKind::NativeObject,

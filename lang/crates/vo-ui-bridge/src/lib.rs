@@ -1,4 +1,4 @@
-//! Transport-only adapter for the replacement UI. All component semantics
+//! Transport-only adapter for Volang UI. All component semantics
 //! execute in the guest; there is no thread-local UI state in this adapter.
 
 #![no_std]
@@ -125,3 +125,10 @@ mod tests {
         register_externs(&mut registry, &[definition(PACKAGE, "Exchange")]).unwrap();
     }
 }
+
+// Compiler hosts need the same provider table for run, SSR and AOT resolution.
+// The feature is absent from browser and native execution-only packages.
+#[cfg(feature = "toolchain")]
+mod toolchain;
+#[cfg(feature = "toolchain")]
+pub use toolchain::engine;
