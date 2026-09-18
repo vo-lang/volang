@@ -401,7 +401,9 @@ Pull requests use conservative component impact selection:
 
 The prerequisite includes planner/certificate regression tests and lightweight
 site staging, directory publication and cross-platform link contracts, alongside
-generated-state and workflow validation. These require no SDK or browser download.
+generated-state and workflow validation. The publication tests install their locked
+Node dependencies through `ui-web-rewrite-dependencies`; they require no SDK or
+browser download.
 The planner records why each task ran or was skipped. Use `vo-dev ci plan --profile
 pull-request --changed-file <path>` to inspect local selection; use a manual CI
 run on a branch for the complete merge profile before a particularly broad change.

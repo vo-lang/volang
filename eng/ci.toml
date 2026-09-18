@@ -139,7 +139,7 @@ tasks = [
 
 [[task]]
 id = "contracts"
-commands = ["ci-planner-contracts", "publication-contracts", "contract-lint", "ui-catalog", "language-manifest", "language-format", "dependency-policy-unit", "workflow-lint"]
+commands = ["ci-planner-contracts", "ui-web-rewrite-dependencies", "publication-contracts", "contract-lint", "ui-catalog", "language-manifest", "language-format", "dependency-policy-unit", "workflow-lint"]
 inputs = ["*"]
 resource_group = "cargo"
 tier = "feedback"
