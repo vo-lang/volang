@@ -27,11 +27,28 @@ export async function checkStudioDocuments(browser, url, outputDirectory = resol
     page.on('pageerror', error => errors.push(error.message));
     page.on('request', request => requests.push(request.url()));
     try {
+      // Install faults before any pointer/focus event can prefetch and cache a
+      // successful chapter. Keep the fault active until the explicit retry.
+      let moduleAttempts = 0, moduleUnavailable = true, invalid = true;
+      await page.route('**/studio-docs/page-modules.json?*', async route => {
+        moduleAttempts++;
+        if (moduleUnavailable) await route.fulfill({ status: 503, body: 'Chapter unavailable' });
+        else await route.continue();
+      });
+      await page.route('**/studio-docs/page-introduction.json?*', async route => {
+        if (invalid) await route.fulfill({ contentType: 'application/json', body: '{"version":2,"nodes":[]}' });
+        else await route.continue();
+      });
       await page.goto(`${url}/studio/gallery?backend=${backend}`);
       await ready(page);
       assert(!requests.some(url => url.includes('/studio-docs/')));
       await page.getByRole('link', { name: 'Documentation', exact: true }).click();
       const nav = page.getByRole('navigation', { name: 'Documentation chapters' });
+      await chapter(page, 'first-steps');
+      await Promise.all([
+        page.waitForResponse(response => response.url().includes('/studio-docs/page-introduction.json')),
+        nav.getByRole('link', { name: 'Introduction', exact: true }).focus(),
+      ]);
       await chapter(page, 'first-steps');
       await page.locator('.studio-doc-contents summary').click();
       assert(await page.getByRole('navigation', {name:'On this page',exact:true}).getByRole('link').count() > 0);
@@ -71,24 +88,18 @@ export async function checkStudioDocuments(browser, url, outputDirectory = resol
       assert.equal(requests.filter(url => url.includes('/studio-docs/page-first-steps.json')).length, 1);
       assert.equal(requests.filter(url => url.includes('/studio-docs/page-hello-world.json')).length, 1);
       assert.equal(searchAttempts,2, 'query edits or chapter navigation refetched the immutable index');
-      let moduleAttempts = 0;
-      await page.route('**/studio-docs/page-modules.json?*', async route => {
-        moduleAttempts++;
-        if (moduleAttempts === 1) await route.fulfill({ status: 503, body: 'Chapter unavailable' });
-        else await route.continue();
-      });
       await nav.getByRole('link', { name: 'Modules and dependencies', exact: true }).click();
+      await page.getByRole('button', { name: 'Try again', exact: true }).waitFor();
+      const failedAttempts = moduleAttempts;
+      assert(failedAttempts > 0);
+      moduleUnavailable = false;
       await page.getByRole('button', { name: 'Try again', exact: true }).click();
       await chapter(page, 'modules');
-      assert.equal(moduleAttempts, 2);
+      assert.equal(moduleAttempts, failedAttempts + 1);
       await nav.getByRole('link', { name: 'Hello world', exact: true }).click();
       await chapter(page, 'hello-world');
       assert.equal(requests.filter(url => url.includes('/studio-docs/page-hello-world.json')).length, 1, 'cached chapter refetched');
-      let invalid = true;
-      await page.route('**/studio-docs/page-introduction.json?*', async route => {
-        if (invalid) await route.fulfill({ contentType: 'application/json', body: '{"version":2,"nodes":[]}' });
-        else await route.continue();
-      });
+      await nav.getByRole('link', { name: 'Introduction', exact: true }).focus();
       await nav.getByRole('link', { name: 'Introduction', exact: true }).click();
       await page.locator('.studio-doc-error [role=alert]').waitFor();
       assert.equal(await page.evaluate(() => window.__studioNext.error), null);
@@ -101,6 +112,12 @@ export async function checkStudioDocuments(browser, url, outputDirectory = resol
       await page.route('**/studio-docs/page-language-tour.json?*', async route => {
         intercepted(); await gate; await route.continue().catch(() => {});
       });
+      // A fresh root ensures the cancellation scenario cannot reuse an earlier
+      // hover-prefetched Language tour from the preceding navigation scenarios.
+      await page.goto(`${url}/studio/gallery?backend=${backend}`);
+      await ready(page);
+      await page.getByRole('link', { name: 'Documentation', exact: true }).click();
+      await chapter(page, 'first-steps');
       await nav.getByRole('link', { name: 'Language tour', exact: true }).click();
       await pending;
       await page.getByRole('link', { name: 'Gallery', exact: true }).click();
