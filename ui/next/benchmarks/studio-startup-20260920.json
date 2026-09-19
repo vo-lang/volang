@@ -1,0 +1,121 @@
+{
+  "date": "2026-09-20",
+  "baselineCommit": "63d711fbebad3f459bbccdc588be1fe02009dc9d",
+  "method": "Chromium fresh contexts; both worker entry points bundled without splitting and overridden locally through Playwright; other assets fetched from https://volang.dev. No production deployment was changed. Shared browser process and network intermediaries may be warm. Browser functional tests ran concurrently, so timing is diagnostic only.",
+  "samples": [
+    {
+      "variant": "baseline",
+      "readyMs": 3221,
+      "error": null,
+      "resources": [
+        {
+          "url": "https://volang.dev/artifacts/studio.vob",
+          "responseBodyBytes": 1793713,
+          "startMs": 1272,
+          "endMs": 1921
+        },
+        {
+          "url": "https://volang.dev/wasm/vo_web_bg.wasm",
+          "responseBodyBytes": 1047286,
+          "startMs": 2306,
+          "endMs": 3145
+        }
+      ]
+    },
+    {
+      "variant": "patched",
+      "readyMs": 1257,
+      "error": null,
+      "resources": [
+        {
+          "url": "https://volang.dev/wasm/vo_web_bg.wasm",
+          "responseBodyBytes": 1047098,
+          "startMs": 414,
+          "endMs": 750
+        },
+        {
+          "url": "https://volang.dev/artifacts/studio.vob.gz",
+          "responseBodyBytes": 652219,
+          "startMs": 413,
+          "endMs": 812
+        }
+      ]
+    },
+    {
+      "variant": "patched",
+      "readyMs": 1902,
+      "error": null,
+      "resources": [
+        {
+          "url": "https://volang.dev/wasm/vo_web_bg.wasm",
+          "responseBodyBytes": 1047286,
+          "startMs": 887,
+          "endMs": 1384
+        },
+        {
+          "url": "https://volang.dev/artifacts/studio.vob.gz",
+          "responseBodyBytes": 652033,
+          "startMs": 885,
+          "endMs": 1442
+        }
+      ]
+    },
+    {
+      "variant": "baseline",
+      "readyMs": 1524,
+      "error": null,
+      "resources": [
+        {
+          "url": "https://volang.dev/artifacts/studio.vob",
+          "responseBodyBytes": 1793731,
+          "startMs": 315,
+          "endMs": 1014
+        },
+        {
+          "url": "https://volang.dev/wasm/vo_web_bg.wasm",
+          "responseBodyBytes": 1047346,
+          "startMs": 898,
+          "endMs": 1449
+        }
+      ]
+    },
+    {
+      "variant": "baseline",
+      "readyMs": 1310,
+      "error": null,
+      "resources": [
+        {
+          "url": "https://volang.dev/artifacts/studio.vob",
+          "responseBodyBytes": 1793714,
+          "startMs": 283,
+          "endMs": 642
+        },
+        {
+          "url": "https://volang.dev/wasm/vo_web_bg.wasm",
+          "responseBodyBytes": 1047285,
+          "startMs": 1019,
+          "endMs": 1241
+        }
+      ]
+    },
+    {
+      "variant": "patched",
+      "readyMs": 1200,
+      "error": null,
+      "resources": [
+        {
+          "url": "https://volang.dev/wasm/vo_web_bg.wasm",
+          "responseBodyBytes": 1047284,
+          "startMs": 357,
+          "endMs": 736
+        },
+        {
+          "url": "https://volang.dev/artifacts/studio.vob.gz",
+          "responseBodyBytes": 652095,
+          "startMs": 357,
+          "endMs": 750
+        }
+      ]
+    }
+  ]
+}

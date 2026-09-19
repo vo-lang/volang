@@ -94,8 +94,13 @@ try {
         await page.getByRole('navigation',{name:'Documentation chapters'}).getByRole('link',{name:'First steps',exact:true}).waitFor();
         assert.equal(responses.filter(response=>response.url().includes('/studio-docs/search.json')).length,1);
         const image=responses.find(response=>response.url().includes('/artifacts/studio.vob'));
-        const encoding=(await image.allHeaders())['content-encoding'];
-        assert(['br','gzip'].includes(encoding),`${engine} did not negotiate compression`);
+        assert(new URL(image.url()).pathname.endsWith('/studio.vob.gz'),`${engine} did not request compressed bytecode`);
+        const encoding='gzip';
+        const delivered=await image.body();
+        const decoded=delivered[0]===0x1f && delivered[1]===0x8b ? gunzipSync(delivered) : delivered;
+        const artifact=build.artifacts.find(item=>item.path==='public/artifacts/studio.vob');
+        assert.equal(createHash('sha256').update(decoded).digest('hex'),artifact.sha256);
+        assert((await image.request().sizes()).responseBodySize < 700000,`${engine} exceeded the compressed bytecode budget`);
         await page.getByRole('link',{name:'Playground',exact:true}).click();
         await page.locator('.cm-content').waitFor();
         const editorLibrary = responses.find(response => response.url().includes('/editor-library-'));

@@ -10,6 +10,7 @@ import {serveFiles} from './static-server.mjs';
 import {checkStudio} from './studio-contracts.mjs';
 import {checkStudioEditor} from './studio-editor-contracts.mjs';
 import {checkStudioLanguageService} from './studio-language-contracts.mjs';
+import {checkStudioStartup} from './studio-startup-contracts.mjs';
 
 const source=await exportStudio();
 const build=JSON.parse(await readFile(join(source,'build-report.json')));
@@ -57,6 +58,7 @@ try {
   const engines=await import('../browser/node_modules/playwright/index.mjs');
   for(const name of selected) {
     const browser=await engines[name].launch({headless:true});browsers.push(browser);
+    await checkStudioStartup(browser,url);
     const directory=join(output,name);await mkdir(directory,{recursive:true});
     const page=await browser.newPage();
     const errors=[];page.on('pageerror',error=>errors.push(error.message));

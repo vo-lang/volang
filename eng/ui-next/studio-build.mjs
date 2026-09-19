@@ -70,6 +70,7 @@ export async function buildStudio({signal} = {}) {
       absWorkingDir:root, entryPoints:Object.fromEntries(['boot','studio-worker','redirect','runner','preview','ui-runner','language-worker'].map(name=>[name,join(source,name+'.js')])),
       outdir:assets, chunkNames:'chunks/[name]-[hash]', bundle:true, splitting:true,
       format:'esm', platform:'browser', target:'es2022', minify:true, metafile:true,
+      define:{STUDIO_COMPRESSED:'true'},
       plugins:[studioHostImports], external:['/compiler/*','/wasm/*'],
     });
     await mkdir(join(assets,'chunks'),{recursive:true});
