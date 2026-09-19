@@ -100,7 +100,15 @@ func Docs(scope *ui.Scope, topic string) ui.View {
 	return ui.Element("div", content).Attr("data-document", page.ID).Attr("aria-busy", fmt.Sprint(result.Fetching))
 }
 
-func chapterGroups(pages []documentation.Page, current string) ui.View {
+func warmChapterLink(link ui.View, client *data.Client, page documentation.Page) ui.View {
+	request := chapterRequest(page)
+	warm := func(ui.Event) { client.Prefetch(request) }
+	return link.On("focus", warm).On("pointerenter", func(event ui.Event) {
+		if event.PointerType != "touch" { warm(event) }
+	})
+}
+
+func chapterGroups(pages []documentation.Page, current string, client *data.Client) ui.View {
 	groups := []ui.View{}
 	section := ""
 	links := []ui.View{}
@@ -111,7 +119,7 @@ func chapterGroups(pages []documentation.Page, current string) ui.View {
 		}
 		section = chapter.Section
 		href := chapterURL(chapter)
-		link := navigation.Link(href, ui.Text(chapter.Title))
+		link := warmChapterLink(navigation.Link(href, ui.Text(chapter.Title)), client, chapter)
 		if chapter.ID == current {
 			link = link.Attr("aria-current", "page")
 		}
@@ -124,11 +132,7 @@ func chapterGroups(pages []documentation.Page, current string) ui.View {
 }
 
 func DocsLayout(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View {
-	initial := ui.UseContext(scope, initialDataContext).([]data.InitialValue)
-	client := data.NewClient(scope, "documents", data.Options{
-		Immutable: true, RetainedEntries: 24, RetainedBytes: 8 * 1024 * 1024, Initial: initial,
-	})
-	ui.Provide(scope, documentationContext, client)
+	client := ui.UseContext(scope, documentationContext).(*data.Client)
 	filter := ui.String(scope, "filter", "")
 	topic := docTopic(match)
 	page := chapterFor(topic)
@@ -160,11 +164,11 @@ func DocsLayout(scope *ui.Scope, match navigation.Match, outlet ui.View) ui.View
 	// Separate keyed ranges retain link identity even across matching sections.
 	textResults := ui.Fragment()
 	if len(textMatches) > 0 {
-		textResults = ui.Fragment(paragraph("In chapter text").Class("studio-doc-search-status"), chapterGroups(textMatches, page.ID))
+		textResults = ui.Fragment(paragraph("In chapter text").Class("studio-doc-search-status"), chapterGroups(textMatches, page.ID, client))
 	} else if len(titleMatches) == 0 {
 		textResults = paragraph("No matching chapters.")
 	}
-	chapterNav := ui.Element("nav", chapterGroups(titleMatches, page.ID).Key("titles"), searchStatus.Key("status"), textResults.Key("content")).Class("studio-doc-nav").Attr("aria-label", "Documentation chapters")
+	chapterNav := ui.Element("nav", chapterGroups(titleMatches, page.ID, client).Key("titles"), searchStatus.Key("status"), textResults.Key("content")).Class("studio-doc-nav").Attr("aria-label", "Documentation chapters")
 	search := kit.Field("docs-search", "Find a chapter", "", ui.Element("input").Attr("type", "search").Attr("maxlength", "128").Attr("placeholder", "Search titles and content").Attr("value", filter.Get()).On("input", func(event ui.Event) {
 		filter.Set(event.Value)
 	}))

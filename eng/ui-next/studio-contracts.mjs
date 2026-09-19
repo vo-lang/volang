@@ -74,7 +74,7 @@ async function studioContracts(browser, url, outputDirectory) {
     assert.equal(await defaultPage.evaluate(() => window.__studioNext.error), null);
     await defaultPage.getByRole('button', {name:'Make it happen'}).click();
     await defaultPage.waitForFunction(() => document.querySelector('[data-demo-count]').textContent.startsWith('1 '));
-    assert(defaultRequests.some(url => url.endsWith('/artifacts/studio.vob')), 'Studio defaults to VM');
+    assert(defaultRequests.some(url => /\/artifacts\/studio\.vob(?:\.gz)?$/.test(url)), 'Studio defaults to VM');
     assert(!defaultRequests.some(url => /\/artifacts\/studio\.wasm$|\/compiler\/|editor-library/.test(url)));
     assert.deepEqual(defaultErrors, []);
   } finally {await defaultPage.close();}

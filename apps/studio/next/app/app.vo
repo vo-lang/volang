@@ -13,8 +13,6 @@ var appType = ui.Define("studio.App")
 
 var routerContext = ui.NewContext("studio.router", nil)
 
-var initialDataContext = ui.NewContext("studio.initial-data", []data.InitialValue{})
-
 type initialEnvelope struct {
 	Version int
 	Location string
@@ -47,7 +45,10 @@ func App(initial string) ui.View {
 		router := navigation.Use(scope, "router", initial)
 		navigation.Restore(scope, "viewport", router, "studio-content")
 		ui.Provide(scope, routerContext, router)
-		ui.Provide(scope, initialDataContext, values)
+		client := data.NewClient(scope, "documents", data.Options{
+			Immutable: true, RetainedEntries: 24, RetainedBytes: 8 * 1024 * 1024, Initial: values,
+		})
+		ui.Provide(scope, documentationContext, client)
 		return studioRoutes.View(router.Current(), ui.Element("main", NotFound()).Class("studio-message"))
 	})
 }
@@ -81,6 +82,9 @@ func StudioLayout(scope *ui.Scope, match navigation.Match, content ui.View) ui.V
 			label = "Documentation"
 		}
 		link := navigation.Link("/studio/" + entry, ui.Text(label)).Attr("class", "studio-nav-link").Attr("data-nav", entry)
+		if entry == "docs" {
+			link = warmChapterLink(link, ui.UseContext(scope, documentationContext).(*data.Client), chapterFor(""))
+		}
 		if section == entry {
 			link = link.Attr("aria-current", "page")
 		}
