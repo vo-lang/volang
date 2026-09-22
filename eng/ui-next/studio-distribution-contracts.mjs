@@ -40,7 +40,7 @@ try {
   const url = application.url.replace(/\/$/,'');
   const redirect = await fetch(url+'/?backend=vm',{redirect:'manual'});
   assert.equal(redirect.status,307);
-  assert.equal(redirect.headers.get('location'),'/studio/gallery?backend=vm');
+  assert.equal(redirect.headers.get('location'),'/studio/docs?backend=vm');
   for (const path of ['/studio/gallery','/studio/playground','/studio/playground/ui','/studio/docs/state']) {
     const response = await fetch(url+path);
     assert.equal(response.status,200,path);

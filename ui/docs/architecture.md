@@ -28,8 +28,8 @@ Start with [the framework design](../next/design.md) and
 `ui/certification.toml`; executable task definitions live in `eng/ci.toml`.
 
 Studio's static export uses the native Vo renderer for all page HTML. Exported
-Docs pages have a single lightweight browser owner for search, clipboard and
-theme controls; they omit the guest snapshot and runtime boot. Their chapter
+Docs pages, including the default landing page, have a single lightweight
+browser owner for search, clipboard and theme controls; they omit the guest snapshot and runtime boot. Their chapter
 links use native document navigation. Gallery and Playground retain the Vo
 application and its hydration contracts, and navigate to exported Docs through
 native links. The Node and development hosts continue exercising Vo Docs and
@@ -40,7 +40,7 @@ and core runtime resources. The Studio Worker bundles its bindings and host;
 compiler and editor imports remain lazy. The content script graph is limited to
 20 KiB gzip by the build. `node eng/ui-next/studio-startup-benchmark.mjs` measures
 10 cold content samples at 1 Mbps/200 ms and 10 cold Gallery samples at
-10 Mbps/100 ms, plus 10 cold root-to-Docs navigations at 1 Mbps/200 ms.
+10 Mbps/100 ms, plus 10 cold root-to-chapter navigations at 1 Mbps/200 ms.
 It checks actual control readiness and duplicate fetches.
 It writes `target/ui-next/startup-benchmark.json`; this local delivery model
 excludes DNS, TLS, packet loss and variability of public networks.
