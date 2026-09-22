@@ -1,5 +1,6 @@
 import {access, cp, mkdir, mkdtemp, readFile, rename, rm, writeFile} from 'node:fs/promises';
-import {basename, extname, join, resolve} from 'node:path';
+import {basename, extname, join, relative, resolve} from 'node:path';
+import {gzipSync} from 'node:zlib';
 import {build as bundle} from './node_modules/esbuild/lib/main.js';
 import {compilerPath} from '../../lang/crates/vo-web/test_compiler.mjs';
 import {root} from './server.mjs';
@@ -67,19 +68,50 @@ export async function buildStudio({signal} = {}) {
         !basename(path).startsWith('.') && !['.ts','.json','.md'].includes(extname(path))});
     }
     const bundled = await bundle({
-      absWorkingDir:root, entryPoints:Object.fromEntries(['boot','studio-worker','redirect','runner','preview','ui-runner','language-worker'].map(name=>[name,join(source,name+'.js')])),
+      absWorkingDir:root, entryPoints:Object.fromEntries(['boot','content','runner','preview','ui-runner','language-worker'].map(name=>[name,join(source,name+'.js')])),
       outdir:assets, chunkNames:'chunks/[name]-[hash]', bundle:true, splitting:true,
       format:'esm', platform:'browser', target:'es2022', minify:true, metafile:true,
       define:{STUDIO_COMPRESSED:'true'},
       plugins:[studioHostImports], external:['/compiler/*','/wasm/*'],
     });
+    const worker = await bundle({
+      absWorkingDir:root, entryPoints:[join(source,'studio-worker.js')],
+      outfile:join(assets,'studio-worker.js'), bundle:true, splitting:false,
+      format:'esm', platform:'browser', target:'es2022', minify:true, metafile:true,
+      define:{STUDIO_COMPRESSED:'true'}, plugins:[studioHostImports, {
+        name:'studio-runtime-binding', setup(build) {
+          build.onResolve({filter:/^\/wasm\/vo_web\.js$/}, () => ({path:resolve(root,'target/ui-next/wasm-runtime/vo_web.js')}));
+        },
+      }],
+    });
+    Object.assign(bundled.metafile.inputs, worker.metafile.inputs);
+    const staticImports = entry => {
+      const paths = new Set();
+      const visit = path => {
+        if (paths.has(path)) return;
+        paths.add(path);
+        for (const item of bundled.metafile.outputs[path]?.imports ?? []) {
+          if (!item.external && item.kind === 'import-statement') visit(item.path);
+        }
+      };
+      const output = Object.entries(bundled.metafile.outputs).find(([,value]) => value.entryPoint === `apps/studio/next/${entry}.js`);
+      if (!output) throw new Error(`Studio ${entry} bundle is missing`);
+      visit(output[0]);
+      return [...paths];
+    };
+    await writeFile(join(stage,'startup-preloads.json'), JSON.stringify(staticImports('boot').map(path =>
+      '/' + relative(publicDirectory,resolve(root,path)).split('\\').join('/'))));
+    const contentGzipBytes = (await Promise.all(staticImports('content').map(async path =>
+      gzipSync(await readFile(resolve(root,path))).length))).reduce((sum,size) => sum + size, 0);
+    if (contentGzipBytes > 20 * 1024) throw new Error('Studio content scripts exceed 20 KiB gzip');
+    await writeFile(join(stage,'content-catalog.json'), JSON.stringify(docs));
     await mkdir(join(assets,'chunks'),{recursive:true});
     await cp(resolve(root,'LICENSE'),join(stage,'LICENSE'));
     await writeFile(join(stage,'README.md'), '# Volang Studio\n\nRequires Node 24 and a matching Volang CLI. Run `node server/entry.mjs`, then\nopen `/studio/gallery`. `HOST`, `PORT` and `VO_EXECUTABLE` configure the host.\nDeploy at the origin root; subdirectory mounting is not supported by this build.\nKeep this entire directory immutable while running. Source and node_modules are\nnot required. Console and UI compilers download when an example is run or code information is requested.\n');
     const compressed = await precompressAssets(publicDirectory,{signal});
     const thirdParty = await thirdPartyNotices({inputs:bundled.metafile.inputs, workingDirectory:root, directory:stage});
     const report = {schema:'volang.studio-next-distribution.v1',wireVersion:JSON.parse(await readFile(resolve(root,'ui/next/wire.schema.json'))).version,
-      serverProtocol, backends:['vm'], base:'/', documents:docs.pages.length,
+      serverProtocol, backends:['vm'], base:'/', documents:docs.pages.length, contentGzipBytes,
       compiler:(await execute(compilerPath(),['version'],{signal})).trim(),
       browserInputs:Object.keys(bundled.metafile.inputs).sort(), thirdParty, compressed, artifacts:await artifactInventory(stage)};
     await writeFile(join(stage,'build-report.json'), JSON.stringify(report,null,2)+'\n');

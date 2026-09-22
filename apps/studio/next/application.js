@@ -13,6 +13,20 @@ export async function startStudio(mountUi, { artifact = 'studio', defaultBackend
   const query = new URL(location.href).searchParams;
   const backend = query.get('backend') ?? defaultBackend;
   const state = window.__studioNext = { error: null, ready: false, close: null, done: null, workers: { started: 0, stopped: 0 } };
+  const nativeNavigation = new AbortController();
+  if (document.documentElement.hasAttribute('data-studio-static')) {
+    // Exported chapters own their DOM independently of the interactive guest.
+    container.addEventListener('click', event => {
+      const anchor = event.target?.closest?.('a[href]');
+      if (!anchor || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey ||
+          anchor.hasAttribute('download') || (anchor.target && anchor.target !== '_self')) return;
+      const url = new URL(anchor.href, location.href);
+      if (url.origin !== location.origin || !/^\/studio\/docs(?:\/|$)/.test(url.pathname)) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      url.pathname = url.pathname.replace(/\/$/, '') + '/';
+      location.assign(url.href);
+    }, {capture:true, signal:nativeNavigation.signal});
+  }
   const drafts = createPersistentStorage('volang.studio.next.drafts.v1');
 
   function showError(error) {
@@ -73,10 +87,11 @@ export async function startStudio(mountUi, { artifact = 'studio', defaultBackend
       backend, artifact: `/artifacts/${artifact}.${'vob'}`,
       loadVm: () => import('/wasm/vo_web.js'), services,
     });
-    state.close = () => application.close();
+    state.close = () => {nativeNavigation.abort(); application.close();};
     state.done = application.done.catch(showError);
     if (await application.ready) { state.ready = true; status.textContent = ''; }
   } catch (error) {
+    nativeNavigation.abort();
     showError(error);
   } finally {
     // Let startup finish its requests before replacing the worker serving them.

@@ -67,7 +67,8 @@ export async function checkStudioSite({directory,output,origin,signal}) {
     browser=await chromium.launch();signal?.throwIfAborted();
     phase='browser-journey';
     const application=await checkStudio(browser,new URL(origin).origin,output);
-    if(!application.length||application.some(value=>!value.passed)||[...new Set(application.map(value=>value.backend))].sort().join(',')!=='vm')throw new Error('Studio site browser coverage is incomplete.');
+    if(!application.length||application.some(value=>!value.passed)||[...new Set(application.filter(value=>value.mode !== 'static-content').map(value=>value.backend))].sort().join(',')!=='vm')throw new Error('Studio site browser coverage is incomplete.');
+    if(application.filter(value=>value.mode==='static-content' && value.passed).length!==1)throw new Error('Studio content coverage is incomplete.');
     phase='origin-after';
     const after=await verifyStudioOrigin(directory,origin,{signal});
     if(JSON.stringify(before)!==JSON.stringify(after))throw new Error('Studio site changed during its browser check.');

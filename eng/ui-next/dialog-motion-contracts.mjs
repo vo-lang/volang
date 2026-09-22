@@ -66,8 +66,8 @@ export async function checkDialogMotion(page) {
   await finish();
   await page.locator('[data-close-dialog]').click();
   await page.waitForFunction(() => document.querySelector('#gallery-dialog').dataset.state === 'closed');
-  await page.locator('[data-nav=docs]').evaluate(link => link.click());
-  await page.getByRole('heading', { name: 'A small idea, brought to life.' }).waitFor();
+  await page.locator('[data-nav=playground]').evaluate(link => link.click());
+  await page.locator('#playground-source').waitFor();
   assert.equal(await page.evaluate(() => !window.motionDialog.isConnected && !document.querySelector('dialog:modal')
     && document.documentElement.style.overflow === ''), true);
   await held.evaluate(element => element.remove());

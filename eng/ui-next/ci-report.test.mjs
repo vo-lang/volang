@@ -1,3 +1,4 @@
+import {contentContracts} from './studio-content.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {createHash} from 'node:crypto';
@@ -165,10 +166,11 @@ test('static Studio evidence binds its native producer and every delivered backe
     engine,browserVersion:'test',passed:true,rootRedirect:true,refresh:true,missingPage:true,noScript:true,
     ...Object.fromEntries(['studio'].map(name=>[name,['vm'].map(backend=>({backend,passed:true}))])),editor:editorResults(),language:languageResults(),
   }))};
+  for (const result of report.results) result.studio.push({mode:'static-content',passed:true,contracts:contentContracts});
   staticStudioEvidence(report,build,source);
   assert.throws(()=>staticStudioEvidence(report,build,Buffer.from('another native build')),/native build/);
   for(const alter of [value=>value.results.pop(),value=>value.results[0].editor.shift(),value=>value.results[0].language[0].workersReleased=false,
-    value=>value.results[0].noScript=false,
+    value=>value.results[0].noScript=false,value=>value.results[0].studio.pop(),
     value=>value.build.sourceBuildSha256='different',value=>value.relocated=false]) {
     const changed=structuredClone(report);alter(changed);
     assert.throws(()=>staticStudioEvidence(changed,build,source));
