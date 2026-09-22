@@ -41,7 +41,7 @@
     "test:runtime": "node --test tests/host_scheduler.test.mjs tests/vm_contracts.test.mjs"
   },
   "devDependencies": {
-    "typescript": "^5.0.0"
+    "typescript": "^7.0.2"
   },
   "keywords": [
     "vo",
