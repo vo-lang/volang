@@ -1,3 +1,4 @@
+import {checkStudioContent} from './studio-content-contracts.mjs';
 import {sourceEditor} from './editor-controls.mjs';
 import {waitStudioDraft} from './studio-draft-contracts.mjs';
 import assert from 'node:assert/strict';
@@ -65,6 +66,7 @@ async function runConsole(page) {
 
 async function studioContracts(browser, url, outputDirectory) {
   const reports = [];
+  let staticContent = false;
   const defaultPage = await browser.newPage(), defaultRequests = [], defaultErrors = [];
   try {
     defaultPage.on('request', request => defaultRequests.push(request.url()));
@@ -72,6 +74,7 @@ async function studioContracts(browser, url, outputDirectory) {
     await defaultPage.goto(`${url}/studio/gallery`);
     await defaultPage.waitForFunction(() => window.__studioNext?.ready || window.__studioNext?.error);
     assert.equal(await defaultPage.evaluate(() => window.__studioNext.error), null);
+    staticContent = await defaultPage.locator('html[data-studio-static]').count() > 0;
     await defaultPage.getByRole('button', {name:'Make it happen'}).click();
     await defaultPage.waitForFunction(() => document.querySelector('[data-demo-count]').textContent.startsWith('1 '));
     assert(defaultRequests.some(url => /\/artifacts\/studio\.vob(?:\.gz)?$/.test(url)), 'Studio defaults to VM');
@@ -114,24 +117,29 @@ async function studioContracts(browser, url, outputDirectory) {
     await page.locator('#studio-theme').uncheck();
     await page.getByRole('link', { name: 'Documentation', exact: true }).click();
     await page.getByRole('heading', { name: 'A small idea, brought to life.' }).waitFor();
-    await page.waitForFunction(() => document.activeElement.id === 'studio-content' && document.title === 'First steps · Volang Studio');
-    assert.equal(new URL(page.url()).pathname, '/studio/docs');
-    await page.goBack();
-    await page.locator('[data-open-dialog]').click();
-    await page.locator('[data-open-inner]').click();
-    await page.goForward();
-    await page.getByRole('heading', { name: 'A small idea, brought to life.' }).waitFor();
-    await page.waitForFunction(() => !document.querySelector('dialog:modal') && document.documentElement.style.overflow === '');
-    await page.getByRole('link', { name: 'State & identity', exact: true }).click();
-    await page.getByRole('heading', { name: 'State that stays close.' }).waitFor();
-    await page.goBack();
-    await page.getByRole('heading', { name: 'A small idea, brought to life.' }).waitFor();
-    await checkNestedRoutes(page);
-    await checkBreadcrumb(page);
-    await checkStudioScroll(page);
+    if (!staticContent) {
+      await page.waitForFunction(() => document.activeElement.id === 'studio-content' && document.title === 'First steps · Volang Studio');
+      assert.equal(new URL(page.url()).pathname, '/studio/docs');
+      await page.goBack();
+      await page.locator('[data-open-dialog]').click();
+      await page.locator('[data-open-inner]').click();
+      await page.goForward();
+      await page.getByRole('heading', { name: 'A small idea, brought to life.' }).waitFor();
+      await page.waitForFunction(() => !document.querySelector('dialog:modal') && document.documentElement.style.overflow === '');
+      await page.getByRole('link', { name: 'State & identity', exact: true }).click();
+      await page.getByRole('heading', { name: 'State that stays close.' }).waitFor();
+      await page.goBack();
+      await page.getByRole('heading', { name: 'A small idea, brought to life.' }).waitFor();
+      await checkNestedRoutes(page);
+      await checkBreadcrumb(page);
+      await checkStudioScroll(page);
+    } else {
+      assert.equal(new URL(page.url()).pathname, '/studio/docs/');
+    }
     assert.equal(requests.some(url => url.includes('/compiler/') || url.endsWith('/playground-ui.json')), false, 'Gallery/Docs loaded compiler or preview sources');
     await page.getByRole('link', { name: 'Playground', exact: true }).click();
     await page.locator('#playground-source').waitFor();
+    await page.waitForFunction(() => window.__studioNext?.ready || window.__studioNext?.error);
     const source = 'package main\nimport "fmt"\nfunc main() { fmt.Println("Hello, 中文") }\n';
     await sourceEditor(page).fill(source);
     assert.equal(await runConsole(page),'Hello, 中文\n');
@@ -162,7 +170,7 @@ async function studioContracts(browser, url, outputDirectory) {
     await context.close();
     console.log(`${backend}: new Studio navigation, Gallery, Docs and Playground passed`);
   }
-  for (const backend of ['vm']) {
+  for (const backend of staticContent ? [] : ['vm']) {
     const page = await browser.newPage();
     let release;
     const gate = new Promise(resolve => { release = resolve; });
@@ -246,8 +254,12 @@ async function studioContracts(browser, url, outputDirectory) {
     await page.close();
   }
   reports.push(...await checkUiPlaygroundSsr(browser, url));
-  reports.push(...await checkStudioDocuments(browser, url, outputDirectory));
+  reports.push(...await (staticContent ? checkStudioContent(browser, url) : checkStudioDocuments(browser, url, outputDirectory)));
   reports.push(...await checkStudioExamplesBrowser(browser, url, outputDirectory));
   reports.push(...await checkStudioShortcuts(browser, url));
+  if (staticContent) {
+    const dynamicOnly = new Set(['modal-route-disposal','nested-layout-state','dynamic-route-identity','history-scroll-and-focus','navigation-focus-title','query-route','history-back']);
+    for (const report of reports) if (report.mode === 'client' && report.contracts) report.contracts = report.contracts.filter(name => !dynamicOnly.has(name));
+  }
   return reports;
 }

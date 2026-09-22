@@ -84,7 +84,7 @@ try {
     assert.equal(await page.evaluate(()=>window.__studioNext.error),null);
     assert.deepEqual(errors,[]);await page.close();
     const noScript=await browser.newPage({javaScriptEnabled:false});
-    for(const path of ['/studio/gallery','/studio/docs/hello-world','/studio/playground']) {
+    for(const path of ['/','/studio/gallery','/studio/docs/hello-world','/studio/playground']) {
       assert.equal((await noScript.goto(url+path)).status(),200);
       assert(await noScript.locator('h1').count());
       assert(await noScript.locator('#root').innerText());

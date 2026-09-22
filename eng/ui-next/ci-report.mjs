@@ -1,3 +1,4 @@
+import {contentContracts} from './studio-content.mjs';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {createReadStream} from 'node:fs';
@@ -163,9 +164,12 @@ export function staticStudioEvidence(report,build,sourceBytes) {
   for (const result of report.results) {
     for (const name of ['passed','rootRedirect','refresh','missingPage','noScript']) assert.equal(result[name],true,result.engine+' '+name);
     assert.equal(typeof result.browserVersion,'string');assert(result.browserVersion.length);
+    const content = result.studio.filter(value => value.mode === 'static-content');
+    assert.equal(content.length,1,result.engine+' static content');
+    assert.deepEqual(content[0].contracts,contentContracts);
     for (const name of ['studio','editor']) {
       assert(result[name].every(value=>value.passed === true));
-      assert.deepEqual([...new Set(result[name].map(value=>value.backend))].sort(),backends,result.engine+' static '+name);
+      assert.deepEqual([...new Set(result[name].filter(value=>value.mode !== 'static-content').map(value=>value.backend))].sort(),backends,result.engine+' static '+name);
     }
     editorDiagnosticsEvidence(result.editor,result.engine+' static Studio');
     studioLanguageEvidence(result.language,result.engine+' static Studio');

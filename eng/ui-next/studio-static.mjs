@@ -1,3 +1,4 @@
+import {canonicalStudioLinks, contentDocument} from './studio-content.mjs';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile} from 'node:fs/promises';
@@ -36,18 +37,6 @@ export function studioStaticRedirects(values,pages) {
   return result;
 }
 
-function redirectDocument(to) {
-  const href=to.split('/').map(encodeURIComponent).join('/');
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Volang Studio</title><link rel="stylesheet" href="/ui-kit/theme.css"><link rel="stylesheet" href="/studio-assets/studio.css">
-<noscript><meta http-equiv="refresh" content="0;url=${href}"></noscript></head>
-<body class="vui"><main class="studio-message studio-intro"><p class="studio-eyebrow">VOLANG STUDIO</p>
-<h1>Continue exploring.</h1><p>Follow the link to the current Studio.</p>
-<a id="studio-redirect" href="${href}">Open Studio</a></main>
-<script type="module" src="/studio-assets/redirect.js"></script></body></html>\n`;
-}
-
 /** Export one verified native distribution. Rendering uses its compiled route
  * catalog and server protocol directly, without opening a listener. */
 export async function exportStudio({source = join(root,'target/ui-next/studio-distribution'),
@@ -68,6 +57,11 @@ export async function exportStudio({source = join(root,'target/ui-next/studio-di
   const template = await readFile(join(source,'server/document.html'),'utf8');
   if (!template.includes('studio-assets/boot.js')) throw new Error('Studio static boot outlet is missing.');
   const compose = prepareHtml(template,true);
+  const preloads = JSON.parse(await readFile(join(source,'startup-preloads.json'),'utf8'));
+  const startupLinks = preloads.map(path => `<link rel="modulepreload" href="${path}">`).join('') +
+    '<link rel="preload" as="fetch" crossorigin href="/wasm/vo_web_bg.wasm">' +
+    '<link rel="preload" as="fetch" crossorigin href="/artifacts/studio.vob.gz">';
+  const catalog = JSON.parse(await readFile(join(source,'content-catalog.json'),'utf8'));
   // One static 404 serves every unknown URL. Its native links work without
   // starting a guest whose route would disagree with that shared HTML.
   const composeMissing = prepareHtml(template.replace(/\s*<script\b[^>]*>[\s\S]*?<\/script>/g,'')
@@ -82,7 +76,10 @@ export async function exportStudio({source = join(root,'target/ui-next/studio-di
       const page = await renderPage(executable,artifact,{method:'GET',url:location.path,basePath:'/',headers:{},body:''},options);
       const expected = location.file === '404.html' ? 404 : 200;
       if (page.kind !== 'html' || page.status !== expected || !page.html || page.entry !== 'default' || Object.keys(page.headers).length) throw new Error('Studio page cannot be exported: ' + location.path);
-      const html = (expected === 404 ? composeMissing : compose)(page.html,{data:page.data,assets:'/',title:page.title,description:page.description});
+      let html = (expected === 404 ? composeMissing : compose)(page.html,{data:page.data,assets:'/',title:page.title,description:page.description});
+      html = /^\/studio\/docs(?:\/|$)/.test(location.path) ? contentDocument(html, catalog) :
+        canonicalStudioLinks(html).replace('<html ', '<html data-studio-static ')
+          .replace('</head>', expected === 200 ? startupLinks + '</head>' : '</head>');
       htmlBytes += Buffer.byteLength(html);
       if (htmlBytes > maxPagesHtmlBytes) throw new Error('Studio static HTML exceeds the build budget.');
       const file = join(stage,location.file);
@@ -91,7 +88,9 @@ export async function exportStudio({source = join(root,'target/ui-next/studio-di
       results.push({path:location.path,file:location.file,status:page.status,title:page.title});
     }
     for (const redirect of redirects) {
-      const html=redirectDocument(redirect.to);
+      const target = pages.find(page => page.path === redirect.to);
+      const html = (await readFile(join(stage,target.file),'utf8'))
+        .replace('<html ', `<html data-studio-alias="${redirect.to.replace(/\/$/, '')}/" `);
       htmlBytes+=Buffer.byteLength(html);
       if (htmlBytes > maxPagesHtmlBytes) throw new Error('Studio static HTML exceeds the build budget.');
       const file=join(stage,redirect.file);await mkdir(dirname(file),{recursive:true});
