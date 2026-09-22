@@ -58,9 +58,9 @@ try {
         const started = performance.now();
         await page.goto(origin+(kind === 'content'?'/studio/docs/':kind === 'gallery'?'/studio/gallery/':'/'),{waitUntil:kind === 'entry-navigation' ? 'commit' : 'domcontentloaded'});
         if (kind === 'entry-navigation') {
-          await page.getByRole('link',{name:'Documentation',exact:true}).click();
+          await page.getByRole('link',{name:'State & identity',exact:true}).click();
         }
-        await page.waitForFunction(kind => kind !== 'gallery' ? document.documentElement.hasAttribute('data-content-ready') :
+        await page.waitForFunction(kind => kind !== 'gallery' ? document.documentElement?.hasAttribute('data-content-ready') :
           window.__studioNext?.ready || window.__studioNext?.error,kind);
         const readyMs = performance.now()-started;
         const coldRequests = requests.map(item=>({...item,at:item.at-started}));
@@ -70,12 +70,14 @@ try {
           assert.equal(await page.locator('.studio').getAttribute('data-theme'),'dark');
           let start = performance.now();
           await page.getByRole('link',{name:'State & identity',exact:true}).click();
-          await page.waitForFunction(() => document.documentElement.hasAttribute('data-content-ready'));
+          await page.waitForFunction(() => document.documentElement?.hasAttribute('data-content-ready'));
           navigationMs = performance.now()-start;
           start = performance.now();
           await page.getByRole('navigation',{name:'Documentation chapters'}).getByRole('link',{name:'Language specification',exact:true}).click();
-          await page.waitForFunction(() => document.documentElement.hasAttribute('data-content-ready'));
+          await page.waitForFunction(() => document.documentElement?.hasAttribute('data-content-ready'));
           specificationMs = performance.now()-start;
+          assert(!requests.some(item=>/\/(?:wasm|artifacts|compiler)\//.test(item.pathname)));
+        } else if (kind === 'entry-navigation') {
           assert(!requests.some(item=>/\/(?:wasm|artifacts|compiler)\//.test(item.pathname)));
         } else if (kind === 'gallery') {
           assert.equal(await page.evaluate(() => window.__studioNext.error),null);
@@ -100,7 +102,7 @@ try {
       specificationP95Ms:kind==='content'?percentile(rows.map(row=>row.specificationMs),.95):undefined};
   });
   await writeFile(resolve(root,'target/ui-next/startup-benchmark.json'),JSON.stringify({
-    method:'Fresh Chromium context per sample, local gzip HTTP server, max-age=600, round-robin shared response-byte bandwidth, fixed delay per request. Content and root-to-Docs navigation: 1 Mbps/200 ms; Gallery: 10 Mbps/100 ms. Includes functional readiness; excludes DNS/TLS and Internet variability.',
+    method:'Fresh Chromium context per sample, local gzip HTTP server, max-age=600, round-robin shared response-byte bandwidth, fixed delay per request. Content and root-to-chapter navigation: 1 Mbps/200 ms; Gallery: 10 Mbps/100 ms. Includes functional readiness; excludes DNS/TLS and Internet variability.',
     summary,samples},null,2)+'\n');
   console.log(JSON.stringify(summary,null,2));
 }

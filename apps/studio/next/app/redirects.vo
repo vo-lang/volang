@@ -1,10 +1,13 @@
 package app
 
+// The public landing page stays usable without an interactive runtime.
+const studioHome = "/studio/docs"
+
 type SiteRedirect struct {
 	From string
 	To string
 }
 
 func SiteRedirects() []SiteRedirect {
-	return []SiteRedirect{{From: "/", To: "/studio/gallery"}}
+	return []SiteRedirect{{From: "/", To: studioHome}}
 }

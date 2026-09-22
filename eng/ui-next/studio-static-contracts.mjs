@@ -62,15 +62,19 @@ try {
     const directory=join(output,name);await mkdir(directory,{recursive:true});
     const page=await browser.newPage();
     const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    const rootRequests=[];
+    const record=request=>rootRequests.push(new URL(request.url()).pathname);
+    page.context().on('request',record);
     await page.goto(url+'/?backend=vm#studio-content');
-    await page.waitForFunction(()=>window.__studioNext?.ready || window.__studioNext?.error);
-    assert.equal(await page.evaluate(()=>window.__studioNext.error),null);
-    assert.equal(new URL(page.url()).pathname,'/studio/gallery/');
+    await page.locator('html[data-content-ready]').waitFor();
+    assert.equal(await page.evaluate(()=>typeof window.__studioNext),'undefined');
+    assert.equal(new URL(page.url()).pathname,'/studio/docs/');
     assert.equal(new URL(page.url()).search,'?backend=vm');
     assert.equal(new URL(page.url()).hash,'#studio-content');
     await page.reload();
-    await page.waitForFunction(()=>window.__studioNext?.ready || window.__studioNext?.error);
-    assert.equal(await page.evaluate(()=>window.__studioNext.error),null);
+    await page.locator('html[data-content-ready]').waitFor();
+    assert(!rootRequests.some(path=>/^\/(wasm|compiler|artifacts)\//.test(path)), 'The landing page downloads an interactive runtime');
+    page.context().off('request',record);
     for (const path of ['/missing','/studio/missing','/studio/docs/no-such-chapter']) {
       const missing=await page.goto(url+path+'?backend=vm');assert.equal(missing.status(),404);
       await page.getByRole('heading',{name:'A little off the path.'}).waitFor();
